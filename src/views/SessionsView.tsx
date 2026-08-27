@@ -260,19 +260,6 @@ function bound(v: string): string | undefined {
 }
 
 /**
- * A `YYYY-MM-DD` date input as the RFC 3339 instant the server parses.
- *
- * The bound is taken in the **local** zone, and the `to` side is the *end* of
- * that day: the server compares `start_time <= to`, so a `to` of midnight would
- * exclude every session that ran on the very day the user picked. `from` is the
- * start of its day against `last_activity >= from`, so the range reads as the
- * two dates inclusive.
- *
- * Anything that is not a whole date yields `undefined` rather than a plausible
- * wrong instant — the server ignores an unparseable bound too, so both sides
- * agree it is unbounded.
- */
-/**
  * A facet's option list with the current selection appended when the facet no
  * longer offers it.
  *
@@ -288,6 +275,19 @@ function withSelected(
   return selected && !list.includes(selected) ? [...list, selected] : list;
 }
 
+/**
+ * A `YYYY-MM-DD` date input as the RFC 3339 instant the server parses.
+ *
+ * The bound is taken in the **local** zone, and the `to` side is the *end* of
+ * that day: the server compares `start_time <= to`, so a `to` of midnight would
+ * exclude every session that ran on the very day the user picked. `from` is the
+ * start of its day against `last_activity >= from`, so the range reads as the
+ * two dates inclusive.
+ *
+ * Anything that is not a whole date yields `undefined` rather than a plausible
+ * wrong instant — the server ignores an unparseable bound too, so both sides
+ * agree it is unbounded.
+ */
 function dayBoundary(day: string, edge: "start" | "end"): string | undefined {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.trim());
   if (!m) return undefined;
