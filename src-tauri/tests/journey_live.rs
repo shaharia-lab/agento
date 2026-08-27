@@ -130,25 +130,36 @@ fn the_journey_builds_over_the_real_corpus() {
     let mut slowest = (0u128, String::new());
     let mut elapsed_total = 0u128;
 
-    for Row {
-        session_id,
-        subagents: cached_subagents,
-        cached_active_ms,
-        cached_subagent_active_ms,
-    } in &rows
-    {
+    // Every message below identifies a session by its **position in the
+    // sample**, never by the id read out of SQLite.
+    //
+    // That is not squeamishness about a UUID: CodeQL's `rust/cleartext-logging`
+    // query models a database read as a sensitive source and stderr as a log
+    // sink, so interpolating the id here is seven high-severity alerts on a
+    // required check. The position is as actionable — the query at the top of
+    // this function is ordered and `LIMIT`-ed, so `sample #37` re-derives to one
+    // row — and it keeps the suite's output free of the taint entirely rather
+    // than arguing the finding away per alert.
+    for (index, row) in rows.iter().enumerate() {
+        let Row {
+            session_id,
+            subagents: cached_subagents,
+            cached_active_ms,
+            cached_subagent_active_ms,
+        } = row;
+        let at = format!("sample #{index}");
         let start = Instant::now();
         let journey = journey::get(&db, session_id).expect("journey read");
         let took = start.elapsed().as_millis();
         elapsed_total += took;
         if took > slowest.0 {
-            slowest = (took, session_id.clone());
+            slowest = (took, at.clone());
         }
 
         let Some(journey) = journey else {
             // A cached row whose transcript has since been removed. Not a
             // failure — the endpoint's own 404 — but worth seeing.
-            eprintln!("  {session_id}: no transcript on disk");
+            eprintln!("  {at}: no transcript on disk");
             continue;
         };
         built += 1;
@@ -165,21 +176,21 @@ fn the_journey_builds_over_the_real_corpus() {
             });
             assert!(
                 delegated,
-                "{session_id} reports {} sub-agents and renders none of them",
+                "{at} reports {} sub-agents and renders none of them",
                 journey.subagent_count
             );
             nested_or_appended += 1;
         }
         assert_eq!(
             journey.subagent_count, *cached_subagents,
-            "{session_id}: the journey counted {} sub-agents where the cache row \
-             has {cached_subagents} — the two walk the same directory",
+            "{at}: the journey counted {} sub-agents where the cache row has \
+             {cached_subagents} — the two walk the same directory",
             journey.subagent_count
         );
         assert_eq!(
             journey.total_turns as usize,
             journey.turns.len(),
-            "{session_id}: total_turns disagrees with the turns it shipped"
+            "{at}: total_turns disagrees with the turns it shipped"
         );
 
         // The one bound that is actually an invariant, and it is one-directional
@@ -203,9 +214,9 @@ fn the_journey_builds_over_the_real_corpus() {
         // somebody else's. So the relationship is counted and reported instead.
         assert!(
             journey.active_duration_ms >= *cached_active_ms,
-            "{session_id}: the journey's active time ({}) is below the parent's \
-             own cached figure ({cached_active_ms}) — absorbing stamps cannot \
-             lower the total, so a stamp was lost",
+            "{at}: the journey's active time ({}) is below the parent's own \
+             cached figure ({cached_active_ms}) — absorbing stamps cannot lower \
+             the total, so a stamp was lost",
             journey.active_duration_ms
         );
         if journey.active_duration_ms < cached_active_ms + cached_subagent_active_ms {
@@ -248,8 +259,8 @@ fn the_journey_builds_over_the_real_corpus() {
             .is_some_and(|t| t.steps.iter().all(|s| s.step_type != "user_input"));
         assert!(
             extra == 0 || (extra == 1 && leading_orphan),
-            "{session_id}: the journey rendered {} turns and the insight pipeline \
-             counted {} over the same transcript (leading orphan turn: \
+            "{at}: the journey rendered {} turns and the insight pipeline counted \
+             {} over the same transcript (leading orphan turn: \
              {leading_orphan}) — the shared predicate has drifted",
             journey.total_turns,
             insight.turn_count
