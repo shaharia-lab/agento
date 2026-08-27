@@ -220,11 +220,44 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --lib -- -D warnings
 
-      # Three filters, not the whole lib — see the comment above the job.
-      - name: Rust unit tests (the Windows path rules and their call sites)
+      # TEMPORARY (#374): the unfiltered run, non-blocking, so the number the
+      # comment above quotes is measured *with* `core.autocrlf=false` rather
+      # than inherited from the first push, which ran with the runner's default.
+      # Removed in the follow-up commit that records the result.
+      - name: MEASURE ONLY — unfiltered lib tests
+        continue-on-error: true
+        shell: bash
         working-directory: src-tauri
-        run: >
-          cargo test --lib --
-          native::gopath
-          native::sessions::projects
-          native::claude_settings::profiles::tests::a_windows_path_outside_the_dir_is_refused
+        run: |
+          cargo test --lib 2>&1 | tee unfiltered.log || true
+          echo "===== SUMMARY ====="
+          grep -E '^test result:' unfiltered.log || true
+          echo "===== FAILURES ====="
+          sed -n '/^failures:$/,/^test result:/p' unfiltered.log | grep -E '^    ' || true
+
+      # Three filters, not the whole lib — see the comment above the job.
+      #
+      # **The floor is not decoration.** `cargo test` treats "the filter matched
+      # nothing" as **success**, so an allowlist that goes stale — a module
+      # renamed, a test moved — would leave the only job that runs these rules
+      # on Windows green with zero assertions executed. That is the same shape
+      # as a vector loop with no truncation floor, and the same shape as the
+      # allowlist `base.css` was rewritten away from in #469. Denylisting was
+      # the alternative and is worse here: it would have to name ~30 individual
+      # Unix-shaped fixtures, and each stale entry is itself invisible.
+      - name: Rust unit tests (the Windows path rules and their call sites)
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          set -o pipefail
+          cargo test --lib -- \
+            native::gopath \
+            native::sessions::projects \
+            native::claude_settings::profiles::tests::a_windows_path_outside_the_dir_is_refused \
+            | tee filtered.log
+          passed=$(grep -oE '^test result: ok\. [0-9]+ passed' filtered.log | grep -oE '[0-9]+' | head -1)
+          echo "ran ${passed:-0} tests"
+          if [ -z "$passed" ] || [ "$passed" -lt 25 ]; then
+            echo "::error::expected at least 25 tests to run, got ${passed:-0} — the filter has gone stale"
+            exit 1
+          fi

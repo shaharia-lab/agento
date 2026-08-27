@@ -650,9 +650,9 @@ something that still runs.
   `native/gopath.rs` carried only the Unix rules; it now carries both, selected
   by `cfg(windows)`, with **both compiled and both vector-tested on every
   host** — which is what lets a Linux CI run catch a Windows regression. The
-  `windows_rules` job in `ci.yml` compiles and runs the `cfg(windows)` arms
-  (`cargo test --lib`; the integration suites drive a shebang'd fake CLI and are
-  Unix-only by construction).
+  `windows_rules` job in `ci.yml` type-checks the `cfg(windows)` arms with an
+  unfiltered `cargo clippy --lib` and *runs* three modules of them; see *Known
+  gaps* for why its test step is filtered and what has to land to widen it.
 
 ### The endpoint registry
 
