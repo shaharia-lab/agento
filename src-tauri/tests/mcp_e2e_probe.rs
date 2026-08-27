@@ -150,9 +150,10 @@ async fn a_turn_lists_and_calls_a_tool_through_the_options_a_turn_builds() {
         if line.contains("\"tool_use\"") && line.contains("mcp__local-tools__current_time") {
             called = true;
         }
-        // `current_time`'s RFC 1123 output for Asia/Tokyo ends in the zone
-        // abbreviation, which is the one part of the answer the model cannot
-        // have invented from the prompt.
+        // The tool's own text coming back. A weak signal on its own — a model
+        // knows Tokyo is JST — so it is a corroboration of `called` rather
+        // than an independent assertion; `listed` and `called` carry the
+        // weight, and both are facts only the CLI can report.
         if line.contains("JST") {
             answered = true;
         }

@@ -492,24 +492,36 @@ function ServiceEditor({
         const svc = services[info.key] ?? { enabled: false, tools: [] };
         const stored = svc.tools ?? [];
         // What this service actually exposes today, which is not the same as
-        // what it stores (#501). Two shapes have to be translated:
+        // what it stores (#501). Three shapes have to be translated:
         //
         // - **disabled** exposes nothing whatever its list says, so the boxes
         //   read empty — otherwise a row saved as
         //   `{enabled: false, tools: [...]}` shows ticks for tools no agent can
         //   reach, and checking one more silently restores the rest.
-        // - **enabled with no list** exposes *every* tool of the group, because
-        //   the backend reads an empty union as "host everything". Rendering
-        //   that as nothing ticked is the exact inverse of the truth, and it is
-        //   the shape `POST /api/integrations` and every pre-list row carry —
-        //   so it is what a user is most likely to be looking at. Showing it
-        //   ticked is also self-healing: unchecking one then stores the rest by
-        //   name, and the row stops being ambiguous.
+        // - **enabled with no list, and no sibling has one either** exposes
+        //   *every* tool of the group. Rendering that as nothing ticked is the
+        //   exact inverse of the truth, and it is the shape
+        //   `POST /api/integrations` and every pre-list row carry — so it is
+        //   what a user is most likely to be looking at.
+        // - **enabled with no list while a sibling has one** exposes
+        //   **nothing**, and this is the case that reads backwards. "Host
+        //   everything" is a property of `build_allowed_set`, which unions
+        //   *every* enabled service across the whole integration — not of one
+        //   group being empty. So a listless `gmail` beside a
+        //   `drive: ["list_files"]` matches no name in that union and hosts
+        //   zero tools. Ticking it here would not only misreport it: the union
+        //   is what makes unchecking one box *grant* the other two.
+        const unionEmpty = provider.services.every((other) => {
+          const svcOther = services[other.key];
+          return !svcOther?.enabled || !svcOther.tools?.length;
+        });
         const chosen = !svc.enabled
           ? []
           : stored.length
             ? stored
-            : info.tools.map((t) => t.name);
+            : unionEmpty
+              ? info.tools.map((t) => t.name)
+              : [];
         return (
           <div
             key={info.key}

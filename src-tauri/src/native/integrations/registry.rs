@@ -2021,6 +2021,32 @@ mod tests {
                 "an empty union is 'host everything', bounded by the service gate: {spelling}"
             );
         }
+
+        // **And "empty" is a property of the whole union, not of one group.**
+        // The same listless `gmail` beside a service that *does* name a tool
+        // hosts **nothing**: `build_allowed_set` unions every enabled service,
+        // so the union is `{list_files}` and no Gmail name is in it. Reading
+        // "this group stored no list" as "this group hosts everything" is the
+        // mistake, and `IntegrationsView.tsx` has to make the same distinction
+        // to render an untouched row honestly — which is why it is pinned here
+        // rather than left to the UI to be right about on its own.
+        let mixed: BTreeMap<String, ServiceConfig> = serde_json::from_str(
+            r#"{"gmail":{"enabled":true},"drive":{"enabled":true,"tools":["list_files"]}}"#,
+        )
+        .expect("services");
+        let hosted: Vec<String> = super::super::google::google_tools(
+            &filter_config_tools(&mixed, &[], service_tool_table("google")),
+            tokens.clone(),
+        )
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+        assert_eq!(
+            hosted,
+            ["list_files"],
+            "a sibling's stored list makes the union non-empty, so the listless \
+             service matches nothing"
+        );
     }
 
     /// The qualified name is built from the **bare id**, which is what every

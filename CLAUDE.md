@@ -1549,7 +1549,16 @@ asked for:
   `IntegrationsView.tsx` now turns the **service** off when its last tool goes,
   so the copy is true of everything the app can store. The API can still store
   that shape and it still hosts everything; refusing it would be a wire change
-  on a byte-exact endpoint.
+  on a byte-exact endpoint — so the editor also has to *render* such a row
+  honestly, and that rule reads backwards twice over. A listless enabled
+  service shows every tool ticked **only when no sibling names one**: "host
+  everything" is a property of `build_allowed_set`'s union over the *whole
+  integration*, not of one group being empty, so a listless `gmail` beside a
+  `drive: ["list_files"]` hosts **nothing** and must show nothing. Getting that
+  half wrong is worse than a misdisplay — the union is what makes unchecking
+  one box in the ticked-by-default group *grant* the others. Pinned from the
+  backend side by `an_enabled_service_with_an_empty_list_still_hosts_everything`,
+  which carries the mixed row for this reason.
 
 **And a turn now says what it hosted.** `chat/runner.rs::report_hosted_tools`
 logs one `info` line per started MCP server naming the tools it registered, plus
