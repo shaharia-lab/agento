@@ -10,8 +10,9 @@
 //!
 //! # Why this exists rather than another fixture
 //!
-//! `journey.rs` already carries twenty-five unit tests and a byte-exact golden,
-//! and none of them can see the two failures that matter most here.
+//! `journey.rs` already carries a unit test per rule and a byte-exact golden,
+//! and none of them can see the two failures that matter most here. (No count
+//! here on purpose: a number in prose drifts the next time a test is added.)
 //!
 //! The first is a builder that runs, reports success and produces **no turns** —
 //! the shape #408 had on the insight side. A three-file fixture with one prompt
