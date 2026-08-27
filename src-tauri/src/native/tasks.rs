@@ -1772,11 +1772,28 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
             if let Err(err) = super::schedule::validate_cron(&cfg.expression, loc, now) {
                 // Two different mistakes, so two different sentences: one is a
                 // typo, the other is a date that does not exist.
+                //
+                // Both arms are named. `setup` on a `JobDefinition::Cron` can
+                // reach exactly these two of `ScheduleError`'s eight — the
+                // other six belong to the one-time, duration and daily job
+                // types — so the wildcard is unreachable rather than a default,
+                // and it is spelled `unreachable-ish` on purpose: under a bare
+                // `_ =>` a variant added later would silently inherit the
+                // *parse* wording and every test would stay green.
                 let message = match err {
+                    super::schedule::ScheduleError::CronParse => {
+                        "expression is not a valid cron schedule"
+                    }
                     super::schedule::ScheduleError::CronInvalid => {
                         "expression is a valid cron schedule but will never fire"
                     }
-                    _ => "expression is not a valid cron schedule",
+                    other => {
+                        log::warn!(
+                            "cron validation got an unexpected schedule error: {}",
+                            other.class()
+                        );
+                        "expression is not a valid cron schedule"
+                    }
                 };
                 return Err(WriteError::validation(
                     "schedule_config.expression",
