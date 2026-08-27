@@ -3172,6 +3172,24 @@ subprocess instead of stopping it, so `close()` has to stay reachable.
 `schedule::cron::parse` returns a `Result` for that input, so there is nothing to
 catch and the row is skipped with a warning either way.
 
+**A cron expression is validated at save time, through the scheduler's own
+`setup`** (#330). `validate_task`'s `"cron"` arm calls
+`schedule::validate_cron`, so `POST`/`PUT /api/tasks` answer **422** for an
+expression that cannot parse (`CRON_TZ=UTC`, `TZ=`, a four-field spec) or that
+parses and never fires (`0 0 30 2 *`), and no row is written. Two things about
+it are load-bearing. It is a **wrapper over `setup`, never a second parser or a
+regex** — a validator with its own dialect refuses expressions the scheduler
+would have run, and `cron.rs`'s dialect is not the obvious one (descriptors are
+accepted, six-field seconds specs are not, `?` sets the same bit `*` does). And
+the location it validates against is `runtime::local_tz()`, the resolver whose
+result **is** `Scheduler::loc`, rather than the running scheduler's field: a
+write path has to work before `start` and in tests, and reading it off the
+scheduler would make validation depend on boot order.
+
+`schedule_task`'s log-and-skip is unchanged and is now about **rows stored
+before that check existed**. Do not remove it along with the gap — it is what
+keeps one bad legacy row from being worse than a warning line.
+
 **The notification subscriber is wired at last.** `internal/notification`'s
 handler was ported in #307 with its header noting the subscriber "cannot exist
 yet" — the publisher was the Go scheduler, in another process. It is now a direct
@@ -4060,11 +4078,3 @@ these are now simply Agento's bugs, and fixing them is unblocked.
   `writeProfileSettings` and `moveProfileFile` — while four sibling call sites
   check. A hand-edited index can therefore make an update write outside the
   settings directory. Both sites say so in a comment.
-- **A cron expression of exactly `CRON_TZ=UTC` is accepted at save time**
-  ([#330](https://github.com/shaharia-lab/agento/issues/330)). Schedule
-  validation checks only that the expression is non-empty. `native/schedule/cron.rs`
-  answers `Err` rather than panicking, so it cannot brick a boot here, but the
-  row is still stored and the task never fires. Note the obvious fix does not
-  work: the library's own validity check goes through the same parser and
-  panics on the same input, so validation needs its own guard or a prefix
-  pre-check.

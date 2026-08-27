@@ -30,8 +30,16 @@
 //! reference parser, which historically took the whole process down on every
 //! boot (issue #330). [`super::cron::parse`] returns a `Result` for that input
 //! rather than panicking, so there is nothing to recover from here —
-//! the row is skipped with a warning either way. #330 is still a real bug in the
-//! Go server, and validating at save time is still its fix.
+//! the row is skipped with a warning either way.
+//!
+//! Since #330 landed, no *new* row can hold such an expression:
+//! [`super::validate_cron`] refuses it at save time, on both `POST` and
+//! `PUT /api/tasks`, so the write answers 422 instead of storing an `active`
+//! task with no timer. [`schedule_task`]'s log-and-skip is therefore about
+//! **rows already stored** — a database written before that check existed — and
+//! it stays exactly as it was. Do not remove it along with the gap it used to
+//! be the only defence against: it is what keeps one bad legacy row from being
+//! anything worse than a warning line.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -401,7 +409,15 @@ async fn sleep_until(target: DateTime<Utc>) {
 /// tool take, and the only one available: a fixed offset cannot answer "what is
 /// 09:00 tomorrow" across a DST transition, which is the whole reason a daily
 /// job is not a 24-hour duration job.
-fn local_tz() -> Tz {
+///
+/// It is `pub(crate)` because the **save-time** cron check needs the location
+/// the scheduler would have used, and it must answer the same thing whether or
+/// not a scheduler has started (a write path runs in tests and before `start`).
+/// Reading it off the running [`Scheduler`] would have made validation
+/// conditional on boot order; calling the same resolver is unconditional and
+/// agrees with `Scheduler::loc` by construction, since that field is this
+/// function's own result.
+pub(crate) fn local_tz() -> Tz {
     iana_time_zone::get_timezone()
         .ok()
         .and_then(|name| name.parse::<Tz>().ok())
@@ -609,6 +625,60 @@ mod tests {
         // calendar arithmetic can use.
         let tz = local_tz();
         let _ = Utc::now().with_timezone(&tz);
+    }
+
+    /// #330's containment half, which must outlive the save-time check that
+    /// made it unreachable for *new* rows. A database written before that check
+    /// existed can still hold `CRON_TZ=UTC`, and the guarantee is that loading
+    /// it is an `Err` the caller logs and steps over — never a panic, and never
+    /// a half-installed timer.
+    #[test]
+    fn a_stored_row_with_an_unusable_expression_is_skipped_rather_than_fatal() {
+        let scheduler = Arc::new(Scheduler {
+            db_path: PathBuf::from("/nonexistent/agento.db"),
+            loc: Tz::UTC,
+            jobs: Mutex::new(HashMap::new()),
+            swept: Mutex::new(HashMap::new()),
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
+        });
+        let task = ScheduledTask {
+            id: "legacy".to_string(),
+            name: "n".to_string(),
+            description: String::new(),
+            prompt: "p".to_string(),
+            agent_slug: String::new(),
+            working_directory: String::new(),
+            model: String::new(),
+            settings_profile_id: String::new(),
+            timeout_minutes: 30,
+            schedule_type: "cron".to_string(),
+            schedule_config: crate::native::tasks::ScheduleConfig {
+                expression: "CRON_TZ=UTC".to_string(),
+                ..Default::default()
+            },
+            stop_after_count: 0,
+            stop_after_time: None,
+            save_output: false,
+            status: "active".to_string(),
+            run_count: 0,
+            last_run_at: None,
+            last_run_status: String::new(),
+            next_run_at: None,
+            created_at: Default::default(),
+            updated_at: Default::default(),
+        };
+
+        let err = scheduler
+            .schedule_task(&task)
+            .expect_err("must not schedule");
+        assert!(
+            err.contains("schedule:cron_parse"),
+            "the class says which failure it was: {err}"
+        );
+        assert!(
+            scheduler.lock_jobs().is_empty(),
+            "a task that cannot be scheduled installs no timer"
+        );
     }
 
     #[test]
