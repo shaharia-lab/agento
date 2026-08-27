@@ -284,7 +284,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   36 migrations, embedded from parity/ — applied at startup
+    migrate.rs   37 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -365,7 +365,9 @@ src-tauri/src/
     sessions/    GET /api/claude-sessions, /facets, /projects, /{id} and
                  /{id}/journey (#479), plus POST /{id}/continue (#308) and
                  PATCH /{id} (#296)
-      continue_chat.rs the two writes that resume a Claude session as a chat
+      continue_chat.rs the two writes that resume a Claude session as a chat,
+                 the lookup that makes continue idempotent, and the three
+                 `continued_from_*` columns migration 37 adds (#490)
       update.rs  the rename and the favourite — the only two columns here the
                  user typed, and the only ones the scanner never writes
       detail.rs  one session re-read from its transcript, patched from the cache
@@ -2277,6 +2279,28 @@ busy timeout.
   ones Agento adds (`user_input_required`, `permission_request`).
 - **`AskUserQuestion` is answered by *denying* the tool** with the user's text
   in `Message` — that is how the answer reaches the model. Not a bug.
+- **A continued chat's inherited history is the transcript's, and it is a fixed
+  prefix** (#490, migration 37). "Continue in chat" records
+  `continued_from_session_id` / `continued_from_project_path` /
+  `continued_from_message_count` on `chat_sessions`; the conversation itself is
+  never imported into `chat_messages`, because that would duplicate megabytes
+  per session and corrupt the chat's own usage and cost figures, which are
+  stored rather than derived. `ChatsView` re-reads the source through
+  `GET /api/claude-sessions/{id}` and renders `messages.slice(0, count)` above
+  its own turns. **The count is a boundary, not a total, and nothing may
+  advance it**: the CLI appends a resumed turn to the *same* transcript file, so
+  after the first Agento turn the source already holds the local messages and
+  rendering the whole transcript beside `chat_messages` shows the newest turn
+  twice. The **pair** is stored, not the id (the #362 family), and deliberately
+  not `sdk_session_id` — `chat/persist.rs` rewrites that column from whatever
+  the stream reports, so it is a live pointer rather than an identity.
+- **Continue is idempotent per source session.** One Claude session, one chat:
+  `continue_session` looks a chat up before inserting and reopens it, returning
+  the same `201 {"chat_id"}`. The lookup also matches a chat whose **own id** is
+  the session id, because a turn pins the CLI session to the chat id — so a chat
+  Agento created itself is indexed in the corpus under that id, and "continue"
+  on one of those reopens the chat it already is rather than cloning it. Rows
+  written before migration 37 record no source and keep today's behaviour.
 - **A chat's permission mode is the chat's, then the agent's, then `default`.**
   `chat_sessions.permission_mode` (migration 30) beats the rule that an
   interactive handler forces `default`; empty means "no choice", not a mode.

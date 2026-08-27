@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Icon } from "../../lib/icons";
 import { IS_MAC } from "../../lib/tauri";
 import { clockTime, initials, type Tone } from "../../lib/format";
@@ -19,6 +25,7 @@ export function Transcript({
   streaming,
   onAnswer,
   onDecide,
+  header,
 }: {
   chatId: string;
   messages: ChatMessage[];
@@ -30,6 +37,17 @@ export function Transcript({
   streaming: boolean;
   onAnswer(text: string): void;
   onDecide(allow: boolean): void;
+  /**
+   * Rendered above the chat's own turns, inside this scroller (#490).
+   *
+   * A continued chat shows the conversation it resumes, and it has to share
+   * *this* scroll container: a region of its own would give the view two
+   * scrollbars and land the reader at the top of the inherited history rather
+   * than at the composer. The stick-to-bottom effect below covers it for free —
+   * the history arrives after mount, and a render that grows the content while
+   * `stick` is set re-pins the scroll to the newest turn.
+   */
+  header?: ReactNode;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -56,6 +74,8 @@ export function Transcript({
   return (
     <div className="transcript scroll" ref={scroller} onScroll={onScroll}>
       <div className="transcript__inner">
+        {header}
+
         {messages.map((m, i) => (
           <Message
             key={`${m.timestamp}-${i}`}

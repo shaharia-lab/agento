@@ -12,7 +12,14 @@ import {
   usd,
 } from "../lib/format";
 import { Icon } from "../lib/icons";
-import type { Agent, ChatDetail, ChatMessage, ChatSession } from "../lib/types";
+import type {
+  Agent,
+  ChatDetail,
+  ChatMessage,
+  ChatSession,
+  ClaudeMessage,
+  ClaudeSessionDetail,
+} from "../lib/types";
 import {
   Empty,
   InspGroup,
@@ -30,6 +37,7 @@ import { saveNewChatPrefs, type NewChatPrefs } from "../lib/newChatPrefs";
 import { Composer } from "./chat/Composer";
 import { Transcript } from "./chat/Transcript";
 import { useChatStream } from "./chat/useChatStream";
+import { SessionTranscript } from "./sessions/SessionTranscript";
 import "../styles/chats.css";
 
 type Filter = "all" | "favorites" | "running";
@@ -172,6 +180,41 @@ export function ChatsView({
 
   const busy = stream.chatId !== null;
   const agentLabel = session?.agent_slug || "Agento";
+
+  // --- The conversation a continued chat resumes (#490) --------------------
+  //
+  // "Continue in chat" records the source session on the chat row; the history
+  // itself stays in the Claude transcript, because importing it would duplicate
+  // megabytes per session and corrupt this chat's own usage figures, which are
+  // stored rather than derived. So it is fetched through the same live
+  // session-detail read the Sessions view uses, and rendered read-only above the
+  // chat's own turns.
+  const resumedFrom = session?.continued_from_session_id ?? "";
+  const resumedCount = session?.continued_from_message_count ?? 0;
+  const resumed = useResource<ClaudeSessionDetail | null>(
+    (signal) =>
+      resumedFrom
+        ? api.get<ClaudeSessionDetail>(`/claude-sessions/${resumedFrom}`, signal)
+        : Promise.resolve(null),
+    [resumedFrom]
+  );
+
+  // **A fixed prefix, and that is the whole guard against a double render.**
+  // The CLI appends a resumed turn to the *same* transcript file, so once this
+  // chat has taken a turn the source session contains those messages too —
+  // rendering the whole transcript here would show the newest turn once from the
+  // transcript and once from `chat_messages`. `continued_from_message_count` was
+  // recorded when the chat was created and never moves.
+  //
+  // `slice` clamps on its own, so a transcript that was compacted or rewritten
+  // to fewer messages renders what is left rather than indexing past the end.
+  const inherited = useMemo<ClaudeMessage[]>(
+    () =>
+      resumedFrom && resumed.data
+        ? (resumed.data.messages ?? []).slice(0, resumedCount)
+        : [],
+    [resumedFrom, resumed.data, resumedCount]
+  );
 
   const select = useCallback((id: string) => {
     setSelected(id);
@@ -592,7 +635,7 @@ export function ChatsView({
               <div className="transcript scroll">
                 <div className="listnote">Loading conversation…</div>
               </div>
-            ) : messages.length === 0 && stream.chatId !== selected ? (
+            ) : messages.length === 0 && !resumedFrom && stream.chatId !== selected ? (
               <div className="transcript scroll">
                 <Empty
                   icon="sparkle"
@@ -612,6 +655,17 @@ export function ChatsView({
                 streaming={stream.chatId === selected}
                 onAnswer={answerPrompt}
                 onDecide={(allow) => void stream.decide(allow)}
+                header={
+                  resumedFrom ? (
+                    <ResumedHistory
+                      sessionId={resumedFrom}
+                      projectPath={session?.continued_from_project_path ?? ""}
+                      messages={inherited}
+                      loading={resumed.loading && !resumed.data}
+                      error={resumed.error}
+                    />
+                  ) : null
+                }
               />
             )}
 
@@ -750,6 +804,59 @@ export function ChatsView({
           </aside>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * The conversation this chat was continued from, read-only, above its own turns.
+ *
+ * Three states and all three are honest. It is *not* gated on loading before the
+ * chat renders: the composer must be usable immediately, and a source transcript
+ * that has been moved, deleted or made unreadable since must leave the chat
+ * working — so a failure is a note in this region rather than an error for the
+ * whole view.
+ */
+function ResumedHistory({
+  sessionId,
+  projectPath,
+  messages,
+  loading,
+  error,
+}: {
+  sessionId: string;
+  projectPath: string;
+  messages: ClaudeMessage[];
+  loading: boolean;
+  error?: string;
+}) {
+  return (
+    <div className="resumed">
+      <div className="resumed__head">
+        <Icon name="history" size={12} />
+        <span className="truncate" title={projectPath || sessionId}>
+          Continued from {projectPath ? tildePath(projectPath) : "a Claude session"}
+        </span>
+        <span className="resumed__id mono truncate">{sessionId}</span>
+      </div>
+
+      {loading ? (
+        <div className="resumed__note">Reading the earlier conversation…</div>
+      ) : error ? (
+        <div className="resumed__note">
+          The earlier conversation could not be read: {error}
+        </div>
+      ) : messages.length === 0 ? (
+        <div className="resumed__note">
+          The earlier conversation is no longer available.
+        </div>
+      ) : (
+        <SessionTranscript messages={messages} />
+      )}
+
+      <div className="resumed__rule">
+        <span>Continued here</span>
+      </div>
     </div>
   );
 }
