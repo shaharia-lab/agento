@@ -511,10 +511,15 @@ function ServiceEditor({
         //   `drive: ["list_files"]` matches no name in that union and hosts
         //   zero tools. Ticking it here would not only misreport it: the union
         //   is what makes unchecking one box *grant* the other two.
-        const unionEmpty = provider.services.every((other) => {
-          const svcOther = services[other.key];
-          return !svcOther?.enabled || !svcOther.tools?.length;
-        });
+        // Over the **stored** map, not `provider.services`: `build_allowed_set`
+        // unions `services.values()`, so a key outside this app's catalog — one
+        // `POST /api/integrations` accepted, since it validates no service
+        // names — contributes to the real union while a catalog walk cannot see
+        // it. Same answer for every catalog key, since an absent service
+        // contributes nothing either way.
+        const unionEmpty = Object.values(services).every(
+          (other) => !other?.enabled || !other.tools?.length,
+        );
         const chosen = !svc.enabled
           ? []
           : stored.length
