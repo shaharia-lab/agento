@@ -331,12 +331,41 @@ This is your Claude Code history, indexed and searchable. It covers everything
 `claude` has ever done on this machine, not only what you ran through Agento.
 
 **The list** pages as you scroll and filters in the database, so it stays fast at
-thousands of sessions. Filter by project, model, date, cost or duration, search
-titles and message content, and sort by recent, cost, tokens, duration or message
-count.
+thousands of sessions. The toolbar carries search, project, account, sort and a
+favourites toggle; everything else is behind **Filters**.
 
 Each row carries its project, model, turn count, tokens, cost, duration, and
 badges for permission mode, linked pull requests and git branch.
+
+### Narrowing the list
+
+**Filters** in the toolbar opens a panel with the rest of them. The button shows
+how many are narrowing the list while the panel is shut.
+
+| Filter | Matches |
+| --- | --- |
+| **Mode** | the session's permission mode — Bypass, Plan, Accept, Don't ask, Default |
+| **Model** | the model the session ran on |
+| **Linked PRs** | sessions with, or without, a linked pull request |
+| **Messages** | a turn count, **main thread only** — sub-agent turns are not counted, matching the Msgs column |
+| **Active minutes** | active duration, parent and sub-agents together |
+| **Tokens in / out** | billable input and output tokens, sub-agents included |
+| **Cost** | US dollars, sub-agents included |
+| **Date range** | sessions still active on or after the first date, and started on or before the second |
+
+Every numeric filter is a **minimum and a maximum**, and either alone is enough:
+a minimum by itself reads "at least", a maximum by itself "at most", and both
+together "between".
+
+**Nothing is applied until you press Apply.** Each change re-runs the query and
+throws away the pages already loaded, so typing a number would otherwise filter
+on each digit in turn. The panel counts how many sessions the pending set
+matches, beside the button, so Apply is never a guess. **Clear all** resets the
+search and every filter at once.
+
+Mode, Model and Linked PRs appear only when the indexed sessions actually differ
+on them — one model on the machine means no Model dropdown, and it comes back the
+moment there are two.
 
 **Actions on a session:**
 

@@ -69,6 +69,28 @@ const SORTS: { value: Sort; label: string }[] = [
   { value: "messages", label: "Messages" },
 ];
 
+/**
+ * An inclusive numeric bound, held as the **input's own strings**.
+ *
+ * `""` and `0` are different answers — unbounded versus "at most zero" — and a
+ * number-typed state would collapse them. One min/max pair also expresses every
+ * comparison the list needs: min alone reads "at least", max alone "at most",
+ * both "between", so no operator control sits beside each field.
+ */
+interface Range {
+  min: string;
+  max: string;
+}
+
+const NO_RANGE: Range = { min: "", max: "" };
+
+function rangeSet(r: Range): boolean {
+  return r.min.trim() !== "" || r.max.trim() !== "";
+}
+
+/** Whether a session must have a linked PR, must have none, or either. */
+type LinkFilter = "" | "with" | "without";
+
 interface Filters {
   project: string;
   /**
@@ -100,6 +122,25 @@ interface Filters {
    */
   searchSort: Sort | "";
   favorites: boolean;
+
+  /* --- The advanced set, edited as a draft in the Filters panel ----------- */
+
+  /** `""` matches every mode; otherwise the raw `permission_mode` column. */
+  permissionMode: string;
+  /** `""` matches every model. */
+  model: string;
+  links: LinkFilter;
+  /** Main-thread messages only — the column the Msgs cell renders. */
+  messages: Range;
+  /** *Active* minutes, parent plus sub-agents; never the wall-clock span. */
+  duration: Range;
+  tokensIn: Range;
+  tokensOut: Range;
+  /** USD. */
+  cost: Range;
+  /** `YYYY-MM-DD` as the date inputs hold it; `""` is unbounded. */
+  from: string;
+  to: string;
 }
 
 const INITIAL_FILTERS: Filters = {
@@ -108,7 +149,159 @@ const INITIAL_FILTERS: Filters = {
   sort: "recent",
   searchSort: "",
   favorites: false,
+  permissionMode: "",
+  model: "",
+  links: "",
+  messages: NO_RANGE,
+  duration: NO_RANGE,
+  tokensIn: NO_RANGE,
+  tokensOut: NO_RANGE,
+  cost: NO_RANGE,
+  from: "",
+  to: "",
 };
+
+/**
+ * How many of the advanced filters are narrowing the list.
+ *
+ * A min/max pair counts once and the date range counts once, so the number
+ * matches the fields the panel shows rather than the parameters the request
+ * carries — the badge is answering "how much is hidden behind this button".
+ */
+function advancedCount(f: Filters): number {
+  let n = 0;
+  if (f.permissionMode) n += 1;
+  if (f.model) n += 1;
+  if (f.links) n += 1;
+  for (const r of [f.messages, f.duration, f.tokensIn, f.tokensOut, f.cost]) {
+    if (rangeSet(r)) n += 1;
+  }
+  if (f.from || f.to) n += 1;
+  return n;
+}
+
+/**
+ * The parameter names `sessions/query.rs::SessionQuery::parse` reads, spelled
+ * exactly as it reads them.
+ *
+ * A closed union rather than `Record<string, …>` because a misspelled parameter
+ * is **silent on both sides**: the server ignores what it does not recognise
+ * and answers the unfiltered set, so a `permission_mode` typed `permissionMode`
+ * would look like a filter that simply matches everything. There is no
+ * TypeScript test harness here, so making the compiler reject the typo is the
+ * only guard available. Keep it in step with that parser.
+ */
+type FilterParamKey =
+  | "q"
+  | "project"
+  | "config_dir"
+  | "favorites"
+  | "permission_mode"
+  | "model"
+  | "links"
+  | "messages_min"
+  | "messages_max"
+  | "duration_min"
+  | "duration_max"
+  | "tokens_in_min"
+  | "tokens_in_max"
+  | "tokens_out_min"
+  | "tokens_out_max"
+  | "cost_min"
+  | "cost_max"
+  | "from"
+  | "to";
+
+type FilterParams = Partial<Record<FilterParamKey, string | number | boolean>>;
+
+/**
+ * Serialize a filter set into request parameters.
+ *
+ * One function for three callers — the list, the facet aggregate beside it, and
+ * the panel's pending count — because they must describe the *same* set. Two
+ * call sites narrowing by two slightly different query strings is exactly how a
+ * row count and the total printed above it come to disagree.
+ *
+ * An unset filter is **absent**, never an empty value: `qs()` drops both, but
+ * the distinction is the server's — `model=` would ask for a model named `""`.
+ */
+function filterParamsOf(search: string, f: Filters): FilterParams {
+  return {
+    q: search.trim() || undefined,
+    project: f.project || undefined,
+    config_dir: f.configDir || undefined,
+    favorites: f.favorites ? true : undefined,
+    permission_mode: f.permissionMode || undefined,
+    model: f.model || undefined,
+    links: f.links || undefined,
+
+    messages_min: bound(f.messages.min),
+    messages_max: bound(f.messages.max),
+    // The filter's unit is minutes and the column's is milliseconds; the server
+    // scales the bound rather than the column (`add_range(…, 60_000.0)`), so
+    // what goes on the wire is minutes.
+    duration_min: bound(f.duration.min),
+    duration_max: bound(f.duration.max),
+    tokens_in_min: bound(f.tokensIn.min),
+    tokens_in_max: bound(f.tokensIn.max),
+    tokens_out_min: bound(f.tokensOut.min),
+    tokens_out_max: bound(f.tokensOut.max),
+    cost_min: bound(f.cost.min),
+    cost_max: bound(f.cost.max),
+
+    from: dayBoundary(f.from, "start"),
+    to: dayBoundary(f.to, "end"),
+  };
+}
+
+/** One side of a range, sent verbatim — the server ignores what it cannot parse. */
+function bound(v: string): string | undefined {
+  return v.trim() || undefined;
+}
+
+/**
+ * A facet's option list with the current selection appended when the facet no
+ * longer offers it.
+ *
+ * The escape hatch every option-set control here needs: without it a control
+ * disappears at the one moment it is the only thing that could clear itself,
+ * leaving the list pinned to a value nothing on screen mentions.
+ */
+function withSelected(
+  options: string[] | null | undefined,
+  selected: string
+): string[] {
+  const list = options?.filter(Boolean) ?? [];
+  return selected && !list.includes(selected) ? [...list, selected] : list;
+}
+
+/**
+ * A `YYYY-MM-DD` date input as the RFC 3339 instant the server parses.
+ *
+ * The bound is taken in the **local** zone, and the `to` side is the *end* of
+ * that day: the server compares `start_time <= to`, so a `to` of midnight would
+ * exclude every session that ran on the very day the user picked. `from` is the
+ * start of its day against `last_activity >= from`, so the range reads as the
+ * two dates inclusive.
+ *
+ * Anything that is not a real date yields `undefined` rather than a plausible
+ * wrong instant — the server ignores an unparseable bound too, so both sides
+ * agree it is unbounded. The shape check is not enough on its own: `Date`
+ * *normalizes* rather than rejecting, so `2026-02-30` would otherwise be sent
+ * as 2 March. Only the round trip catches that.
+ */
+function dayBoundary(day: string, edge: "start" | "end"): string | undefined {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.trim());
+  if (!m) return undefined;
+  const [year, month, date] = [Number(m[1]), Number(m[2]) - 1, Number(m[3])];
+  const t =
+    edge === "start"
+      ? new Date(year, month, date, 0, 0, 0, 0)
+      : new Date(year, month, date, 23, 59, 59, 999);
+  const real =
+    t.getFullYear() === year && t.getMonth() === month && t.getDate() === date;
+  return real ? t.toISOString() : undefined;
+}
 
 /**
  * The sort a request will really run under — `sessions/query.rs::resolve_sort`,
@@ -191,21 +384,53 @@ function totalDuration(s: ClaudeSessionSummary): number {
 
 /* --- Presentation helpers ------------------------------------------------- */
 
+/**
+ * The permission modes Claude Code writes, and how each reads.
+ *
+ * One table for the row badge and the Mode filter, so the option a user picks
+ * is spelled exactly as the column they picked it from. An unknown value keeps
+ * its raw text in both places rather than being dropped — the corpus predates
+ * some of these names.
+ */
+const MODE_LABELS: Record<string, string> = {
+  bypassPermissions: "Bypass",
+  plan: "Plan",
+  acceptEdits: "Accept",
+  dontAsk: "Don't ask",
+  default: "Default",
+};
+
+const MODE_TONES: Record<string, string> = {
+  bypassPermissions: "badge--amber",
+  plan: "badge--purple",
+  acceptEdits: "badge--teal",
+  dontAsk: "badge--teal",
+};
+
+/**
+ * `permission_mode` is a free-form column — the scanner copies whatever the
+ * transcript's `permission-mode` event carried, with no enum in between — so
+ * every read of these tables goes through a `typeof` check rather than `??`.
+ * A plain object inherits `toString`, `constructor` and `valueOf`, and `??`
+ * does not catch a function: the value would reach JSX as a React child and as
+ * a `className`. The `switch` these tables replaced was immune by construction.
+ */
+function lookup(table: Record<string, string>, key: string): string | undefined {
+  const v = table[key];
+  return typeof v === "string" ? v : undefined;
+}
+
+function modeLabel(mode: string): string {
+  return lookup(MODE_LABELS, mode) ?? mode;
+}
+
 function modeBadge(s: ClaudeSessionSummary): { label: string; tone: string } | null {
-  switch (s.permission_mode) {
-    case "bypassPermissions":
-      return { label: "Bypass", tone: "badge--amber" };
-    case "plan":
-      return { label: "Plan", tone: "badge--purple" };
-    case "acceptEdits":
-      return { label: "Accept", tone: "badge--teal" };
-    case "dontAsk":
-      return { label: "Don't ask", tone: "badge--teal" };
-    case "default":
-      return { label: "Default", tone: "" };
-    default:
-      return s.mode ? { label: s.mode, tone: "" } : null;
-  }
+  // `omitempty` on the Go side, so the field is absent on a row that recorded
+  // no mode — which is not the same as one whose mode this table does not know.
+  const mode = s.permission_mode ?? "";
+  const label = lookup(MODE_LABELS, mode);
+  if (label) return { label, tone: lookup(MODE_TONES, mode) ?? "" };
+  return s.mode ? { label: s.mode, tone: "" } : null;
 }
 
 /**
@@ -251,10 +476,133 @@ function neverScanned(st: SessionScanStatus | undefined): boolean {
   return !isFinite(t) || new Date(t).getFullYear() < 2000;
 }
 
+/* --- The advanced filter panel ------------------------------------------- */
+
+const LINK_LABELS: Record<LinkFilter, string> = {
+  "": "Any",
+  with: "With a linked PR",
+  without: "Without a linked PR",
+};
+
+function FilterField({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="sess-filters__field">
+      <div className="sess-filters__label">
+        {label}
+        {hint && <span className="sess-filters__hint">{hint}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * One inclusive min/max pair. Both sides are plain `<input>` text, so a
+ * part-typed value is never coerced — and nothing here fires a request, because
+ * the panel edits a draft.
+ */
+function RangeField({
+  label,
+  hint,
+  step,
+  value,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  step?: string;
+  value: Range;
+  onChange(r: Range): void;
+}) {
+  return (
+    <FilterField label={label} hint={hint}>
+      <div className="sess-filters__range">
+        <input
+          className="sess-filters__num tnum"
+          type="number"
+          min="0"
+          step={step}
+          inputMode="decimal"
+          placeholder="Min"
+          aria-label={`${label} minimum`}
+          value={value.min}
+          onChange={(e) => onChange({ ...value, min: e.target.value })}
+        />
+        <span className="sess-filters__dash">–</span>
+        <input
+          className="sess-filters__num tnum"
+          type="number"
+          min="0"
+          step={step}
+          inputMode="decimal"
+          placeholder="Max"
+          aria-label={`${label} maximum`}
+          value={value.max}
+          onChange={(e) => onChange({ ...value, max: e.target.value })}
+        />
+      </div>
+    </FilterField>
+  );
+}
+
+/**
+ * How many sessions the *draft* would match, so Apply is not a leap in the
+ * dark — the facet aggregate is the cheap half of a search (~101 ms against the
+ * page's seconds on a common term), and this asks for nothing else.
+ *
+ * It is a child component so the request exists only while the panel is open,
+ * rather than doubling facet traffic for every user who never opens it. The
+ * params object is referentially stable between draft edits, so debouncing it
+ * directly is what keeps a keystroke from becoming a request.
+ */
+function DraftMatchCount({ params }: { params: FilterParams }) {
+  const settled = useDebounced(params, 300);
+  const preview = useResource<SessionFacets>(
+    (signal) =>
+      api.get<SessionFacets>(`/claude-sessions/facets${qs(settled)}`, signal),
+    [settled]
+  );
+
+  // A failed read knows nothing about how many rows match, and saying "0" about
+  // a request that never landed would read as an answer.
+  if (preview.error && !preview.data) {
+    return <span className="sess-filters__count">Count unavailable</span>;
+  }
+  if (!preview.data) {
+    return <span className="sess-filters__count">Counting…</span>;
+  }
+  const n = preview.data.total;
+  return (
+    <span className="sess-filters__count tnum">
+      {integer(n)} {n === 1 ? "session" : "sessions"} match
+    </span>
+  );
+}
+
 export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const [query, setQuery] = useState("");
   const q = useDebounced(query, 250);
   const [filters, setFilters] = useState<Filters>(INITIAL_FILTERS);
+
+  /**
+   * What the Filters panel edits, applied to `filters` on the button.
+   *
+   * Deliberately not live. Every change here resets the keyset cursor and
+   * discards every accumulated page, so typing `50` into a minimum would run a
+   * query for `5` and throw the list away and back mid-keystroke — a server
+   * round trip per character, not a client-side re-filter. The pending count
+   * beside Apply is what keeps that from being a leap in the dark.
+   */
+  const [draft, setDraft] = useState<Filters>(INITIAL_FILTERS);
+  const [panelOpen, setPanelOpen] = useState(false);
 
   // The debounced term, not the raw one: gating relevance on what the user is
   // still typing would flicker the option in and out per keystroke and refetch
@@ -285,15 +633,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const items = loaded.key === listKey ? loaded.items : NO_ROWS;
   const hasMore = loaded.key === listKey && loaded.hasMore;
 
-  const filterParams = useMemo(
-    () => ({
-      q: q.trim() || undefined,
-      project: filters.project || undefined,
-      config_dir: filters.configDir || undefined,
-      favorites: filters.favorites ? true : undefined,
-    }),
-    [q, filters.project, filters.configDir, filters.favorites]
-  );
+  const filterParams = useMemo(() => filterParamsOf(q, filters), [q, filters]);
 
   const page = useResource<SessionPage>(
     (signal) =>
@@ -353,7 +693,24 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     // Batched with the filter change so no request ever carries a stale cursor.
     setPaging({ key: "", cursor: "" });
     setFilters((f) => ({ ...f, ...patch }));
+    // The panel's draft carries the *whole* filter set, so a toolbar control
+    // writing only `filters` would make Apply silently revert it. Patching both
+    // is what keeps the two halves of one filter set from drifting apart.
+    setDraft((d) => ({ ...d, ...patch }));
   }, []);
+
+  /** Applied and draft together — the empty state's escape hatch. */
+  const clearFilters = useCallback(() => {
+    setQuery("");
+    setPaging({ key: "", cursor: "" });
+    setFilters(INITIAL_FILTERS);
+    setDraft(INITIAL_FILTERS);
+  }, []);
+
+  const applyDraft = useCallback(() => {
+    setPaging({ key: "", cursor: "" });
+    setFilters(draft);
+  }, [draft]);
 
   const onQuery = useCallback((v: string) => {
     setPaging({ key: "", cursor: "" });
@@ -654,16 +1011,43 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
    * Without this the control disappears at the moment it is the only thing that
    * could clear itself, leaving the list pinned to an account with no rows.
    */
-  const accountOptions = useMemo(() => {
-    const dirs = facets.data?.config_dirs?.filter(Boolean) ?? [];
-    return filters.configDir && !dirs.includes(filters.configDir)
-      ? [...dirs, filters.configDir]
-      : dirs;
-  }, [facets.data, filters.configDir]);
-
-  const filtersActive = Boolean(
-    query.trim() || filters.project || filters.configDir || filters.favorites
+  const accountOptions = useMemo(
+    () => withSelected(facets.data?.config_dirs, filters.configDir),
+    [facets.data, filters.configDir]
   );
+
+  /**
+   * The Mode and Model option sets, on the same terms as `accountOptions`: the
+   * facet is computed over every *visible* session rather than the filtered
+   * one, so picking a model never removes the others.
+   *
+   * A live selection keeps its own option even when the facet stops offering
+   * it. That is not the filter narrowing the facet — it cannot — but the corpus
+   * moving underneath a selection: a rescan dropping the last session of a
+   * model, a project hidden in Settings, or a config dir leaving the indexed
+   * set. Without it the dropdown loses the only entry that could clear it.
+   */
+  const modeOptions = useMemo(
+    () => withSelected(facets.data?.permission_modes, draft.permissionMode),
+    [facets.data, draft.permissionMode]
+  );
+
+  const modelOptions = useMemo(
+    () => withSelected(facets.data?.models, draft.model),
+    [facets.data, draft.model]
+  );
+
+  const activeCount = advancedCount(filters);
+  const draftParams = useMemo(() => filterParamsOf(q, draft), [q, draft]);
+  const draftDiffers = useMemo(
+    () => JSON.stringify(draft) !== JSON.stringify(filters),
+    [draft, filters]
+  );
+
+  const filtersActive =
+    Boolean(
+      query.trim() || filters.project || filters.configDir || filters.favorites
+    ) || activeCount > 0;
   const loadingMore = page.loading && cursor !== "";
   const remaining = facets.data ? facets.data.total - items.length : 0;
 
@@ -797,6 +1181,27 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             <Icon name="star" size={14} />
           </button>
 
+          {/* The eight advanced filters live behind this, collapsed by default:
+              the toolbar is already dense at 28px rows, and most listings are
+              narrowed by search and project alone. The badge is the applied
+              count, not the draft's — it answers "how much of what I am looking
+              at is hidden behind this button". */}
+          <button
+            className={`btn sess-filters__toggle ${
+              panelOpen ? "sess-filters__toggle--on" : ""
+            }`}
+            aria-expanded={panelOpen}
+            aria-controls="sess-filters-panel"
+            title="Advanced filters"
+            onClick={() => setPanelOpen((v) => !v)}
+          >
+            <Icon name="filter" size={13} />
+            Filters
+            {activeCount > 0 && (
+              <span className="sess-filters__badge tnum">{activeCount}</span>
+            )}
+          </button>
+
           <div className="spacer" />
 
           {scanning && status.data && (
@@ -823,6 +1228,168 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             <Icon name="refresh" size={14} />
           </button>
         </div>
+
+        {panelOpen && (
+          <div className="sess-filters" id="sess-filters-panel">
+            <div className="sess-filters__grid">
+              {/* Both dropdowns follow the account control's rule: rendered
+                  only when there is a choice to make, and always while one is
+                  selected. */}
+              {(modeOptions.length > 1 || draft.permissionMode !== "") && (
+                <FilterField label="Mode">
+                  <Dropdown
+                    small
+                    className="sess-filters__select"
+                    ariaLabel="Permission mode"
+                    label={
+                      draft.permissionMode
+                        ? modeLabel(draft.permissionMode)
+                        : "Any mode"
+                    }
+                    value={draft.permissionMode}
+                    onChange={(v) => setDraft((d) => ({ ...d, permissionMode: v }))}
+                    options={[
+                      { value: "", label: "Any mode" },
+                      ...modeOptions.map((m) => ({
+                        value: m,
+                        label: modeLabel(m),
+                      })),
+                    ]}
+                  />
+                </FilterField>
+              )}
+
+              {(modelOptions.length > 1 || draft.model !== "") && (
+                <FilterField label="Model">
+                  <Dropdown
+                    small
+                    className="sess-filters__select"
+                    ariaLabel="Model"
+                    label={draft.model || "Any model"}
+                    value={draft.model}
+                    onChange={(v) => setDraft((d) => ({ ...d, model: v }))}
+                    options={[
+                      { value: "", label: "Any model" },
+                      ...modelOptions.map((m) => ({ value: m, label: m })),
+                    ]}
+                  />
+                </FilterField>
+              )}
+
+              {/* Nothing in the corpus is linked to a PR on most machines, and
+                  a control whose every state shows the same rows is noise. */}
+              {(facets.data?.has_prs || draft.links !== "") && (
+                <FilterField label="Linked PRs">
+                  <Dropdown
+                    small
+                    className="sess-filters__select"
+                    ariaLabel="Linked pull requests"
+                    label={LINK_LABELS[draft.links]}
+                    value={draft.links}
+                    onChange={(v) =>
+                      setDraft((d) => ({ ...d, links: v as LinkFilter }))
+                    }
+                    options={(["", "with", "without"] as LinkFilter[]).map(
+                      (v) => ({ value: v, label: LINK_LABELS[v] })
+                    )}
+                  />
+                </FilterField>
+              )}
+
+              <RangeField
+                label="Messages"
+                // SQL_MESSAGE_COUNT is bare `c.message_count`, where cost,
+                // duration and the token ranges all fold sub-agents in. That is
+                // deliberate on both sides — each filter matches the column its
+                // own cell renders — but it has to be said, or a "Messages"
+                // filter would silently promise a total it does not use.
+                hint="Main thread only"
+                value={draft.messages}
+                onChange={(r) => setDraft((d) => ({ ...d, messages: r }))}
+              />
+
+              <RangeField
+                label="Active minutes"
+                // Active duration, not the wall-clock span: a resumed session's
+                // span counts every idle day between sittings, which is exactly
+                // why the column the list sorts and renders is not that one.
+                hint="Active time, not elapsed"
+                value={draft.duration}
+                onChange={(r) => setDraft((d) => ({ ...d, duration: r }))}
+              />
+
+              <RangeField
+                label="Tokens in"
+                hint="Incl. sub-agents"
+                value={draft.tokensIn}
+                onChange={(r) => setDraft((d) => ({ ...d, tokensIn: r }))}
+              />
+
+              <RangeField
+                label="Tokens out"
+                hint="Incl. sub-agents"
+                value={draft.tokensOut}
+                onChange={(r) => setDraft((d) => ({ ...d, tokensOut: r }))}
+              />
+
+              <RangeField
+                label="Cost"
+                hint="USD, incl. sub-agents"
+                step="0.01"
+                value={draft.cost}
+                onChange={(r) => setDraft((d) => ({ ...d, cost: r }))}
+              />
+
+              <FilterField
+                label="Date range"
+                hint="Active on or after / started on or before"
+              >
+                <div className="sess-filters__range">
+                  <input
+                    className="sess-filters__date"
+                    type="date"
+                    aria-label="Active on or after"
+                    value={draft.from}
+                    max={draft.to || undefined}
+                    onChange={(e) =>
+                      setDraft((d) => ({ ...d, from: e.target.value }))
+                    }
+                  />
+                  <span className="sess-filters__dash">–</span>
+                  <input
+                    className="sess-filters__date"
+                    type="date"
+                    aria-label="Started on or before"
+                    value={draft.to}
+                    min={draft.from || undefined}
+                    onChange={(e) =>
+                      setDraft((d) => ({ ...d, to: e.target.value }))
+                    }
+                  />
+                </div>
+              </FilterField>
+            </div>
+
+            <div className="sess-filters__foot">
+              <DraftMatchCount params={draftParams} />
+              <div className="spacer" />
+              <button
+                className="btn"
+                disabled={!filtersActive && !draftDiffers}
+                onClick={clearFilters}
+              >
+                Clear all
+              </button>
+              <button
+                className="btn btn--primary"
+                disabled={!draftDiffers}
+                onClick={applyDraft}
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        )}
 
         {page.error && items.length === 0 ? (
           <Empty
@@ -860,13 +1427,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
               title="No matching sessions"
               text="No indexed session matches the current search and filters."
               action={
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setQuery("");
-                    patchFilters(INITIAL_FILTERS);
-                  }}
-                >
+                <button className="btn" onClick={clearFilters}>
                   Clear filters
                 </button>
               }

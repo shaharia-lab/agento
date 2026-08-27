@@ -9,6 +9,151 @@
   max-width: 230px;
 }
 
+/* --- Advanced filter panel ------------------------------------------------ */
+/* A disclosure under the toolbar rather than more toolbar: nine controls do not
+   fit a 28px strip, and most listings never need them. */
+
+.sess-filters__toggle {
+  gap: var(--sp-2);
+  white-space: nowrap;
+}
+/* The open state, on `.iconbtn--active`'s terms plus a ring: this button is the
+   only chrome saying a panel is below it, and a background alone reads as hover
+   on a control that is also a toggle. */
+.sess-filters__toggle--on {
+  background: var(--bg-active);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+/* The applied count, so a collapsed panel still says how much is hidden. */
+.sess-filters__badge {
+  min-width: 15px;
+  height: 15px;
+  padding: 0 var(--sp-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+}
+
+.sess-filters {
+  flex: none;
+  padding: var(--sp-6) var(--sp-5);
+  border-bottom: var(--hairline) solid var(--line);
+  background: var(--bg-inset);
+}
+
+.sess-filters__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--sp-5) var(--sp-6);
+}
+
+.sess-filters__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.sess-filters__label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.sess-filters__hint {
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* `.select` is inline-flex and sizes to its label, which in a grid of equal
+   cells leaves ragged controls; the cell is the width here. */
+.sess-filters__select {
+  width: 100%;
+}
+
+.sess-filters__range {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.sess-filters__dash {
+  color: var(--fg-quaternary);
+  flex: none;
+}
+
+.sess-filters__num,
+.sess-filters__date {
+  flex: 1;
+  min-width: 0;
+  height: var(--control-h);
+  padding: 0 var(--sp-4);
+  background: var(--bg-content);
+  border-radius: var(--r-md);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line-strong);
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+.sess-filters__num:focus,
+.sess-filters__date:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
+}
+.sess-filters__num::placeholder {
+  color: var(--fg-quaternary);
+}
+/* The spinners eat most of a field this narrow, and a bound is typed rather
+   than stepped. */
+.sess-filters__num {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.sess-filters__num::-webkit-outer-spin-button,
+.sess-filters__num::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+/* WebKit renders the picker glyph nearly black in dark mode; the filter is what
+   both webviews honour, since the pseudo-element takes no colour. */
+.sess-filters__date::-webkit-calendar-picker-indicator {
+  opacity: 0.55;
+  cursor: pointer;
+}
+:root[data-theme="dark"] .sess-filters__date::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"])
+    .sess-filters__date::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+  }
+}
+
+.sess-filters__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-5);
+  border-top: var(--hairline) solid var(--line);
+}
+
+.sess-filters__count {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
 /* --- Session detail (read-only transcript) -------------------------------- */
 /* A failed "Continue in chat" from the full session view. Sits directly under
    the toolbar that carries the button, so it needs no scrolling to see. */
