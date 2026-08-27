@@ -468,6 +468,14 @@ fn normalize_config_dir(agent: &mut Agent) -> Result<(), WriteError> {
 
 /// `config.NormalizeClaudeConfigDir`: trim, expand a leading `~`, then
 /// `filepath.Clean`.
+///
+/// **An OS path** (#374): it is a directory on the machine the app is running
+/// on, so `join` and `clean` here are the target's rules and the result is
+/// `C:\Users\u\.claude` on Windows rather than `C:\Users\u/.claude`. That
+/// matters twice over — the caller then rejects anything `Path::is_absolute`
+/// declines, and the stored value is compared against
+/// `GET /api/settings/claude-config-dirs`' own suggestions, which are built the
+/// same way.
 fn normalize_claude_config_dir(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

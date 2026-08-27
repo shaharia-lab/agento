@@ -41,11 +41,50 @@ That is the property to copy. Anything added here later must do the same: expose
 its routes as one const, and assert equality both ways. A hand-maintained list
 asserted in one direction is a list that goes stale.
 
+## `gopath_windows_vectors.json` has a generator, and it is the only one that does
+
+Everything else here was recorded from the Go server. Go's Windows
+`path/filepath` is not that server — it is the *standard library*, and it still
+exists — so `gopath_windows_vectors.json` (#374) is regenerable, and it is the
+one file in this directory you may re-record without changing the contract:
+
+```bash
+go run parity/generators/gopath_windows_vectors.go > parity/gopath_windows_vectors.json
+```
+
+`parity/generators/gopath_windows_vectors.go` needs no `go.mod` and no network.
+Two things about it are deliberate:
+
+- **It vendors Go's Windows source; it does not re-implement it.** The
+  `lazybuf`, `Clean`, `Base`, `Dir`, `VolumeName`, `IsAbs`, `volumeNameLen`,
+  `postClean` and `Join` bodies are copied verbatim from
+  `internal/filepathlite/path.go`, `internal/filepathlite/path_windows.go` and
+  `path/filepath/path_windows.go`, with only the build constraints and two
+  `internal/` helpers replaced. That is what makes it a *second opinion* about
+  the Rust port rather than a restatement of it — the lesson #268 learned when
+  `filepath.Clean` transcribed by eye produced `/a//c` for `/a/b/../c/`. A
+  generator that shares the port's belief agrees with a wrong port.
+- **The inputs are Go's own test tables**, not invented ones: `cleantests` +
+  `wincleantests`, `basetests` + `winbasetests`, `dirtests` + `windirtests`,
+  `jointests` + `winjointests`, `isabstests` + `winisabstests` from
+  `path/filepath/path_test.go`, plus the paths Agento's own Windows surfaces
+  build. The vendored code reproduces every expectation in those tables exactly,
+  which is the check that says the vendoring is faithful.
+
+Regenerating it against a newer Go is a **contract change** like any other here:
+state the Go version and what moved. The header records the version it was
+produced with.
+
+It also carries the one array that has no home elsewhere: `unix_base` pins
+`filepath.Base` under the **Unix** rules, produced by the generator host's real
+`path/filepath`. `Base` is new to the port (`sessions/projects.rs` needs it) and
+`gopath_vectors.json` is frozen, so it lives here rather than growing that file.
+
 ## Recovering a generator
 
-The generators were deleted in #391 (`07b6212`) along with the implementation
-they ran against. If you ever need to see how one of these files was produced,
-they are in history:
+The other generators were deleted in #391 (`07b6212`) along with the
+implementation they ran against. If you ever need to see how one of those files
+was produced, they are in history:
 
 ```bash
 git show 07b6212^:desktop/parity/

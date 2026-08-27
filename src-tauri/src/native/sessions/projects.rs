@@ -93,9 +93,16 @@ pub fn list(db_path: &Path, include_hidden: bool) -> Result<Vec<ClaudeProject>, 
 
 /// `filepath.Base(filepath.Dir(filePath))` — the project directory's own name,
 /// which is the encoded form Claude Code writes.
+///
+/// **`file_path` is an OS path, not a corpus-canonical one** (#374). It is the
+/// transcript's real location on disk, so on Windows it is
+/// `C:\Users\u\.claude\projects\-C--Users-u-proj\<id>.jsonl` and both halves of
+/// this have to be the target's rules. It used to be `dir.rsplit('/')`, which
+/// on Windows finds no `/` at all and answers the *whole directory path* as the
+/// project's name — the identity every later lookup keys on. `gopath::base` is
+/// what the doc comment always claimed this was.
 fn encoded_name(file_path: &str) -> String {
-    let dir = gopath::dir(file_path);
-    dir.rsplit('/').next().unwrap_or(&dir).to_string()
+    gopath::base(&gopath::dir(file_path))
 }
 
 /// `include_hidden=true`, and nothing else. Go compares the raw value against
@@ -230,6 +237,29 @@ mod tests {
             encoded_name("/home/u/.claude/projects/-p/sess/subagents/agent-1.jsonl"),
             "subagents"
         );
+    }
+
+    /// The same rule under the Windows path rules (#374).
+    ///
+    /// `encoded_name` dispatches on the target, so on a Unix host the
+    /// composition is asserted through the Windows functions directly and the
+    /// call itself only on Windows — which is what the `windows_rules` CI job
+    /// is for. The third assertion is what the code did before: `rsplit('/')`
+    /// finds no separator in a Windows directory and answers the whole path, so
+    /// every project's identity would have been its own absolute path.
+    #[test]
+    fn the_encoded_name_is_the_directorys_own_name_under_the_windows_rules() {
+        let file = r"C:\Users\u\.claude\projects\-C--Users-u-Projects-agento\abc.jsonl";
+        let dir = gopath::dir_windows(file);
+        assert_eq!(
+            dir,
+            r"C:\Users\u\.claude\projects\-C--Users-u-Projects-agento"
+        );
+        assert_eq!(gopath::base_windows(&dir), "-C--Users-u-Projects-agento");
+        assert_eq!(dir.rsplit('/').next(), Some(dir.as_str()));
+
+        #[cfg(windows)]
+        assert_eq!(encoded_name(file), "-C--Users-u-Projects-agento");
     }
 
     /// Field order is the Go struct's declaration order, and `hidden` is always

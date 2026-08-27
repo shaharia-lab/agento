@@ -152,3 +152,54 @@ jobs:
       - name: Compile Rust (ci profile)
         working-directory: src-tauri
         run: cargo build --profile ci
+
+  # Windows x86_64 is a shipped release target (`release.yml` builds
+  # `x86_64-pc-windows-msvc`) and nothing compiled the `cfg(windows)` arms until
+  # #374 ported Go's Windows `filepath`. Without this job that port is
+  # unverified on the only platform it targets: `cfg(not(windows))` code
+  # compiles everywhere and the Windows arm compiles nowhere, which is the
+  # shape a `cfg` split fails in silently.
+  #
+  # **`--lib`, and that is a recorded limitation rather than an oversight.** The
+  # integration suites under `src-tauri/tests/` are Unix-only by construction —
+  # `chat_turn.rs`, `claude_sdk.rs` and `scheduled_run.rs` drive a fake Claude
+  # CLI that is a shebang'd Python script made executable through
+  # `std::os::unix::fs::PermissionsExt`, which does not exist on Windows and so
+  # will not even compile there. Porting the fake CLI is its own piece of work
+  # and is not what this job is for. What `--lib` does cover is every unit test
+  # in `native/` — `gopath`'s two rule sets and both vector files, the three
+  # surfaces #374 un-gated, and the four call sites it audited.
+  #
+  # Lints run here too: `clippy` on a Linux host never sees the `cfg(windows)`
+  # arms at all, so `-D warnings` there says nothing about them.
+  windows_rules:
+    name: Windows unit tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          key: windows
+
+      # The frontend is not built here, so `tauri-build` has no `../dist` to
+      # embed. It is only read in a release build, and this job compiles the
+      # test profile — but the directory has to exist for the config to
+      # validate.
+      - name: Stub the frontend bundle
+        shell: bash
+        run: mkdir -p dist && echo '<!doctype html>' > dist/index.html
+
+      - name: Rust lints (windows arms)
+        working-directory: src-tauri
+        run: cargo clippy --lib -- -D warnings
+
+      - name: Rust unit tests
+        working-directory: src-tauri
+        run: cargo test --lib

@@ -121,6 +121,23 @@ pub fn profiles_path(dir: &str) -> String {
 /// The mode matters: these files carry API keys and hook commands, and
 /// `std::fs::write` would create them `0666 & ~umask`.
 ///
+/// **On Windows the mode is dropped, and that is Go's behaviour rather than a
+/// hole** (#374). `syscall.Open` on Windows maps `perm` onto exactly one bit —
+/// the read-only attribute, set when no write bit is present — and `0600` has
+/// one, so Go's own `os.WriteFile(path, data, 0600)` there creates a file with
+/// the parent directory's inherited ACL and nothing else. A file inside
+/// `%USERPROFILE%` inherits that profile's ACL, which grants the user, SYSTEM
+/// and the local Administrators group; the practical difference from `0600` is
+/// that an administrator can read it without taking ownership first, which on
+/// Windows they can do anyway.
+///
+/// The alternative — building an explicit DACL through `SetSecurityInfo` — was
+/// considered and declined: it needs a new `windows-sys` surface that this
+/// crate does not otherwise use, it diverges from what the file's other writer
+/// (Claude Code itself) does, and there is nothing to pin it against. The
+/// decision is recorded here rather than left as a silent `cfg` gap, which is
+/// what it was until #374.
+///
 /// **Truncate-then-write, not temp-file-then-rename**, and that is a choice.
 /// `os.WriteFile` truncates, so a crash between the truncate and the write
 /// leaves an empty file — and for `settings_profiles.json` an empty index
@@ -143,6 +160,10 @@ pub fn write_file(path: &str, data: &[u8]) -> io::Result<()> {
 }
 
 /// `os.MkdirAll(dir, 0700)`.
+///
+/// The Windows story is [`write_file`]'s: `syscall.Mkdir` ignores `perm`
+/// outright there, so Go creates the directory with the parent's inherited ACL
+/// and so does this.
 pub fn mkdir_all(dir: &str) -> io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -723,15 +744,6 @@ fn claims(method: &Method, path: &str) -> bool {
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
-    // Go's modes and Go's `filepath` are what this module writes with, and
-    // neither is verified on Windows — the same decision `super::fs` makes,
-    // answered as a 501 since #278 removed the sidecar that used to take it.
-    if !cfg!(unix) {
-        return super::Answer::error(
-            axum::http::StatusCode::NOT_IMPLEMENTED,
-            "the Claude settings surface is not supported on Windows in this build",
-        );
-    }
     // Resolved once, here: every handler below works inside one directory, and
     // a failure to resolve it is answered before anything is written.
     let dir = &run_dir(&ctx.db_path)?;

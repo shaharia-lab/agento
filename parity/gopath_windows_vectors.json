@@ -1,0 +1,1204 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for Go's path/filepath, WINDOWS rules.",
+    "Sibling of gopath_vectors.json (Unix). 'want' is what Go's own",
+    "internal/filepathlite and path/filepath Windows source produces, so a",
+    "divergence fails the Rust port against Go's real output rather than",
+    "against a belief about it. Read by src-tauri/src/native/gopath.rs on",
+    "every host, not only on Windows.",
+    "Generated from go1.26.5 with:",
+    "  go run parity/generators/gopath_windows_vectors.go > parity/gopath_windows_vectors.json",
+    "Inputs are Go's own path_test.go tables (cleantests+wincleantests,",
+    "basetests+winbasetests, dirtests+windirtests, jointests+winjointests)",
+    "plus the paths Agento's own Windows surfaces build."
+  ],
+  "clean": [
+    {
+      "value": "abc",
+      "want": "abc"
+    },
+    {
+      "value": "abc/def",
+      "want": "abc\\def"
+    },
+    {
+      "value": "a/b/c",
+      "want": "a\\b\\c"
+    },
+    {
+      "value": ".",
+      "want": "."
+    },
+    {
+      "value": "..",
+      "want": ".."
+    },
+    {
+      "value": "../..",
+      "want": "..\\.."
+    },
+    {
+      "value": "../../abc",
+      "want": "..\\..\\abc"
+    },
+    {
+      "value": "/abc",
+      "want": "\\abc"
+    },
+    {
+      "value": "/",
+      "want": "\\"
+    },
+    {
+      "value": "",
+      "want": "."
+    },
+    {
+      "value": "abc/",
+      "want": "abc"
+    },
+    {
+      "value": "abc/def/",
+      "want": "abc\\def"
+    },
+    {
+      "value": "a/b/c/",
+      "want": "a\\b\\c"
+    },
+    {
+      "value": "./",
+      "want": "."
+    },
+    {
+      "value": "../",
+      "want": ".."
+    },
+    {
+      "value": "../../",
+      "want": "..\\.."
+    },
+    {
+      "value": "/abc/",
+      "want": "\\abc"
+    },
+    {
+      "value": "abc//def//ghi",
+      "want": "abc\\def\\ghi"
+    },
+    {
+      "value": "abc//",
+      "want": "abc"
+    },
+    {
+      "value": "abc/./def",
+      "want": "abc\\def"
+    },
+    {
+      "value": "/./abc/def",
+      "want": "\\abc\\def"
+    },
+    {
+      "value": "abc/.",
+      "want": "abc"
+    },
+    {
+      "value": "abc/def/ghi/../jkl",
+      "want": "abc\\def\\jkl"
+    },
+    {
+      "value": "abc/def/../ghi/../jkl",
+      "want": "abc\\jkl"
+    },
+    {
+      "value": "abc/def/..",
+      "want": "abc"
+    },
+    {
+      "value": "abc/def/../..",
+      "want": "."
+    },
+    {
+      "value": "/abc/def/../..",
+      "want": "\\"
+    },
+    {
+      "value": "abc/def/../../..",
+      "want": ".."
+    },
+    {
+      "value": "/abc/def/../../..",
+      "want": "\\"
+    },
+    {
+      "value": "abc/def/../../../ghi/jkl/../../../mno",
+      "want": "..\\..\\mno"
+    },
+    {
+      "value": "/../abc",
+      "want": "\\abc"
+    },
+    {
+      "value": "a/../b:/../../c",
+      "want": "..\\c"
+    },
+    {
+      "value": "abc/./../def",
+      "want": "def"
+    },
+    {
+      "value": "abc//./../def",
+      "want": "def"
+    },
+    {
+      "value": "abc/../../././../def",
+      "want": "..\\..\\def"
+    },
+    {
+      "value": "//abc",
+      "want": "\\\\abc"
+    },
+    {
+      "value": "///abc",
+      "want": "\\\\\\abc"
+    },
+    {
+      "value": "//abc//",
+      "want": "\\\\abc\\\\"
+    },
+    {
+      "value": "c:",
+      "want": "c:."
+    },
+    {
+      "value": "c:\\",
+      "want": "c:\\"
+    },
+    {
+      "value": "c:\\abc",
+      "want": "c:\\abc"
+    },
+    {
+      "value": "c:abc\\..\\..\\.\\.\\..\\def",
+      "want": "c:..\\..\\def"
+    },
+    {
+      "value": "c:\\abc\\def\\..\\..",
+      "want": "c:\\"
+    },
+    {
+      "value": "c:\\..\\abc",
+      "want": "c:\\abc"
+    },
+    {
+      "value": "c:..\\abc",
+      "want": "c:..\\abc"
+    },
+    {
+      "value": "c:\\b:\\..\\..\\..\\d",
+      "want": "c:\\d"
+    },
+    {
+      "value": "\\",
+      "want": "\\"
+    },
+    {
+      "value": "/",
+      "want": "\\"
+    },
+    {
+      "value": "\\\\i\\..\\c$",
+      "want": "\\\\i\\..\\c$"
+    },
+    {
+      "value": "\\\\i\\..\\i\\c$",
+      "want": "\\\\i\\..\\i\\c$"
+    },
+    {
+      "value": "\\\\i\\..\\I\\c$",
+      "want": "\\\\i\\..\\I\\c$"
+    },
+    {
+      "value": "\\\\host\\share\\foo\\..\\bar",
+      "want": "\\\\host\\share\\bar"
+    },
+    {
+      "value": "//host/share/foo/../baz",
+      "want": "\\\\host\\share\\baz"
+    },
+    {
+      "value": "\\\\host\\share\\foo\\..\\..\\..\\..\\bar",
+      "want": "\\\\host\\share\\bar"
+    },
+    {
+      "value": "\\\\.\\C:\\a\\..\\..\\..\\..\\bar",
+      "want": "\\\\.\\C:\\bar"
+    },
+    {
+      "value": "\\\\.\\C:\\\\\\\\a",
+      "want": "\\\\.\\C:\\a"
+    },
+    {
+      "value": "\\\\a\\b\\..\\c",
+      "want": "\\\\a\\b\\c"
+    },
+    {
+      "value": "\\\\a\\b",
+      "want": "\\\\a\\b"
+    },
+    {
+      "value": ".\\c:",
+      "want": ".\\c:"
+    },
+    {
+      "value": ".\\c:\\foo",
+      "want": ".\\c:\\foo"
+    },
+    {
+      "value": ".\\c:foo",
+      "want": ".\\c:foo"
+    },
+    {
+      "value": "\\\\?\\C:\\",
+      "want": "\\\\?\\C:\\"
+    },
+    {
+      "value": "\\\\?\\C:\\a",
+      "want": "\\\\?\\C:\\a"
+    },
+    {
+      "value": "a/../c:",
+      "want": ".\\c:"
+    },
+    {
+      "value": "a\\..\\c:",
+      "want": ".\\c:"
+    },
+    {
+      "value": "a/../c:/a",
+      "want": ".\\c:\\a"
+    },
+    {
+      "value": "a/../../c:",
+      "want": "..\\c:"
+    },
+    {
+      "value": "foo:bar",
+      "want": "foo:bar"
+    },
+    {
+      "value": "/a/../??/a",
+      "want": "\\.\\??\\a"
+    },
+    {
+      "value": "C:\\Users\\u\\.claude",
+      "want": "C:\\Users\\u\\.claude"
+    },
+    {
+      "value": "C:\\Users\\u\\.claude\\",
+      "want": "C:\\Users\\u\\.claude"
+    },
+    {
+      "value": "C:\\Users\\u\\.claude\\projects",
+      "want": "C:\\Users\\u\\.claude\\projects"
+    },
+    {
+      "value": "C:\\Users\\u/.claude-work",
+      "want": "C:\\Users\\u\\.claude-work"
+    },
+    {
+      "value": "C:/Users/u/.claude",
+      "want": "C:\\Users\\u\\.claude"
+    },
+    {
+      "value": "C:\\Users\\u\\AppData\\Roaming\\..\\Local",
+      "want": "C:\\Users\\u\\AppData\\Local"
+    },
+    {
+      "value": "\\\\?\\C:\\Users\\u\\.claude\\settings.json",
+      "want": "\\\\?\\C:\\Users\\u\\.claude\\settings.json"
+    },
+    {
+      "value": "\\\\nas\\home\\u\\.claude",
+      "want": "\\\\nas\\home\\u\\.claude"
+    },
+    {
+      "value": "~",
+      "want": "~"
+    },
+    {
+      "value": "~/Projects",
+      "want": "~\\Projects"
+    },
+    {
+      "value": "C:\\Users\\ü\\Projekte\\..\\.claude",
+      "want": "C:\\Users\\ü\\.claude"
+    }
+  ],
+  "dir": [
+    {
+      "value": "",
+      "want": "."
+    },
+    {
+      "value": ".",
+      "want": "."
+    },
+    {
+      "value": "/.",
+      "want": "\\"
+    },
+    {
+      "value": "/",
+      "want": "\\"
+    },
+    {
+      "value": "/foo",
+      "want": "\\"
+    },
+    {
+      "value": "x/",
+      "want": "x"
+    },
+    {
+      "value": "abc",
+      "want": "."
+    },
+    {
+      "value": "abc/def",
+      "want": "abc"
+    },
+    {
+      "value": "a/b/.x",
+      "want": "a\\b"
+    },
+    {
+      "value": "a/b/c.",
+      "want": "a\\b"
+    },
+    {
+      "value": "a/b/c.x",
+      "want": "a\\b"
+    },
+    {
+      "value": "////",
+      "want": "\\\\\\\\"
+    },
+    {
+      "value": "c:\\",
+      "want": "c:\\"
+    },
+    {
+      "value": "c:.",
+      "want": "c:."
+    },
+    {
+      "value": "c:\\a\\b",
+      "want": "c:\\a"
+    },
+    {
+      "value": "c:a\\b",
+      "want": "c:a"
+    },
+    {
+      "value": "c:a\\b\\c",
+      "want": "c:a\\b"
+    },
+    {
+      "value": "\\\\host\\share",
+      "want": "\\\\host\\share"
+    },
+    {
+      "value": "\\\\host\\share\\",
+      "want": "\\\\host\\share\\"
+    },
+    {
+      "value": "\\\\host\\share\\a",
+      "want": "\\\\host\\share\\"
+    },
+    {
+      "value": "\\\\host\\share\\a\\b",
+      "want": "\\\\host\\share\\a"
+    },
+    {
+      "value": "\\\\\\\\",
+      "want": "\\\\\\\\"
+    },
+    {
+      "value": "C:\\Users\\u\\.claude",
+      "want": "C:\\Users\\u"
+    },
+    {
+      "value": "C:\\Users\\u\\.claude\\projects\\-C--Users-u-proj\\s.jsonl",
+      "want": "C:\\Users\\u\\.claude\\projects\\-C--Users-u-proj"
+    },
+    {
+      "value": "C:/Users/u/.claude",
+      "want": "C:\\Users\\u"
+    },
+    {
+      "value": "\\\\?\\C:\\Users\\u\\.claude",
+      "want": "\\\\?\\C:\\Users\\u"
+    }
+  ],
+  "join": [
+    {
+      "elems": [],
+      "want": ""
+    },
+    {
+      "elems": [
+        ""
+      ],
+      "want": ""
+    },
+    {
+      "elems": [
+        "/"
+      ],
+      "want": "\\"
+    },
+    {
+      "elems": [
+        "a"
+      ],
+      "want": "a"
+    },
+    {
+      "elems": [
+        "a",
+        "b"
+      ],
+      "want": "a\\b"
+    },
+    {
+      "elems": [
+        "a",
+        ""
+      ],
+      "want": "a"
+    },
+    {
+      "elems": [
+        "",
+        "b"
+      ],
+      "want": "b"
+    },
+    {
+      "elems": [
+        "/",
+        "a"
+      ],
+      "want": "\\a"
+    },
+    {
+      "elems": [
+        "/",
+        "a/b"
+      ],
+      "want": "\\a\\b"
+    },
+    {
+      "elems": [
+        "/",
+        ""
+      ],
+      "want": "\\"
+    },
+    {
+      "elems": [
+        "/a",
+        "b"
+      ],
+      "want": "\\a\\b"
+    },
+    {
+      "elems": [
+        "a",
+        "/b"
+      ],
+      "want": "a\\b"
+    },
+    {
+      "elems": [
+        "/a",
+        "/b"
+      ],
+      "want": "\\a\\b"
+    },
+    {
+      "elems": [
+        "a/",
+        "b"
+      ],
+      "want": "a\\b"
+    },
+    {
+      "elems": [
+        "a/",
+        ""
+      ],
+      "want": "a"
+    },
+    {
+      "elems": [
+        "",
+        ""
+      ],
+      "want": ""
+    },
+    {
+      "elems": [
+        "/",
+        "a",
+        "b"
+      ],
+      "want": "\\a\\b"
+    },
+    {
+      "elems": [
+        "//",
+        "a"
+      ],
+      "want": "\\\\a"
+    },
+    {
+      "elems": [
+        "directory",
+        "file"
+      ],
+      "want": "directory\\file"
+    },
+    {
+      "elems": [
+        "C:\\Windows\\",
+        "System32"
+      ],
+      "want": "C:\\Windows\\System32"
+    },
+    {
+      "elems": [
+        "C:\\Windows\\",
+        ""
+      ],
+      "want": "C:\\Windows"
+    },
+    {
+      "elems": [
+        "C:\\",
+        "Windows"
+      ],
+      "want": "C:\\Windows"
+    },
+    {
+      "elems": [
+        "C:",
+        "a"
+      ],
+      "want": "C:a"
+    },
+    {
+      "elems": [
+        "C:",
+        "a\\b"
+      ],
+      "want": "C:a\\b"
+    },
+    {
+      "elems": [
+        "C:",
+        "a",
+        "b"
+      ],
+      "want": "C:a\\b"
+    },
+    {
+      "elems": [
+        "C:",
+        "",
+        "b"
+      ],
+      "want": "C:b"
+    },
+    {
+      "elems": [
+        "C:",
+        "",
+        "",
+        "b"
+      ],
+      "want": "C:b"
+    },
+    {
+      "elems": [
+        "C:",
+        ""
+      ],
+      "want": "C:."
+    },
+    {
+      "elems": [
+        "C:",
+        "",
+        ""
+      ],
+      "want": "C:."
+    },
+    {
+      "elems": [
+        "C:",
+        "\\a"
+      ],
+      "want": "C:\\a"
+    },
+    {
+      "elems": [
+        "C:",
+        "",
+        "\\a"
+      ],
+      "want": "C:\\a"
+    },
+    {
+      "elems": [
+        "C:.",
+        "a"
+      ],
+      "want": "C:a"
+    },
+    {
+      "elems": [
+        "C:a",
+        "b"
+      ],
+      "want": "C:a\\b"
+    },
+    {
+      "elems": [
+        "C:a",
+        "b",
+        "d"
+      ],
+      "want": "C:a\\b\\d"
+    },
+    {
+      "elems": [
+        "\\\\host\\share",
+        "foo"
+      ],
+      "want": "\\\\host\\share\\foo"
+    },
+    {
+      "elems": [
+        "\\\\host\\share\\foo"
+      ],
+      "want": "\\\\host\\share\\foo"
+    },
+    {
+      "elems": [
+        "//host/share",
+        "foo/bar"
+      ],
+      "want": "\\\\host\\share\\foo\\bar"
+    },
+    {
+      "elems": [
+        "\\"
+      ],
+      "want": "\\"
+    },
+    {
+      "elems": [
+        "\\",
+        ""
+      ],
+      "want": "\\"
+    },
+    {
+      "elems": [
+        "\\",
+        "a"
+      ],
+      "want": "\\a"
+    },
+    {
+      "elems": [
+        "\\\\",
+        "a"
+      ],
+      "want": "\\\\a"
+    },
+    {
+      "elems": [
+        "\\",
+        "a",
+        "b"
+      ],
+      "want": "\\a\\b"
+    },
+    {
+      "elems": [
+        "\\\\",
+        "a",
+        "b"
+      ],
+      "want": "\\\\a\\b"
+    },
+    {
+      "elems": [
+        "\\",
+        "\\\\a\\b",
+        "c"
+      ],
+      "want": "\\a\\b\\c"
+    },
+    {
+      "elems": [
+        "\\\\a",
+        "b",
+        "c"
+      ],
+      "want": "\\\\a\\b\\c"
+    },
+    {
+      "elems": [
+        "\\\\a\\",
+        "b",
+        "c"
+      ],
+      "want": "\\\\a\\b\\c"
+    },
+    {
+      "elems": [
+        "//",
+        "a"
+      ],
+      "want": "\\\\a"
+    },
+    {
+      "elems": [
+        "a:\\b\\c",
+        "x\\..\\y:\\..\\..\\z"
+      ],
+      "want": "a:\\b\\z"
+    },
+    {
+      "elems": [
+        "\\",
+        "??\\a"
+      ],
+      "want": "\\.\\??\\a"
+    },
+    {
+      "elems": [
+        "C:\\Users\\u",
+        ".claude"
+      ],
+      "want": "C:\\Users\\u\\.claude"
+    },
+    {
+      "elems": [
+        "C:\\Users\\u\\.claude",
+        "settings.json"
+      ],
+      "want": "C:\\Users\\u\\.claude\\settings.json"
+    },
+    {
+      "elems": [
+        "C:\\Users\\u\\.claude",
+        "settings_profiles.json"
+      ],
+      "want": "C:\\Users\\u\\.claude\\settings_profiles.json"
+    },
+    {
+      "elems": [
+        "C:\\Users\\u\\.claude",
+        "todos",
+        "abc-agent-abc.json"
+      ],
+      "want": "C:\\Users\\u\\.claude\\todos\\abc-agent-abc.json"
+    },
+    {
+      "elems": [
+        "C:\\Users\\u",
+        ".claude-work"
+      ],
+      "want": "C:\\Users\\u\\.claude-work"
+    },
+    {
+      "elems": [
+        "C:\\Users\\u\\.claude",
+        "projects"
+      ],
+      "want": "C:\\Users\\u\\.claude\\projects"
+    },
+    {
+      "elems": [
+        "C:\\Users\\u\\AppData\\Local\\agento\\uploads",
+        "1-uuid.png"
+      ],
+      "want": "C:\\Users\\u\\AppData\\Local\\agento\\uploads\\1-uuid.png"
+    },
+    {
+      "elems": [
+        "C:\\Users\\ü",
+        "文档"
+      ],
+      "want": "C:\\Users\\ü\\文档"
+    },
+    {
+      "elems": [
+        "\\\\nas\\home\\u",
+        ".claude"
+      ],
+      "want": "\\\\nas\\home\\u\\.claude"
+    },
+    {
+      "elems": [
+        "C:\\Users\\u",
+        "/Projects"
+      ],
+      "want": "C:\\Users\\u\\Projects"
+    }
+  ],
+  "base": [
+    {
+      "value": "",
+      "want": "."
+    },
+    {
+      "value": ".",
+      "want": "."
+    },
+    {
+      "value": "/.",
+      "want": "."
+    },
+    {
+      "value": "/",
+      "want": "\\"
+    },
+    {
+      "value": "////",
+      "want": "\\"
+    },
+    {
+      "value": "x/",
+      "want": "x"
+    },
+    {
+      "value": "abc",
+      "want": "abc"
+    },
+    {
+      "value": "abc/def",
+      "want": "def"
+    },
+    {
+      "value": "a/b/.x",
+      "want": ".x"
+    },
+    {
+      "value": "a/b/c.",
+      "want": "c."
+    },
+    {
+      "value": "a/b/c.x",
+      "want": "c.x"
+    },
+    {
+      "value": "c:\\",
+      "want": "\\"
+    },
+    {
+      "value": "c:.",
+      "want": "."
+    },
+    {
+      "value": "c:\\a\\b",
+      "want": "b"
+    },
+    {
+      "value": "c:a\\b",
+      "want": "b"
+    },
+    {
+      "value": "c:a\\b\\c",
+      "want": "c"
+    },
+    {
+      "value": "\\\\host\\share\\",
+      "want": "\\"
+    },
+    {
+      "value": "\\\\host\\share\\a",
+      "want": "a"
+    },
+    {
+      "value": "\\\\host\\share\\a\\b",
+      "want": "b"
+    },
+    {
+      "value": "C:\\Users\\u\\.claude\\projects\\-C--Users-u-proj",
+      "want": "-C--Users-u-proj"
+    },
+    {
+      "value": "C:\\Users\\u\\.claude\\projects\\-C--Users-u-proj\\",
+      "want": "-C--Users-u-proj"
+    }
+  ],
+  "volume_name": [
+    {
+      "value": "",
+      "want": ""
+    },
+    {
+      "value": "c:",
+      "want": "c:"
+    },
+    {
+      "value": "c:\\",
+      "want": "c:"
+    },
+    {
+      "value": "c:\\a",
+      "want": "c:"
+    },
+    {
+      "value": "C:/a",
+      "want": "C:"
+    },
+    {
+      "value": "\\",
+      "want": ""
+    },
+    {
+      "value": "/",
+      "want": ""
+    },
+    {
+      "value": "\\\\",
+      "want": "\\\\"
+    },
+    {
+      "value": "\\\\host",
+      "want": "\\\\host"
+    },
+    {
+      "value": "\\\\host\\share",
+      "want": "\\\\host\\share"
+    },
+    {
+      "value": "\\\\host\\share\\a",
+      "want": "\\\\host\\share"
+    },
+    {
+      "value": "//host/share/a",
+      "want": "\\\\host\\share"
+    },
+    {
+      "value": "\\\\.\\C:\\a",
+      "want": "\\\\.\\C:"
+    },
+    {
+      "value": "\\\\?\\C:\\a",
+      "want": "\\\\?\\C:"
+    },
+    {
+      "value": "\\??\\C:\\a",
+      "want": "\\??\\C:"
+    },
+    {
+      "value": "\\\\.\\UNC\\host\\share\\a",
+      "want": "\\\\.\\UNC\\host\\share"
+    },
+    {
+      "value": "\\\\.",
+      "want": "\\\\."
+    },
+    {
+      "value": "\\\\.\\",
+      "want": "\\\\.\\"
+    },
+    {
+      "value": "\\\\?\\",
+      "want": "\\\\?\\"
+    },
+    {
+      "value": "foo:bar",
+      "want": ""
+    },
+    {
+      "value": "a/b",
+      "want": ""
+    },
+    {
+      "value": "C:\\Users\\u\\.claude",
+      "want": "C:"
+    }
+  ],
+  "unix_base": [
+    {
+      "value": "",
+      "want": "."
+    },
+    {
+      "value": ".",
+      "want": "."
+    },
+    {
+      "value": "/.",
+      "want": "."
+    },
+    {
+      "value": "/",
+      "want": "/"
+    },
+    {
+      "value": "////",
+      "want": "/"
+    },
+    {
+      "value": "x/",
+      "want": "x"
+    },
+    {
+      "value": "abc",
+      "want": "abc"
+    },
+    {
+      "value": "abc/def",
+      "want": "def"
+    },
+    {
+      "value": "a/b/.x",
+      "want": ".x"
+    },
+    {
+      "value": "a/b/c.",
+      "want": "c."
+    },
+    {
+      "value": "a/b/c.x",
+      "want": "c.x"
+    },
+    {
+      "value": "/home/u/.claude/projects/-home-u-proj",
+      "want": "-home-u-proj"
+    },
+    {
+      "value": "/home/u/.claude/projects/-home-u-proj/",
+      "want": "-home-u-proj"
+    },
+    {
+      "value": "/home/ü/文档",
+      "want": "文档"
+    }
+  ],
+  "is_abs": [
+    {
+      "value": "",
+      "want": false
+    },
+    {
+      "value": "/",
+      "want": false
+    },
+    {
+      "value": "/usr/bin/gcc",
+      "want": false
+    },
+    {
+      "value": "..",
+      "want": false
+    },
+    {
+      "value": "/a/../bb",
+      "want": false
+    },
+    {
+      "value": ".",
+      "want": false
+    },
+    {
+      "value": "./",
+      "want": false
+    },
+    {
+      "value": "lala",
+      "want": false
+    },
+    {
+      "value": "C:\\",
+      "want": true
+    },
+    {
+      "value": "c\\",
+      "want": false
+    },
+    {
+      "value": "c::",
+      "want": false
+    },
+    {
+      "value": "c:",
+      "want": false
+    },
+    {
+      "value": "/",
+      "want": false
+    },
+    {
+      "value": "\\",
+      "want": false
+    },
+    {
+      "value": "\\Windows",
+      "want": false
+    },
+    {
+      "value": "c:a\\b",
+      "want": false
+    },
+    {
+      "value": "c:\\a\\b",
+      "want": true
+    },
+    {
+      "value": "c:/a/b",
+      "want": true
+    },
+    {
+      "value": "\\\\host\\share",
+      "want": true
+    },
+    {
+      "value": "\\\\host\\share\\",
+      "want": true
+    },
+    {
+      "value": "\\\\host\\share\\foo",
+      "want": true
+    },
+    {
+      "value": "//host/share/foo/bar",
+      "want": true
+    },
+    {
+      "value": "\\\\?\\a\\b\\c",
+      "want": true
+    },
+    {
+      "value": "\\??\\a\\b\\c",
+      "want": true
+    },
+    {
+      "value": "C:\\Users\\u\\Projects",
+      "want": true
+    },
+    {
+      "value": "C:\\Users\\u\\..\\evil",
+      "want": true
+    }
+  ]
+}

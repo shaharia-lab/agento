@@ -112,6 +112,13 @@ fn upload(content_type: &str, body: &[u8], upload_dir: &Path) -> Result<super::A
     // Go's traversal guard. It cannot fire on a generated name, and it is
     // reproduced rather than reasoned away: it is the check that would catch a
     // later change to how the name is built.
+    //
+    // **An OS path** (#374): `upload_dir` is a real directory under the data
+    // dir, so `clean`/`join` are the target's rules and `MAIN_SEPARATOR` is the
+    // separator they emit. The two agree by construction on both platforms —
+    // which they did *not* before, when `clean` was Unix-only and would have
+    // produced `C:\…\uploads/name` against a `\` prefix, failing every upload
+    // on Windows with `invalid filename`.
     let prefix = format!(
         "{}{}",
         super::gopath::clean(&upload_dir.to_string_lossy()),
@@ -183,6 +190,16 @@ fn unix_millis() -> i64 {
 /// the caller's filename reaches the filesystem through this function and
 /// nothing else — a `..`, a separator, a second dot or a NUL all yield `""`
 /// rather than being cleaned, because the rule is an allowlist.
+///
+/// **Deliberately Unix-only, on both platforms** (#374). `go_base`/`go_ext`
+/// below treat only `/` as a separator, where a Windows build of the original
+/// would also split on `\`. That is left alone because the *answer* cannot
+/// differ: the allowlist runs over whatever the scan produced, and every string
+/// on which the two rules disagree contains a `\`, which the allowlist rejects
+/// — so both spellings yield `""`. Making it dispatch would widen a security
+/// boundary for no observable gain. The `filepath` this reaches is a caller's
+/// **filename**, not a path on this machine, which is the distinction the four
+/// audited `gopath::` call sites turn on.
 fn sanitize_extension(filename: &str) -> String {
     let ext = go_ext(&go_base(filename));
     // `cleaned` is the extension without its dot, and an **empty** one passes:

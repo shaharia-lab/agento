@@ -954,12 +954,11 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
 /// removed it — one commit, one owner, no window in which two processes
 /// disagree about the row.
 ///
-/// `/api/settings/claude-config-dirs` is claimed on **every** platform but
-/// answered only on Unix: the probe is `filepath` arithmetic and
-/// `native/gopath.rs` implements the Unix rules, so on Windows [`serve`]
-/// answers 501 — the same decision `native/fs.rs` makes. Windows x86_64 is a
-/// shipped target (`.github/workflows/desktop-release.yml`) while desktop CI is
-/// ubuntu-only, so nothing else would catch it.
+/// `/api/settings/claude-config-dirs` is claimed and answered on **every**
+/// platform. It answered a 501 on Windows until #374, because the probe is
+/// `filepath` arithmetic and `native/gopath.rs` carried only the Unix rules;
+/// it now carries both, selected by target and pinned on every host by
+/// `parity/gopath_windows_vectors.json`.
 fn claims(method: &Method, path: &str) -> bool {
     match path {
         "/api/settings" => method == Method::GET || method == Method::PUT,
@@ -970,22 +969,13 @@ fn claims(method: &Method, path: &str) -> bool {
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     // The config-dir probe is `filepath` arithmetic on the real filesystem, and
-    // this port implements the **Unix** `filepath` (see `native/gopath.rs`,
-    // whose vectors are Unix-shaped). On Windows `gopath::dir` finds no `/` in
-    // `C:\Users\u\.claude` and answers `"."`, so the probe would list the
-    // process working directory instead of `$HOME`, and `gopath::join` would
-    // build `C:\Users\u/.claude-work`, which no `configured` entry can match —
-    // silently empty suggestions at best, an outright wrong list at worst.
-    // A 501 naming the gap is the honest answer since #278 removed the sidecar
-    // that used to take this — the same decision `native/fs.rs` makes.
-    // `GET /api/settings` is a plain row read and is deliberately still
-    // answered.
-    if !cfg!(unix) && req.path == "/api/settings/claude-config-dirs" {
-        return super::Answer::error(
-            axum::http::StatusCode::NOT_IMPLEMENTED,
-            "the Claude config-dir probe is not supported on Windows in this build",
-        );
-    }
+    // it answered a 501 on Windows until #374: this port carried only the Unix
+    // `filepath`, so `gopath::dir` found no `/` in `C:\Users\u\.claude` and
+    // answered `"."` — listing the process working directory instead of the
+    // home directory — while `gopath::join` built `C:\Users\u/.claude-work`,
+    // which no `configured` entry could ever match. Both are now the
+    // target's rules (`parity/gopath_windows_vectors.json` pins them), so the
+    // probe is answered everywhere and the gate is gone.
     if req.method == Method::PUT {
         return super::writes::finish(update(&ctx.db_path, req.body));
     }
@@ -1336,9 +1326,12 @@ mod tests {
     /// Both halves of the endpoint, against Go's own answers over a home
     /// directory built from the vectors.
     ///
-    /// `#[cfg(unix)]` for the same reason the vectors are Unix-shaped and
-    /// [`serve`] answers 501 on Windows: the layout needs a symlink, and the
-    /// rule is `filepath` arithmetic implemented for Unix only.
+    /// `#[cfg(unix)]` because the layout needs a **symlink**, which is one of
+    /// the four exclusions this pins (`os.ReadDir`'s `IsDir` does not follow
+    /// one) and which needs a privilege on Windows that a CI runner does not
+    /// have. The rule itself is no longer Unix-only — [`serve`] answers this
+    /// route everywhere since #374 — and the `filepath` arithmetic underneath
+    /// is pinned for both targets by `parity/gopath_windows_vectors.json`.
     #[test]
     #[cfg(unix)]
     fn the_candidate_probe_matches_gos_discovery_rule() {

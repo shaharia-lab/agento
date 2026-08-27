@@ -303,13 +303,20 @@ fn resolve_profile_file_path(dir: &str, id: &str) -> Result<String, WriteError> 
 /// a different process's and unknowable here. Every path this surface writes is
 /// absolute, so this only fires on a hand-edited index.
 fn validate_path_within_dir(path: &str, dir: &str) -> Result<(), WriteError> {
-    if !path.starts_with('/') {
+    // `filepath.IsAbs`, and on Windows that is a volume test rather than a
+    // leading separator — `\Users\u\settings_x.json` is rooted but names no
+    // drive, so it is relative for this purpose exactly as `settings_x.json`
+    // is. See [`super::super::gopath::is_abs`] (#374).
+    if !gopath::is_abs(path) {
         return Err(WriteError::Fallback(format!(
             "profile file path {path:?} is relative; only the Go server knows its working directory"
         )));
     }
     let abs = gopath::clean(path);
-    if !abs.starts_with(&format!("{dir}/")) {
+    // `dir + string(os.PathSeparator)`, so the prefix is `\` on Windows —
+    // where `gopath::clean` has just normalised every `/` away, and a `/`
+    // spelled here would match nothing.
+    if !abs.starts_with(&format!("{dir}{}", std::path::MAIN_SEPARATOR)) {
         return Err(WriteError::Fallback(format!(
             "path {abs:?} escapes settings directory"
         )));
@@ -763,6 +770,27 @@ mod tests {
             });
         }
         assert_eq!(deduplicate_id("work", &profiles), "work-3");
+    }
+
+    /// The Windows half of the same guard (#374). It runs only there, because
+    /// `validate_path_within_dir` uses the dispatching `gopath::is_abs`/`clean`
+    /// and `std::path::MAIN_SEPARATOR` — all three of which are the point.
+    /// A *rooted* path naming no drive is relative for this purpose, which is
+    /// the case a `starts_with('/')` check got backwards in both directions.
+    #[test]
+    #[cfg(windows)]
+    fn a_windows_path_outside_the_dir_is_refused() {
+        let dir = r"C:\Users\u\.claude";
+        assert!(validate_path_within_dir(r"C:\Users\u\.claude\settings_a.json", dir).is_ok());
+        assert!(validate_path_within_dir(dir, dir).is_err());
+        assert!(validate_path_within_dir(r"C:\Users\u\.claude-evil\x.json", dir).is_err());
+        assert!(validate_path_within_dir(r"C:\Users\u\.claude\..\x.json", dir).is_err());
+        // Rooted, but on no particular drive: only the Go server's process
+        // knows which, so it is refused exactly as a bare filename is.
+        assert!(matches!(
+            validate_path_within_dir(r"\Users\u\.claude\settings_a.json", dir).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
     }
 
     #[test]

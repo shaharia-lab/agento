@@ -475,6 +475,11 @@ fn derive_preview(messages: &[SessionMessage]) -> String {
 
 /// `loadTodos`: `<config dir>/todos/<id>-agent-<id>.json`, absent or malformed
 /// reading as none.
+///
+/// **An OS path** (#374): the result is handed straight to `std::fs::read`, so
+/// `gopath::join` has to be the target's rules. `is_valid_session_id` is what
+/// keeps the interpolated id out of the path arithmetic, and it is unchanged —
+/// it already refuses every separator on both platforms.
 fn load_todos(config_dir: &str, session_id: &str) -> Vec<SessionTodo> {
     if !is_valid_session_id(session_id) {
         return Vec::new();
