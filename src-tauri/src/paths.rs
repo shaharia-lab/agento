@@ -8,8 +8,19 @@
 
 use std::path::PathBuf;
 
-/// The user's home directory, by the same variables Go's `os.UserHomeDir`
-/// consults.
+/// The user's home directory.
+///
+/// **Not `os.UserHomeDir`, and the difference only shows on Windows** — this
+/// comment claimed it was until #374 un-gated the three surfaces that reach it.
+/// Go switches on `GOOS` and reads `$HOME` on Unix and `%USERPROFILE%` on
+/// Windows, *never both*; this is a fallback chain, so a Windows shell that
+/// exports `HOME` (MSYS2, Git Bash) wins over `USERPROFILE` and Agento then
+/// resolves a different home than the Claude Code CLI does.
+///
+/// Left as a chain deliberately rather than fixed here: [`data_dir`] is built
+/// on this, so switching the precedence relocates the database of any Windows
+/// install that has `HOME` set. That is a migration, not a path fix, and it is
+/// out of scope for #374.
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

@@ -307,8 +307,13 @@ fn clean(p: &str) -> String {
 /// Absolute paths only. A relative config dir means two different things at
 /// once — Agento resolves it against the server's working directory, Claude
 /// Code against the subprocess's — so Go drops it and so does this.
+///
+/// `gopath::is_abs` rather than `Path::is_absolute` (#374): Go's test is
+/// `filepath.IsAbs`, and on Windows the two disagree on a Root Local Device
+/// path — `\??\C:\x` is absolute to `volumeNameLen` and has no prefix Rust
+/// recognises. On Unix they are the same function.
 pub(crate) fn absolute_dir(p: &str) -> Option<String> {
-    if p.is_empty() || !Path::new(p).is_absolute() {
+    if p.is_empty() || !super::gopath::is_abs(p) {
         return None;
     }
     Some(p.to_string())
@@ -764,7 +769,9 @@ fn validate_claude_config_dir(raw: &str) -> Result<(), WriteError> {
     if normalized.is_empty() {
         return Ok(());
     }
-    if !Path::new(&normalized).is_absolute() {
+    // `filepath.IsAbs`, the same one [`absolute_dir`] uses — not
+    // `Path::is_absolute`, which disagrees on a Windows device path.
+    if !super::gopath::is_abs(&normalized) {
         return Err(WriteError::BadRequest(format!(
             "claude config dir must be an absolute path, got {normalized:?}"
         )));

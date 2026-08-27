@@ -125,11 +125,15 @@ pub fn profiles_path(dir: &str) -> String {
 /// hole** (#374). `syscall.Open` on Windows maps `perm` onto exactly one bit —
 /// the read-only attribute, set when no write bit is present — and `0600` has
 /// one, so Go's own `os.WriteFile(path, data, 0600)` there creates a file with
-/// the parent directory's inherited ACL and nothing else. A file inside
-/// `%USERPROFILE%` inherits that profile's ACL, which grants the user, SYSTEM
-/// and the local Administrators group; the practical difference from `0600` is
-/// that an administrator can read it without taking ownership first, which on
-/// Windows they can do anyway.
+/// the parent directory's inherited ACL and nothing else.
+///
+/// **The file is therefore only as tight as wherever the config dir points**,
+/// and that is a user-supplied location: under the default
+/// `%USERPROFILE%\.claude` it inherits the profile's ACL (the user, SYSTEM and
+/// the local Administrators group), but `CLAUDE_CONFIG_DIR=C:\ProgramData\claude`
+/// inherits a world-readable one. `0600` would have bounded that and this does
+/// not — which is the honest statement of the trade, and it is on the
+/// known-gaps list in `CLAUDE.md`.
 ///
 /// The alternative — building an explicit DACL through `SetSecurityInfo` — was
 /// considered and declined: it needs a new `windows-sys` surface that this

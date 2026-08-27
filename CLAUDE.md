@@ -4044,10 +4044,21 @@ because each one cost real time to find:
   `claude_settings::write_file` reproduces it rather than building a DACL, and
   says so at its site. A file under `%USERPROFILE%` is readable by local
   administrators where `0600` would not be.
-- **`src-tauri/tests/` does not run on Windows.** `chat_turn.rs`,
+- **The Windows CI job type-checks everything and *tests* three modules.**
+  `ci.yml`'s `windows_rules` runs `cargo clippy --lib -- -D warnings`, which
+  covers every line of the library for that target — the thing a Linux run
+  cannot do. Its test step is filtered to `native::gopath`,
+  `native::sessions::projects` and one profiles guard, because a full
+  `cargo test --lib` there is red at **1388/1422** and every one of the 34 is a
+  **Unix-shaped fixture** rather than a defect: `absolute_dir("/var/lib/claude")`
+  is correctly `None` on Windows, `validate_path_within_dir("/h/.claude/x",
+  "/h/.claude")` is correctly refused, `HOME=/home//u` cleans to `\home\u`.
+  Porting those fixtures is general Windows support and is the work that has to
+  land before the filter can be widened.
+- **`src-tauri/tests/` does not run on Windows at all.** `chat_turn.rs`,
   `claude_sdk.rs` and `scheduled_run.rs` make their fake Claude CLI executable
-  through `std::os::unix::fs::PermissionsExt`, so they do not compile there;
-  `ci.yml`'s `windows_rules` job runs `cargo test --lib` only.
+  through `std::os::unix::fs::PermissionsExt`, so they do not compile there —
+  which is what `--lib` excludes.
 - **`GET /api/fs` answers 500 where it should answer 404 or 400.** The
   directory picker reports "internal server error" for a path the user simply
   mistyped. The three typed bodies (404 missing, 400 unreadable, 500 no home)

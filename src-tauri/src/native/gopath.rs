@@ -781,14 +781,18 @@ mod tests {
 
     #[test]
     fn dir_matches_the_go_vectors() {
-        for case in vectors().dir {
+        let v = vectors().dir;
+        assert!(v.len() >= 20, "vectors look truncated");
+        for case in v {
             assert_eq!(dir_unix(&case.value), case.want, "Dir({:?})", case.value);
         }
     }
 
     #[test]
     fn join_matches_the_go_vectors() {
-        for case in vectors().join {
+        let v = vectors().join;
+        assert!(v.len() >= 12, "vectors look truncated");
+        for case in v {
             let elems: Vec<&str> = case.elems.iter().map(String::as_str).collect();
             assert_eq!(join_unix(&elems), case.want, "Join({:?})", case.elems);
         }
@@ -835,14 +839,18 @@ mod tests {
 
     #[test]
     fn windows_dir_matches_the_go_vectors() {
-        for case in windows_vectors().dir {
+        let v = windows_vectors().dir;
+        assert!(v.len() >= 20, "windows vectors look truncated");
+        for case in v {
             assert_eq!(dir_windows(&case.value), case.want, "Dir({:?})", case.value);
         }
     }
 
     #[test]
     fn windows_join_matches_the_go_vectors() {
-        for case in windows_vectors().join {
+        let v = windows_vectors().join;
+        assert!(v.len() >= 45, "windows vectors look truncated");
+        for case in v {
             let elems: Vec<&str> = case.elems.iter().map(String::as_str).collect();
             assert_eq!(join_windows(&elems), case.want, "Join({:?})", case.elems);
         }
@@ -850,7 +858,9 @@ mod tests {
 
     #[test]
     fn windows_base_matches_the_go_vectors() {
-        for case in windows_vectors().base {
+        let v = windows_vectors().base;
+        assert!(v.len() >= 15, "windows vectors look truncated");
+        for case in v {
             assert_eq!(
                 base_windows(&case.value),
                 case.want,
@@ -862,7 +872,9 @@ mod tests {
 
     #[test]
     fn windows_volume_name_matches_the_go_vectors() {
-        for case in windows_vectors().volume_name {
+        let v = windows_vectors().volume_name;
+        assert!(v.len() >= 15, "windows vectors look truncated");
+        for case in v {
             assert_eq!(
                 volume_name_windows(&case.value),
                 case.want,
@@ -878,14 +890,18 @@ mod tests {
     /// which is the Unix build.
     #[test]
     fn unix_base_matches_the_go_vectors() {
-        for case in windows_vectors().unix_base {
+        let v = windows_vectors().unix_base;
+        assert!(v.len() >= 10, "vectors look truncated");
+        for case in v {
             assert_eq!(base_unix(&case.value), case.want, "Base({:?})", case.value);
         }
     }
 
     #[test]
     fn windows_is_abs_matches_the_go_vectors() {
-        for case in windows_vectors().is_abs {
+        let v = windows_vectors().is_abs;
+        assert!(v.len() >= 20, "windows vectors look truncated");
+        for case in v {
             assert_eq!(
                 is_abs_windows(&case.value),
                 case.want,
