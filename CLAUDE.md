@@ -309,8 +309,8 @@ src-tauri/src/
       body.rs    json.Marshal over a Go map, and encoding/json's unmarshal errors
       repos.rs / issues.rs / pulls.rs / actions.rs / releases.rs  one per service
     settings.rs  GET+PUT /api/settings and /settings/claude-config-dirs (a
-                 filesystem probe; Unix, 501 on Windows); the preferences +
-                 config dirs a read is scoped to
+                 filesystem probe; answered on both platforms since #374); the
+                 preferences + config dirs a read is scoped to
     claude_settings/ Claude Code's own settings.json and the profiles beside it (#304) —
       mod.rs     the run config dir, Go's `any`/`MarshalIndent`/`Indent`, GET+PUT
                  /api/claude-settings, and the request decoder that is NOT writes::decode_body
@@ -333,10 +333,13 @@ src-tauri/src/
     scan.rs      GET /api/claude-sessions/status, POST /refresh — and the scan
                  itself: the shell owns it (#289)
     fs.rs        GET /api/fs and POST /api/fs/mkdir — the working-dir picker's
-                 listing and its one create (Unix; forwards on Windows)
+                 listing and its one create (both platforms since #374; note
+                 mkdir's guard is filepath.IsAbs, where rooted != absolute)
     uploads.rs   POST /api/uploads — the one multipart body, and the extension
                  allowlist that is the route's whole security boundary
-    gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
+    gopath.rs    Go's filepath.Clean/Dir/Join/Base/IsAbs — BOTH rule sets, Unix
+                 and Windows (#374), selected by cfg(windows) and both compiled
+                 and vector-tested on every host
     gourl.rs     the path chi routes on — Go decodes only canonical escaping
     query.rs     one query parameter, read the way r.URL.Query().Get reads it
     pricing.rs   GET /api/pricing/catalog, plus the rate Resolver — and the
@@ -642,9 +645,14 @@ something that still runs.
   monitoring writes (#309), never a version-mismatch-shaped 404.
 - **`GET /api/version/update-check` short-circuits for every build** — offering
   an update there would duplicate the Tauri updater.
-- **On Windows, the three `filepath` surfaces answer 501** (`fs.rs`,
-  `claude_settings/`, the config-dir probe). Implementing Windows path
-  semantics is outstanding work.
+- **The three `filepath` surfaces are answered on Windows too** since #374
+  (`fs.rs`, `claude_settings/`, the config-dir probe). They answered 501 while
+  `native/gopath.rs` carried only the Unix rules; it now carries both, selected
+  by `cfg(windows)`, with **both compiled and both vector-tested on every
+  host** — which is what lets a Linux CI run catch a Windows regression. The
+  `windows_rules` job in `ci.yml` type-checks the `cfg(windows)` arms with an
+  unfiltered `cargo clippy --lib` and *runs* three modules of them; see *Known
+  gaps* for why its test step is filtered and what has to land to widen it.
 
 ### The endpoint registry
 
@@ -4030,8 +4038,39 @@ because each one cost real time to find:
   thing to invalidate correctly, and nothing about the response depends on one.
 
 **Known gaps**
-- **Windows `filepath` semantics are unimplemented.** `fs.rs`,
-  `claude_settings/` and the config-dir probe answer 501 there.
+- **Windows file modes are the parent directory's ACL, not `0600`/`0700`.**
+  That is Go's own behaviour — `syscall.Open` there maps `perm` onto the
+  read-only attribute alone and `syscall.Mkdir` ignores it outright — so
+  `claude_settings::write_file` reproduces it rather than building a DACL, and
+  says so at its site. A file under `%USERPROFILE%` is readable by local
+  administrators where `0600` would not be.
+- **The Windows CI job type-checks everything and *tests* three modules.**
+  `ci.yml`'s `windows_rules` runs `cargo clippy --lib -- -D warnings`, which
+  covers every line of the library for that target — the thing a Linux run
+  cannot do. Its test step is filtered to `native::gopath`,
+  `native::sessions::projects` and one profiles guard, and **floored at 25
+  tests**, because `cargo test` treats "the filter matched nothing" as success
+  and an allowlist with no floor is a job that goes silently vacuous on a
+  rename.
+
+  The filter is measured, not assumed. An unfiltered `cargo test --lib` there is
+  red at **1394/1422** (it was 1388 before `core.autocrlf=false` was set on the
+  checkout; those six were pure CRLF against the byte-exact goldens). **27 of
+  the 28 are Unix-shaped fixtures** rather than defects — `settings::tests` 10,
+  `claude_settings` 9, `fs::tests` 5, `scanner::walk` 2, `uploads::tests` 1:
+  `absolute_dir("/var/lib/claude")` is correctly `None` on Windows,
+  `validate_path_within_dir("/h/.claude/x", "/h/.claude")` is correctly refused,
+  `HOME=/home//u` correctly cleans to `\home\u`. Porting them is general
+  Windows support and is the work that has to land before the filter widens.
+- **The 28th Windows failure is not a path fixture.**
+  `integrations::telegram::client::tests::a_body_that_dies_mid_stream_still_names_nothing_secret`
+  fails there with *"must fail in the body stream, not the send"* — a
+  stream-timing difference, pre-existing and newly visible. Nothing to do with
+  #374; it needs its own look.
+- **`src-tauri/tests/` does not run on Windows at all.** `chat_turn.rs`,
+  `claude_sdk.rs` and `scheduled_run.rs` make their fake Claude CLI executable
+  through `std::os::unix::fs::PermissionsExt`, so they do not compile there —
+  which is what `--lib` excludes.
 - **`GET /api/fs` answers 500 where it should answer 404 or 400.** The
   directory picker reports "internal server error" for a path the user simply
   mistyped. The three typed bodies (404 missing, 400 unreadable, 500 no home)

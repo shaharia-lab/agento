@@ -27,14 +27,20 @@
 //! path, and reproducing Go's policy would mean hand-rolling the conversion for
 //! a case the picker cannot act on, so this is documented rather than fixed.
 //!
-//! **Answered on Unix only.** The endpoint is `filepath.Clean`/`Dir`/`Join`
-//! wrapped in a response, and Windows `filepath` strips a volume name before
-//! cleaning and accepts both separators — a different algorithm, with no Windows
-//! machine in this loop to verify an implementation of it against. The route is
-//! still *claimed* there and [`serve`] answers a 501 naming the gap: gating
-//! `claims` instead would leave a registry entry that claims nothing, and the
-//! two registry tests exist precisely to catch that shape. See
-//! [`super::gopath`].
+//! **Answered on Windows too, since #374.** The endpoint is
+//! `filepath.Clean`/`Dir`/`Join` wrapped in a response, and Windows `filepath`
+//! is a different algorithm — a volume name is split off before cleaning and
+//! both separators are accepted — so this used to answer a 501 naming the gap.
+//! [`super::gopath`] now carries both rule sets, pinned by
+//! `parity/gopath_windows_vectors.json`, and every path here goes through the
+//! dispatching `gopath::clean`/`dir`/`join`/`is_abs`, so the listing is
+//! platform-correct by construction rather than by a gate.
+//!
+//! One thing to keep in mind when reading `mkdir`: **its guard is
+//! `filepath.IsAbs`, not `starts_with('/')`**, and on Windows *rooted is not
+//! absolute*. `\Users\u` names no drive, so `MkdirAll` would resolve it against
+//! whichever drive the process happens to be on — which is why the check moved
+//! into `gopath` rather than staying inline.
 //!
 //! `POST /api/fs/mkdir` is here too (#296). It was deferred by #293 as one of
 //! the two routes that escaped every category — ~20 lines, no database, no
@@ -188,8 +194,10 @@ pub fn mkdir(body: &[u8]) -> Result<super::Answer, WriteError> {
     }
 
     let clean = gopath::clean(&req.path);
-    // `filepath.IsAbs` is `strings.HasPrefix(path, "/")` on Unix.
-    if !clean.starts_with('/') || clean.contains("..") {
+    // `filepath.IsAbs`, which is `strings.HasPrefix(path, "/")` on Unix and a
+    // volume-name test on Windows — where a *rooted* path like `\Users\u` names
+    // no drive and is therefore not absolute. See [`super::gopath::is_abs`].
+    if !gopath::is_abs(&clean) || clean.contains("..") {
         return Err(WriteError::BadRequest("invalid path".to_string()));
     }
 
@@ -215,10 +223,20 @@ fn create_dir_all_0750(path: &str) -> std::io::Result<()> {
         .create(path)
 }
 
+/// `os.MkdirAll(path, 0750)` — with the mode dropped, which is what Go itself
+/// does here.
+///
+/// `syscall.Mkdir` on Windows ignores its `perm` argument entirely, so Go's own
+/// `MkdirAll(path, 0750)` creates a directory inheriting the parent's ACL. This
+/// reproduces that rather than reaching for `SetSecurityInfo`: a working
+/// directory the user picked is not a secret, it is created inside a tree the
+/// user already chose, and diverging from Go here would be a Windows-only
+/// permission model with nothing pinning it. The credential-bearing files are
+/// [`super::claude_settings`]'s, and that module states the same decision at
+/// more length.
 #[cfg(not(unix))]
-fn create_dir_all_0750(_path: &str) -> std::io::Result<()> {
-    // Unreachable: `serve` refuses this route off Unix before it is called.
-    Err(std::io::Error::other("not ported for Windows"))
+fn create_dir_all_0750(path: &str) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().recursive(true).create(path)
 }
 
 /// The `path` query parameter. No rule of its own on top of the decoding —
@@ -250,16 +268,6 @@ fn claims(method: &Method, path: &str) -> bool {
 const PATH_MKDIR: &str = "/api/fs/mkdir";
 
 fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
-    // Windows `filepath` is a different algorithm and unverified here. The
-    // honest answer is a 501 naming the gap, not a listing built with Unix path
-    // arithmetic — `gopath::dir` on `C:\Users\u` finds no `/` and answers
-    // `"."`, so the picker would silently browse the wrong directory.
-    if !cfg!(unix) {
-        return super::Answer::error(
-            axum::http::StatusCode::NOT_IMPLEMENTED,
-            "the filesystem browser is not supported on Windows in this build",
-        );
-    }
     if req.path == PATH_MKDIR {
         return finish(mkdir(req.body));
     }

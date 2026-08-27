@@ -13,7 +13,8 @@ import type { FSEntry } from "../lib/types";
  * `pickDirectory` is the OS's own dialog and is what a desktop app should
  * offer — it browses the real filesystem, honours symlinks and bookmarks, and
  * costs no round trip. `DirBrowser` is an in-app listing over `GET /api/fs`,
- * which is Unix-only and cannot see outside what the backend will list.
+ * which cannot see outside what the backend will list. (It was Unix-only until
+ * #374; `GET /api/fs` is answered on Windows too now.)
  *
  * The native one is tried first and the in-app one is the fallback, and the
  * fallback is not only for `npm run dev` in a browser tab: the dialog plugin is

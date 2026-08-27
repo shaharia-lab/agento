@@ -152,3 +152,109 @@ jobs:
       - name: Compile Rust (ci profile)
         working-directory: src-tauri
         run: cargo build --profile ci
+
+  # Windows x86_64 is a shipped release target (`release.yml` builds
+  # `x86_64-pc-windows-msvc`) and nothing compiled the `cfg(windows)` arms until
+  # #374 ported Go's Windows `filepath`. Without this job that port is
+  # unverified on the only platform it targets: `cfg(not(windows))` code
+  # compiles everywhere and the Windows arm compiles nowhere, which is the
+  # shape a `cfg` split fails in silently.
+  #
+  # **`clippy --lib` is the broad half and it is the important one.** It
+  # type-checks and lints *every* line of the library for this target, which is
+  # the only thing that can catch a `cfg(windows)` arm that does not compile —
+  # a Linux `clippy --all-targets` never sees those arms at all, so `-D
+  # warnings` there says nothing about them.
+  #
+  # **The test step is deliberately filtered, and that is a measured limitation
+  # rather than an oversight.** An unfiltered `cargo test --lib` was run here
+  # twice. With the runner's default `core.autocrlf=true` it is red at
+  # **1388/1422**; with the `autocrlf=false` step above — which is the one that
+  # counts — it is red at **1394/1422**, so six of those were pure CRLF against
+  # the byte-exact goldens and are now fixed rather than excluded.
+  #
+  # Of the 28 that remain, **27 are Unix-shaped test fixtures rather than
+  # defects**: `native::settings::tests` (10), `native::claude_settings` (9),
+  # `native::fs::tests` (5), `native::scanner::walk` (2) and
+  # `native::uploads::tests` (1) assert Unix path spellings —
+  # `absolute_dir("/var/lib/claude")` is correctly `None` on Windows,
+  # `validate_path_within_dir("/h/.claude/x", "/h/.claude")` is correctly
+  # refused, `HOME=/home//u` correctly cleans to `\home\u`. The 28th is
+  # `integrations::telegram::client::tests::a_body_that_dies_mid_stream_still_names_nothing_secret`,
+  # which is a **stream-timing** difference and not a path fixture at all —
+  # pre-existing, newly visible, and its own piece of work.
+  #
+  # Porting those is general Windows support, which #374 lists under *Risks* as
+  # the scope creep to avoid, so the filter names the modules that issue owns:
+  # `gopath` (both rule sets and both vector files, 248 cases against the real
+  # target), the `sessions::projects` call site it fixed, and the Windows arm of
+  # the profile path guard. **Widening this needs those fixtures ported first**
+  # — see `CLAUDE.md`'s *Known gaps*.
+  #
+  # The integration suites under `src-tauri/tests/` are a different and harder
+  # case: `chat_turn.rs`, `claude_sdk.rs` and `scheduled_run.rs` drive a fake
+  # Claude CLI that is a shebang'd Python script made executable through
+  # `std::os::unix::fs::PermissionsExt`, so they do not compile on Windows at
+  # all. `--lib` is what excludes them.
+  windows_rules:
+    name: Windows unit tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      # The runner's default is `core.autocrlf=true`, which rewrites every text
+      # file on checkout — including `notifications/email.html` and the `parity/`
+      # goldens, whose whole point is that they are byte-exact. Turning it off
+      # here rather than adding a repository-wide `.gitattributes`: this is the
+      # only Windows checkout there is, so the narrower lever is the right one.
+      - name: Check out with the repository's own line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          key: windows
+
+      # The frontend is not built here, so `tauri-build` has no `../dist` to
+      # embed. It is only read in a release build, and this job compiles the
+      # test profile — but the directory has to exist for the config to
+      # validate.
+      - name: Stub the frontend bundle
+        shell: bash
+        run: mkdir -p dist && echo '<!doctype html>' > dist/index.html
+
+      - name: Rust lints (windows arms)
+        working-directory: src-tauri
+        run: cargo clippy --lib -- -D warnings
+
+      # Three filters, not the whole lib — see the comment above the job.
+      #
+      # **The floor is not decoration.** `cargo test` treats "the filter matched
+      # nothing" as **success**, so an allowlist that goes stale — a module
+      # renamed, a test moved — would leave the only job that runs these rules
+      # on Windows green with zero assertions executed. That is the same shape
+      # as a vector loop with no truncation floor, and the same shape as the
+      # allowlist `base.css` was rewritten away from in #469. Denylisting was
+      # the alternative and is worse here: it would have to name ~30 individual
+      # Unix-shaped fixtures, and each stale entry is itself invisible.
+      - name: Rust unit tests (the Windows path rules and their call sites)
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          set -o pipefail
+          cargo test --lib -- \
+            native::gopath \
+            native::sessions::projects \
+            native::claude_settings::profiles::tests::a_windows_path_outside_the_dir_is_refused \
+            | tee filtered.log
+          passed=$(grep -oE '^test result: ok\. [0-9]+ passed' filtered.log | grep -oE '[0-9]+' | head -1)
+          echo "ran ${passed:-0} tests"
+          if [ -z "$passed" ] || [ "$passed" -lt 25 ]; then
+            echo "::error::expected at least 25 tests to run, got ${passed:-0} — the filter has gone stale"
+            exit 1
+          fi

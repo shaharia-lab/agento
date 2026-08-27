@@ -128,7 +128,7 @@
       "route": "/api/fs",
       "status": "native",
       "owner": "#296",
-      "reason": "the working-dir picker's listing; 501 on Windows since #278"
+      "reason": "the working-dir picker's listing; answered on Windows too since #374"
     },
     {
       "method": "GET",
@@ -240,7 +240,7 @@
       "route": "/api/settings/claude-config-dirs",
       "status": "native",
       "owner": "#305",
-      "reason": "the config-dir probe; 501 on Windows since #278"
+      "reason": "the config-dir probe; answered on Windows too since #374"
     },
     {
       "method": "GET",
