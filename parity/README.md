@@ -52,12 +52,13 @@ git show 07b6212^:desktop/parity/
 git show 07b6212^:desktop/parity/github_parity_test.go
 ```
 
-Four files never had a generator and are hand-written beside the code:
+Five files never had a generator and are hand-written beside the code:
 `desktop_routes.json`, `session_metric_vectors.json`,
-`claude_sessions_search_golden.json` and `session_detail_blocks_golden.json`.
+`claude_sessions_search_golden.json`, `session_detail_blocks_golden.json` and
+`journey_golden.json`.
 
-The last two were both authored *after* the Go tree was deleted, because
-neither has a Go ancestor to record from. `claude_sessions_search_golden.json`
+The last three were all authored *after* the Go tree was deleted, because none
+has a Go ancestor left to record from. `claude_sessions_search_golden.json`
 pins one search response — `match_snippet` and the `relevance` sort (#437) are
 Agento's own — recording where the field sits, that it is omitted where there is
 no index hit, and the ranked order. Two things it deliberately does **not** pin:
@@ -72,6 +73,19 @@ wire object — `is_error` **last**, after `input` — that a *successful* resul
 carries no `is_error` key at all, that a `tool_use` input still ships with its
 own key order and number spelling, and that a tool-result carrier is a user
 message with `blocks` and no `content`.
+
+`journey_golden.json` pins the whole `GET /api/claude-sessions/{id}/journey`
+response of one fixture transcript (#479). The route's Go implementation was
+deleted at the cut-over, so this records what the *port* answers rather than
+what Go did — and the port deliberately differs from it in three places, each
+argued in `sessions/journey.rs`'s header. What it pins: the key order of every
+object on the wire, that a `tool_call`'s `input` reaches it with the
+transcript's own key order and number spelling (`{"z":1.50,"cmd":"make"}` —
+neither sorted nor respelled), Go's `\u003c`/`\u0026` escaping *inside* a step
+payload, that a zero `duration_ms` is absent from a step and present on a turn,
+that a successful `tool_result` still carries `is_error`, and that a nested
+sub-agent's steps sit under the call that spawned it rather than beside it. Its
+fixture has no ties on any sort key, so only one ordering can be produced.
 
 ## Who reads them
 

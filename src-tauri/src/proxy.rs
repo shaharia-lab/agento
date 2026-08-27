@@ -568,9 +568,14 @@ mod tests {
 
     /// A route nothing claims answers chi's own 404 — status, content type,
     /// nosniff and the exact body Go's router wrote.
+    ///
+    /// The example is the per-session insight record, which is still unported.
+    /// It was `{id}/journey` until #479 claimed that one — a two-segment path
+    /// under a claimed prefix, which is the shape worth testing here, so the
+    /// substitute keeps it.
     #[tokio::test]
     async fn an_unclaimed_route_answers_chis_404() {
-        let path = "/api/claude-sessions/abc/journey".to_string();
+        let path = "/api/claude-sessions/abc/insights".to_string();
         let req = Request::builder()
             .method(Method::GET)
             .uri(&path)

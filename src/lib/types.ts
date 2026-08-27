@@ -362,6 +362,63 @@ export interface ClaudeSessionDetail extends ClaudeSessionSummary {
   subagents: ClaudeSubagent[] | null;
 }
 
+/* --- Session journey (GET /api/claude-sessions/{id}/journey, #479) -------- */
+
+/**
+ * One discrete event within a turn.
+ *
+ * `data` is a different shape per `type`, so it is `unknown` and read through
+ * the narrowing helpers in `views/sessions/journeyData.ts` rather than cast at
+ * each use. `steps` is a nested sub-agent's own steps, and only ever one level
+ * deep — the server flattens anything below that.
+ */
+export interface JourneyStep {
+  type:
+    | "user_input"
+    | "thinking"
+    | "text_response"
+    | "tool_call"
+    | "tool_result"
+    | "thinking_duration"
+    | "compaction"
+    | "sub_agent";
+  timestamp: string;
+  /** Omitted entirely when zero — a step with no measurable gap. */
+  duration_ms?: number;
+  data: unknown;
+  steps?: JourneyStep[] | null;
+}
+
+export interface JourneyTurn {
+  number: number;
+  start_time: string;
+  end_time: string;
+  duration_ms: number;
+  /** Omitted when the turn spent no input or output tokens. */
+  usage?: TokenUsage | null;
+  tool_calls: number;
+  steps: JourneyStep[];
+}
+
+export interface SessionJourney {
+  session_id: string;
+  model?: string;
+  cwd?: string;
+  git_branch?: string;
+  start_time: string;
+  end_time: string;
+  /** The raw span. `active_duration_ms` is the one to show — see the view. */
+  total_duration_ms: number;
+  active_duration_ms: number;
+  total_turns: number;
+  /** Main thread only. The delegated half is `subagent_usage`. */
+  usage: TokenUsage;
+  subagent_usage: TokenUsage;
+  subagent_count: number;
+  summary?: string;
+  turns: JourneyTurn[];
+}
+
 export interface SessionPage {
   items: ClaudeSessionSummary[];
   next_cursor: string;
