@@ -124,8 +124,8 @@ fn migrated_with_chat(id: &str) -> tempfile::NamedTempFile {
 /// That is what makes `wrap_permission_handler` wrap the handler at all: an
 /// empty allowlist returns the inner one unwrapped, so a test that skipped the
 /// agent would exercise the bypass rather than the allowlist. `built_in` only,
-/// so the allowlist is exactly the one tool — the local server has its own
-/// fixture below, and an agent naming an MCP server still forwards to Go.
+/// so the allowlist is exactly the one tool — the local server and the
+/// `mcps.yaml` one each have their own fixture below.
 fn migrated_with_allowlisted_agent(id: &str) -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().expect("temp file");
     let mut conn = rusqlite::Connection::open(file.path()).expect("open");
@@ -162,6 +162,28 @@ fn migrated_with_local_tool_agent(id: &str) -> tempfile::NamedTempFile {
     conn.execute(
         "INSERT INTO chat_sessions (id, title, agent_slug, created_at, updated_at)
          VALUES (?1, 'New Chat', 'clock', '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+        [id],
+    )
+    .expect("seed chat");
+    file
+}
+
+/// A chat whose agent names one **external** MCP server — the `mcps.yaml`
+/// shape, which no integration row backs.
+fn migrated_with_mcp_agent(id: &str, server: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().expect("temp file");
+    let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+    agento_lib::native::migrate::apply(&mut conn).expect("migrate");
+    conn.execute(
+        "INSERT INTO agents (slug, name, capabilities) VALUES ('docs', 'Docs', ?1)",
+        [format!(
+            r#"{{"mcp":{{"{server}":{{"tools":["search"]}}}}}}"#
+        )],
+    )
+    .expect("seed agent");
+    conn.execute(
+        "INSERT INTO chat_sessions (id, title, agent_slug, created_at, updated_at)
+         VALUES (?1, 'New Chat', 'docs', '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
         [id],
     )
     .expect("seed chat");
@@ -1291,6 +1313,88 @@ async fn a_chat_using_a_local_tool_runs_natively_end_to_end() {
         names,
         vec!["mcp__local-tools__current_time"],
         "renaming either half of this breaks every agent that already names it"
+    );
+}
+
+/// The acceptance criterion of #375, end to end: an agent whose MCP server is
+/// declared **only** in `mcps.yaml` runs, and the entry the user wrote reaches
+/// the CLI's `--mcp-config` argument.
+///
+/// Before #375 this turn was refused twice over — once because `docs-mcp` has
+/// no integration row, and once because an `mcps.yaml` existed at all — so it
+/// answered a 500 and no subprocess was ever spawned.
+///
+/// The fake CLI reports what it was actually invoked with rather than the test
+/// inspecting an `Options`: the whole chain under test is the file being read,
+/// the entry being converted, and `Options::build_args` putting it on a command
+/// line. A `KeyError` in there is the assertion.
+#[tokio::test]
+async fn a_chat_using_an_mcps_yaml_server_reaches_the_cli_with_it() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = dir.path().join("mcps.yaml");
+    std::fs::write(
+        &registry,
+        "docs-mcp:\n  transport: stdio\n  command: /usr/bin/docs-mcp\n  \
+         args: [\"--root\", \"/srv/docs\"]\n  env:\n    LOG_LEVEL: debug\n",
+    )
+    .expect("write mcps.yaml");
+    // The one lever that points this process at a fixture: a debug build's
+    // `paths::data_dir` ignores `AGENTO_DATA_DIR` by design, so `MCPS_FILE` is
+    // how a test reads a registry that is not the developer's own. No other
+    // test in this binary names an MCP server, so nothing else consults it.
+    std::env::set_var("MCPS_FILE", &registry);
+
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        cfg = json.loads(sys.argv[sys.argv.index("--mcp-config") + 1])
+        seen = {"server": cfg["mcpServers"]["docs-mcp"],
+                "allowed": sys.argv[sys.argv.index("--allowedTools") + 1],
+                "strict": "--strict-mcp-config" in sys.argv}
+        # Compact separators so the text compares against `serde_json`'s own
+        # spelling; Python's default puts a space after ':' and ','.
+        seen = json.dumps(seen, sort_keys=True, separators=(",", ":"))
+        say({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": seen}]}})
+        say({"type": "result", "subtype": "success", "is_error": False,
+             "result": "ok", "session_id": "sdk-external",
+             "usage": {"input_tokens": 1, "output_tokens": 1}})
+"#,
+    );
+
+    let id = unique_id("mcpsyaml");
+    let file = migrated_with_mcp_agent(&id, "docs-mcp");
+    let body = run_turn_on(&cli, &file, &id, "search the docs").await;
+
+    // The entry travels verbatim: the transport's *wire* spelling, the argv and
+    // the environment the file declared. Asserted as one substring rather than
+    // key by key, because a respelled key or a dropped `env` is exactly the
+    // failure a per-field check waves through.
+    let expected = serde_json::json!({
+        "allowed": "mcp__docs-mcp__search",
+        "server": {
+            "type": "stdio",
+            "command": "/usr/bin/docs-mcp",
+            "args": ["--root", "/srv/docs"],
+            "env": {"LOG_LEVEL": "debug"},
+        },
+        "strict": true,
+    });
+    let expected = serde_json::to_string(&expected).expect("encode");
+    // The CLI's line is passed through into the SSE body verbatim, so the text
+    // arrives with its quotes escaped — compare against that, not the raw JSON.
+    let escaped = serde_json::to_string(&expected).expect("escape");
+    let needle = &escaped[1..escaped.len() - 1];
+    assert!(
+        body.contains(needle),
+        "the mcps.yaml entry never reached the CLI.\nwanted: {needle}\nbody was: {body}"
     );
 }
 

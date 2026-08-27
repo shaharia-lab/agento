@@ -294,8 +294,12 @@ src-tauri/src/
     chat/        the SSE turn and the three routes that steer it (#276)
       live.rs    the process-local live-session registry — why the four move together
       runner.rs  an agent's config as SDK options; starts the local tools
-                 server (#310) and one per github integration (#311), and
-                 refuses only what it still cannot supply
+                 server (#310) and one per github integration (#311), passes
+                 an mcps.yaml server through (#375), and refuses only a name
+                 that resolves to neither
+      mcps_yaml.rs `<data dir>/mcps.yaml` — LoadMCPRegistry, the three
+                 transports and the `${ENV:…}` substitution (#375). The one
+                 YAML this app reads and the only caller of `serde_norway`
       turn.rs    spawn, stream, and the AskUserQuestion continuation
       persist.rs what a finished turn writes, and what an interrupted one does not
       sse.rs     the frame bytes: raw pass-through vs the two synthetic events
@@ -2160,20 +2164,42 @@ means a model mid-`create_issue` when the user hits Save is the ordinary case.
 `a_tool_call_in_flight_survives_the_handles_drop` pins it, and it fails with the
 two lines swapped.
 
-**What the runner still refuses.** `chat/runner.rs::build_options` serves an
-agent whose `capabilities.mcp` names hosted integrations, starting one filtered
-server per name and handing the handles to the turn beside the local-tools one.
-Three things it cannot serve, and each is a *refusal* rather than a fallback —
-a chat reports it, and a scheduled run records a failed `job_history` row: a
-name whose row is a type this build does not host (i.e. `whatsapp`), a name
-with **no** integration row at all, and — broader than it strictly needs to be
-— *any* `mcp` capability when `<data dir>/mcps.yaml` exists, because the
-original resolution order consults that file **before** the integrations and
-this build reads none. The server is registered under the **bare integration id**,
-not `github::server_name`'s `github-<id>`: the latter is `mcp.NewServer`'s
-implementation name and never appears on a tool, while the id is the
-`mcpServers` key and so the prefix on every qualified name already in an agent's
+**How the runner resolves an MCP name, and the one thing it still refuses**
+(#375). `chat/runner.rs::mcp_plan` walks `capabilities.mcp` in
+`resolveServerConfig`'s order: **the `mcps.yaml` registry first**
+(`native/chat/mcps_yaml.rs`), then the integrations. A registry hit is an
+*external* server — somebody else's subprocess or URL, handed to the CLI in
+`--mcp-config` with nothing bound here; an integration is a filtered in-process
+server started per turn. Either is registered under **the name the agent
+wrote** — the bare integration id, not `github::server_name`'s `github-<id>`:
+the latter is `mcp.NewServer`'s implementation name and never appears on a tool,
+while the key is the prefix on every qualified name already in an agent's
 allowlist.
+
+The order is Go's and it decides a real case: **a name in both is the yaml
+entry**, so a user who shadows an integration id in their own file gets their
+own server. One shape is refused, and it is a *refusal* rather than a fallback —
+a chat reports it, a scheduled run records a failed `job_history` row: **a name
+in neither**, which `whatsapp` reaches by construction since the type is dropped
+(#273). A malformed or unreadable `mcps.yaml` refuses too, rather than reading
+as "no external servers" and silently dropping a tool set.
+
+**What #375 removed is the check that was broader than it needed to be:** the
+mere *presence* of `<data dir>/mcps.yaml` used to refuse every `mcp` capability,
+including names that resolved perfectly to hosted integrations. It was guarding
+against a name resolving differently in the Go server than here — a hazard that
+needed both to exist, and #391 deleted the Go tree. Until it went, one leftover
+file (the normal state for anyone who ever ran `agento web` against the same
+data directory) disabled every MCP-backed agent on the machine.
+
+Two ordering rules keep that fix from being undone by accident. `mcp_plan` takes
+the registry's **path**, not a loaded registry, and loads it only after
+establishing that the agent names at least one MCP server — so a typo in the
+file cannot refuse a turn that never consults it. And the database is opened
+only for a name the registry did not answer, so an all-external agent reads no
+`integrations` rows at all. `MCPS_FILE` overrides the path, which is the only
+way to point a test at a fixture: a debug build's `paths::data_dir` ignores the
+environment by design.
 
 **Reading a credential is this module's job and nobody else's.** The rule in
 `native/integrations.rs` — `credentials` is never selected, `auth` collapses to
@@ -2992,7 +3018,9 @@ database".
 `Err` and let Go answer" is not available, because there is no request. So every
 path ends in a `job_history` row. That includes the one case Go has no
 equivalent for: `chat/runner.rs::build_options` can still refuse an agent whose
-tools this build cannot host (a name in `mcps.yaml`, or a `whatsapp` row), and
+tools this build cannot supply (a `capabilities.mcp` name that neither
+`mcps.yaml` nor a hostable integration resolves — a `whatsapp` row reaches that
+by construction — or one whose `mcps.yaml` could not be read), and
 where a chat forwards, a scheduled run records a **failed** row reading
 `agent tools unavailable in this build: …` and publishes the failed event.
 Silence is the one outcome that is not allowed, because a job history with no row

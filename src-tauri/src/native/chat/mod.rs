@@ -15,11 +15,13 @@
 //! forward — it is the answer. The three steering routes answer Go's own 409s
 //! (`handleProvideInput`, `handlePermissionResponse`, `handleStopSession` each
 //! had a distinct string; they are reproduced verbatim), and a chat this
-//! runtime cannot execute — `whatsapp` tools are dropped (#273), `mcps.yaml`
-//! is not read — is a 500 carrying the reason, produced *before* the
+//! runtime cannot execute — an agent naming an MCP server that neither
+//! [`mcps_yaml`] nor a hostable integration resolves, which `whatsapp` reaches
+//! by construction (#273) — is a 500 carrying the reason, produced *before* the
 //! subprocess is spawned. See `runner::build_options`.
 
 pub mod live;
+pub mod mcps_yaml;
 pub mod persist;
 pub mod runner;
 pub mod sse;

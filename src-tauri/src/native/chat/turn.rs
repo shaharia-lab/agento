@@ -105,8 +105,9 @@ pub struct TurnState {
 /// answered as a clean JSON error — a 404 for a missing chat, Go's fixed
 /// `500 "failed to start message"` for machinery failures (reason in the log,
 /// as Go logged it), and a 500 carrying the refusal reason for the cases that
-/// this build refuses outright (`whatsapp` tools are dropped, `mcps.yaml` is
-/// not read). Once the stream has begun, a failure ends the stream rather than
+/// this build refuses outright (an MCP name that neither `mcps.yaml` nor a
+/// hostable integration resolves, which `whatsapp` reaches by construction —
+/// #273). Once the stream has begun, a failure ends the stream rather than
 /// changing the status — the 200 is already committed.
 pub async fn run(
     db_path: std::path::PathBuf,
@@ -179,8 +180,9 @@ pub async fn run(
         // (#275), which is why this is a field rather than an unconditional.
         custom_session_id: chat_id.clone(),
     };
-    // Refuses for an agent whose tools this runtime cannot supply — `whatsapp`
-    // is dropped (#273), `mcps.yaml` is not read — before any subprocess
+    // Refuses for an agent whose tools this runtime cannot supply — an MCP name
+    // named by no `mcps.yaml` entry and backed by no hostable integration row,
+    // which `whatsapp` reaches by construction (#273) — before any subprocess
     // exists. The refusal reason is the response body: since #278 there is no
     // other implementation to hand the chat to, so an honest 500 naming what
     // is unsupported is the best available answer.

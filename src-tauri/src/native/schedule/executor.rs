@@ -15,7 +15,9 @@
 //! That last case is the one Go has no equivalent for. Go's `buildRunOptions`
 //! can always supply every tool, since it *is* the process that hosts them;
 //! [`crate::native::chat::runner::build_options`] can refuse (an agent naming an
-//! `mcps.yaml` server, or a `whatsapp` integration this build dropped). In a
+//! MCP server that neither `<data dir>/mcps.yaml` nor a hostable integration
+//! resolves — a `whatsapp` row reaches that by construction — or one whose
+//! `mcps.yaml` this process could not read). In a
 //! chat that refusal is a 500. Here it is a recorded failure with the reason in
 //! `error_message`, which is the only answer that leaves evidence — a job
 //! history with no row is indistinguishable from a task that was not due.
