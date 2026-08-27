@@ -279,8 +279,15 @@ ring = "0.17"
 # Pinned to the `providers-v0.1.0` **tag**, which ferrox#150/#153 made real; the
 # design document predates it and says to pin a SHA. A tag can be moved where a
 # SHA cannot — accepted because ferrox is our own repository and its README now
-# documents this tag as the reference point. Revisit at the crates.io publish
-# decision, before the first shipping release.
+# documents this tag as the reference point.
+#
+# **Settled in #453: the tag stays**, and crates.io is declined for now. What
+# actually protects a build is `Cargo.lock`, which records the resolved commit —
+# so a moved tag changes what a *fresh* resolve picks and nothing that is already
+# checked out or already released. Publishing would buy an immutable registry
+# artifact at the cost of a release process in a repo we own and are the only
+# consumer of. Revisit if `ferrox-providers` ever gains a consumer outside this
+# app, or if the tag is ever moved in anger.
 ferrox-providers = { git = "https://github.com/shaharia-lab/ferrox", tag = "providers-v0.1.0", default-features = false, features = [
     "anthropic",
     "openai",
