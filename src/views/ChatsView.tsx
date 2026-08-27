@@ -190,13 +190,21 @@ export function ChatsView({
   // session-detail read the Sessions view uses, and rendered read-only above the
   // chat's own turns.
   const resumedFrom = session?.continued_from_session_id ?? "";
+  const resumedPath = session?.continued_from_project_path ?? "";
   const resumedCount = session?.continued_from_message_count ?? 0;
+  // `resumedPath` is in the deps even though the request does not carry it: two
+  // chats can be continued from the same session id under *different* project
+  // paths, and each pair has to be evaluated against a payload fetched for it
+  // rather than against the other one's cached answer. Today the route resolves
+  // by id alone, so the refetch returns the same transcript and the verdict is
+  // the same either way — the dependency is what keeps that an implementation
+  // detail of the route instead of something this guard silently relies on.
   const resumed = useResource<ClaudeSessionDetail | null>(
     (signal) =>
       resumedFrom
         ? api.get<ClaudeSessionDetail>(`/claude-sessions/${resumedFrom}`, signal)
         : Promise.resolve(null),
-    [resumedFrom]
+    [resumedFrom, resumedPath]
   );
 
   // `useResource` keeps the previous payload while the next one loads — the same
@@ -210,6 +218,32 @@ export function ChatsView({
     resumed.data?.session_id === resumedFrom ? resumed.data : null;
   const resumedError = resumedData ? undefined : resumed.error;
 
+  // **The corpus keys a session on the pair, and so does the reference** (#492).
+  // Migration 37 records `(continued_from_session_id, continued_from_project_path)`
+  // for exactly that reason — the #362 family — but `GET /api/claude-sessions/{id}`
+  // resolves through `find_session_file`, which is first-match-by-id across every
+  // config dir and project. So the same id under two project paths answers with
+  // *a* transcript, not necessarily the recorded one, and every check above it
+  // passes. Compare the pair and refuse to render a transcript that contradicts
+  // it: a different project's conversation shown as this chat's history is a
+  // silent wrong answer, which is worse than an honest note.
+  //
+  // Two rules the comparison depends on. It is gated on a **non-empty** recorded
+  // path, because a chat may legitimately carry the id with no path (the Rust
+  // side omits an empty string from the wire) and there is then nothing to
+  // contradict. And both sides are compared **raw**: `continue_chat.rs` stores
+  // `detail.summary.project_path` verbatim and both values come from the same
+  // `walk::decode_project_path`, so for a dash-encoded project both are the
+  // encoded name — normalising or tilde-shortening either side would invent
+  // mismatches. `tildePath` is for display only.
+  const resumedMismatch = useMemo(
+    () =>
+      resumedData && resumedPath && resumedData.project_path !== resumedPath
+        ? { recorded: resumedPath, found: resumedData.project_path }
+        : null,
+    [resumedData, resumedPath]
+  );
+
   // **A fixed prefix, and that is the whole guard against a double render.**
   // The CLI appends a resumed turn to the *same* transcript file, so once this
   // chat has taken a turn the source session contains those messages too —
@@ -220,8 +254,11 @@ export function ChatsView({
   // `slice` clamps on its own, so a transcript that was compacted or rewritten
   // to fewer messages renders what is left rather than indexing past the end.
   const inherited = useMemo<ClaudeMessage[]>(
-    () => (resumedData ? (resumedData.messages ?? []).slice(0, resumedCount) : []),
-    [resumedData, resumedCount]
+    () =>
+      resumedData && !resumedMismatch
+        ? (resumedData.messages ?? []).slice(0, resumedCount)
+        : [],
+    [resumedData, resumedMismatch, resumedCount]
   );
 
   const select = useCallback((id: string) => {
@@ -667,10 +704,11 @@ export function ChatsView({
                   resumedFrom ? (
                     <ResumedHistory
                       sessionId={resumedFrom}
-                      projectPath={session?.continued_from_project_path ?? ""}
+                      projectPath={resumedPath}
                       messages={inherited}
                       loading={resumed.loading && !resumedData}
                       error={resumedError}
+                      mismatch={resumedMismatch}
                     />
                   ) : null
                 }
@@ -819,11 +857,17 @@ export function ChatsView({
 /**
  * The conversation this chat was continued from, read-only, above its own turns.
  *
- * Three states and all three are honest. It is *not* gated on loading before the
+ * Four states and all four are honest. It is *not* gated on loading before the
  * chat renders: the composer must be usable immediately, and a source transcript
  * that has been moved, deleted or made unreadable since must leave the chat
  * working — so a failure is a note in this region rather than an error for the
  * whole view.
+ *
+ * `mismatch` is its own state rather than an `error` (#492): that transcript read
+ * fine, it simply belongs to another project, and "could not be read" would send
+ * the reader debugging the wrong thing. Its arm is ordered **before** the empty
+ * one, because a mismatch renders no messages either and "no longer available"
+ * would be the wrong sentence for a session that is available elsewhere.
  */
 function ResumedHistory({
   sessionId,
@@ -831,12 +875,14 @@ function ResumedHistory({
   messages,
   loading,
   error,
+  mismatch,
 }: {
   sessionId: string;
   projectPath: string;
   messages: ClaudeMessage[];
   loading: boolean;
   error?: string;
+  mismatch?: { recorded: string; found: string } | null;
 }) {
   return (
     <div className="resumed">
@@ -853,6 +899,14 @@ function ResumedHistory({
       ) : error ? (
         <div className="resumed__note">
           The earlier conversation could not be read: {error}
+        </div>
+      ) : mismatch ? (
+        <div className="resumed__note">
+          This chat was continued from{" "}
+          <span className="mono">{tildePath(mismatch.recorded)}</span>, but that
+          session id resolved to{" "}
+          <span className="mono">{tildePath(mismatch.found)}</span> — so the
+          earlier conversation is not shown.
         </div>
       ) : messages.length === 0 ? (
         <div className="resumed__note">
