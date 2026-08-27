@@ -166,15 +166,27 @@ jobs:
   # a Linux `clippy --all-targets` never sees those arms at all, so `-D
   # warnings` there says nothing about them.
   #
-  # **The test step is deliberately filtered, and that is a recorded limitation
-  # rather than an oversight.** `cargo test --lib` was tried first and is red at
-  # 1388/1422: every one of the 34 is a **Unix-shaped test fixture**, not a
-  # defect — `absolute_dir("/var/lib/claude")` is correctly `None` on Windows,
+  # **The test step is deliberately filtered, and that is a measured limitation
+  # rather than an oversight.** An unfiltered `cargo test --lib` was run here
+  # twice. With the runner's default `core.autocrlf=true` it is red at
+  # **1388/1422**; with the `autocrlf=false` step above — which is the one that
+  # counts — it is red at **1394/1422**, so six of those were pure CRLF against
+  # the byte-exact goldens and are now fixed rather than excluded.
+  #
+  # Of the 28 that remain, **27 are Unix-shaped test fixtures rather than
+  # defects**: `native::settings::tests` (10), `native::claude_settings` (9),
+  # `native::fs::tests` (5), `native::scanner::walk` (2) and
+  # `native::uploads::tests` (1) assert Unix path spellings —
+  # `absolute_dir("/var/lib/claude")` is correctly `None` on Windows,
   # `validate_path_within_dir("/h/.claude/x", "/h/.claude")` is correctly
-  # refused, and the byte-exact goldens compare against files whose line endings
-  # the checkout decides. Porting ~34 fixtures is general Windows support, which
-  # #374 lists as out of scope, so the filter names the modules that issue owns:
-  # `gopath` (both rule sets and both vector files, ~200 cases against the real
+  # refused, `HOME=/home//u` correctly cleans to `\home\u`. The 28th is
+  # `integrations::telegram::client::tests::a_body_that_dies_mid_stream_still_names_nothing_secret`,
+  # which is a **stream-timing** difference and not a path fixture at all —
+  # pre-existing, newly visible, and its own piece of work.
+  #
+  # Porting those is general Windows support, which #374 lists under *Risks* as
+  # the scope creep to avoid, so the filter names the modules that issue owns:
+  # `gopath` (both rule sets and both vector files, 248 cases against the real
   # target), the `sessions::projects` call site it fixed, and the Windows arm of
   # the profile path guard. **Widening this needs those fixtures ported first**
   # — see `CLAUDE.md`'s *Known gaps*.
@@ -219,21 +231,6 @@ jobs:
       - name: Rust lints (windows arms)
         working-directory: src-tauri
         run: cargo clippy --lib -- -D warnings
-
-      # TEMPORARY (#374): the unfiltered run, non-blocking, so the number the
-      # comment above quotes is measured *with* `core.autocrlf=false` rather
-      # than inherited from the first push, which ran with the runner's default.
-      # Removed in the follow-up commit that records the result.
-      - name: MEASURE ONLY — unfiltered lib tests
-        continue-on-error: true
-        shell: bash
-        working-directory: src-tauri
-        run: |
-          cargo test --lib 2>&1 | tee unfiltered.log || true
-          echo "===== SUMMARY ====="
-          grep -E '^test result:' unfiltered.log || true
-          echo "===== FAILURES ====="
-          sed -n '/^failures:$/,/^test result:/p' unfiltered.log | grep -E '^    ' || true
 
       # Three filters, not the whole lib — see the comment above the job.
       #

@@ -4048,13 +4048,25 @@ because each one cost real time to find:
   `ci.yml`'s `windows_rules` runs `cargo clippy --lib -- -D warnings`, which
   covers every line of the library for that target — the thing a Linux run
   cannot do. Its test step is filtered to `native::gopath`,
-  `native::sessions::projects` and one profiles guard, because a full
-  `cargo test --lib` there is red at **1388/1422** and every one of the 34 is a
-  **Unix-shaped fixture** rather than a defect: `absolute_dir("/var/lib/claude")`
-  is correctly `None` on Windows, `validate_path_within_dir("/h/.claude/x",
-  "/h/.claude")` is correctly refused, `HOME=/home//u` cleans to `\home\u`.
-  Porting those fixtures is general Windows support and is the work that has to
-  land before the filter can be widened.
+  `native::sessions::projects` and one profiles guard, and **floored at 25
+  tests**, because `cargo test` treats "the filter matched nothing" as success
+  and an allowlist with no floor is a job that goes silently vacuous on a
+  rename.
+
+  The filter is measured, not assumed. An unfiltered `cargo test --lib` there is
+  red at **1394/1422** (it was 1388 before `core.autocrlf=false` was set on the
+  checkout; those six were pure CRLF against the byte-exact goldens). **27 of
+  the 28 are Unix-shaped fixtures** rather than defects — `settings::tests` 10,
+  `claude_settings` 9, `fs::tests` 5, `scanner::walk` 2, `uploads::tests` 1:
+  `absolute_dir("/var/lib/claude")` is correctly `None` on Windows,
+  `validate_path_within_dir("/h/.claude/x", "/h/.claude")` is correctly refused,
+  `HOME=/home//u` correctly cleans to `\home\u`. Porting them is general
+  Windows support and is the work that has to land before the filter widens.
+- **The 28th Windows failure is not a path fixture.**
+  `integrations::telegram::client::tests::a_body_that_dies_mid_stream_still_names_nothing_secret`
+  fails there with *"must fail in the body stream, not the send"* — a
+  stream-timing difference, pre-existing and newly visible. Nothing to do with
+  #374; it needs its own look.
 - **`src-tauri/tests/` does not run on Windows at all.** `chat_turn.rs`,
   `claude_sdk.rs` and `scheduled_run.rs` make their fake Claude CLI executable
   through `std::os::unix::fs::PermissionsExt`, so they do not compile there —
