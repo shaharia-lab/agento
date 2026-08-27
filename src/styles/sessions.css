@@ -17,8 +17,11 @@
   gap: var(--sp-2);
   white-space: nowrap;
 }
+/* The open state, on `.iconbtn--active`'s terms plus a ring: this button is the
+   only chrome saying a panel is below it, and a background alone reads as hover
+   on a control that is also a toggle. */
 .sess-filters__toggle--on {
-  color: var(--fg-primary);
+  background: var(--bg-active);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 /* The applied count, so a collapsed panel still says how much is hidden. */
@@ -100,7 +103,7 @@
   border-radius: var(--r-md);
   box-shadow: inset 0 0 0 var(--hairline) var(--line-strong);
   font-size: var(--text-sm);
-  color: var(--fg-primary);
+  color: var(--fg);
 }
 .sess-filters__num:focus,
 .sess-filters__date:focus {

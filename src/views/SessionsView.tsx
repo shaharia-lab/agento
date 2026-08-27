@@ -284,18 +284,23 @@ function withSelected(
  * start of its day against `last_activity >= from`, so the range reads as the
  * two dates inclusive.
  *
- * Anything that is not a whole date yields `undefined` rather than a plausible
+ * Anything that is not a real date yields `undefined` rather than a plausible
  * wrong instant — the server ignores an unparseable bound too, so both sides
- * agree it is unbounded.
+ * agree it is unbounded. The shape check is not enough on its own: `Date`
+ * *normalizes* rather than rejecting, so `2026-02-30` would otherwise be sent
+ * as 2 March. Only the round trip catches that.
  */
 function dayBoundary(day: string, edge: "start" | "end"): string | undefined {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.trim());
   if (!m) return undefined;
+  const [year, month, date] = [Number(m[1]), Number(m[2]) - 1, Number(m[3])];
   const t =
     edge === "start"
-      ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0, 0)
-      : new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 23, 59, 59, 999);
-  return isFinite(t.getTime()) ? t.toISOString() : undefined;
+      ? new Date(year, month, date, 0, 0, 0, 0)
+      : new Date(year, month, date, 23, 59, 59, 999);
+  const real =
+    t.getFullYear() === year && t.getMonth() === month && t.getDate() === date;
+  return real ? t.toISOString() : undefined;
 }
 
 /**
@@ -402,16 +407,29 @@ const MODE_TONES: Record<string, string> = {
   dontAsk: "badge--teal",
 };
 
+/**
+ * `permission_mode` is a free-form column — the scanner copies whatever the
+ * transcript's `permission-mode` event carried, with no enum in between — so
+ * every read of these tables goes through a `typeof` check rather than `??`.
+ * A plain object inherits `toString`, `constructor` and `valueOf`, and `??`
+ * does not catch a function: the value would reach JSX as a React child and as
+ * a `className`. The `switch` these tables replaced was immune by construction.
+ */
+function lookup(table: Record<string, string>, key: string): string | undefined {
+  const v = table[key];
+  return typeof v === "string" ? v : undefined;
+}
+
 function modeLabel(mode: string): string {
-  return MODE_LABELS[mode] ?? mode;
+  return lookup(MODE_LABELS, mode) ?? mode;
 }
 
 function modeBadge(s: ClaudeSessionSummary): { label: string; tone: string } | null {
   // `omitempty` on the Go side, so the field is absent on a row that recorded
   // no mode — which is not the same as one whose mode this table does not know.
   const mode = s.permission_mode ?? "";
-  const label = MODE_LABELS[mode];
-  if (label) return { label, tone: MODE_TONES[mode] ?? "" };
+  const label = lookup(MODE_LABELS, mode);
+  if (label) return { label, tone: lookup(MODE_TONES, mode) ?? "" };
   return s.mode ? { label: s.mode, tone: "" } : null;
 }
 
@@ -1000,11 +1018,14 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
   /**
    * The Mode and Model option sets, on the same terms as `accountOptions`: the
-   * facet is computed over every visible session rather than the filtered one,
-   * and a live selection keeps its own option even when the facet stops
-   * offering it — which happens when the last session of a model is filtered
-   * out from underneath by some *other* control. Without it the dropdown loses
-   * the only entry that could clear it.
+   * facet is computed over every *visible* session rather than the filtered
+   * one, so picking a model never removes the others.
+   *
+   * A live selection keeps its own option even when the facet stops offering
+   * it. That is not the filter narrowing the facet — it cannot — but the corpus
+   * moving underneath a selection: a rescan dropping the last session of a
+   * model, a project hidden in Settings, or a config dir leaving the indexed
+   * set. Without it the dropdown loses the only entry that could clear it.
    */
   const modeOptions = useMemo(
     () => withSelected(facets.data?.permission_modes, draft.permissionMode),
