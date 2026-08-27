@@ -72,6 +72,26 @@ export interface ChatSession {
   total_cache_creation_tokens?: number;
   total_cache_read_tokens?: number;
   is_favorite?: boolean;
+  /**
+   * The Claude session this chat resumes, as the corpus keys one: the **pair**
+   * `(continued_from_session_id, continued_from_project_path)`, never the id
+   * alone. Absent on a chat that is not a continuation, and on every chat
+   * created before migration 37 — those keep today's behaviour.
+   *
+   * Not `sdk_session_id`, which the stream rewrites on every turn.
+   */
+  continued_from_session_id?: string;
+  continued_from_project_path?: string;
+  /**
+   * How many of the source transcript's messages this chat inherited — a
+   * **boundary, not a total**.
+   *
+   * The CLI appends a resumed turn to the *same* transcript file, so the source
+   * grows past this point the moment Agento takes a turn. Render exactly this
+   * prefix and the chat's own `messages` after it; rendering the whole
+   * transcript would show the newest turn twice.
+   */
+  continued_from_message_count?: number;
 }
 
 /**

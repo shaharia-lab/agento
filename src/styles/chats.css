@@ -224,3 +224,64 @@
   word-break: break-all;
   white-space: normal;
 }
+
+/* --- The conversation a continued chat resumes (#490) --------------------- */
+/*
+ * Rendered inside the live transcript's own scroller, above the chat's turns,
+ * so the view keeps one scrollbar and lands the reader at the composer. It is
+ * set back from the live turns rather than styled as one of them: these are
+ * somebody else's messages, they cannot be edited, replied to or copied through
+ * the chat's own affordances, and reading them as this chat's own is exactly
+ * the confusion the divider below exists to prevent.
+ */
+.resumed {
+  margin-bottom: var(--sp-5);
+  padding-bottom: var(--sp-2);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+}
+
+.resumed__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+}
+
+.resumed__id {
+  margin-left: auto;
+  max-width: 40%;
+  font-size: var(--text-xs);
+  color: var(--fg-tertiary);
+}
+
+.resumed__note {
+  padding: var(--sp-5) var(--sp-4);
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+/* The boundary. Everything above is the session being resumed; everything
+   below is this chat's own. */
+.resumed__rule {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.resumed__rule::before,
+.resumed__rule::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}

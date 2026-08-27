@@ -641,6 +641,16 @@ mod tests {
         assert_eq!(version, 0);
     }
 
+    /// The migration these upgrade tests exercise: the one that added
+    /// `session_insights.search_index_version` and the `session_search_key`
+    /// side table (#446).
+    ///
+    /// A literal on purpose. Each of the three tests below builds a database at
+    /// `SEARCH_KEY_MIGRATION - 1`, seeds rows an older build would have written,
+    /// and asserts on what **36** does to them — so the boundary is a property of
+    /// what is under test, not of wherever the migration list happens to end.
+    const SEARCH_KEY_MIGRATION: i64 = 36;
+
     /// The upgrade path with **data** in it.
     ///
     /// `migrate::a_database_at_any_earlier_version_upgrades_to_this_one` already
@@ -658,9 +668,11 @@ mod tests {
     /// version carries it forward and indexes nothing; one that had not (the 0
     /// below, seeded by the sibling case) reads as behind and is rebuilt.
     ///
-    /// The boundary is derived from `expected_version()`, not written as a
-    /// literal, so appending migration 37 does not silently turn this into a
-    /// fresh-install test that no longer exercises an upgrade at all.
+    /// The boundary is [`SEARCH_KEY_MIGRATION`], the migration under test, and it
+    /// was `expected_version()` until #490 appended migration 37: read off the
+    /// tip, the seed rows land *after* 36 has already run, so the backfill this
+    /// asserts on never sees them and the test fails for a change that has
+    /// nothing to do with it.
     #[test]
     fn the_migration_applies_to_a_populated_database() {
         // Two installs, differing only in whether the old global stamp had been
@@ -669,7 +681,7 @@ mod tests {
         for stamped in [Some(SEARCH_INDEX_VERSION), None] {
             let file = tempfile::NamedTempFile::new().expect("temp file");
             let mut conn = Connection::open(file.path()).expect("open");
-            let last = migrate::expected_version();
+            let last = SEARCH_KEY_MIGRATION;
 
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -713,7 +725,10 @@ mod tests {
 
             migrate::apply(&mut conn).expect("upgrade must apply");
 
-            assert_eq!(migrate::current_version(&conn).expect("version"), last);
+            assert_eq!(
+                migrate::current_version(&conn).expect("version"),
+                migrate::expected_version()
+            );
             migrate::verify(&conn).expect("verify");
             let (kept, version): (i64, i64) = conn
                 .query_row(
@@ -760,7 +775,7 @@ mod tests {
     fn the_migration_leaves_an_unindexed_session_behind() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut conn = Connection::open(file.path()).expect("open");
-        let last = migrate::expected_version();
+        let last = SEARCH_KEY_MIGRATION;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -818,7 +833,7 @@ mod tests {
     fn the_migration_removes_a_duplicate_pair_the_old_schema_allowed() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut conn = Connection::open(file.path()).expect("open");
-        let last = migrate::expected_version();
+        let last = SEARCH_KEY_MIGRATION;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (

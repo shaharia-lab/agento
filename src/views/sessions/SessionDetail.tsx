@@ -1,20 +1,17 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { api } from "../../lib/api";
 import { useResource } from "../../lib/hooks";
 import { compactNumber, dateTime, integer, tildePath, usd } from "../../lib/format";
 import { Icon } from "../../lib/icons";
 import type {
-  ClaudeMessage,
   ClaudeSessionDetail,
   ClaudeSessionSummary,
   ClaudeSubagent,
   ClaudeTodo,
 } from "../../lib/types";
 import { Empty, Segmented } from "../../components/ui";
-import { Thinking, ToolCall } from "../chat/Transcript";
-import type { ToolState } from "../chat/useChatStream";
-import { Markdown } from "../chat/Markdown";
 import { SessionJourney } from "./SessionJourney";
+import { SessionTranscript } from "./SessionTranscript";
 
 /**
  * Read-only transcript of one indexed Claude Code session, rendered with the
@@ -57,45 +54,6 @@ export function SessionDetail({
       ),
     [session.session_id]
   );
-
-  // Sidechain events are a sub-agent's own transcript leaking into the
-  // parent's, a user event with nothing to show is a tool_result carrier, and
-  // content opening with one of Claude Code's own injection wrappers is the
-  // harness talking, not the user — the scanner's turn count excludes all
-  // three, so showing them here would render turns the header does not count.
-  //
-  // A carrier does now arrive with `blocks`, and it is still not a turn: its
-  // results are read out below and rendered against the call each answers, so
-  // "has something to show" is any block that is *not* a tool_result.
-  const messages = useMemo(
-    () =>
-      (detail.data?.messages ?? []).filter((m) => {
-        if (m.is_sidechain) return false;
-        if (m.type !== "user") return true;
-        const text = m.content?.trim() ?? "";
-        if (!text && !m.blocks?.some((b) => b.type !== "tool_result")) {
-          return false;
-        }
-        return !INJECTED_MARKERS.some((w) => text.startsWith(w));
-      }),
-    [detail.data]
-  );
-
-  // A tool call and its result are two messages apart in a transcript — the
-  // assistant's `tool_use`, then the user-role carrier answering it — so the
-  // results are collected once, keyed on the id both blocks publish, and read
-  // back where the call renders. This walks the *unfiltered* list on purpose:
-  // the carriers holding the results are exactly what the filter above drops.
-  const tools = useMemo(() => {
-    const byId: Record<string, ToolState> = {};
-    for (const m of detail.data?.messages ?? []) {
-      for (const b of m.blocks ?? []) {
-        if (b.type !== "tool_result" || !b.id) continue;
-        byId[b.id] = { result: b.text ?? "", isError: b.is_error ?? false };
-      }
-    }
-    return byId;
-  }, [detail.data]);
 
   const todos = detail.data?.todos ?? [];
   const subagents = detail.data?.subagents ?? [];
@@ -177,15 +135,14 @@ export function SessionDetail({
           <div className="transcript__inner">
             {todos.length > 0 && <TodoList todos={todos} />}
             {subagents.length > 0 && <SubagentList subagents={subagents} />}
-            {messages.length === 0 ? (
-              <div className="sess-note">
-                This transcript holds no conversation turns.
-              </div>
-            ) : (
-              messages.map((m, i) => (
-                <Message key={m.uuid || i} msg={m} tools={tools} />
-              ))
-            )}
+            <SessionTranscript
+              messages={detail.data.messages ?? []}
+              empty={
+                <div className="sess-note">
+                  This transcript holds no conversation turns.
+                </div>
+              }
+            />
           </div>
         </div>
       )}
@@ -200,96 +157,6 @@ const TABS: { value: Tab; label: string }[] = [
   { value: "transcript", label: "Transcript" },
   { value: "journey", label: "Journey" },
 ];
-
-/**
- * The harness's injection wrappers — internal/claudesessions'
- * injectedTurnMarkers, plus the skill-invocation preamble.
- */
-const INJECTED_MARKERS = [
-  "<task-notification>",
-  "<command-message>",
-  "<command-name>",
-  "<local-command-caveat>",
-  "<local-command-stdout>",
-  "<system-reminder>",
-  "Base directory for this skill:",
-];
-
-/**
- * The byline every assistant message carries.
- *
- * A constant, and deliberately not the session's `agent_name`: Claude Code's
- * `agent-name` event is the session's own name — what `/rename` sets — in every
- * version that has written one, so using it here bylined all 104 messages of a
- * renamed session with its 100-character title. `lib/sessionAgent.ts` carries
- * the evidence and the rest of the rule.
- */
-const ASSISTANT_LABEL = "Claude";
-
-function Message({
-  msg,
-  tools,
-}: {
-  msg: ClaudeMessage;
-  tools: Record<string, ToolState>;
-}) {
-  const isUser = msg.type === "user";
-  // Blocks replace `content` as the body, so a message whose only blocks are
-  // tool_results must fall back to it rather than rendering nothing: those are
-  // shown against the call each answers, not here. No transcript in the local
-  // corpus writes text beside a tool_result (0 of 10,568 carriers), but the
-  // alternative to this line is a silently empty bubble if one ever does.
-  const blocks = msg.blocks?.some((b) => b.type !== "tool_result")
-    ? msg.blocks
-    : null;
-
-  return (
-    <div className={`msg ${isUser ? "msg--user" : ""}`}>
-      <div
-        className={`avatar ${isUser ? "" : "avatar--purple"}`}
-        style={{ width: 28, height: 28 }}
-      >
-        {isUser ? <Icon name="users" size={13} /> : <Icon name="sparkle" size={13} />}
-      </div>
-      <div className="msg__body">
-        <div className="msg__head">
-          <span className="msg__author">
-            {isUser ? "You" : ASSISTANT_LABEL}
-          </span>
-          <span className="msg__time">{dateTime(msg.timestamp)}</span>
-        </div>
-        {blocks ? (
-          blocks.map((b, i) =>
-            b.type === "thinking" ? (
-              // Redacted thinking is an empty block plus a signature — there
-              // is nothing to open, so no box is drawn.
-              b.text ? <Thinking key={i} text={b.text} /> : null
-            ) : b.type === "tool_use" ? (
-              <ToolCall
-                key={b.id ?? i}
-                name={b.name ?? "tool"}
-                input={b.input}
-                // The result of this call, if the transcript carried one.
-                // `undefined` now means genuinely unanswered — an interrupted
-                // session — rather than "never looked".
-                state={b.id ? tools[b.id] : undefined}
-                live={false}
-              />
-            ) : b.type === "tool_result" ? (
-              // Rendered inside the call it answers, never on its own. Only a
-              // carrier holds one, and a carrier is not shown.
-              null
-            ) : (
-              <Markdown key={i} text={b.text ?? ""} />
-            )
-          )
-        ) : (
-          <Markdown text={msg.content ?? ""} />
-        )}
-      </div>
-    </div>
-  );
-}
 
 /**
  * The delegations this session spawned, as one collapsed block.

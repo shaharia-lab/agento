@@ -69,6 +69,29 @@ pub struct ChatSession {
     pub total_cache_read_tokens: i64,
     #[serde(skip_serializing_if = "is_false")]
     pub is_favorite: bool,
+    /// The Claude session this chat resumes, as the corpus keys one: the **pair**
+    /// `(session_id, project_path)`, never the id alone (#490, the #362 family).
+    ///
+    /// Appended after `is_favorite` rather than woven into the order above, and
+    /// all three are `omitempty`-shaped, so a chat that is not a continuation
+    /// puts exactly the bytes on the wire it always did.
+    ///
+    /// Deliberately **not** `sdk_session_id`, which `chat/persist.rs` rewrites
+    /// from whatever the stream reports: that column is a live pointer, this is a
+    /// record of what the conversation was opened from.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub continued_from_session_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub continued_from_project_path: String,
+    /// How many of the source transcript's normalized messages this chat
+    /// inherited — a **boundary, not a total**.
+    ///
+    /// The CLI appends a resumed turn to the *same* transcript file, so the
+    /// source grows past this point as soon as Agento takes a turn. The view
+    /// renders exactly this prefix and its own `chat_messages` after it; anything
+    /// that advanced this number would double-render the newest turn.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub continued_from_message_count: i64,
 }
 
 /// One message in a chat. Mirrors `storage.ChatMessage`.
@@ -145,7 +168,9 @@ const SESSION_COLUMNS: &str =
     "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
        settings_profile_id, total_input_tokens, total_output_tokens,
        total_cache_creation_tokens, total_cache_read_tokens,
-       created_at, updated_at, is_favorite, permission_mode
+       created_at, updated_at, is_favorite, permission_mode,
+       continued_from_session_id, continued_from_project_path,
+       continued_from_message_count
 FROM chat_sessions";
 
 /// Every chat session, most recently updated first, as the store orders them.
@@ -220,6 +245,9 @@ fn scan_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
         total_cache_creation_tokens: row.get(9)?,
         total_cache_read_tokens: row.get(10)?,
         is_favorite: row.get(13)?,
+        continued_from_session_id: row.get(15)?,
+        continued_from_project_path: row.get(16)?,
+        continued_from_message_count: row.get(17)?,
     })
 }
 
@@ -537,6 +565,11 @@ pub(super) fn insert_session(
         total_cache_creation_tokens: 0,
         total_cache_read_tokens: 0,
         is_favorite: false,
+        // A freshly inserted row is not a continuation. `continue_chat.rs`
+        // records the source in the same transaction, immediately after this.
+        continued_from_session_id: String::new(),
+        continued_from_project_path: String::new(),
+        continued_from_message_count: 0,
     })
 }
 
@@ -684,7 +717,9 @@ fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSes
         "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
                 settings_profile_id, total_input_tokens, total_output_tokens,
                 total_cache_creation_tokens, total_cache_read_tokens, is_favorite,
-                created_at, updated_at, permission_mode
+                created_at, updated_at, permission_mode,
+                continued_from_session_id, continued_from_project_path,
+                continued_from_message_count
          FROM chat_sessions WHERE id = ?1",
         [id],
         |row| {
@@ -704,6 +739,9 @@ fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSes
                 is_favorite: row.get(11)?,
                 created_at: super::gotime::from_sql_text(&row.get::<_, String>(12)?, 12)?,
                 updated_at: super::gotime::from_sql_text(&row.get::<_, String>(13)?, 13)?,
+                continued_from_session_id: row.get(15)?,
+                continued_from_project_path: row.get(16)?,
+                continued_from_message_count: row.get(17)?,
             })
         },
     )
@@ -738,7 +776,10 @@ mod tests {
             created_at                  DATETIME NOT NULL,
             updated_at                  DATETIME NOT NULL,
             is_favorite                 INTEGER NOT NULL DEFAULT 0,
-            permission_mode             TEXT NOT NULL DEFAULT ''
+            permission_mode             TEXT NOT NULL DEFAULT '',
+            continued_from_session_id   TEXT NOT NULL DEFAULT '',
+            continued_from_project_path TEXT NOT NULL DEFAULT '',
+            continued_from_message_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE chat_messages (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1121,6 +1162,69 @@ mod tests {
         // The rename survived the second patch — the handler writes the whole
         // row back, so a lost read would silently revert it.
         assert_eq!(session.title, "Renamed");
+    }
+
+    /// `PATCH` is the **second** reader of the `continued_from_*` columns
+    /// (#490), and it is not the one `continue_chat.rs`'s read-path test covers.
+    ///
+    /// `get_session_tx` is a differently ordered `SELECT` from `SESSION_COLUMNS`
+    /// — `is_favorite` sits at index 11 there and 13 here — and both address the
+    /// three new columns positionally at 15/16/17. So a swapped index compiles,
+    /// passes every column-level assertion, and ships a `PATCH` response whose
+    /// `continued_from_session_id` is the project path. The two readers need two
+    /// tests for the same reason they have two orderings.
+    ///
+    /// The row is seeded with SQL rather than through `continue_session`, which
+    /// would need a transcript on disk: what is under test is the decoder, and a
+    /// literal row states exactly which value belongs in which field.
+    #[test]
+    fn a_patch_carries_the_continuation_fields_back() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE chat_sessions
+                    SET continued_from_session_id = 'src-session',
+                        continued_from_project_path = '/src/project',
+                        continued_from_message_count = 42
+                  WHERE id = ?1",
+                [&id],
+            )
+            .expect("seed a continuation");
+
+        let answer = patch(file.path(), &id, br#"{"is_favorite":true}"#).expect("patch");
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+
+        assert!(
+            body.contains(r#""continued_from_session_id":"src-session""#),
+            "the source session must survive the patch response: {body}"
+        );
+        assert!(
+            body.contains(r#""continued_from_project_path":"/src/project""#),
+            "…and so must the project path, which is half the key: {body}"
+        );
+        assert!(
+            body.contains(r#""continued_from_message_count":42"#),
+            "…and the boundary, which is what stops a double render: {body}"
+        );
+    }
+
+    /// A chat that is not a continuation puts none of the three on the wire, so
+    /// every response written before migration 37 is byte-identical.
+    #[test]
+    fn an_ordinary_chat_carries_no_continuation_keys() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+
+        let answer = patch(file.path(), &id, br#"{"is_favorite":true}"#).expect("patch");
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert!(!body.contains("continued_from"), "{body}");
+
+        let detail = get(file.path(), &id).expect("get").expect("the chat");
+        let encoded = encoded(&detail);
+        assert!(!encoded.contains("continued_from"), "{encoded}");
     }
 
     /// Every one of these is a 400, not a 422: the checks live in the handler,
