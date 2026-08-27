@@ -436,6 +436,25 @@ pub fn setup(
     }
 }
 
+/// Whether [`setup`] would accept this cron expression — the save-time check
+/// behind `POST`/`PUT /api/tasks` (#330).
+///
+/// It is a thin wrapper over [`setup`] rather than its own parse, and that is
+/// the whole point: a validator with a second parser is a validator that can
+/// refuse an expression the scheduler would have run, or accept one it will
+/// not. The `JobSchedule` is discarded because the caller is a write handler
+/// with no timer to install — validation happens before the row exists, so
+/// there is nothing to schedule yet.
+///
+/// The two errors it can answer are different mistakes and the caller reports
+/// them differently: [`ScheduleError::CronParse`] is an expression robfig's
+/// dialect cannot read at all (`CRON_TZ=UTC` with nothing after the prefix,
+/// a six-field seconds spec), while [`ScheduleError::CronInvalid`] parses and
+/// then never fires inside the five-year search (`0 0 30 2 *`).
+pub fn validate_cron(expr: &str, loc: Tz, now: DateTime<Utc>) -> Result<(), ScheduleError> {
+    setup(&JobDefinition::Cron(expr.to_string()), loc, now).map(|_| ())
+}
+
 impl JobSchedule {
     /// `jobSchedule.next(lastRun)`. The zero `Fire` in and out is Go's zero
     /// time, which is how an exhausted schedule answers — and feeding it back

@@ -1025,6 +1025,114 @@ mod tests {
         );
     }
 
+    /// #330. Before this check the expression was inspected only at *schedule*
+    /// time, after the row was committed — so every one of these answered 201
+    /// and left an `active` task with no timer and no `next_run_at`, which is
+    /// indistinguishable from a task that was simply never due.
+    #[test]
+    fn an_unusable_cron_expression_is_refused_at_save_time() {
+        let file = migrated();
+        let unparseable = r#"validation error for "schedule_config.expression": expression is not a valid cron schedule"#;
+        let cases = [
+            // A timezone prefix with nothing after it — the shape the issue is
+            // named for, and the one a user reaches by pasting the first line
+            // of a crontab example and forgetting the schedule.
+            ("CRON_TZ=UTC", unparseable),
+            ("TZ=", unparseable),
+            ("CRON_TZ=", unparseable),
+            ("TZ=Europe/Berlin", unparseable),
+            // Not a prefix problem at all: too few fields.
+            ("0 2 * *", unparseable),
+            // Parses, and then never fires: February has no 30th, so the
+            // five-year search inside `setup` comes back empty. A *different*
+            // mistake from a typo, and it says so.
+            (
+                "0 0 30 2 *",
+                r#"validation error for "schedule_config.expression": expression is a valid cron schedule but will never fire"#,
+            ),
+        ];
+        for (expr, want) in cases {
+            let body = format!(
+                r#"{{"name":"n","prompt":"p","schedule_type":"cron",
+                    "schedule_config":{{"expression":{}}}}}"#,
+                serde_json::to_string(expr).expect("encode")
+            );
+            let err = create_task(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), want, "for {expr:?}");
+            assert_eq!(
+                err.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "for {expr:?}"
+            );
+        }
+        assert!(
+            list_tasks(file.path()).expect("list").is_empty(),
+            "a refused cron expression stores no row"
+        );
+    }
+
+    /// The other half of the same check, and the one that matters more: the
+    /// validator delegates to the scheduler's own `setup`, so anything the
+    /// scheduler would have run has to survive the write path untouched.
+    #[test]
+    fn every_cron_expression_the_scheduler_accepts_still_saves() {
+        for expr in [
+            "@daily",
+            "@hourly",
+            "@every 1h30m",
+            "CRON_TZ=Local 0 9 * * *",
+            "CRON_TZ=Europe/Berlin 0 9 * * *",
+            "0 2 * * *",
+            "*/30 * * * *",
+            "0 0 29 2 *", // a leap day: rare, but it does fire
+        ] {
+            let file = migrated();
+            let body = format!(
+                r#"{{"name":"n","prompt":"p","schedule_type":"cron",
+                    "schedule_config":{{"expression":{}}}}}"#,
+                serde_json::to_string(expr).expect("encode")
+            );
+            let task = created(&file, &body);
+            assert_eq!(task.schedule_config.expression, expr);
+            assert_eq!(task.status, "active");
+        }
+    }
+
+    /// `update_task` shares `validate_task` but has its own handler, so a test
+    /// that only exercised create would pass against half a fix — and here the
+    /// stakes are higher, because a refusal that leaked through would overwrite
+    /// a *working* schedule with one that never fires.
+    #[test]
+    fn the_update_path_refuses_an_unusable_cron_expression_and_keeps_the_stored_row() {
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"n","prompt":"p","schedule_type":"cron",
+                "schedule_config":{"expression":"0 2 * * *"}}"#,
+        );
+
+        let err = update_task(
+            file.path(),
+            &task.id,
+            br#"{"name":"renamed","prompt":"p","schedule_type":"cron",
+                 "schedule_config":{"expression":"CRON_TZ=UTC"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message(),
+            r#"validation error for "schedule_config.expression": expression is not a valid cron schedule"#
+        );
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // The refusal happens inside the transaction, before `update_task_in`,
+        // so not one column moved — including the name the same body renamed.
+        let stored = get_task(file.path(), &task.id)
+            .expect("read")
+            .expect("still there");
+        assert_eq!(stored.name, "n");
+        assert_eq!(stored.schedule_config.expression, "0 2 * * *");
+    }
+
     #[test]
     fn a_negative_timeout_is_rejected_but_zero_is_defaulted() {
         // The message says "between 1 and 240" while the check admits 0 — Go's
@@ -1642,11 +1750,56 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
                 "at least one of every_minutes, every_hours, or every_days is required for interval schedules",
             ))
         }
-        "cron" if cfg.expression.is_empty() => {
-            return Err(WriteError::validation(
-                "schedule_config.expression",
-                "expression is required for cron schedules",
-            ))
+        "cron" => {
+            if cfg.expression.is_empty() {
+                return Err(WriteError::validation(
+                    "schedule_config.expression",
+                    "expression is required for cron schedules",
+                ));
+            }
+            // #330: the expression is checked *here*, not at schedule time.
+            // `create_task` commits the row and only then calls
+            // `schedule_task`, whose failure is a log line — so before this
+            // check an unusable expression produced a 201, an `active` task,
+            // no timer and no `next_run_at`, forever, with the reconcile sweep
+            // failing on it identically every minute. A validation error is
+            // the only place the user can be told.
+            //
+            // The location is the scheduler's own, so a `CRON_TZ=Local` prefix
+            // resolves at save time to what it will resolve to at run time.
+            let loc = super::schedule::runtime::local_tz();
+            let now = chrono::Utc::now();
+            if let Err(err) = super::schedule::validate_cron(&cfg.expression, loc, now) {
+                // Two different mistakes, so two different sentences: one is a
+                // typo, the other is a date that does not exist.
+                //
+                // Both arms are named. `setup` on a `JobDefinition::Cron` can
+                // reach exactly these two of `ScheduleError`'s eight — the
+                // other six belong to the one-time, duration and daily job
+                // types — so the wildcard is unreachable rather than a default,
+                // and it is spelled `unreachable-ish` on purpose: under a bare
+                // `_ =>` a variant added later would silently inherit the
+                // *parse* wording and every test would stay green.
+                let message = match err {
+                    super::schedule::ScheduleError::CronParse => {
+                        "expression is not a valid cron schedule"
+                    }
+                    super::schedule::ScheduleError::CronInvalid => {
+                        "expression is a valid cron schedule but will never fire"
+                    }
+                    other => {
+                        log::warn!(
+                            "cron validation got an unexpected schedule error: {}",
+                            other.class()
+                        );
+                        "expression is not a valid cron schedule"
+                    }
+                };
+                return Err(WriteError::validation(
+                    "schedule_config.expression",
+                    message,
+                ));
+            }
         }
         _ => {}
     }
