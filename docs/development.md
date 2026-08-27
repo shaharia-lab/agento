@@ -357,9 +357,13 @@ Three parts of that line are load-bearing:
   here only because ferrox is our own repository and its README documents this
   tag as the reference point.
 
-**Open, and due before the first release that ships the gateway:** whether to
-publish `ferrox-providers` to crates.io rather than depending on it by git —
-[#453](https://github.com/shaharia-lab/agento/issues/453).
+**Settled in [#453](https://github.com/shaharia-lab/agento/issues/453): the tag
+stays and crates.io is declined for now.** `Cargo.lock` records the resolved
+commit, so a moved tag changes what a *fresh* resolve picks and nothing that is
+already checked out or already released. Publishing would buy an immutable
+registry artifact at the cost of a release process in a repository we own and
+are the only consumer of. Revisit if `ferrox-providers` gains a consumer outside
+this app.
 
 Two more things are copied rather than imported, and both are deliberate:
 `is_retryable` / `should_failover` (`gateway/dispatch.rs`) live in ferrox's
