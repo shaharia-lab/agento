@@ -27,7 +27,10 @@
 //! `claude_cache_metadata.search_index_version` a dead column, kept because the
 //! migrations are append-only. Migration **37** is the seventh: the three
 //! `chat_sessions.continued_from_*` columns that record what a chat resumes and
-//! where its inherited history ends (#490). Same terms every time — authored,
+//! where its inherited history ends (#490). Migration **38** is the eighth:
+//! `user_settings.claude_executable_path`, the in-product escape hatch for when
+//! Claude Code CLI detection cannot find an install (#503).
+//! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
 //! encoders rewrites Go's `>` escaping across the frozen entries and that is the
@@ -258,8 +261,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 37, "expected 37 migrations");
-        assert_eq!(expected_version(), 37);
+        assert_eq!(all.len(), 38, "expected 38 migrations");
+        assert_eq!(expected_version(), 38);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -353,7 +356,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 37);
+        assert_eq!(current_version(&conn).expect("version"), 38);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -392,7 +395,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 37);
+        assert_eq!(current_version(&conn).expect("version"), 38);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -500,7 +503,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 37);
+        assert_eq!(current_version(&conn).expect("version"), 38);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -509,7 +512,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 37);
+        assert_eq!(recorded, 38);
     }
 
     #[test]

@@ -416,7 +416,8 @@ mod tests {
             hidden_projects            TEXT    NOT NULL DEFAULT '[]',
             idle_gap_threshold_minutes INTEGER NOT NULL DEFAULT 0,
             claude_config_dir          TEXT    NOT NULL DEFAULT '',
-            claude_config_dirs         TEXT    NOT NULL DEFAULT '[]'
+            claude_config_dirs         TEXT    NOT NULL DEFAULT '[]',
+            claude_executable_path     TEXT    NOT NULL DEFAULT ''
         );";
 
     /// A database on disk, since both reads take a path and open their own

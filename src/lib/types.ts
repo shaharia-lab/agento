@@ -237,6 +237,8 @@ export interface UserSettings {
   idle_gap_threshold_minutes: number;
   claude_config_dir: string;
   claude_config_dirs: string[] | null;
+  /** An explicit path to the Claude Code CLI. Empty means "detect it" (#503). */
+  claude_executable_path: string;
 }
 
 /**

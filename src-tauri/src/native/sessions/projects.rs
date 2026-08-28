@@ -143,7 +143,8 @@ mod tests {
                 appearance_font_family TEXT NOT NULL DEFAULT '', notification_settings TEXT NOT NULL DEFAULT '{}',
                 event_bus_worker_pool_size INTEGER NOT NULL DEFAULT 3, public_url TEXT NOT NULL DEFAULT '',
                 hidden_projects TEXT NOT NULL DEFAULT '[]', idle_gap_threshold_minutes INTEGER NOT NULL DEFAULT 0,
-                claude_config_dir TEXT NOT NULL DEFAULT '', claude_config_dirs TEXT NOT NULL DEFAULT '[]');",
+                claude_config_dir TEXT NOT NULL DEFAULT '', claude_config_dirs TEXT NOT NULL DEFAULT '[]',
+                claude_executable_path TEXT NOT NULL DEFAULT '');",
         )
         .expect("schema");
         // The config dir under test is an *extra* dir; the default one is

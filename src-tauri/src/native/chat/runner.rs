@@ -853,21 +853,20 @@ fn profile_file_path_in(config_dir: &str, index_dir: &str, profile_id: &str) -> 
 /// Which `claude` binary to spawn.
 ///
 /// The SDK defaults to the bare name resolved on `PATH`, which is exactly what
-/// the desktop app cannot rely on: a GUI process inherits a minimal `PATH`, and
-/// `find_claude_cli` exists precisely because of that — it is what the startup
-/// banner already uses to tell the user whether the CLI is installed. Spawning
-/// with the bare name while the banner says "found" would be the two disagreeing.
+/// the desktop app cannot rely on: a GUI process inherits a minimal `PATH`, so
+/// the bare name fails to resolve for the very same reason detection would have
+/// (#503). [`crate::claude_cli`] is that resolution, and it is **the same one
+/// the startup banner reports** — a banner saying "found" over a spawn that
+/// cannot find it is the shape of the bug that module exists for.
 ///
-/// `AGENTO_CLAUDE_EXECUTABLE` overrides both. It is a real need — a second
-/// install, or a wrapper script — and it is also how the turn tests point the
-/// runner at a scripted fake CLI instead of a real one.
+/// `AGENTO_CLAUDE_EXECUTABLE` overrides everything, there as here. It is a real
+/// need — a second install, or a wrapper script — and it is also how the turn
+/// tests point the runner at a scripted fake CLI instead of a real one.
+///
+/// It delegates rather than reimplementing the order, so there is nothing here
+/// that can drift from what `host_info` reports.
 fn claude_executable() -> String {
-    if let Ok(explicit) = std::env::var("AGENTO_CLAUDE_EXECUTABLE") {
-        if !explicit.is_empty() {
-            return explicit;
-        }
-    }
-    crate::find_claude_cli().unwrap_or_else(|| "claude".to_string())
+    crate::claude_cli::executable()
 }
 
 /// The two template variables Agento substitutes into a system prompt.
