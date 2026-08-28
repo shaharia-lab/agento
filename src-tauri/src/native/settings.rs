@@ -1742,6 +1742,140 @@ mod tests {
         assert_eq!(body, "{\"error\":\"invalid JSON body\"}\n");
     }
 
+    /// The `claude_executable_path` override's own refusals (#503).
+    ///
+    /// Its whole job is being *spawned*, so a relative path (which would resolve
+    /// against whatever working directory a GUI launch happens to have), a
+    /// missing file, a directory and a file with no executable bit are each a
+    /// 400 in the same dialect the config dir uses. A blank value is valid and
+    /// means "detect it".
+    #[test]
+    fn a_claude_executable_path_that_cannot_be_spawned_is_a_400() {
+        let _env = crate::paths::tests::env_lock();
+        if !nothing_is_locked() {
+            return;
+        }
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let missing = scratch.path().join("nope");
+        let a_dir = scratch.path().join("adir");
+        std::fs::create_dir(&a_dir).expect("dir");
+        let not_executable = scratch.path().join("plain");
+        std::fs::write(&not_executable, "#!/bin/sh\n").expect("file");
+
+        for (body, expected) in [
+            (
+                r#"{"claude_executable_path":"bin/claude"}"#.to_string(),
+                "claude executable path must be an absolute path, got \\\"bin/claude\\\""
+                    .to_string(),
+            ),
+            (
+                format!(r#"{{"claude_executable_path":"{}"}}"#, missing.display()),
+                format!(
+                    "claude executable \\\"{}\\\" does not exist",
+                    missing.display()
+                ),
+            ),
+            (
+                format!(r#"{{"claude_executable_path":"{}"}}"#, a_dir.display()),
+                format!(
+                    "claude executable \\\"{}\\\" is not a file",
+                    a_dir.display()
+                ),
+            ),
+        ] {
+            let file = migrated_db();
+            let (status, answer) = put(file.path(), &body);
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(answer, format!("{{\"error\":\"{expected}\"}}\n"), "{body}");
+        }
+
+        // The executable bit is a Unix concept; Windows has none, and refusing a
+        // path for want of a bit the filesystem does not carry would make the
+        // field unusable there.
+        #[cfg(unix)]
+        {
+            let file = migrated_db();
+            let (status, answer) = put(
+                file.path(),
+                &format!(
+                    r#"{{"claude_executable_path":"{}"}}"#,
+                    not_executable.display()
+                ),
+            );
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            assert!(answer.contains("is not executable"), "{answer}");
+
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            let file = migrated_db();
+            let (status, answer) = put(
+                file.path(),
+                &format!(
+                    r#"{{"claude_executable_path":"{}"}}"#,
+                    not_executable.display()
+                ),
+            );
+            assert_eq!(status, axum::http::StatusCode::OK, "{answer}");
+            assert!(
+                answer.contains(&format!(
+                    r#""claude_executable_path":"{}""#,
+                    not_executable.display()
+                )),
+                "the saved path is not in the answer: {answer}"
+            );
+        }
+    }
+
+    /// `AGENTO_CLAUDE_EXECUTABLE` locks the field, exactly as
+    /// `CLAUDE_CONFIG_DIR` locks `claude_config_dir` (#503) — so the form can
+    /// disable the input and say which variable to change, and a `PUT` sending
+    /// something else is refused rather than silently ignored.
+    ///
+    /// The blank case is the one that is easy to get wrong: the settings form
+    /// posts every tab back, so a client that does not know about this field
+    /// must be *pinned* rather than read as asking to clear it.
+    #[test]
+    fn the_claude_executable_path_is_locked_by_its_environment_variable() {
+        let _env = crate::paths::tests::env_lock();
+        let _var = EnvVar::set("AGENTO_CLAUDE_EXECUTABLE", "/opt/wrapper/claude");
+
+        assert_eq!(
+            locked_fields()
+                .get("claude_executable_path")
+                .map(String::as_str),
+            Some("AGENTO_CLAUDE_EXECUTABLE")
+        );
+        // The environment's value is what a read answers, whatever is stored.
+        let resolved = resolve(UserSettings {
+            claude_executable_path: "/stored/claude".into(),
+            ..UserSettings::default()
+        });
+        assert_eq!(
+            resolved.settings.claude_executable_path,
+            "/opt/wrapper/claude"
+        );
+
+        let file = migrated_db();
+        let (status, answer) = put(
+            file.path(),
+            r#"{"claude_executable_path":"/somewhere/else/claude"}"#,
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            answer,
+            "{\"error\":\"claude_executable_path is locked by environment variable \
+             AGENTO_CLAUDE_EXECUTABLE\"}\n"
+        );
+
+        let (status, answer) = put(file.path(), r#"{"claude_executable_path":""}"#);
+        assert_eq!(status, axum::http::StatusCode::OK, "{answer}");
+        assert!(
+            answer.contains(r#""claude_executable_path":"/opt/wrapper/claude""#),
+            "a blank value must be pinned, not read as a request to clear: {answer}"
+        );
+    }
+
     /// Every rejection is a **400** carrying the error's own text — not the 409
     /// the monitoring path answers for an env-locked write, and not the 422 the
     /// service layer's `ValidationError` produces. `SettingsManager` returns

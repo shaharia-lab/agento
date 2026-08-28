@@ -237,9 +237,12 @@ pub fn resolve(stored_override: Option<&str>) -> Option<Resolution> {
         }
     }
 
-    // 5. The known install locations.
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    for candidate in candidates(Path::new(&home)) {
+    // 5. The known install locations. `home` is an `Option`, deliberately: the
+    //    absolute entries (Homebrew, `/usr/local/bin`) do not depend on it, and
+    //    an early `?` here would be the same defect as the one fixed above one
+    //    variable along — no HOME, no scan at all.
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    for candidate in candidates(home.as_ref().map(Path::new)) {
         if verify(&candidate) {
             return Some(Resolution {
                 path: candidate.to_string_lossy().into_owned(),
@@ -256,10 +259,16 @@ pub fn resolve(stored_override: Option<&str>) -> Option<Resolution> {
 /// likely to be missing from its `PATH` while the user's terminal has them.
 ///
 /// The globbed entries (`~/.nvm/versions/node/*/bin`, fnm's multishell dirs) are
-/// listed newest-first by directory name, so a machine with several Node
-/// versions installed prefers the most recent — which is the one the user's
-/// shell almost certainly selects.
-fn candidates(home: &Path) -> Vec<PathBuf> {
+/// listed by directory name **descending**, which puts the newest version first
+/// for the usual `vNN.NN.NN` spellings. It is a lexical sort, not a semver one,
+/// so `v9` sorts above `v10` — which decides only *which* of several installs
+/// wins, never whether one is found, and every hit is `--version`-verified
+/// either way. A semver parser here would be a second thing to be wrong about
+/// for no better outcome.
+///
+/// `home` is optional because the absolute entries do not need it: an
+/// environment with no `HOME` still gets Homebrew and `/usr/local/bin` checked.
+fn candidates(home: Option<&Path>) -> Vec<PathBuf> {
     let name = cli_name();
     let mut dirs: Vec<PathBuf> = Vec::new();
 
@@ -268,6 +277,10 @@ fn candidates(home: &Path) -> Vec<PathBuf> {
     for abs in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
         dirs.push(PathBuf::from(abs));
     }
+
+    let Some(home) = home else {
+        return dirs.into_iter().map(|d| d.join(name)).collect();
+    };
 
     for rel in [
         // The native installer.
@@ -601,7 +614,7 @@ mod tests {
     #[test]
     fn the_candidate_list_covers_every_documented_install_location() {
         let home = Path::new("/home/u");
-        let found: Vec<String> = candidates(home)
+        let found: Vec<String> = candidates(Some(home))
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
@@ -638,7 +651,7 @@ mod tests {
         for version in ["v18.19.0", "v20.11.0", "v22.11.0"] {
             std::fs::create_dir_all(nvm.join(version).join("bin")).expect("mkdir");
         }
-        let found: Vec<String> = candidates(tmp.path())
+        let found: Vec<String> = candidates(Some(tmp.path()))
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .filter(|p| p.contains(".nvm"))
@@ -668,6 +681,27 @@ mod tests {
     #[test]
     fn a_missing_version_manager_directory_contributes_nothing() {
         assert!(newest_first(Path::new("/nonexistent/nvm/versions/node"), "bin").is_empty());
+    }
+
+    /// No `HOME` must not mean no scan. The reported function returned `None`
+    /// the moment `PATH` was unset, and writing the same `?` one variable along
+    /// would reintroduce it in the branch that matters most on macOS — where
+    /// Homebrew and `/usr/local/bin` are exactly what launchd's `PATH` omits.
+    #[test]
+    fn the_absolute_locations_are_scanned_even_with_no_home() {
+        let name = cli_name();
+        let found: Vec<String> = candidates(None)
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                format!("/opt/homebrew/bin/{name}"),
+                format!("/usr/local/bin/{name}"),
+                format!("/opt/local/bin/{name}"),
+            ]
+        );
     }
 
     #[test]
