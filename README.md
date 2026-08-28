@@ -62,8 +62,8 @@ Anthropic API key to enter; the app tells you on launch if the CLI is missing.
 
 > [!IMPORTANT]
 > **macOS:** the app is ad-hoc signed, not notarised. The first launch needs one trip to
-> **System Settings → Privacy & Security → Open Anyway**; updates the app installs itself
-> never ask again.
+> **System Settings → Privacy & Security → Open Anyway**, or one `xattr` command; updates
+> the app installs itself never ask again.
 
 **In-app** means Agento downloads, verifies and installs the next version itself. `.deb`
 and `.rpm` are owned by your package manager, so Agento only tells you when one exists.
@@ -77,7 +77,16 @@ Agento's own update key.
 
 Drag **Agento** into Applications and open it. macOS blocks it once, because the app is
 not signed with an Apple Developer certificate: go to **System Settings → Privacy &
-Security**, scroll down, click **Open Anyway**. Updates installed by the app never ask again.
+Security**, scroll down, click **Open Anyway**.
+
+If the warning only offers **Move to Trash** and **Done**, and no **Open Anyway** line
+appears in Privacy & Security, remove the quarantine flag instead:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Agento.app
+```
+
+Either way you do it once. Updates installed by the app never ask again.
 
 </details>
 
