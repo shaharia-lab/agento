@@ -107,14 +107,22 @@ pub struct Resolution {
 /// How long the login-shell probe and each `--version` check may take.
 ///
 /// `std::process` has no native timeout, so both are bounded by
-/// [`wait_bounded`]. The probe runs the user's own rc files, which can be slow
-/// (a `nvm use` on a cold cache) but must never be able to hold up a launch: the
-/// budget is generous enough for an ordinary shell and short enough that a
-/// pathological one degrades to "found by a later rule" rather than to a frozen
-/// window.
+/// [`wait_bounded`]. **These two numbers are the worst case a user waits for a
+/// window**, because [`prime`] runs inside `lib.rs`'s startup block — so they
+/// are as small as an honest answer allows rather than as large as patience
+/// allows. An ordinary login shell answers in 100–500 ms and a real
+/// `claude --version` in well under a second; 3 s and 2 s leave room for a
+/// cold `nvm use` while capping a shell whose rc file is waiting on input at
+/// five seconds total, after which resolution simply continues down the order.
+///
+/// The alternative — priming on a background thread — was rejected: `cached()`
+/// would then race the spawned resolution, and the loser fills the `OnceLock`
+/// *without* the stored override, so a user's configured path would be silently
+/// ignored on some launches and not others. Deterministic and bounded beats
+/// fast and occasionally wrong.
 #[cfg(unix)]
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The binary's name on this platform.
 fn cli_name() -> &'static str {

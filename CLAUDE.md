@@ -4173,11 +4173,14 @@ answer is cached in a `OnceLock` for the process.
   Rules 1–2 are taken on trust: a wrapper script is a documented reason to set
   the variable, and refusing it would remove the escape hatch the setting exists
   to be.
-- **Both subprocesses are bounded and neither is on a request path.** The probe
-  runs the user's own rc files, which can block; it is killed at its timeout and
-  resolution falls through, so a pathological shell degrades to "found by a
-  later rule", never to a window that does not open. Priming happens in setup,
-  below the migrations (the column is 38's) and above the proxy.
+- **Both subprocesses are bounded, and the bounds are a startup budget.**
+  Priming runs inside `lib.rs`'s setup block — below the migrations (the column
+  is 38's) and above the proxy — so 3 s for the probe and 2 s per `--version`
+  are *the worst case a user waits for a window*, not a generous ceiling. A
+  pathological shell degrades to "found by a later rule", never to a window that
+  does not open. Priming on a background thread was rejected: `cached()` would
+  race it, and the loser fills the `OnceLock` **without the stored override**,
+  so a configured path would be ignored on some launches and not others.
 - **Resolution is once per launch.** Saving the setting takes effect at the next
   start, which the Settings help says. Re-detecting live was considered and left
   out.
