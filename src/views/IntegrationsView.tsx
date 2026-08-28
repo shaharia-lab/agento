@@ -490,7 +490,43 @@ function ServiceEditor({
     <div>
       {provider.services.map((info) => {
         const svc = services[info.key] ?? { enabled: false, tools: [] };
-        const chosen = svc.tools ?? [];
+        const stored = svc.tools ?? [];
+        // What this service actually exposes today, which is not the same as
+        // what it stores (#501). Three shapes have to be translated:
+        //
+        // - **disabled** exposes nothing whatever its list says, so the boxes
+        //   read empty — otherwise a row saved as
+        //   `{enabled: false, tools: [...]}` shows ticks for tools no agent can
+        //   reach, and checking one more silently restores the rest.
+        // - **enabled with no list, and no sibling has one either** exposes
+        //   *every* tool of the group. Rendering that as nothing ticked is the
+        //   exact inverse of the truth, and it is the shape
+        //   `POST /api/integrations` and every pre-list row carry — so it is
+        //   what a user is most likely to be looking at.
+        // - **enabled with no list while a sibling has one** exposes
+        //   **nothing**, and this is the case that reads backwards. "Host
+        //   everything" is a property of `build_allowed_set`, which unions
+        //   *every* enabled service across the whole integration — not of one
+        //   group being empty. So a listless `gmail` beside a
+        //   `drive: ["list_files"]` matches no name in that union and hosts
+        //   zero tools. Ticking it here would not only misreport it: the union
+        //   is what makes unchecking one box *grant* the other two.
+        // Over the **stored** map, not `provider.services`: `build_allowed_set`
+        // unions `services.values()`, so a key outside this app's catalog — one
+        // `POST /api/integrations` accepted, since it validates no service
+        // names — contributes to the real union while a catalog walk cannot see
+        // it. Same answer for every catalog key, since an absent service
+        // contributes nothing either way.
+        const unionEmpty = Object.values(services).every(
+          (other) => !other?.enabled || !other.tools?.length,
+        );
+        const chosen = !svc.enabled
+          ? []
+          : stored.length
+            ? stored
+            : unionEmpty
+              ? info.tools.map((t) => t.name)
+              : [];
         return (
           <div
             key={info.key}
@@ -516,32 +552,45 @@ function ServiceEditor({
                 }
               />
             </div>
-            {svc.enabled && (
-              <div className="svcblock__tools">
-                {info.tools.map((t) => (
-                  <label className="svctool" key={t.name}>
-                    <Checkbox
-                      on={chosen.includes(t.name)}
-                      onChange={(on) =>
-                        onChange({
-                          ...services,
-                          [info.key]: {
-                            enabled: true,
-                            tools: on
-                              ? [...chosen, t.name]
-                              : chosen.filter((x) => x !== t.name),
-                          },
-                        })
-                      }
-                    />
-                    <span className="svctool__body">
-                      <span className="svctool__name">{t.name}</span>
-                      <span className="svctool__desc">{t.description}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            )}
+            {/* The checkboxes stay mounted when the service is off, and that is
+                not cosmetic (#501): unchecking the last tool now turns the
+                service off, so hiding them would make the state it lands in a
+                dead end — going from "only get_repo" to "only list_repos" would
+                mean re-enabling the service, which grants *every* tool. The
+                block is already greyed by `svcblock--off`. */}
+            <div className="svcblock__tools">
+              {info.tools.map((t) => (
+                <label className="svctool" key={t.name}>
+                  <Checkbox
+                    on={chosen.includes(t.name)}
+                    onChange={(on) => {
+                      const next = on
+                        ? [...chosen, t.name]
+                        : chosen.filter((x) => x !== t.name);
+                      onChange({
+                        ...services,
+                        // Unchecking the **last** tool turns the service off
+                        // rather than storing `{enabled: true, tools: []}`
+                        // (#501). The backend reads an empty tool list as
+                        // "host everything" — the semantics are ported and
+                        // pinned in all six integrations — so that shape means
+                        // the exact opposite of what the user just asked for,
+                        // and of what the copy above this editor promises.
+                        // Checking one is the way back on.
+                        [info.key]: {
+                          enabled: next.length > 0,
+                          tools: next,
+                        },
+                      });
+                    }}
+                  />
+                  <span className="svctool__body">
+                    <span className="svctool__name">{t.name}</span>
+                    <span className="svctool__desc">{t.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
           </div>
         );
       })}

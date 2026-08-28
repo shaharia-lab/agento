@@ -1517,6 +1517,65 @@ the union of *every enabled service's* `tools` list names it — **or when that
 union is empty**. So all-enabled-with-no-lists hosts all twenty, and one name
 anywhere narrows every service at once. Both halves are in the vectors.
 
+**That empty-union rule is kept, and #501 settled it rather than changing it.**
+It is ported, identical in all six integrations and asserted by each of their
+own suites, so an explicitly empty `tools` list still means *host everything*.
+What #501 closed is the two ways that read as the opposite of what the user
+asked for:
+
+- **`filter_config_tools` dropped a service that named no tools**, so an
+  integration row storing `{"enabled": true}` — what `POST /api/integrations`
+  accepts, and what every row written before the per-service lists carries —
+  hosted **zero** tools while `--allowedTools` still named them. A service with
+  no list of its own is now given the request **narrowed to its own tools**,
+  through the integration's `SERVICE_TOOLS` table.
+
+  **Handing it the whole request instead is unsound, and it is the obvious
+  thing to write.** The tempting argument — a name from another group is
+  rejected by the service gate anyway — is *nearly* true and fails exactly
+  where it matters: `build_allowed_set` unions **every** enabled service, so a
+  name injected by a listless service satisfies the `allowed` half for a
+  **sibling**, whose own gate passes because it is enabled too. A row of
+  `{"gmail":{"enabled":true},"drive":{"enabled":true,"tools":["list_files"]}}`
+  would then host `create_file` — a write tool the user's own Drive list
+  excludes — on an integration whose every tool result carries attacker-authored
+  third-party content. `SERVICE_TOOLS` is the `push` table as data, and each
+  integration's `the_service_table_matches_what_is_registered` derives the truth
+  from its own registration function (one service enabled at a time) rather than
+  transcribing it, so the two cannot drift.
+- **The Integrations UI could store `{"enabled": true, "tools": []}`** by
+  unchecking a service's last tool, which hosts every tool of that service —
+  the exact inverse of "Only the tools you leave on are exposed to agents".
+  `IntegrationsView.tsx` now turns the **service** off when its last tool goes,
+  so the copy is true of everything the app can store. The API can still store
+  that shape and it still hosts everything; refusing it would be a wire change
+  on a byte-exact endpoint — so the editor also has to *render* such a row
+  honestly, and that rule reads backwards twice over. A listless enabled
+  service shows every tool ticked **only when no sibling names one**: "host
+  everything" is a property of `build_allowed_set`'s union over the *whole
+  integration*, not of one group being empty, so a listless `gmail` beside a
+  `drive: ["list_files"]` hosts **nothing** and must show nothing. Getting that
+  half wrong is worse than a misdisplay — the union is what makes unchecking
+  one box in the ticked-by-default group *grant* the others. Pinned from the
+  backend side by `an_enabled_service_with_an_empty_list_still_hosts_everything`,
+  which carries the mixed row for this reason.
+
+**And a turn now says what it hosted.** `chat/runner.rs::report_hosted_tools`
+logs one `info` line per started MCP server naming the tools it registered, plus
+a `warn` per requested tool it did not — read off the handle
+(`InProcessMcpServer::tool_names`), not off what was asked for, because the two
+disagreeing *is* the defect. It stays a warning: `start_local_tools`' rule is
+that a missing tool is the kinder failure than a refused run. Before it, `claude:
+mcp "google-7": serving on http://…` was the whole record and a server hosting
+nothing printed it byte for byte like a healthy one.
+
+`src-tauri/tests/mcp_e2e_probe.rs` is the `#[ignore]`d suite that would have
+caught it: it drives the real CLI through **`runner::build_options`' own
+output** — not a hand-built command line, which is what makes it able to see an
+option-assembly defect at all — and asserts the tool was both *listed* (it
+appears in the CLI's `init` event) and *called*. `claude_mcp_live.rs` remains
+its sibling and stops at the handshake on purpose.
+
 **Four surfaces are pinned, not one.** `parity/github_vectors.json` is
 taken from the real Go server over its real MCP transport, against a fake GitHub
 that **records the request each tool built**: the hosted tool set, each

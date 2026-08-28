@@ -607,6 +607,7 @@ async fn start_integration_servers(
                     &spec.tools,
                 )
                 .await?;
+                report_hosted_tools(&spec.id, server.tool_names(), &spec.tools);
                 let registered = opts.with_mcp_server(&spec.id, server.config());
                 servers.push(server);
                 registered
@@ -660,12 +661,48 @@ async fn start_local_tools(
     let server = crate::native::tools::start_local_mcp_server()
         .await
         .map_err(|e| format!("starting local MCP server: {e}"))?;
+    report_hosted_tools(
+        crate::native::tools::LOCAL_MCP_SERVER_NAME,
+        server.tool_names(),
+        local,
+    );
     let opts = opts
         .with_mcp_server(crate::native::tools::LOCAL_MCP_SERVER_NAME, server.config())
         .map_err(|e| format!("registering the local MCP server: {e}"))?
         .with_strict_mcp_config();
     allowed.extend(crate::native::tools::allowed_tool_names(local.iter()));
     Ok((opts, Some(server)))
+}
+
+/// One line per MCP server a turn starts, naming what it registered — and a
+/// warning per requested tool it did not (#501).
+///
+/// This is the line that makes "the agent does not know about its tools"
+/// answerable from the log. Until it existed, `claude: mcp "google-7": serving
+/// on http://…` was the whole record, and a server hosting **zero** tools
+/// printed it byte for byte identically to one hosting eight: the handshake
+/// completes either way and `--allowedTools` names the tools regardless.
+///
+/// Both call sites pass the names the **handle** reports rather than the names
+/// they asked for, which is the point — the two disagreeing is exactly the
+/// defect this reports.
+///
+/// The mismatch is a `warn` and never a refusal. `start_local_tools`' header
+/// records why: an agent naming a tool that no longer exists gets a model that
+/// cannot call it rather than a turn that will not start, which is the kinder
+/// failure and is Go's. This makes it visible without making it fatal.
+///
+/// Follows `writes::service_log_convention` — `message key=value`, every string
+/// value `{:?}`, after the effect — with one departure it does not cover:
+/// the mismatch line is at `warn`, because the seam's own split puts failures
+/// there and a tool the model cannot reach is one.
+fn report_hosted_tools(server_key: &str, hosted: &[String], requested: &[String]) {
+    log::info!("mcp server started server={server_key:?} tools={hosted:?}");
+    for tool in requested {
+        if !hosted.iter().any(|name| name == tool) {
+            log::warn!("mcp tool not hosted server={server_key:?} tool={tool:?}");
+        }
+    }
 }
 
 fn capability_count(list: Option<&crate::native::gojson::GoList<String>>) -> usize {
@@ -1524,6 +1561,7 @@ mod tests {
     /// (`github-<id>`) must not appear anywhere on a tool.
     #[tokio::test]
     async fn a_github_agent_runs_natively_under_the_integration_id() {
+        crate::native::writes::testlog::install();
         let file = db_with_integration("gh-1", "github");
         let caps = caps_naming("gh-1", Some(vec!["get_repo".into()]));
 
@@ -1553,12 +1591,27 @@ mod tests {
         // `appendToolOpts` adds it whenever any MCP server is registered.
         assert!(opts.strict_mcp_config);
         assert_eq!(allowed, vec!["mcp__gh-1__get_repo".to_string()]);
+
+        // #501's line at the call site the bug was *reported* through. The
+        // local-tools tests cover the other one, and neither covers this,
+        // so the assertion lives here rather than in a third fixture.
+        let logged = crate::native::writes::testlog::matching(
+            r#"mcp server started server="gh-1" tools=["get_repo"]"#,
+        );
+        assert!(
+            !logged.is_empty(),
+            "an integration server logs what it hosts"
+        );
+        for line in &logged {
+            assert!(line.starts_with("INFO "), "a start logs at info: {line:?}");
+        }
     }
 
     /// Go appends a qualified name for whatever the agent asked for, registered
     /// or not — the same rule the local tools follow.
     #[tokio::test]
     async fn an_unhosted_tool_name_is_still_qualified() {
+        crate::native::writes::testlog::install();
         let file = db_with_integration("gh-1", "github");
         let caps = caps_naming("gh-1", Some(vec!["get_repo".into(), "gone".into()]));
         let plan = mcp_plan(Some(&caps), Some(file.path()), None)
@@ -1576,6 +1629,23 @@ mod tests {
                 "mcp__gh-1__get_repo".to_string(),
                 "mcp__gh-1__gone".to_string()
             ]
+        );
+
+        // …and #501's other line, on the integration path: the name travels
+        // anyway, and the log is the only thing that says it will not resolve.
+        let logged = crate::native::writes::testlog::matching(
+            r#"mcp tool not hosted server="gh-1" tool="gone""#,
+        );
+        assert!(!logged.is_empty(), "an unhosted integration tool warns");
+        for line in &logged {
+            assert!(line.starts_with("WARN "), "a mismatch warns: {line:?}");
+        }
+        assert!(
+            crate::native::writes::testlog::matching(
+                r#"mcp tool not hosted server="gh-1" tool="get_repo""#
+            )
+            .is_empty(),
+            "a tool the server does host must not warn"
         );
     }
 
@@ -1721,6 +1791,76 @@ mod tests {
         assert!(!opts.disallowed_tools.contains(&"Read".to_string()));
         assert!(opts.disallowed_tools.contains(&"Write".to_string()));
         assert_eq!(opts.disallowed_tools.len(), ALL_BUILT_IN_TOOLS.len() - 2);
+    }
+
+    /// #501: what a started server registered is on the record, and the names
+    /// come off the **handle** rather than off what was asked for.
+    ///
+    /// Driven through `build_options` rather than by calling
+    /// [`report_hosted_tools`] directly: the property is that the turn's own
+    /// assembly emits it, and a test that called the helper itself would pass
+    /// with both call sites deleted.
+    #[tokio::test]
+    async fn starting_a_server_for_a_turn_logs_the_tools_it_registered() {
+        crate::native::writes::testlog::install();
+        let spec = spec_for(Capabilities {
+            built_in: None,
+            local: Some(vec!["current_time".into()].into()),
+            mcp: None,
+        });
+        let (_opts, _servers) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+
+        let found = crate::native::writes::testlog::matching(
+            r#"mcp server started server="local-tools" tools=["current_time"]"#,
+        );
+        assert!(!found.is_empty(), "no line naming the registered tools");
+        for line in &found {
+            assert!(line.starts_with("INFO "), "a start logs at info: {line:?}");
+        }
+    }
+
+    /// The other half: a name in `--allowedTools` that the server does not host
+    /// is a `warn`, naming the server and the tool — and it is *only* a warn,
+    /// because `start_local_tools`' rule is that a missing tool is the kinder
+    /// failure.
+    ///
+    /// `"gone"` is the same fixture
+    /// [`built_ins_and_local_tools_share_one_allowlist_in_gos_order`] uses, and
+    /// that test asserts the qualified name still reaches the allowlist — so the
+    /// two together pin "reported, not refused".
+    #[tokio::test]
+    async fn a_requested_tool_the_server_does_not_host_logs_a_warning() {
+        crate::native::writes::testlog::install();
+        let spec = spec_for(Capabilities {
+            built_in: None,
+            local: Some(vec!["current_time".into(), "gone".into()].into()),
+            mcp: None,
+        });
+        let (opts, _servers) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+
+        let found = crate::native::writes::testlog::matching(
+            r#"mcp tool not hosted server="local-tools" tool="gone""#,
+        );
+        assert!(!found.is_empty(), "an unhosted tool goes unreported");
+        for line in &found {
+            assert!(line.starts_with("WARN "), "a mismatch warns: {line:?}");
+        }
+        assert!(
+            crate::native::writes::testlog::matching(
+                r#"mcp tool not hosted server="local-tools" tool="current_time""#
+            )
+            .is_empty(),
+            "a tool the server does host must not warn"
+        );
+        assert!(
+            opts.allowed_tools
+                .contains(&"mcp__local-tools__gone".to_string()),
+            "reported, not refused: the qualified name still travels"
+        );
     }
 
     /// No local tools means no listener and no MCP server — a port bound for an
