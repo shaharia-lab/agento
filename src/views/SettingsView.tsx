@@ -586,6 +586,19 @@ function UpdatesSection() {
   );
 }
 
+/**
+ * `HostInfo.claude_cli_source` in words. The wire values are the resolver's
+ * rule names (`native/../claude_cli.rs`), which are precise and mean nothing to
+ * a user staring at a path they did not expect.
+ */
+const CLI_SOURCE_LABEL: Record<string, string> = {
+  env: "from AGENTO_CLAUDE_EXECUTABLE",
+  setting: "the path set here",
+  "login-shell": "found by asking your login shell",
+  path: "found on PATH",
+  candidate: "found in a known install location",
+};
+
 function lockHelp(envVar: string): string {
   return `Locked by ${envVar}. Change the environment variable and restart Agento — saving a different value here is rejected.`;
 }
@@ -603,6 +616,8 @@ function ClaudePane({
 }) {
   const [newDir, setNewDir] = useState("");
   const runLock = locked.claude_config_dir;
+  const cliLock = locked.claude_executable_path;
+  const host = useHostInfo();
 
   // Older servers do not expose this route at all; a 404 means "no
   // suggestions", not an error worth showing.
@@ -629,6 +644,49 @@ function ClaudePane({
 
   return (
     <>
+      {/*
+        The escape hatch for #503. Detection asks the login shell, the PATH and
+        a list of known install locations, and a GUI app sees none of the user's
+        shell environment — so it can miss a real install, and when it does this
+        field is the only way back that does not involve `launchctl setenv`.
+      */}
+      <div className="formsec">
+        <div className="formsec__title">Claude Code CLI</div>
+        <FormRow
+          label="Executable"
+          help={
+            cliLock
+              ? lockHelp(cliLock)
+              : "Leave blank to detect it automatically. Set it if Agento cannot find your install — paste what `which claude` prints in your terminal. Takes effect after a restart."
+          }
+        >
+          <label className={`field ${cliLock ? "field--locked" : ""}`}>
+            <input
+              value={user.claude_executable_path ?? ""}
+              onChange={(e) => onPatch({ claude_executable_path: e.target.value })}
+              placeholder={host?.claude_cli ?? "/usr/local/bin/claude"}
+              className="mono"
+              disabled={!!cliLock}
+              spellCheck={false}
+            />
+          </label>
+          {/*
+            Where it was found, not just that it was: "we found a claude, here"
+            is the whole diagnostic when the one detected is not the one the
+            user expected.
+          */}
+          <span style={{ fontSize: "var(--text-sm)", color: "var(--fg-tertiary)" }}>
+            {host === undefined
+              ? "Checking…"
+              : host.claude_cli === null
+                ? "Not found. Agents cannot run until this is set or the CLI is installed."
+                : `Detected at ${host.claude_cli} (${CLI_SOURCE_LABEL[host.claude_cli_source ?? ""] ?? host.claude_cli_source})`}
+          </span>
+        </FormRow>
+      </div>
+
+      <div className="divider" />
+
       <div className="formsec">
         <div className="formsec__title">Config directory</div>
         <FormRow

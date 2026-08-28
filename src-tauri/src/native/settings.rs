@@ -119,6 +119,16 @@ pub struct UserSettings {
     #[serde(deserialize_with = "null_is_zero_value")]
     pub claude_config_dir: String,
     pub claude_config_dirs: Option<Vec<String>>,
+    /// Where the Claude Code CLI is, when detection cannot find it (#503).
+    ///
+    /// Appended **last** on purpose: this field has no Go counterpart, and
+    /// every other one here is in the order `config.UserSettings` declares
+    /// them. Adding it at the end is the one position that moves no existing
+    /// byte on the wire.
+    ///
+    /// Empty means "detect it", which is what [`crate::claude_cli`] then does.
+    #[serde(deserialize_with = "null_is_zero_value")]
+    pub claude_executable_path: String,
 }
 
 /// Read the settings row as stored. A missing row, a read error, or malformed
@@ -140,7 +150,8 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                     COALESCE(hidden_projects, ''),
                     COALESCE(idle_gap_threshold_minutes, 0),
                     COALESCE(claude_config_dir, ''),
-                    COALESCE(claude_config_dirs, '')
+                    COALESCE(claude_config_dirs, ''),
+                    COALESCE(claude_executable_path, '')
              FROM user_settings WHERE id = 1",
             [],
             |r| {
@@ -162,6 +173,7 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                     idle_gap_threshold_minutes: r.get(10)?,
                     claude_config_dir: r.get(11)?,
                     claude_config_dirs: decode_string_list(&extra_raw),
+                    claude_executable_path: r.get(13)?,
                 })
             },
         )
@@ -383,6 +395,13 @@ pub fn resolve(stored: UserSettings) -> SettingsResponse {
     if let Some(dir) = claude_config_dir_from_env() {
         settings.claude_config_dir = dir;
     }
+    // #503's own, with no Go counterpart: the variable the chat runner has
+    // always honoured is now reported here too, so the form shows the path a
+    // turn will really spawn rather than a stored value the environment
+    // overrides.
+    if let Some(path) = env_value("AGENTO_CLAUDE_EXECUTABLE") {
+        settings.claude_executable_path = path;
+    }
 
     SettingsResponse {
         settings,
@@ -417,6 +436,15 @@ fn locked_fields() -> BTreeMap<String, String> {
         locked.insert(
             "claude_config_dir".to_string(),
             "CLAUDE_CONFIG_DIR".to_string(),
+        );
+    }
+    // #503's addition. It is in this function rather than the loop above only
+    // because that loop is Go's three fields in Go's order, and this one has no
+    // Go counterpart to be in order with.
+    if env_value("AGENTO_CLAUDE_EXECUTABLE").is_some() {
+        locked.insert(
+            "claude_executable_path".to_string(),
+            "AGENTO_CLAUDE_EXECUTABLE".to_string(),
         );
     }
     locked
@@ -648,7 +676,9 @@ fn apply_update(
     apply_locked_fields(&mut incoming, current)?;
     validate_idle_gap_threshold(incoming.idle_gap_threshold_minutes)?;
     validate_claude_config_dirs(&incoming, current)?;
+    validate_claude_executable_path(&incoming, current)?;
 
+    incoming.claude_executable_path = normalize(&incoming.claude_executable_path);
     incoming.claude_config_dir = normalize(&incoming.claude_config_dir);
     incoming.claude_config_dirs = normalize_claude_config_dirs(&incoming.claude_config_dirs);
     Ok(incoming)
@@ -674,6 +704,10 @@ fn apply_locked_fields(
         "default_working_dir",
         "public_url",
         "claude_config_dir",
+        // Appended last, so the field a conflicting body is reported on does
+        // not move: the order here is which lock is *reported*, and the four
+        // above it are Go's slice order.
+        "claude_executable_path",
     ] {
         let Some(env_var) = locked.get(field) else {
             continue;
@@ -685,6 +719,10 @@ fn apply_locked_fields(
                 &current.default_working_dir,
             ),
             "public_url" => (&mut incoming.public_url, &current.public_url),
+            "claude_executable_path" => (
+                &mut incoming.claude_executable_path,
+                &current.claude_executable_path,
+            ),
             _ => (&mut incoming.claude_config_dir, &current.claude_config_dir),
         };
         // `claude_config_dir` compares **normalized**, so `~/.claude` and
@@ -794,6 +832,73 @@ fn validate_claude_config_dir(raw: &str) -> Result<(), WriteError> {
     }
 }
 
+/// The `claude_executable_path` override (#503).
+///
+/// **Only a value the caller is actually changing is checked**, for
+/// [`validate_claude_config_dirs`]' reason and one more: this path can stop
+/// being executable between two saves (a reinstall, an unmounted volume), and
+/// refusing every later save of an unrelated field would strand the user in a
+/// form they cannot submit. A stored path that no longer resolves is handled
+/// where it matters instead — [`crate::claude_cli::resolve`] logs it and falls
+/// through to detection.
+///
+/// Blank is valid and means "detect it". A non-empty value must be absolute,
+/// because a relative one would resolve against whatever working directory the
+/// app happens to have, and executable, because the only thing this field is
+/// for is being spawned.
+fn validate_claude_executable_path(
+    incoming: &UserSettings,
+    current: &UserSettings,
+) -> Result<(), WriteError> {
+    let want = normalize(&incoming.claude_executable_path);
+    if want == normalize(&current.claude_executable_path) || want.is_empty() {
+        return Ok(());
+    }
+    // `filepath.IsAbs`, the same rule the config dir uses — not
+    // `Path::is_absolute`, which disagrees on a Windows device path.
+    if !super::gopath::is_abs(&want) {
+        return Err(WriteError::BadRequest(format!(
+            "claude executable path must be an absolute path, got {want:?}"
+        )));
+    }
+    match std::fs::metadata(&want) {
+        Ok(meta) if !meta.is_file() => Err(WriteError::BadRequest(format!(
+            "claude executable {want:?} is not a file"
+        ))),
+        Ok(meta) => {
+            if is_executable(&meta) {
+                Ok(())
+            } else {
+                Err(WriteError::BadRequest(format!(
+                    "claude executable {want:?} is not executable"
+                )))
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(WriteError::BadRequest(format!(
+            "claude executable {want:?} does not exist"
+        ))),
+        Err(e) => Err(WriteError::BadRequest(format!(
+            "claude executable {want:?} is not readable: {e}"
+        ))),
+    }
+}
+
+/// Does this file carry an executable bit? Windows has none — there the
+/// extension is the whole rule, and refusing a path for want of a bit the
+/// filesystem does not have would make the field unusable.
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        true
+    }
+}
+
 /// `config.normalizeClaudeConfigDirs`: normalize, drop blanks and duplicates.
 ///
 /// An input that reduces to nothing becomes **nil**, not an empty slice, and the
@@ -831,8 +936,8 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
              appearance_dark_mode, appearance_font_size, appearance_font_family,
              notification_settings, event_bus_worker_pool_size, public_url,
              hidden_projects, idle_gap_threshold_minutes,
-             claude_config_dir, claude_config_dirs)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             claude_config_dir, claude_config_dirs, claude_executable_path)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(id) DO UPDATE SET
             default_working_dir = excluded.default_working_dir,
             default_model = excluded.default_model,
@@ -846,7 +951,8 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
             hidden_projects = excluded.hidden_projects,
             idle_gap_threshold_minutes = excluded.idle_gap_threshold_minutes,
             claude_config_dir = excluded.claude_config_dir,
-            claude_config_dirs = excluded.claude_config_dirs",
+            claude_config_dirs = excluded.claude_config_dirs,
+            claude_executable_path = excluded.claude_executable_path",
         rusqlite::params![
             settings.default_working_dir,
             settings.default_model,
@@ -861,6 +967,7 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
             settings.idle_gap_threshold_minutes,
             settings.claude_config_dir,
             encode_string_list(&settings.claude_config_dirs),
+            settings.claude_executable_path,
         ],
     )
     .map(|_| ())
@@ -1059,7 +1166,8 @@ mod tests {
             hidden_projects            TEXT    NOT NULL DEFAULT '[]',
             idle_gap_threshold_minutes INTEGER NOT NULL DEFAULT 0,
             claude_config_dir          TEXT    NOT NULL DEFAULT '',
-            claude_config_dirs         TEXT    NOT NULL DEFAULT '[]'
+            claude_config_dirs         TEXT    NOT NULL DEFAULT '[]',
+            claude_executable_path     TEXT    NOT NULL DEFAULT ''
         );";
 
     fn fixture(row: Option<&str>) -> Connection {
@@ -1084,12 +1192,12 @@ mod tests {
                   appearance_dark_mode, appearance_font_size, appearance_font_family,
                   notification_settings, event_bus_worker_pool_size, public_url,
                   hidden_projects, idle_gap_threshold_minutes,
-                  claude_config_dir, claude_config_dirs)
+                  claude_config_dir, claude_config_dirs, claude_executable_path)
                VALUES (1, 'working-dir', 'the-model', 1,
                        1, 13, 'the-font',
                        'the-notifications', 7, 'the-url',
                        '["/hidden/one"]', 25,
-                       '/run/dir', '["/extra/dir"]')"#,
+                       '/run/dir', '["/extra/dir"]', '/the/claude')"#,
         ));
 
         let stored = load_stored(&conn);
@@ -1112,6 +1220,7 @@ mod tests {
             stored.claude_config_dirs,
             Some(vec!["/extra/dir".to_string()])
         );
+        assert_eq!(stored.claude_executable_path, "/the/claude");
 
         // The narrowed view must agree with the row it was derived from — one
         // reader is the point.
@@ -1192,7 +1301,7 @@ mod tests {
                 r#""notification_settings":"{}","event_bus_worker_pool_size":3,"#,
                 r#""public_url":"","hidden_projects":["/home/u/secret"],"#,
                 r#""idle_gap_threshold_minutes":0,"claude_config_dir":"","#,
-                r#""claude_config_dirs":[]},"locked":{},"model_from_env":false}"#,
+                r#""claude_config_dirs":[],"claude_executable_path":""},"locked":{},"model_from_env":false}"#,
                 "\n"
             )
         );
@@ -1558,7 +1667,7 @@ mod tests {
                 r#""public_url":"https://agento.example","#,
                 r#""hidden_projects":["/home/u/secret","/home/u/other"],"#,
                 r#""idle_gap_threshold_minutes":25,"claude_config_dir":"","#,
-                r#""claude_config_dirs":null},"locked":{},"model_from_env":false}"#,
+                r#""claude_config_dirs":null,"claude_executable_path":""},"locked":{},"model_from_env":false}"#,
                 "\n"
             )
         );
@@ -1604,7 +1713,7 @@ mod tests {
                 r#""notification_settings":"","event_bus_worker_pool_size":0,"#,
                 r#""public_url":"","hidden_projects":null,"#,
                 r#""idle_gap_threshold_minutes":7,"claude_config_dir":"","#,
-                r#""claude_config_dirs":null},"locked":{},"model_from_env":false}"#,
+                r#""claude_config_dirs":null,"claude_executable_path":""},"locked":{},"model_from_env":false}"#,
                 "\n"
             )
         );
@@ -1631,6 +1740,140 @@ mod tests {
         let (status, body) = put(file.path(), "not json");
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(body, "{\"error\":\"invalid JSON body\"}\n");
+    }
+
+    /// The `claude_executable_path` override's own refusals (#503).
+    ///
+    /// Its whole job is being *spawned*, so a relative path (which would resolve
+    /// against whatever working directory a GUI launch happens to have), a
+    /// missing file, a directory and a file with no executable bit are each a
+    /// 400 in the same dialect the config dir uses. A blank value is valid and
+    /// means "detect it".
+    #[test]
+    fn a_claude_executable_path_that_cannot_be_spawned_is_a_400() {
+        let _env = crate::paths::tests::env_lock();
+        if !nothing_is_locked() {
+            return;
+        }
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let missing = scratch.path().join("nope");
+        let a_dir = scratch.path().join("adir");
+        std::fs::create_dir(&a_dir).expect("dir");
+        let not_executable = scratch.path().join("plain");
+        std::fs::write(&not_executable, "#!/bin/sh\n").expect("file");
+
+        for (body, expected) in [
+            (
+                r#"{"claude_executable_path":"bin/claude"}"#.to_string(),
+                "claude executable path must be an absolute path, got \\\"bin/claude\\\""
+                    .to_string(),
+            ),
+            (
+                format!(r#"{{"claude_executable_path":"{}"}}"#, missing.display()),
+                format!(
+                    "claude executable \\\"{}\\\" does not exist",
+                    missing.display()
+                ),
+            ),
+            (
+                format!(r#"{{"claude_executable_path":"{}"}}"#, a_dir.display()),
+                format!(
+                    "claude executable \\\"{}\\\" is not a file",
+                    a_dir.display()
+                ),
+            ),
+        ] {
+            let file = migrated_db();
+            let (status, answer) = put(file.path(), &body);
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(answer, format!("{{\"error\":\"{expected}\"}}\n"), "{body}");
+        }
+
+        // The executable bit is a Unix concept; Windows has none, and refusing a
+        // path for want of a bit the filesystem does not carry would make the
+        // field unusable there.
+        #[cfg(unix)]
+        {
+            let file = migrated_db();
+            let (status, answer) = put(
+                file.path(),
+                &format!(
+                    r#"{{"claude_executable_path":"{}"}}"#,
+                    not_executable.display()
+                ),
+            );
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            assert!(answer.contains("is not executable"), "{answer}");
+
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            let file = migrated_db();
+            let (status, answer) = put(
+                file.path(),
+                &format!(
+                    r#"{{"claude_executable_path":"{}"}}"#,
+                    not_executable.display()
+                ),
+            );
+            assert_eq!(status, axum::http::StatusCode::OK, "{answer}");
+            assert!(
+                answer.contains(&format!(
+                    r#""claude_executable_path":"{}""#,
+                    not_executable.display()
+                )),
+                "the saved path is not in the answer: {answer}"
+            );
+        }
+    }
+
+    /// `AGENTO_CLAUDE_EXECUTABLE` locks the field, exactly as
+    /// `CLAUDE_CONFIG_DIR` locks `claude_config_dir` (#503) — so the form can
+    /// disable the input and say which variable to change, and a `PUT` sending
+    /// something else is refused rather than silently ignored.
+    ///
+    /// The blank case is the one that is easy to get wrong: the settings form
+    /// posts every tab back, so a client that does not know about this field
+    /// must be *pinned* rather than read as asking to clear it.
+    #[test]
+    fn the_claude_executable_path_is_locked_by_its_environment_variable() {
+        let _env = crate::paths::tests::env_lock();
+        let _var = EnvVar::set("AGENTO_CLAUDE_EXECUTABLE", "/opt/wrapper/claude");
+
+        assert_eq!(
+            locked_fields()
+                .get("claude_executable_path")
+                .map(String::as_str),
+            Some("AGENTO_CLAUDE_EXECUTABLE")
+        );
+        // The environment's value is what a read answers, whatever is stored.
+        let resolved = resolve(UserSettings {
+            claude_executable_path: "/stored/claude".into(),
+            ..UserSettings::default()
+        });
+        assert_eq!(
+            resolved.settings.claude_executable_path,
+            "/opt/wrapper/claude"
+        );
+
+        let file = migrated_db();
+        let (status, answer) = put(
+            file.path(),
+            r#"{"claude_executable_path":"/somewhere/else/claude"}"#,
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            answer,
+            "{\"error\":\"claude_executable_path is locked by environment variable \
+             AGENTO_CLAUDE_EXECUTABLE\"}\n"
+        );
+
+        let (status, answer) = put(file.path(), r#"{"claude_executable_path":""}"#);
+        assert_eq!(status, axum::http::StatusCode::OK, "{answer}");
+        assert!(
+            answer.contains(r#""claude_executable_path":"/opt/wrapper/claude""#),
+            "a blank value must be pinned, not read as a request to clear: {answer}"
+        );
     }
 
     /// Every rejection is a **400** carrying the error's own text — not the 409

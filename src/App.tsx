@@ -365,14 +365,32 @@ export default function App() {
             {claudeMissing && !claudeNoticeDismissed && (
               <div className="banner">
                 <Icon name="alert" size={14} />
+                {/*
+                  "Not found", never "not installed" (#503). Detection asks the
+                  login shell, the PATH and a list of known install locations,
+                  and any of those can miss a real install — a GUI app does not
+                  inherit the user's shell PATH, so this banner has told users
+                  running the CLI in a terminal a few inches away that they had
+                  not installed it. State what we know, and offer the field that
+                  fixes it beside the instructions for the case where we are
+                  right.
+                */}
                 <span>
-                  Claude Code is not installed, so agents cannot run. Install it
-                  with <code>npm i -g @anthropic-ai/claude-code</code>, sign in
-                  with <code>claude</code>, then restart Agento.
+                  Agento could not find the Claude Code CLI, so agents cannot
+                  run. If it is installed, set its path in Settings → Claude.
+                  Otherwise install it with{" "}
+                  <code>npm i -g @anthropic-ai/claude-code</code>, sign in with{" "}
+                  <code>claude</code>, then restart Agento.
                 </span>
                 <button
-                  className="iconbtn"
+                  className="btn btn--sm"
                   style={{ marginLeft: "auto" }}
+                  onClick={() => navigate("settings")}
+                >
+                  Set the path
+                </button>
+                <button
+                  className="iconbtn"
                   onClick={() => setClaudeNoticeDismissed(true)}
                   title="Dismiss"
                 >

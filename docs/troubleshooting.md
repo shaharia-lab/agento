@@ -96,11 +96,33 @@ taskbar or window list.
 
 ## The Claude Code CLI
 
-### "Claude Code CLI not found"
+### "Agento could not find the Claude Code CLI"
 
-Agents run by launching `claude`. Agento looks for it on your `PATH` and in the
-usual per-user install locations (`~/.local/bin`, `~/.npm-global/bin`,
-`~/.bun/bin`, `~/.volta/bin`, `~/bin`, and `AppData/Roaming/npm` on Windows).
+Agents run by launching `claude`. Agento resolves which binary that is **once
+per launch**, in this order — the first hit wins:
+
+1. `AGENTO_CLAUDE_EXECUTABLE`, if it is set.
+2. **Settings → Claude → Claude Code CLI → Executable**, if you have filled it
+   in.
+3. Your **login shell** — Agento runs `$SHELL -lic 'command -v claude'`.
+4. Every directory on the `PATH` the app itself was launched with.
+5. The known install locations: `~/.local/bin`, `~/.claude/local`,
+   `/opt/homebrew/bin`, `/usr/local/bin`, `~/.nvm/versions/node/*/bin`,
+   fnm's and asdf's directories, `~/Library/pnpm`, `~/.yarn/bin`, `~/.bun/bin`,
+   `~/.volta/bin`, `~/.npm-global/bin`, `~/bin`, and `AppData/Roaming/npm` on
+   Windows.
+
+A candidate found by 3, 4 or 5 has to answer `--version` like Claude Code, so an
+unrelated program of the same name on your `PATH` is skipped rather than run for
+every chat.
+
+**Step 3 exists because a GUI application does not inherit your shell's
+`PATH`.** An app launched from Finder, the Dock or Spotlight on macOS gets
+launchd's `/usr/bin:/bin:/usr/sbin:/sbin` and nothing your `.zshrc` ever
+exported; a `.desktop` launch on Linux is only a little better. It is also the
+only step that can see an install made with `claude migrate-installer`, which
+puts the binary in `~/.claude/local` and wires it up as a **shell alias** — so
+there is no binary on any `PATH` at all.
 
 First check it works in a terminal:
 
@@ -108,16 +130,18 @@ First check it works in a terminal:
 claude --version
 ```
 
-If that works but Agento still cannot find it, the cause is almost always that a
-GUI app inherits a smaller `PATH` than your shell does. Point Agento at the
-binary directly:
+If that works and Agento still says it cannot find it, open **Settings → Claude**
+and paste the path into **Executable**. `which claude` gives you the path; if it
+prints an alias rather than a path, use the path from the alias. Restart Agento
+afterwards — resolution happens at launch.
 
-```bash
-AGENTO_CLAUDE_EXECUTABLE=/full/path/to/claude
-```
+The same pane shows what Agento *did* find and which of the five steps found it,
+which is what to read when the CLI it picked is not the one you expected.
 
-Set that in your environment before launching the app. `which claude` gives you
-the path.
+`AGENTO_CLAUDE_EXECUTABLE=/full/path/to/claude` still works and still wins over
+everything, including the setting — but note that on macOS an app launched from
+the Dock cannot see a variable you exported in a shell, so the Settings field is
+usually the one you want.
 
 ### Chats fail with an authentication error
 

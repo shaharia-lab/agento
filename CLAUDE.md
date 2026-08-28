@@ -237,6 +237,9 @@ src/
 
 src-tauri/src/
   lib.rs         setup: database (create/migrate/seed), api server, window, menu
+  claude_cli.rs  where the Claude Code CLI is (#503) — the five ordered rules,
+                 the login-shell probe, and the one answer behind both the
+                 startup banner and every spawn
   paths.rs       data dir + database path
   logs.rs        the app log read back for Settings → Logs — commands, not /api
   proxy.rs       axum server; routes every request into native/'s registry
@@ -284,7 +287,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   37 migrations, embedded from parity/ — applied at startup
+    migrate.rs   38 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -2784,9 +2787,12 @@ for the sender strength. Assert the revert fails; a disconnect test that passes
 either way is the easy mistake here.
 
 **`AGENTO_CLAUDE_EXECUTABLE`** overrides which binary is spawned, falling back to
-`find_claude_cli()` and then the bare name. The fallback matters — a GUI process
-inherits a minimal `PATH`, which is why that helper already existed for the
-startup banner — and the override is how the turn tests point at a fake CLI.
+`claude_cli::executable()` and then the bare name — see *The one external
+dependency* for the whole order and why a `PATH` scan was never enough. The
+override is re-read per call rather than taken from the cache, and that is for
+the tests rather than the app: the cache is a `OnceLock`, so a test binary whose
+cases each point at a *different* scripted CLI would otherwise all run the
+first one's.
 
 ### The scan (#289)
 
@@ -4133,11 +4139,51 @@ database for no gain.
 The Go server runs every agent by spawning `claude` as a subprocess
 (`ClaudeExecutable` defaults to the bare name, resolved on `PATH`). It is a
 ~280 MB separate install we do not redistribute, and it needs its own sign-in.
-The app detects it at startup (`find_claude_cli` in `lib.rs`, which also checks
-per-user install dirs because a GUI process often inherits a minimal `PATH`)
-and shows one clear banner instead of letting every chat fail with
-`exec: not found`. Removing this dependency means reimplementing the agent
-runtime — that is phase 5 of the port, not a packaging change.
+The app resolves it at startup — `src-tauri/src/claude_cli.rs`, primed once in
+`lib.rs`'s setup — and shows one clear banner instead of letting every chat fail
+with `exec: not found`. Removing this dependency means reimplementing the agent
+runtime, which is not a packaging change.
+
+**One resolution, five ordered rules, and the third is the one nobody expects**
+(#503). `AGENTO_CLAUDE_EXECUTABLE` → the stored `claude_executable_path` setting
+(migration 38) → **`$SHELL -lic 'command -v claude'`** → the `PATH` this process
+was launched with → a list of known install locations. First hit wins; the
+answer is cached in a `OnceLock` for the process.
+
+- **The login-shell probe is not decoration, and it must not be "simplified"
+  away.** A GUI application does not inherit the user's shell `PATH`: a macOS
+  launch from Finder, the Dock or Spotlight gets launchd's
+  `/usr/bin:/bin:/usr/sbin:/sbin` and nothing any `.zshrc` exported, so the
+  `PATH` branch contributes essentially nothing on the launch that matters. It
+  is also the **only** branch that can see a `claude migrate-installer` install,
+  which lives in `~/.claude/local` and is wired up as a shell *alias* — no
+  binary on any `PATH` at all. Its output parser handles the alias spellings
+  (`claude=/p`, `alias claude='/p'`, `claude is aliased to '/p'`) and takes the
+  **last** line, because rc files print things.
+- **The banner and the spawn are one answer.** They were two lookups that called
+  one function, and the reported bug was the pair: a user running
+  `2.1.231 (Claude Code)` in their terminal was told it was not installed *and*
+  their agents genuinely could not run, because `claude_executable()` fell back
+  to the bare name, which fails to resolve for the same reason.
+  `runner::claude_executable` is now `claude_cli::executable()` and nothing
+  else.
+- **A discovered path is verified; a named one is not.** Rules 3–5 require an
+  executable file *and* a `--version` answering with Claude Code's banner, so an
+  unrelated `claude` on the `PATH` is skipped rather than spawned every turn.
+  Rules 1–2 are taken on trust: a wrapper script is a documented reason to set
+  the variable, and refusing it would remove the escape hatch the setting exists
+  to be.
+- **Both subprocesses are bounded, and the bounds are a startup budget.**
+  Priming runs inside `lib.rs`'s setup block — below the migrations (the column
+  is 38's) and above the proxy — so 3 s for the probe and 2 s per `--version`
+  are *the worst case a user waits for a window*, not a generous ceiling. A
+  pathological shell degrades to "found by a later rule", never to a window that
+  does not open. Priming on a background thread was rejected: `cached()` would
+  race it, and the loser fills the `OnceLock` **without the stored override**,
+  so a configured path would be ignored on some launches and not others.
+- **Resolution is once per launch.** Saving the setting takes effect at the next
+  start, which the Settings help says. Re-detecting live was considered and left
+  out.
 
 ---
 

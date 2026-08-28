@@ -3,6 +3,11 @@
 // all build on it — and because its tests drive it against a scripted CLI from
 // outside the crate.
 pub mod claude;
+// Where the Claude Code CLI is (#503). One resolution behind both the startup
+// banner and every spawn, because the two disagreeing is the bug the module
+// exists for. Public so an integration test can drive the same walk the app
+// does rather than a copy of it.
+pub mod claude_cli;
 // The embedded LLM gateway (#421). Public for `claude`'s reason and one of its
 // own: #422 is the settings model and storage alone, so until the engine (#424)
 // lands nothing inside the crate reads it, and a private module of entirely
@@ -78,8 +83,18 @@ pub struct HostInfo {
     /// Empty when no signing key is installed, which `setup` treats as fatal —
     /// so in practice the page either gets a working credential or never loads.
     pub api_token: String,
-    /// Resolved path to the Claude Code CLI, or null when it is not installed.
+    /// Resolved path to the Claude Code CLI, or null when it could not be
+    /// found. **The same resolution a turn spawns** ([`claude_cli`]) — the two
+    /// were separate lookups that happened to call one function, and a banner
+    /// that disagrees with the spawn is #503.
     pub claude_cli: Option<String>,
+    /// Which rule produced `claude_cli` — `env`, `setting`, `login-shell`,
+    /// `path` or `candidate`. Null exactly when `claude_cli` is.
+    ///
+    /// Shown in Settings → Claude, because "we found a `claude`, here is where"
+    /// is the whole diagnostic when the one it found is not the one the user
+    /// expected.
+    pub claude_cli_source: Option<String>,
     /// Whether this install can replace itself, which decides between offering
     /// an in-app update and merely announcing one.
     pub can_self_update: bool,
@@ -105,7 +120,8 @@ fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
             log::error!("minting the webview session token: {e}");
             String::new()
         }),
-        claude_cli: find_claude_cli(),
+        claude_cli: claude_cli::cached().map(|r| r.path.clone()),
+        claude_cli_source: claude_cli::cached().map(|r| r.source.as_str().to_string()),
         can_self_update: install_kind() != "package",
         install_kind: install_kind().to_string(),
     }
@@ -139,49 +155,6 @@ fn install_kind() -> &'static str {
     {
         "installer"
     }
-}
-
-/// Locate the `claude` binary the way the backend will.
-///
-/// Everything the app ships is self-contained except this: agents run by
-/// spawning the Claude Code CLI as a subprocess (`src/claude/`), and that CLI
-/// is a separate ~280 MB install we do not redistribute. Detecting it up front
-/// turns "every chat fails with exec: not found" into one honest message.
-pub(crate) fn find_claude_cli() -> Option<String> {
-    let name = if cfg!(windows) {
-        "claude.exe"
-    } else {
-        "claude"
-    };
-
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-
-    // A GUI app launched from a desktop environment often inherits a minimal
-    // PATH that omits the per-user install locations, so check those directly
-    // before reporting the CLI missing.
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    let home = std::path::PathBuf::from(home);
-    for rel in [
-        ".local/bin",
-        ".npm-global/bin",
-        ".bun/bin",
-        ".volta/bin",
-        "bin",
-        "AppData/Roaming/npm",
-    ] {
-        let candidate = home.join(rel).join(name);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-
-    None
 }
 
 /// Ports resolved at startup, exposed to the frontend and to diagnostics.
@@ -346,6 +319,39 @@ pub fn run() {
                         Err(e) => {
                             log::warn!("pricing seed failed; cost computation degraded: {e}");
                         }
+                    }
+                }
+
+                // Where the Claude Code CLI is (#503). Resolved once, here,
+                // for two reasons that pull in the same direction: the walk
+                // asks the user's **login shell** (the only way to see a
+                // `~/.claude/local` alias install, and the answer to a GUI
+                // process inheriting launchd's four-entry PATH), which is a
+                // subprocess nothing on a request path should pay for; and the
+                // stored override lives in `user_settings`, so this is the
+                // first moment the answer can be complete.
+                //
+                // It must stay **below the migrations** — the column it reads
+                // arrives in migration 38 — and **above the proxy**, so the
+                // first `host_info` and the first chat turn both read a primed
+                // cache rather than racing to fill it. A failure to read the
+                // row is not a reason to fail a launch: detection simply runs
+                // without the override.
+                {
+                    let stored = crate::native::db::open_read_only(&db)
+                        .map(|conn| crate::native::settings::load_stored(&conn))
+                        .map_err(|e| log::warn!("claude cli: reading the stored path: {e}"))
+                        .ok();
+                    let resolved = crate::claude_cli::prime(
+                        stored.as_ref().map(|s| s.claude_executable_path.as_str()),
+                    );
+                    match resolved {
+                        Some(r) => log::info!(
+                            "claude cli resolved path={:?} source={}",
+                            r.path,
+                            r.source.as_str()
+                        ),
+                        None => log::warn!("claude cli not found; agents cannot run"),
                     }
                 }
 

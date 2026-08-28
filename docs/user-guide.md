@@ -727,6 +727,14 @@ instead, revoke that token by name in **Settings → Security**.
 
 ### Claude
 
+- **Executable**: where the Claude Code CLI is. Leave it blank and Agento finds
+  it — it asks your login shell, scans the `PATH` it was launched with, and
+  checks the usual install locations. Fill it in when that fails, which is
+  possible on any machine and most likely on macOS, where an app launched from
+  the Dock sees none of your shell's environment. The pane shows what was
+  detected and which rule found it. A change takes effect at the next launch.
+  See
+  [Troubleshooting](troubleshooting.md#agento-could-not-find-the-claude-code-cli).
 - **Run directory**: which Claude Code configuration directory runs use by
   default.
 - **Indexed directories**: which directories analytics reads. Add a second one if
