@@ -8,7 +8,8 @@
     "build": "npm run clean && npm run sync && astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "clean": "node scripts/clean.mjs"
+    "clean": "node scripts/clean.mjs",
+    "check:links": "node scripts/check-links.mjs"
   },
   "dependencies": {
     "@astrojs/rss": "^4.0.19",

@@ -14,6 +14,13 @@ on:
       - 'src-tauri/tauri.conf.json'
       - '.github/workflows/site-check.yml'
 
+# Every action is pinned to a full commit SHA, and only GitHub-owned actions are
+# used. Both are policy on this organisation: `sha_pinning_required` is on, and
+# `allowed_actions` is a selected allowlist. A workflow that breaks either fails
+# at startup with "This run likely failed because of a workflow file issue" and
+# no job logs, which is a slow thing to diagnose — so check the policy before
+# adding an action here.
+
 permissions:
   contents: read
 
@@ -21,9 +28,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: 22
           cache: npm
@@ -39,16 +46,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: npm run build
 
+      # A script rather than a link-checking action: this organisation allows
+      # only GitHub-owned actions plus a named allowlist, so a third-party
+      # checker would mean widening that policy for a docs job. See
+      # web/scripts/check-links.mjs for what it does and does not check.
       - name: Check links
-        uses: lycheeverse/lychee-action@v2
-        with:
-          # Offline: internal links and their fragments only. External links
-          # would make this job fail on somebody else's outage, and a rate
-          # limit from GitHub would fail it on every second run.
-          args: >-
-            --offline
-            --include-fragments
-            --root-dir ${{ github.workspace }}/web/dist
-            --exclude-path web/dist/pagefind
-            'web/dist/**/*.html'
-          fail: true
+        working-directory: web
+        run: npm run check:links

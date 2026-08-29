@@ -20,6 +20,13 @@ on:
     types: [published]
   workflow_dispatch:
 
+# Every action is pinned to a full commit SHA, and only GitHub-owned actions are
+# used. Both are policy on this organisation: `sha_pinning_required` is on, and
+# `allowed_actions` is a selected allowlist. A workflow that breaks either fails
+# at startup with "This run likely failed because of a workflow file issue" and
+# no job logs, which is a slow thing to diagnose — so check the policy before
+# adding an action here.
+
 permissions:
   contents: read
   pages: write
@@ -34,9 +41,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: 22
           cache: npm
@@ -55,8 +62,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: npm run build
 
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: web/dist
 
@@ -68,4 +75,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
