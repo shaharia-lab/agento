@@ -12,7 +12,7 @@
  *     because Starlight renders the title itself;
  *   - the lead paragraph becomes `description` (used for <meta> and search);
  *   - the inline TOC list is dropped, because Starlight renders one;
- *   - `installation.md#updates` becomes `/agento/docs/installation/#updates`;
+ *   - `installation.md#updates` becomes `/docs/installation/#updates`;
  *   - a link that leaves docs/ (`../CLAUDE.md`) becomes a GitHub blob URL,
  *     since those files have no page on this site;
  *   - screenshots are copied to public/ and their links repointed.
@@ -32,7 +32,7 @@ const SHOTS_OUT = resolve(here, '../public/screenshots');
 
 const bySourceFile = new Map(PAGES.map((p) => [p.file, p]));
 
-/** `installation.md` -> `/agento/docs/installation/`; unknown files -> null. */
+/** `installation.md` -> `/docs/installation/`; unknown files -> null. */
 function hrefFor(target) {
   const [path, hash] = target.split('#');
   const page = bySourceFile.get(path);
