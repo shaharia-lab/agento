@@ -20,6 +20,16 @@ const sidebar = [
   })),
 ];
 
+/**
+ * Code blocks are inverted relative to the page in *both* themes, so their
+ * ground is a constant rather than a token. It has to be a literal here:
+ * Expressive Code parses every styleOverride colour with a colour library at
+ * build time, and a `var(--…)` string is not a colour it can parse — feeding
+ * it one produced a stylesheet whose whole `@layer` block was discarded, so
+ * every code block on the site rendered unstyled.
+ */
+const INK = '#0B0C07';
+
 export default defineConfig({
   site: SITE,
   base: BASE,
@@ -36,7 +46,31 @@ export default defineConfig({
         // One theme for both site themes: code blocks are always inverted
         // relative to the page, which is the design's own rule.
         themes: ['github-dark'],
-        styleOverrides: { borderRadius: '2px', borderWidth: '1.5px' },
+        styleOverrides: {
+          borderRadius: '2px',
+          borderWidth: '1.5px',
+          codeBackground: INK,
+          codeFontSize: '0.82rem',
+          // Expressive Code draws a title bar above shell blocks, and left at
+          // its defaults that bar takes the *page* background — so every `bash`
+          // block rendered as a bare light strip stacked on a dark body. The
+          // frame is flattened into the code ground instead, which makes a
+          // fenced block here look like the hand-written ones on the landing
+          // page: one solid rectangle.
+          frames: {
+            frameBoxShadowCssValue: 'none',
+            editorBackground: INK,
+            editorTabBarBackground: INK,
+            editorActiveTabBackground: INK,
+            editorActiveTabBorderColor: 'transparent',
+            editorActiveTabIndicatorTopColor: 'transparent',
+            editorTabBarBorderBottomColor: 'transparent',
+            terminalBackground: INK,
+            terminalTitlebarBackground: INK,
+            terminalTitlebarBorderBottomColor: 'transparent',
+            terminalTitlebarDotsOpacity: '0',
+          },
+        },
       },
       description:
         'Cost analytics, session history and scheduled agents for Claude Code — a desktop app that reads what is already on your disk.',

@@ -18,7 +18,7 @@ const { current } = Astro.props;
       <a href={url('/docs/')} aria-current={current === 'docs' ? 'page' : undefined}>Docs</a>
       <a href={url('/blog/')} aria-current={current === 'blog' ? 'page' : undefined}>Blog</a>
       <a href={`${REPO}/releases`}>Releases</a>
-      <a class="navstar" href={REPO}><span aria-hidden="true">★</span> Star{stars && <span class="n">{stars}</span>}</a>
+      <a class="navbtn navstar" href={REPO}><span aria-hidden="true">★</span> Star{stars && <span class="n">{stars}</span>}</a>
       <ThemeToggle />
     </nav>
   </div>

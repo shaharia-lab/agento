@@ -1,0 +1,81 @@
+---
+/**
+ * The landing FAQ.
+ *
+ * These answer on the page rather than linking away. An earlier version was a
+ * list of links into the docs, which meant the one question somebody has
+ * before downloading — "does this send my transcripts anywhere?" — cost them a
+ * page load to answer, and the deep links were fragile besides: a heading
+ * rename breaks a fragment silently.
+ *
+ * Every answer is taken from docs/, and the `more` link goes to the section it
+ * came from. If you change one here, change it there too — or better, don't
+ * write anything here that the docs do not already say.
+ */
+import { url } from '../../site.config.mjs';
+
+const FAQ = [
+  {
+    q: 'Does Agento send my transcripts anywhere?',
+    a: `No. Everything is stored locally in ~/.agento, and your Claude Code transcripts in
+        ~/.claude are read but never modified. There is no account, no telemetry and no
+        analytics. The only outbound calls are the ones you asked for: agent runs, the
+        integrations you connected, the update check — which you can switch off — and, if
+        you turn it on, the providers the LLM Gateway forwards to.`,
+    more: { label: 'Privacy', href: url('/docs/user-guide/#privacy') },
+  },
+  {
+    q: 'Do I need an Anthropic API key?',
+    a: `No. Agento runs every agent by launching the Claude Code CLI on your machine and
+        reuses its sign-in. If claude works in your terminal, Agento works. The app tells
+        you on launch if it cannot find the CLI, and where it looked.`,
+    more: { label: 'Requirements', href: url('/docs/installation/#requirements') },
+  },
+  {
+    q: 'Will it change anything in ~/.claude?',
+    a: `Your session transcripts are read only. Agento does write Claude Code's own
+        settings.json and the settings profiles beside it — but only when you edit them
+        from the Settings section yourself. Everything Agento owns lives in ~/.agento, and
+        deleting that directory resets it completely.`,
+    more: { label: 'Where your data lives', href: url('/docs/installation/#where-your-data-lives') },
+  },
+  {
+    q: 'Can I point my other tools at it?',
+    a: `Yes. The LLM Gateway is an OpenAI- and Anthropic-compatible endpoint on loopback
+        that routes to whichever providers you configure, and records usage and cost per
+        request. It is off by default and costs one database read at startup when it is.`,
+    more: { label: 'LLM Gateway', href: url('/docs/user-guide/#llm-gateway') },
+  },
+  {
+    q: 'How are my integration credentials stored?',
+    a: `In plain text, in the local database. Their protection is your user account and
+        your disk permissions, so treat ~/.agento as sensitive. The API scrubs secrets
+        from every response and the app never displays one back to you, but the bytes at
+        rest are not encrypted.`,
+    more: { label: 'Privacy', href: url('/docs/user-guide/#privacy') },
+  },
+];
+---
+
+<section class="section">
+  <div class="sheet panel">
+    <div class="eyebrow">
+      Frequently asked
+      <span class="eyebrow__end"><a href={url('/docs/')}>All documentation ↗</a></span>
+    </div>
+    <div class="rows">
+      {FAQ.map((item, i) => (
+        <details class="faq" open={i === 0}>
+          <summary class="faq__q">
+            <span class="faq__chev" aria-hidden="true">▸</span>
+            <span>{item.q}</span>
+          </summary>
+          <div class="faq__a">
+            <p>{item.a}</p>
+            <a class="faq__more" href={item.more.href}>{item.more.label} ↗</a>
+          </div>
+        </details>
+      ))}
+    </div>
+  </div>
+</section>

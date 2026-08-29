@@ -113,7 +113,7 @@ img { max-width: 100%; display: block; }
 .btn:hover { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
 .btn:active { transform: translate(4px, 4px); box-shadow: 0 0 0 var(--ink); }
 .btn:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
-.btn--primary { background: var(--blue); color: #0B0C07; }
+.btn--primary { background: var(--blue); color: var(--on-accent); }
 .btn--ink { background: var(--ink); color: var(--paper); }
 @media (prefers-reduced-motion: reduce) {
   .btn { transition: none; }
@@ -146,23 +146,26 @@ img { max-width: 100%; display: block; }
 .nav a {
   font-family: var(--font-mono); font-size: 12px; font-weight: 500;
   letter-spacing: 0.06em; text-transform: uppercase;
-  text-decoration: none; padding-bottom: 2px;
-  border-bottom: 2px solid transparent;
+  text-decoration: none;
 }
-.nav a:hover { border-bottom-color: var(--blue); }
-.nav a[aria-current] { border-bottom-color: var(--ink); }
+/* The underline is for the plain nav links only. Scoped rather than left to
+   the cascade: `.nav a` outranks `.navstar`, so an unscoped
+   `border-bottom: transparent` here erases the star button's own border. */
+.nav a:not(.navstar) { padding-bottom: 2px; border-bottom: 2px solid transparent; }
+.nav a:not(.navstar):hover { border-bottom-color: var(--blue); }
+.nav a:not(.navstar)[aria-current] { border-bottom-color: var(--ink); }
 
 /* --- landing ------------------------------------------------------------- */
 .hero { padding: 64px 0 40px; }
 .hero__eyebrow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
 .hero__title {
   font-family: var(--font-display);
-  font-size: clamp(44px, 7vw, 82px);
-  line-height: 0.98;
+  font-size: clamp(44px, 8vw, 92px);
+  line-height: 0.97;
   letter-spacing: -0.02em;
   margin: 0 0 20px;
   text-wrap: balance;
-  max-width: 15ch;
+  max-width: 19ch;
 }
 .hero__title em { font-style: italic; color: var(--blue-deep); }
 .hero__lede {
@@ -220,6 +223,9 @@ img { max-width: 100%; display: block; }
 .section__head .label { margin-left: auto; }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+/* A panel beside a screenshot sizes to its own text. Stretching it to match the
+   image's height leaves a third of the panel empty. */
+.split--media { align-items: start; }
 .panel { padding: 26px; }
 .panel h3 {
   font-family: var(--font-sub); font-weight: 600;
@@ -251,16 +257,20 @@ img { max-width: 100%; display: block; }
 .step h4 { font-family: var(--font-sub); font-weight: 600; font-size: 20px; margin: 14px 0 8px; }
 .step p { margin: 0 0 12px; font-size: 14.5px; color: var(--ink-soft); }
 
-.code {
+/* Namespaced deliberately. Expressive Code marks the content of every rendered
+   line with `class="code"` and its frame caption with `class="header"`, so a
+   bare `.code` or `.header` rule here reaches inside every fenced block on the
+   page — which is what turned one code block into five padded boxes. Keep new
+   class names in this file specific enough not to collide. */
+.codeblock {
   background: var(--code-bg); color: var(--code-fg);
   border: var(--bw) solid var(--code-border); border-radius: var(--radius);
   font-family: var(--font-mono); font-size: 12.5px; line-height: 1.7;
   padding: 14px 16px; overflow-x: auto; margin: 0;
 }
-.code .c { color: #8A8779; }
-.code .s { color: var(--blue); }
-.code .k { color: #FFFFFF; font-weight: 700; }
-:root[data-theme="dark"] .code .k, :root:not([data-theme="light"]) .code .k { color: var(--code-fg); }
+.codeblock .c { color: var(--code-comment); }
+.codeblock .s { color: var(--blue); }
+.codeblock .k { color: var(--code-key); font-weight: 700; }
 
 .closer {
   margin: 76px 0 0; padding: 46px 34px;
@@ -269,7 +279,7 @@ img { max-width: 100%; display: block; }
   box-shadow: var(--offset-sm);
 }
 .closer h2 { font-family: var(--font-display); font-weight: 400; font-size: 40px; margin: 0 0 12px; line-height: 1.05; }
-.closer p { margin: 0 0 24px; color: #C9C6BB; max-width: 52ch; }
+.closer p { margin: 0 0 24px; color: var(--on-ink-soft); max-width: 52ch; }
 .closer .btn { border-color: var(--paper); }
 .closer .btn--primary { border-color: var(--paper); box-shadow: 4px 4px 0 var(--paper); }
 .closer .btn--ghost { background: transparent; color: var(--paper); box-shadow: 4px 4px 0 var(--paper); }
@@ -332,7 +342,7 @@ img { max-width: 100%; display: block; }
   border-radius: 2px; padding: 1px 5px;
 }
 .article a.link { color: var(--blue-deep); text-decoration: none; border-bottom: 1.5px solid var(--blue); }
-.article .code { margin: 0 0 18px; }
+.article .codeblock { margin: 0 0 18px; }
 
 .table-wrap { overflow-x: auto; margin: 0 0 20px; border: var(--bw) solid var(--ink); border-radius: var(--radius); }
 table { border-collapse: collapse; width: 100%; background: var(--raised); font-size: 14.5px; }
@@ -395,13 +405,22 @@ td code { font-family: var(--font-mono); font-size: 12.5px; }
 .entry__lede { font-size: 20px; line-height: 1.5; color: var(--ink-soft); margin: 0 0 30px; padding-bottom: 26px; border-bottom: var(--bw-strong) solid var(--ink); }
 .entry p { margin: 0 0 17px; font-size: 17px; line-height: 1.68; }
 .entry h2 { font-family: var(--font-display); font-weight: 400; font-size: 32px; margin: 38px 0 12px; line-height: 1.12; }
-.entry .code { margin: 0 0 20px; }
+.entry .codeblock { margin: 0 0 20px; }
 .entry blockquote {
   margin: 26px 0; padding: 20px 24px;
   border: var(--bw) solid var(--ink); border-left: 6px solid var(--blue);
   border-radius: var(--radius); background: var(--raised);
-  font-family: var(--font-display); font-size: 25px; line-height: 1.3;
 }
+/* The size has to land on the paragraph. `.entry p` (0,1,1) outranks
+   `.entry blockquote` (0,1,1, but earlier), so a font-size on the container
+   alone left the pull quote rendering as body text. */
+.entry blockquote p {
+  margin: 0; color: var(--ink);
+  font-family: var(--font-display); font-weight: 400;
+  font-size: 25px; line-height: 1.3;
+}
+.entry blockquote p + p { margin-top: 12px; }
+.entry blockquote code { font-size: 0.8em; }
 .byline { display: flex; align-items: center; gap: 12px; margin-top: 34px; padding-top: 22px; border-top: var(--bw) solid var(--ink); }
 .byline__av { width: 40px; height: 40px; border-radius: 999px; border: var(--bw) solid var(--ink); background: var(--blue-tint); display: grid; place-items: center; font-family: var(--font-mono); font-weight: 700; font-size: 14px; }
 .byline__n { font-weight: 700; font-size: 15px; }
@@ -444,17 +463,38 @@ td code { font-family: var(--font-mono); font-size: 12.5px; }
 
 /* --- install ------------------------------------------------------------- */
 .prereq { margin-bottom: 22px; }
-.osgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; align-items: start; }
-.oscard { padding: 22px; }
-.oscard--rec { box-shadow: var(--offset), 0 0 0 3px var(--blue); }
-.oscard__rec { color: var(--blue-deep); font-weight: 700; }
+.osgrid { display: flex; flex-direction: column; gap: 12px; }
+.oscard { padding: 0; overflow: hidden; }
+.oscard__sum {
+  display: flex; align-items: center; gap: 14px;
+  padding: 15px 20px; cursor: pointer; list-style: none;
+  font-family: var(--font-sub); font-weight: 600; font-size: 20px;
+}
+.oscard__sum::-webkit-details-marker { display: none; }
+.oscard__sum:hover { background: var(--sunken); }
+.oscard__sum:focus-visible { outline: 3px solid var(--blue); outline-offset: -3px; }
+.oscard__files {
+  margin-left: auto; font-family: var(--font-mono); font-size: 11px;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft);
+}
+.oscard__chev { font-family: var(--font-mono); color: var(--ink-soft); transition: transform 140ms ease; }
+.oscard[open] .oscard__chev { transform: rotate(90deg); }
+.oscard__body { padding: 0 20px 20px; border-top: 1px dashed var(--ink-faint); padding-top: 18px; }
+.oscard--rec { box-shadow: 8px 8px 0 var(--blue); }
+.oscard__rec {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 3px 9px; border: 1.5px solid var(--ink); border-radius: 999px;
+  background: var(--blue-tint); color: var(--ink);
+}
 .oscard .rows { margin-bottom: 16px; }
 .oscard .row__r { font-family: var(--font-mono); font-size: 11px; }
 .row--rec { border-color: var(--ink); background: var(--blue-tint); }
+@media (prefers-reduced-motion: reduce) { .oscard__chev { transition: none; } }
 
 .osteps { margin: 0 0 14px; padding-left: 18px; font-size: 14.5px; color: var(--ink-soft); }
 .osteps li { margin-bottom: 12px; }
-.osteps .code { margin-top: 8px; font-size: 11.5px; white-space: pre; }
+.osteps .codeblock { margin-top: 8px; font-size: 11.5px; white-space: pre; }
 .oshint { display: block; text-transform: none; letter-spacing: 0.01em; line-height: 1.5; }
 .osfoot { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 22px 0 0; }
 .osfoot a { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
@@ -475,23 +515,21 @@ td code { font-family: var(--font-mono); font-size: 12.5px; }
 }
 
 /* --- masthead star -------------------------------------------------------- */
-.navstar {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 10px; border: 1.5px solid var(--ink); border-radius: var(--radius);
-  background: var(--raised); text-decoration: none;
+.navbtn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  border: 1.5px solid var(--ink); border-radius: var(--radius);
+  background: var(--raised); color: var(--ink);
+  font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.06em; text-transform: uppercase; line-height: 1;
+  text-decoration: none; cursor: pointer;
 }
+.navbtn:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
 .navstar:hover { background: var(--blue-tint); }
 .navstar .n { font-variant-numeric: tabular-nums; }
-
-.themetoggle {
-  border: 1.5px solid var(--ink); border-radius: var(--radius);
-  background: var(--raised); color: var(--ink); cursor: pointer;
-  font-family: var(--font-mono); font-size: 11px; font-weight: 500;
-  letter-spacing: 0.06em; text-transform: uppercase; padding: 4px 10px;
-}
+.themetoggle { min-width: 66px; }
 .themetoggle:hover { background: var(--sunken); }
 
-@media (max-width: 900px) { .osgrid { grid-template-columns: 1fr; } }
 
 /* --- 404 ----------------------------------------------------------------- */
 .notfound { padding: 80px 24px 90px; max-width: 720px; }
@@ -500,3 +538,42 @@ td code { font-family: var(--font-mono); font-size: 12.5px; }
 .notfound > p { color: var(--ink-soft); font-size: 18px; margin: 0 0 28px; }
 .notfound__f { margin-top: 26px; font-size: 14.5px; color: var(--ink-soft); }
 .notfound__f a { color: var(--blue-deep); border-bottom: 1.5px solid var(--blue); text-decoration: none; }
+
+/* --- faq ----------------------------------------------------------------- */
+.faq { border: 1px solid var(--ink-faint); border-radius: var(--radius); background: var(--raised); }
+.faq[open] { border-color: var(--ink); }
+.faq__q {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 12px 15px; cursor: pointer; list-style: none;
+  font-family: var(--font-sub); font-weight: 600; font-size: 16.5px;
+}
+.faq__q::-webkit-details-marker { display: none; }
+.faq__q:hover { background: var(--sunken); }
+.faq__q:focus-visible { outline: 3px solid var(--blue); outline-offset: -3px; }
+.faq__chev { font-family: var(--font-mono); color: var(--ink-faint); transition: transform 140ms ease; }
+.faq[open] .faq__chev { transform: rotate(90deg); }
+.faq__a { padding: 0 15px 14px 39px; }
+.faq__a p { margin: 0 0 10px; font-size: 15px; color: var(--ink-soft); max-width: 72ch; }
+.faq__more {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
+  text-transform: uppercase; text-decoration: none;
+  border-bottom: 1.5px solid var(--blue); color: var(--blue-deep);
+}
+@media (prefers-reduced-motion: reduce) { .faq__chev { transition: none; } }
+
+/* --- fenced code blocks --------------------------------------------------- */
+/* Expressive Code carries its own palette through `--ec-*` custom properties.
+   Rather than depend on those resolving, the ground is pinned to our own
+   tokens, so a fenced block in a post looks exactly like the hand-written
+   .codeblock elsewhere on the site: one solid inverted rectangle. Syntax
+   colours still come from Expressive Code's per-token inline styles. */
+.expressive-code .frame pre {
+  background: var(--code-bg);
+  border: var(--bw) solid var(--code-border);
+  border-radius: var(--radius);
+  padding: 14px 0;
+  margin: 0;
+}
+.expressive-code figure { margin: 0 0 20px; }
+.expressive-code .frame .header { display: none; }
+.expressive-code .ec-line .code { padding-inline: 16px; }

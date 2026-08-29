@@ -5,10 +5,12 @@
  * Three rules shape it, and they are all consequences of this being a static
  * page that cannot know who is asking:
  *
- *   1. **Every platform is rendered.** Detection happens in the browser, so
- *      anything hidden server-side is hidden from search engines, from people
- *      with JavaScript off, and from anyone the guess gets wrong. The script
- *      below only *reorders and marks* — it never hides.
+ *   1. **Every platform is rendered**, as a stacked <details>. Detection
+ *      happens in the browser, so nothing may be omitted server-side: a
+ *      <details> panel keeps its content in the DOM whether open or shut, which
+ *      is why collapsing is safe where dropping would not be. The script below
+ *      reorders, opens and marks — it never removes. With JavaScript off, the
+ *      first panel is open and the other two are one click away.
  *   2. **The OS is detected; the architecture is not.** Safari reports
  *      `MacIntel` on Apple Silicon, so there is no reliable way to tell an ARM
  *      Mac from an Intel one in JavaScript. Chromium exposes it through
@@ -78,7 +80,7 @@ const OSES = [
 
 <section class="section" id="install">
   <div class="section__head">
-    <h2>Three steps, about a minute.</h2>
+    <h2>Installed in about a minute.</h2>
     <span class="label">Install</span>
   </div>
 
@@ -92,17 +94,21 @@ const OSES = [
       Agento runs every agent through the CLI you already have and reuses its sign-in. There is no
       Anthropic API key to enter. If this prints a version, you are ready:
     </p>
-    <pre class="code"><span class="k">claude</span> --version</pre>
+    <pre class="codeblock"><span class="k">claude</span> --version</pre>
   </div>
 
   <div class="osgrid" id="osgrid">
-    {OSES.map((entry) => (
-      <div class="sheet oscard" data-os={entry.os}>
-        <div class="eyebrow">
+    {OSES.map((entry, i) => (
+      <details class="sheet oscard" data-os={entry.os} open={i === 0}>
+        <summary class="oscard__sum">
+          <span class="oscard__chev" aria-hidden="true">▸</span>
           {entry.label}
-          <span class="eyebrow__end oscard__rec" hidden>Recommended for you</span>
-        </div>
-
+          <span class="oscard__rec" hidden>Recommended for you</span>
+          <span class="oscard__files">
+            {entry.files.length} {entry.files.length === 1 ? 'file' : 'files'}
+          </span>
+        </summary>
+        <div class="oscard__body">
         {resolved && entry.files.length > 0 ? (
           <div class="rows">
             {entry.files.map((f: any) => (
@@ -122,13 +128,14 @@ const OSES = [
           {entry.steps.map((s) => (
             <li>
               <span>{s.t}</span>
-              {s.code && <pre class="code">{s.code}</pre>}
+              {s.code && <pre class="codeblock">{s.code}</pre>}
             </li>
           ))}
         </ol>
 
         <p class="oshint label">{entry.hint}</p>
-      </div>
+        </div>
+      </details>
     ))}
   </div>
 
@@ -157,10 +164,19 @@ const OSES = [
 
     const card = grid.querySelector(`.oscard[data-os="${os}"]`);
     if (!card) return;
+
     grid.prepend(card);
     card.classList.add('oscard--rec');
+    card.open = true;
     const flag = card.querySelector('.oscard__rec');
     if (flag) flag.hidden = false;
+
+    /* Collapse the others, so the section is one open panel rather than three
+       competing ones. They stay one click away, and their content stays in the
+       DOM either way — <details> hides, it does not remove. */
+    grid.querySelectorAll('.oscard').forEach((el) => {
+      if (el !== card) el.open = false;
+    });
 
     /* Architecture, only where the browser will actually tell us. Chromium
        answers 'arm'; Safari and Firefox do not expose it at all, so both Mac

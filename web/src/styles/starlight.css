@@ -58,7 +58,11 @@
 }
 
 /* --- header -------------------------------------------------------------- */
-.header {
+/* `header.header`, not `.header`. Expressive Code gives every code frame a
+   <figcaption class="header">, so an unqualified rule here painted the title
+   bar of every shell block with the page background — a bare light strip
+   stacked on a dark code body. */
+header.header {
   border-bottom: var(--bw-strong) solid var(--ink);
   background: var(--paper);
   padding-inline: var(--sl-nav-pad-x, 1rem);
@@ -70,8 +74,15 @@
   letter-spacing: -0.01em;
   gap: 0.5rem;
 }
-header .social-icons a { color: var(--ink); }
-header .social-icons a:hover { color: var(--blue-deep); }
+header.header .social-icons a { color: var(--ink); }
+header.header .social-icons a:hover { color: var(--blue-deep); }
+
+/* A code frame is one solid block, matching the hand-written ones on the
+   landing page: no title bar, no window dots. The colours come from the
+   `frames` style overrides in astro.config.mjs; this removes the strip's
+   height, which no colour setting can. */
+.expressive-code .frame.is-terminal .header { display: none; }
+.expressive-code .frame.is-terminal pre { border-top: var(--bw) solid var(--code-border); }
 
 /* --- sidebar ------------------------------------------------------------- */
 #starlight__sidebar { border-inline-end: var(--bw) solid var(--ink); }
@@ -156,6 +167,12 @@ h1.page-title {
   letter-spacing: -0.01em;
   font-size: 1.95rem;
   line-height: 1.15;
+}
+/* The rule goes on the wrapper, not the heading. Starlight sets
+   `.sl-heading-wrapper > :first-child { display: inline }` so that the anchor
+   link sits on the last line — which makes a border on the h2 itself stop at
+   the end of the text rather than spanning the column. */
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
   padding-bottom: 0.4rem;
   border-bottom: var(--bw) solid var(--ink);
 }
@@ -237,10 +254,15 @@ h1.page-title {
 .starlight-aside--caution .starlight-aside__title,
 .starlight-aside--danger .starlight-aside__title { color: var(--warn); }
 
+/* Same rule as site.css: the block's ground comes from our tokens rather than
+   from Expressive Code's own `--ec-*` palette. */
 .expressive-code .frame pre {
-  border: var(--bw) solid var(--code-border) !important;
-  border-radius: var(--radius) !important;
+  background: var(--code-bg);
+  border: var(--bw) solid var(--code-border);
+  border-radius: var(--radius);
+  padding: 14px 0;
 }
+.expressive-code .ec-line .code { padding-inline: 16px; }
 
 /* --- right-hand table of contents ---------------------------------------- */
 #starlight__on-this-page,

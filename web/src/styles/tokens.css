@@ -31,6 +31,16 @@
   --code-border: #0B0C07;
   --warn:        #E8A33D;
 
+  /* Text on the accent. The accent does not flip between themes, so neither
+     does this — it is a literal by nature, not by omission. */
+  --on-accent:   #0B0C07;
+  /* Muted text on an inverted ground (the closing panel), which is bone in
+     light and near-black in dark. Reading it off --ink-soft would be wrong in
+     both: that token is tuned against the page, not against its inverse. */
+  --on-ink-soft: #C9C6BB;
+  --code-comment:#8A8779;
+  --code-key:    #FFFFFF;
+
   --bw: 1.5px;
   --bw-strong: 2px;
   --offset: 8px 8px 0 var(--ink);
@@ -62,6 +72,10 @@
     --code-fg:     #EFECE2;
     --code-border: #F1EEE5;
     --warn:        #E8A33D;
+    --on-accent:   #0B0C07;
+    --on-ink-soft: #4A4840;
+    --code-comment:#8A8779;
+    --code-key:    #FFFFFF;
   }
 }
 :root[data-theme="dark"] {
@@ -78,6 +92,10 @@
   --code-fg:     #EFECE2;
   --code-border: #F1EEE5;
   --warn:        #E8A33D;
+  --on-accent:   #0B0C07;
+  --on-ink-soft: #4A4840;
+  --code-comment:#8A8779;
+  --code-key:    #FFFFFF;
 }
 
 /* Review switch: the reference sets body copy in a serif. Both are wired so

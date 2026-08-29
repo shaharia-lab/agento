@@ -5,9 +5,10 @@
   "scripts": {
     "sync": "node scripts/sync-docs.mjs && node scripts/fetch-release.mjs",
     "dev": "npm run sync && astro dev",
-    "build": "npm run sync && astro build",
+    "build": "npm run clean && npm run sync && astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "clean": "node scripts/clean.mjs"
   },
   "dependencies": {
     "@astrojs/rss": "^4.0.19",

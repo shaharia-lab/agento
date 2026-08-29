@@ -10,6 +10,7 @@ import { url, REPO } from '../../site.config.mjs';
 import release from '../data/release.json';
 import Install from '../components/Install.astro';
 import StarCta from '../components/StarCta.astro';
+import Faq from '../components/Faq.astro';
 
 // Resolved at build time by scripts/fetch-release.mjs — version, tag and the
 // per-platform installer URLs. Nothing about a download is written by hand.
@@ -122,7 +123,7 @@ const RELEASE = release.url;
         <h2>Built for the desk, not the tab.</h2>
         <span class="label">Design</span>
       </div>
-      <div class="split">
+      <div class="split split--media">
         <figure class="shot" style="margin:0">
           <div class="shot__bar">
             <span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span>
@@ -145,17 +146,7 @@ const RELEASE = release.url;
       </div>
     </section>
 
-    <section class="section">
-      <div class="sheet panel">
-        <div class="eyebrow">Frequently asked</div>
-        <div class="rows">
-          <a class="row" href={url("/docs/troubleshooting/#privacy")}><span class="row__t">Does Agento send my transcripts anywhere?</span><span class="row__go">▸</span></a>
-          <a class="row" href={url("/docs/installation/#requirements")}><span class="row__t">Do I need an Anthropic API key?</span><span class="row__go">▸</span></a>
-          <a class="row" href={url("/docs/user-guide/#privacy")}><span class="row__t">Will it change anything in ~/.claude?</span><span class="row__go">▸</span></a>
-          <a class="row" href={url("/docs/user-guide/#llm-gateway")}><span class="row__t">Can I point other tools at it?</span><span class="row__go">▸</span></a>
-        </div>
-      </div>
-    </section>
+    <Faq />
 
     <StarCta />
 
