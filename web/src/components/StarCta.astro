@@ -1,0 +1,29 @@
+---
+/**
+ * The star ask.
+ *
+ * The count is read at build time. It is only *shown* above a threshold —
+ * below it, a number is weaker than no number, and the ask reads better
+ * without one. Raise or drop SHOW_COUNT_ABOVE as the repository grows.
+ */
+import repo from '../data/repo.json';
+import { REPO } from '../../site.config.mjs';
+
+const SHOW_COUNT_ABOVE = 250;
+const showCount = repo.resolved && repo.stars !== null && repo.stars >= SHOW_COUNT_ABOVE;
+const stars = showCount ? new Intl.NumberFormat('en').format(repo.stars) : null;
+---
+
+<section class="starband sheet">
+  <div class="starband__t">
+    <div class="eyebrow">One click, and it helps more than you would think</div>
+    <h3>Star the repo</h3>
+    <p>
+      Stars are how the next Claude Code user finds Agento. It is the whole of our distribution —
+      there is no ad budget and nothing tracks you here.
+    </p>
+  </div>
+  <a class="btn btn--primary starband__btn" href={REPO}>
+    <span aria-hidden="true">★</span> Star on GitHub {stars && <span class="starband__n">{stars}</span>}
+  </a>
+</section>

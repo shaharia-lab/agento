@@ -1,0 +1,78 @@
+name: Site
+
+# Publishes the documentation and blog site to GitHub Pages.
+#
+# It runs on a release as well as on a push, and that is not redundant: the
+# landing page bakes in the latest release's version and its per-platform
+# installer URLs (web/scripts/fetch-release.mjs), because asset filenames carry
+# the version and so cannot be addressed by GitHub's `releases/latest/download`
+# redirect. Without the release trigger the site would advertise the previous
+# version until somebody happened to push a docs change.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'web/**'
+      - 'src-tauri/tauri.conf.json'
+      - '.github/workflows/pages.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Every action is pinned to a full commit SHA, and only GitHub-owned actions are
+# used. Both are policy on this organisation: `sha_pinning_required` is on, and
+# `allowed_actions` is a selected allowlist. A workflow that breaks either fails
+# at startup with "This run likely failed because of a workflow file issue" and
+# no job logs, which is a slow thing to diagnose — so check the policy before
+# adding an action here.
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a queued run is superseded rather than racing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        working-directory: web
+        run: npm ci
+
+      - name: Build
+        working-directory: web
+        # The token lifts the release API's unauthenticated rate limit. The
+        # build falls back to the version in tauri.conf.json without it, so a
+        # rate limit degrades the download list rather than failing the run.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run build
+
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

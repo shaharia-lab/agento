@@ -1,0 +1,164 @@
+---
+/**
+ * The landing page. Everything here is hand-laid rather than generated: it is
+ * the one page whose job is persuasion, and it carries the design at full
+ * intensity — offset shadows, the display serif, the single blue call to
+ * action. Docs and blog step the same vocabulary down.
+ */
+import Page from '../layouts/Page.astro';
+import { url, REPO } from '../../site.config.mjs';
+import release from '../data/release.json';
+import Install from '../components/Install.astro';
+import StarCta from '../components/StarCta.astro';
+import Faq from '../components/Faq.astro';
+
+// Resolved at build time by scripts/fetch-release.mjs — version, tag and the
+// per-platform installer URLs. Nothing about a download is written by hand.
+const { version } = release;
+const RELEASE = release.url;
+
+---
+
+<Page
+  title="Agento — see what Claude Code really costs you"
+  description="A desktop app that reads the session files Claude Code already writes to your disk and turns them into cost analytics, searchable history and scheduled agents. No API key, no account, no telemetry."
+>
+
+  <div class="shell">
+    <section class="hero">
+      <div class="hero__eyebrow">
+        <span class="pill">v{version}</span>
+        <span class="pill pill--plain">macOS · Windows · Linux</span>
+        <span class="pill pill--plain">MIT licensed</span>
+      </div>
+      <h1 class="hero__title">See what Claude Code <em>really</em> costs you.</h1>
+      <p class="hero__lede">
+        Agento reads the session files Claude Code already writes to your disk and turns them into
+        cost analytics, productivity insights and a searchable, replayable history of every run.
+        Then it lets you build agents, schedule them, and connect them to your tools.
+      </p>
+      <div class="hero__cta">
+        <a class="btn btn--primary" href="#install">Download {version} →</a>
+        <a class="btn btn--ink" href={url("/docs/installation/")}>Read the docs</a>
+        <span class="hero__note">No API key. No account. No telemetry.</span>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="stat__n">0</div>
+          <div class="stat__k label">Bytes sent anywhere</div>
+        </div>
+        <div class="stat">
+          <div class="stat__n">1</div>
+          <div class="stat__k label">SQLite file, on your disk</div>
+        </div>
+        <div class="stat">
+          <div class="stat__n">6</div>
+          <div class="stat__k label">Integrations built in</div>
+        </div>
+        <div class="stat">
+          <div class="stat__n">~60s</div>
+          <div class="stat__k label">Install to first session</div>
+        </div>
+      </div>
+
+      <figure class="shot">
+        <div class="shot__bar">
+          <span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span>
+          <span class="shot__name">Agento — Insights</span>
+        </div>
+        <img src={url("/screenshots/light/insights.png")} alt="Agento's Insights view: cost, autonomy, cache-hit and tool-error cards over Claude Code sessions">
+        <figcaption class="shot__cap">Every tool call attributed to a skill, MCP server or sub-agent.</figcaption>
+      </figure>
+    </section>
+
+    <section class="section">
+      <div class="section__head">
+        <h2>Two halves, one window.</h2>
+        <span class="label">What you get</span>
+      </div>
+      <div class="split">
+        <div class="sheet panel">
+          <div class="eyebrow">Looks backward</div>
+          <h3>Your history, made legible</h3>
+          <p>Agento never asks you to change how you work. It reads what Claude Code already wrote.</p>
+          <ul>
+            <li><b>Cost per session</b>, priced at the rate in effect when each message ran.</li>
+            <li><b>Full-text search</b> across every transcript, ranked, with snippets.</li>
+            <li><b>Session journey</b> — turn by turn, sub-agents nested under the task that spawned them.</li>
+          </ul>
+        </div>
+        <div class="sheet sheet--dashed panel">
+          <div class="eyebrow">Looks forward</div>
+          <h3>Agents that do the work</h3>
+          <p>Build one, give it tools, hand it a schedule, and read the job history in the morning.</p>
+          <ul>
+            <li><b>Agent builder</b> with system prompts, tool allowlists and permission modes.</li>
+            <li><b>Scheduled tasks</b> — cron, intervals, or a one-off at a fixed instant.</li>
+            <li><b>GitHub, Slack, Jira, Confluence, Telegram, Google</b> as in-process MCP servers.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section__head">
+        <h2>Every section, one keystroke away.</h2>
+        <span class="label">⌘K</span>
+      </div>
+      <div class="grid3">
+        <div class="sheet card"><span class="label">01 · Chats</span><h4>Talk to your agents</h4><p>Streaming turns, tool calls rendered inline, and a permission prompt you can actually answer.</p></div>
+        <div class="sheet card"><span class="label">02 · Agents</span><h4>Build and version them</h4><p>Prompt templates with variables, tool allowlists, and a Claude settings profile per agent.</p></div>
+        <div class="sheet card"><span class="label">03 · Tasks</span><h4>Put them on a clock</h4><p>Cron expressions validated at save time, so a schedule that can never fire is refused.</p></div>
+        <div class="sheet card"><span class="label">04 · Sessions</span><h4>Replay any run</h4><p>Ranked search over 1,000+ transcripts, then continue any one of them as a live chat.</p></div>
+        <div class="sheet card"><span class="label">05 · Analytics</span><h4>Where the money went</h4><p>Cost by model and project, cache-hit rate, and an activity heatmap in your own timezone.</p></div>
+        <div class="sheet card"><span class="label">06 · Gateway</span><h4>Route your other tools</h4><p>One OpenAI- and Anthropic-compatible endpoint on loopback, with usage and cost per request.</p></div>
+      </div>
+    </section>
+
+    <Install />
+
+    <section class="section">
+      <div class="section__head">
+        <h2>Built for the desk, not the tab.</h2>
+        <span class="label">Design</span>
+      </div>
+      <div class="split split--media">
+        <figure class="shot" style="margin:0">
+          <div class="shot__bar">
+            <span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span>
+            <span class="shot__name">Agento — Agent builder</span>
+          </div>
+          <img src={url("/screenshots/light/agent-builder.png")} alt="Agento's agent builder: system prompt, model, tools and permission mode in three resizable panes">
+        </figure>
+        <div class="sheet panel">
+          <div class="eyebrow">Design<span class="eyebrow__end"><a href={url("/docs/architecture/")}>Architecture ↗</a></span></div>
+          <h3>A native app that behaves like one</h3>
+          <p>Three resizable panes per section, hairline borders, focus-aware selection, a status bar, and a command palette. No browser affordances, because it is not a browser.</p>
+          <p>One process, one SQLite file, and the Claude Code CLI spawned per run. The whole backend is Rust; the window is Tauri.</p>
+          <div class="compbar">
+            <span class="pill pill--plain">Tauri 2</span>
+            <span class="pill pill--plain">Rust</span>
+            <span class="pill pill--plain">React</span>
+            <span class="pill pill--plain">SQLite</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <Faq />
+
+    <StarCta />
+
+    <section class="closer">
+      <h2>Your sessions are already on disk.</h2>
+      <p>Agento just reads them. Install it, and the last six months of your Claude Code usage become a dashboard you can search.</p>
+      <div class="hero__cta">
+        <a class="btn btn--primary" href={RELEASE}>Download {version} →</a>
+        <a class="btn btn--ghost" href={REPO}>Star on GitHub</a>
+      </div>
+    </section>
+
+  </div>
+
+</Page>

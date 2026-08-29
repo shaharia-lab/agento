@@ -1,0 +1,53 @@
+---
+/**
+ * The shell for every page Starlight does not own: the landing page and the
+ * blog. Starlight builds its own <head>, so anything that must be true of
+ * *both* halves of the site (fonts, tokens, the theme attribute) is imported
+ * here and passed to Starlight through `customCss` in astro.config.mjs.
+ */
+import '../styles/fonts.css';
+import '../styles/tokens.css';
+import '../styles/site.css';
+import Masthead from '../components/Masthead.astro';
+import Foot from '../components/Foot.astro';
+import { url } from '../../site.config.mjs';
+
+interface Props {
+  title: string;
+  description: string;
+  current?: 'docs' | 'blog';
+  ogType?: string;
+}
+const { title, description, current, ogType = 'website' } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site).href;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href={url('/favicon.svg')} type="image/svg+xml" />
+    <link rel="alternate" type="application/rss+xml" title="Agento — Notes from the build" href={url('/rss.xml')} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content={ogType} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script is:inline>
+      // Applied before first paint so a dark-mode visitor never sees a flash
+      // of the paper ground.
+      (() => {
+        const t = localStorage.getItem('starlight-theme');
+        if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+      })();
+    </script>
+  </head>
+  <body>
+    <Masthead current={current} />
+    <slot />
+    <div class="shell"><Foot /></div>
+  </body>
+</html>

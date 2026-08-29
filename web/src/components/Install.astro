@@ -1,0 +1,196 @@
+---
+/**
+ * The install section.
+ *
+ * Three rules shape it, and they are all consequences of this being a static
+ * page that cannot know who is asking:
+ *
+ *   1. **Every platform is rendered**, as a stacked <details>. Detection
+ *      happens in the browser, so nothing may be omitted server-side: a
+ *      <details> panel keeps its content in the DOM whether open or shut, which
+ *      is why collapsing is safe where dropping would not be. The script below
+ *      reorders, opens and marks — it never removes. With JavaScript off, the
+ *      first panel is open and the other two are one click away.
+ *   2. **The OS is detected; the architecture is not.** Safari reports
+ *      `MacIntel` on Apple Silicon, so there is no reliable way to tell an ARM
+ *      Mac from an Intel one in JavaScript. Chromium exposes it through
+ *      `userAgentData.getHighEntropyValues`, which is used when present, and
+ *      both Mac downloads are always listed either way. Guessing wrong here
+ *      hands someone a binary that will not run.
+ *   3. **Filenames and links come from the release API**, never from a
+ *      template — asset names carry the version, so a hand-written one is
+ *      wrong the day after a release.
+ */
+import release from '../data/release.json';
+import { url } from '../../site.config.mjs';
+
+const { downloads, resolved } = release;
+const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+const pick = (id: string) => downloads.find((d: any) => d.id === id);
+
+const appimage = pick('linux-appimage-x64');
+const deb = pick('linux-deb-x64');
+const rpm = pick('linux-rpm-x64');
+
+const OSES = [
+  {
+    os: 'macos',
+    label: 'macOS',
+    hint: 'Apple menu → About This Mac tells you which chip you have.',
+    files: downloads.filter((d: any) => d.os === 'macos'),
+    steps: [
+      { t: 'Open the .dmg and drag Agento to Applications.', code: null },
+      {
+        t: 'If macOS says the app cannot be verified, right-click it and choose Open. If that gives you no Open button, clear the quarantine flag:',
+        code: 'xattr -dr com.apple.quarantine /Applications/Agento.app',
+      },
+    ],
+  },
+  {
+    os: 'windows',
+    label: 'Windows',
+    hint: 'Updates arrive in the app after the first install.',
+    files: downloads.filter((d: any) => d.os === 'windows'),
+    steps: [
+      { t: 'Run the installer.', code: null },
+      {
+        t: 'SmartScreen may warn that the publisher is unknown — choose More info, then Run anyway. These builds are signed by our own key rather than an EV certificate.',
+        code: null,
+      },
+    ],
+  },
+  {
+    os: 'linux',
+    label: 'Linux',
+    hint: 'The AppImage updates itself; .deb and .rpm are notify-only, because dpkg and rpm own their files.',
+    files: downloads.filter((d: any) => d.os === 'linux'),
+    steps: [
+      {
+        t: 'AppImage — works on any distribution, and updates in-app:',
+        code: appimage ? `chmod +x ${appimage.file}\n./${appimage.file}` : null,
+      },
+      {
+        t: 'Or install the native package:',
+        code: deb && rpm ? `sudo dpkg -i ${deb.file}      # Debian, Ubuntu\nsudo rpm -i  ${rpm.file}   # Fedora, RHEL` : null,
+      },
+    ],
+  },
+];
+---
+
+<section class="section" id="install">
+  <div class="section__head">
+    <h2>Installed in about a minute.</h2>
+    <span class="label">Install</span>
+  </div>
+
+  <div class="sheet panel prereq">
+    <div class="eyebrow">
+      Before anything
+      <span class="eyebrow__end"><a href={url('/docs/installation/#requirements')}>Requirements ↗</a></span>
+    </div>
+    <h3>Have the Claude Code CLI, signed in</h3>
+    <p>
+      Agento runs every agent through the CLI you already have and reuses its sign-in. There is no
+      Anthropic API key to enter. If this prints a version, you are ready:
+    </p>
+    <pre class="codeblock"><span class="k">claude</span> --version</pre>
+  </div>
+
+  <div class="osgrid" id="osgrid">
+    {OSES.map((entry, i) => (
+      <details class="sheet oscard" data-os={entry.os} open={i === 0}>
+        <summary class="oscard__sum">
+          <span class="oscard__chev" aria-hidden="true">▸</span>
+          {entry.label}
+          <span class="oscard__rec" hidden>Recommended for you</span>
+          <span class="oscard__files">
+            {entry.files.length} {entry.files.length === 1 ? 'file' : 'files'}
+          </span>
+        </summary>
+        <div class="oscard__body">
+        {resolved && entry.files.length > 0 ? (
+          <div class="rows">
+            {entry.files.map((f: any) => (
+              <a class="row" href={f.href}>
+                <span class="badge">{f.kind}</span>
+                <span class="row__m">{f.file}</span>
+                <span class="row__r">{f.arch} · {mb(f.size)}</span>
+                <span class="row__go">↓</span>
+              </a>
+            ))}
+          </div>
+        ) : (
+          <p><a href={release.url}>Pick a file from the latest release ↗</a></p>
+        )}
+
+        <ol class="osteps">
+          {entry.steps.map((s) => (
+            <li>
+              <span>{s.t}</span>
+              {s.code && <pre class="codeblock">{s.code}</pre>}
+            </li>
+          ))}
+        </ol>
+
+        <p class="oshint label">{entry.hint}</p>
+        </div>
+      </details>
+    ))}
+  </div>
+
+  <p class="osfoot">
+    <span class="label">Not your platform?</span>
+    <a href={release.url}>Every file in {release.tag} ↗</a>
+    <span class="label">·</span>
+    <a href={url('/docs/installation/')}>Full installation guide</a>
+  </p>
+</section>
+
+<script is:inline>
+  /* Promotes the visitor's platform to the front and marks it. It never hides
+     a card: a wrong guess, an unknown OS, or no JavaScript all leave the full
+     set visible and in their authored order. */
+  (async () => {
+    const grid = document.getElementById('osgrid');
+    if (!grid) return;
+
+    const ua = navigator.userAgent;
+    let os = null;
+    if (/Mac/i.test(ua)) os = 'macos';
+    else if (/Win/i.test(ua)) os = 'windows';
+    else if (/Linux|X11|CrOS/i.test(ua) && !/Android/i.test(ua)) os = 'linux';
+    if (!os) return;
+
+    const card = grid.querySelector(`.oscard[data-os="${os}"]`);
+    if (!card) return;
+
+    grid.prepend(card);
+    card.classList.add('oscard--rec');
+    card.open = true;
+    const flag = card.querySelector('.oscard__rec');
+    if (flag) flag.hidden = false;
+
+    /* Collapse the others, so the section is one open panel rather than three
+       competing ones. They stay one click away, and their content stays in the
+       DOM either way — <details> hides, it does not remove. */
+    grid.querySelectorAll('.oscard').forEach((el) => {
+      if (el !== card) el.open = false;
+    });
+
+    /* Architecture, only where the browser will actually tell us. Chromium
+       answers 'arm'; Safari and Firefox do not expose it at all, so both Mac
+       builds stay listed and nothing is emphasised. */
+    try {
+      const d = await navigator.userAgentData?.getHighEntropyValues(['architecture']);
+      if (!d?.architecture) return;
+      const arm = d.architecture === 'arm';
+      card.querySelectorAll('.row').forEach((row) => {
+        const isArm = /aarch64|arm64/i.test(row.querySelector('.row__m')?.textContent || '');
+        if (isArm === arm) row.classList.add('row--rec');
+      });
+    } catch {
+      /* No high-entropy hints available. The list stands as rendered. */
+    }
+  })();
+</script>
