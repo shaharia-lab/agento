@@ -6,23 +6,64 @@
  * action. Docs and blog step the same vocabulary down.
  */
 import Page from '../layouts/Page.astro';
-import { url, REPO } from '../../site.config.mjs';
+import { url, abs, REPO, SITE, SITE_NAME, ORG, OG_IMAGE } from '../../site.config.mjs';
 import release from '../data/release.json';
 import Install from '../components/Install.astro';
 import StarCta from '../components/StarCta.astro';
 import Faq from '../components/Faq.astro';
+import JsonLd from '../components/JsonLd.astro';
 
 // Resolved at build time by scripts/fetch-release.mjs — version, tag and the
 // per-platform installer URLs. Nothing about a download is written by hand.
 const { version } = release;
 const RELEASE = release.url;
 
+/**
+ * What this page is about, said in the vocabulary a search engine indexes
+ * rather than the one a reader does. Every value is derived — the version and
+ * the release URL come from the same build-time fetch the download buttons do,
+ * so the card cannot advertise a version the page does not offer.
+ *
+ * `offers` at price 0 is not decoration: without an explicit free offer a
+ * SoftwareApplication is shown with no pricing at all, which reads as
+ * "unknown", and free is the single most load-bearing fact about this one.
+ */
+const schema = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    '@id': `${SITE}/#app`,
+    name: SITE_NAME,
+    applicationCategory: 'DeveloperApplication',
+    applicationSubCategory: 'Analytics',
+    operatingSystem: 'macOS, Windows, Linux',
+    softwareVersion: version,
+    downloadUrl: RELEASE,
+    url: SITE,
+    image: abs(OG_IMAGE.path),
+    license: `${REPO}/blob/main/LICENSE`,
+    isAccessibleForFree: true,
+    description:
+      'A desktop app that reads the session files Claude Code already writes to your disk and turns them into cost analytics, searchable history and scheduled agents.',
+    offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+    author: { '@type': 'Organization', name: ORG.name, url: ORG.url },
+  },
+  {
+    '@context': 'https://schema.org',
+    '@type': 'WebSite',
+    '@id': `${SITE}/#website`,
+    name: SITE_NAME,
+    url: SITE,
+    publisher: { '@type': 'Organization', name: ORG.name, url: ORG.url },
+  },
+];
 ---
 
 <Page
   title="Agento — see what Claude Code really costs you"
   description="A desktop app that reads the session files Claude Code already writes to your disk and turns them into cost analytics, searchable history and scheduled agents. No API key, no account, no telemetry."
 >
+  <JsonLd slot="head" schema={schema} />
 
   <div class="shell">
     <section class="hero">

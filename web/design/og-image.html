@@ -1,0 +1,145 @@
+<!doctype html>
+<!--
+  Source for public/og.png — the one image every share of this site renders.
+
+  Rendered by scripts/render-og.mjs with headless Chrome at exactly 1200×630,
+  which is the size Facebook, LinkedIn, Slack and X all size their large card
+  from. Re-render after editing:
+
+      npm run build:og
+
+  Two rules shape the composition, and both are about what a crop does to it:
+
+  1. **No text.** Every consumer of this image reformats it. X crops a 1200×630
+     to about 2:1 in the timeline, Slack shows it at a few hundred pixels wide,
+     and WhatsApp crops to a square. Wording that is legible in the file is
+     unreadable in three of those and clipped in the fourth, and the title and
+     description are already carried as their own meta tags — repeating them in
+     pixels only gives them a second place to go stale.
+  2. **Everything that means anything lives inside the centre 600×600.** That is
+     the square a 1:1 crop keeps. Outside it is ground and grid only, so the
+     image degrades to the same mark whatever the consumer does to its sides.
+
+  The vocabulary is styles/tokens.css: bone paper, hard ink borders, a solid
+  offset shadow, one electric accent. Colours are literals here rather than
+  tokens because this file is rendered standalone, with no stylesheet behind it.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        --paper: #f0eee6;
+        --ink: #0b0c07;
+        --blue: #1dc1ff;
+        --faint: #d8d5c9;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1200px; height: 630px; }
+      body {
+        background: var(--paper);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        position: relative;
+      }
+
+      /* Full-bleed hairline grid. Purely ground: it carries no meaning, so a
+         crop through it costs nothing, and it keeps the wide format from
+         reading as an oversized margin around a small mark. */
+      .grid {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(to right, var(--faint) 1.5px, transparent 1.5px),
+          linear-gradient(to bottom, var(--faint) 1.5px, transparent 1.5px);
+        background-size: 60px 60px;
+        background-position: -1px -1px;
+      }
+
+      .stage {
+        position: relative;
+        width: 600px;
+        height: 600px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 52px;
+      }
+
+      /* The mark, at 15× the favicon's 32px artboard. Border widths and the
+         corner radius are scaled from it by the same factor so the shape is the
+         favicon rather than a lookalike. */
+      .mark {
+        position: relative;
+        width: 260px;
+        height: 260px;
+      }
+      .mark__shadow {
+        position: absolute;
+        inset: 0;
+        transform: translate(16px, 16px);
+        background: var(--ink);
+        border-radius: 24px;
+      }
+      .mark__face {
+        position: absolute;
+        inset: 0;
+        background: var(--paper);
+        border: 10px solid var(--ink);
+        border-radius: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .mark__dot {
+        width: 90px;
+        height: 90px;
+        border-radius: 50%;
+        background: var(--blue);
+        border: 10px solid var(--ink);
+      }
+
+      /* An abstract session-cost chart: the product's own subject, told without
+         a word. Symmetric about the centre line so a square crop takes the same
+         shape off both sides, and short enough that a 2:1 crop keeps all of it. */
+      .bars {
+        display: flex;
+        align-items: flex-end;
+        gap: 18px;
+        height: 138px;
+      }
+      .bar {
+        width: 40px;
+        background: var(--paper);
+        border: 5px solid var(--ink);
+        border-radius: 3px;
+      }
+      .bar--fill { background: var(--blue); }
+    </style>
+  </head>
+  <body>
+    <div class="grid"></div>
+
+    <div class="stage">
+      <div class="mark">
+        <div class="mark__shadow"></div>
+        <div class="mark__face">
+          <div class="mark__dot"></div>
+        </div>
+      </div>
+
+      <div class="bars">
+        <div class="bar" style="height: 54px"></div>
+        <div class="bar" style="height: 88px"></div>
+        <div class="bar" style="height: 124px"></div>
+        <div class="bar bar--fill" style="height: 138px"></div>
+        <div class="bar" style="height: 124px"></div>
+        <div class="bar" style="height: 88px"></div>
+        <div class="bar" style="height: 54px"></div>
+      </div>
+    </div>
+  </body>
+</html>

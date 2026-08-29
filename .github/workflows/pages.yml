@@ -69,8 +69,16 @@ jobs:
         # The token lifts the release API's unauthenticated rate limit. The
         # build falls back to the version in tauri.conf.json without it, so a
         # rate limit degrades the download list rather than failing the run.
+        #
+        # PUBLIC_GTM_ID is a repository variable, not a secret — a container id
+        # is visible in the page source of every site that loads one. Unset, the
+        # build emits no analytics at all, which is what keeps the tag off fork
+        # builds and off `npm run dev`; see gtmId() in web/site.config.mjs.
+        # Only this workflow publishes, so only this workflow passes it: the
+        # site-check job builds the same site without it deliberately.
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          PUBLIC_GTM_ID: ${{ vars.PUBLIC_GTM_ID }}
         run: npm run build
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
