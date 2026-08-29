@@ -1,0 +1,13 @@
+---
+import { url, REPO } from '../../site.config.mjs';
+const year = new Date().getFullYear();
+---
+<footer class="foot">
+  <span class="label">© {year} Shaharia Lab · MIT</span>
+  <a href={url('/docs/')}>Docs</a>
+  <a href={url('/blog/')}>Blog</a>
+  <a href={`${REPO}/releases`}>Releases</a>
+  <a href={`${REPO}/issues`}>Issues</a>
+  <a href={`${REPO}/blob/main/SECURITY.md`}>Security</a>
+  <span class="label foot__end">runs entirely on your machine —</span>
+</footer>

@@ -1,0 +1,52 @@
+---
+import { getCollection, render } from 'astro:content';
+import Page from '../../layouts/Page.astro';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog', ({ data }) => !data.draft);
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+
+const initials = post.data.author
+  .split(' ')
+  .map((w: string) => w[0])
+  .join('')
+  .slice(0, 2)
+  .toUpperCase();
+const date = post.data.date.toLocaleDateString('en-GB', {
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
+});
+---
+
+<Page
+  title={`${post.data.title} — Agento`}
+  description={post.data.description}
+  current="blog"
+  ogType="article"
+>
+  <div class="shell">
+    <article class="entry">
+      <div class="entry__meta">
+        {post.data.tags[0] && <span class="pill">{post.data.tags[0]}</span>}
+        <span class="post__date">{date}</span>
+      </div>
+      <h1>{post.data.title}</h1>
+      <p class="entry__lede">{post.data.description}</p>
+
+      <Content />
+
+      <div class="byline">
+        <div class="byline__av">{initials}</div>
+        <div>
+          <div class="byline__n">{post.data.author}</div>
+          <div class="byline__r">Maintainer, Agento</div>
+        </div>
+      </div>
+    </article>
+  </div>
+</Page>

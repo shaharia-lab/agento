@@ -1,0 +1,66 @@
+---
+import { getCollection } from 'astro:content';
+import Page from '../../layouts/Page.astro';
+import { url } from '../../../site.config.mjs';
+
+const posts = (await getCollection('blog', ({ data }) => !data.draft)).sort(
+  (a, b) => b.data.date.valueOf() - a.data.date.valueOf()
+);
+const [featured, ...rest] = posts.some((p) => p.data.featured)
+  ? [posts.find((p) => p.data.featured)!, ...posts.filter((p) => !p.data.featured)]
+  : posts;
+
+const fmt = (d: Date, long = false) =>
+  d.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: long ? 'long' : 'short',
+    year: 'numeric',
+  });
+---
+
+<Page
+  title="Notes from the build — Agento"
+  description="Release notes, ported subsystems, and the decisions that were harder than they looked."
+  current="blog"
+>
+  <div class="shell blog">
+    <h1 class="blog__title">Notes from the build.</h1>
+    <p class="blog__sub">
+      Release notes, ported subsystems, and the decisions that were harder than they looked.
+    </p>
+
+    {featured && (
+      <a class="post post--feature" href={url(`/blog/${featured.id}/`)}>
+        <div class="post__meta">
+          <span class="pill">Latest</span>
+          <span class="post__date">{fmt(featured.data.date, true)}</span>
+        </div>
+        <h3>{featured.data.title}</h3>
+        <p>{featured.data.description}</p>
+        <div class="post__tags">
+          {featured.data.tags.map((t) => <span class="pill pill--plain">{t}</span>)}
+        </div>
+      </a>
+    )}
+
+    {rest.length > 0 && (
+      <div class="posts">
+        {rest.map((post) => (
+          <a class="post" href={url(`/blog/${post.id}/`)}>
+            <span class="post__date">{fmt(post.data.date)}</span>
+            <div class="post__body">
+              <h3>{post.data.title}</h3>
+              <p>{post.data.description}</p>
+              <div class="post__tags">
+                {post.data.tags.map((t) => <span class="pill pill--plain">{t}</span>)}
+              </div>
+            </div>
+            <span class="post__go">→</span>
+          </a>
+        ))}
+      </div>
+    )}
+
+    {posts.length === 0 && <p class="blog__sub">Nothing published yet.</p>}
+  </div>
+</Page>

@@ -1,0 +1,86 @@
+/* ==========================================================================
+   Agento site — design tokens
+
+   Neo-brutalist editorial: bone paper, hard ink borders, solid offset shadows,
+   one electric accent. Light is the native state; dark inverts the ground and
+   the ink and keeps everything else.
+
+   Every colour is defined here on bare :root first, then redefined for the two
+   dark states. Nothing downstream may declare a colour inside a media query or
+   a [data-theme] block — a token defined only there never applies to a visitor
+   on the default "system" setting, which is most of them.
+   ========================================================================== */
+/* ==========================================================================
+   AGENTO — site design tokens
+   Neo-brutalist editorial: bone paper, hard ink borders, solid offset
+   shadows, one electric accent. Light is the native state; dark inverts the
+   ground and the ink and keeps everything else.
+   ========================================================================== */
+:root {
+  --paper:       #F0EEE6;
+  --raised:      #F7F5EE;
+  --sunken:      #E6E3D9;
+  --ink:         #0B0C07;
+  --ink-soft:    #5A574D;
+  --ink-faint:   #8A8779;
+  --blue:        #1DC1FF;
+  --blue-tint:   #C9E6F6;
+  --blue-deep:   #0B7FA8;
+  --code-bg:     #0B0C07;
+  --code-fg:     #EFECE2;
+  --code-border: #0B0C07;
+  --warn:        #E8A33D;
+
+  --bw: 1.5px;
+  --bw-strong: 2px;
+  --offset: 8px 8px 0 var(--ink);
+  --offset-sm: 5px 5px 0 var(--ink);
+  --radius: 2px;
+
+  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-sub: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --font-serif-text: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --font-sans-text: "Karla", "Helvetica Neue", Arial, sans-serif;
+  --font-body: var(--font-sans-text);
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --measure: 68ch;
+  --shell: 1120px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:       #14150F;
+    --raised:      #1C1D16;
+    --sunken:      #0D0E09;
+    --ink:         #F1EEE5;
+    --ink-soft:    #A29F92;
+    --ink-faint:   #6E6C61;
+    --blue:        #1DC1FF;
+    --blue-tint:   #0E3A4C;
+    --blue-deep:   #7FDCFF;
+    --code-bg:     #0A0B06;
+    --code-fg:     #EFECE2;
+    --code-border: #F1EEE5;
+    --warn:        #E8A33D;
+  }
+}
+:root[data-theme="dark"] {
+  --paper:       #14150F;
+  --raised:      #1C1D16;
+  --sunken:      #0D0E09;
+  --ink:         #F1EEE5;
+  --ink-soft:    #A29F92;
+  --ink-faint:   #6E6C61;
+  --blue:        #1DC1FF;
+  --blue-tint:   #0E3A4C;
+  --blue-deep:   #7FDCFF;
+  --code-bg:     #0A0B06;
+  --code-fg:     #EFECE2;
+  --code-border: #F1EEE5;
+  --warn:        #E8A33D;
+}
+
+/* Review switch: the reference sets body copy in a serif. Both are wired so
+   the choice can be made by looking, not by arguing. */
+:root[data-body="serif"] { --font-body: var(--font-serif-text); }
+:root[data-body="serif"] body { font-size: 17.5px; line-height: 1.62; }

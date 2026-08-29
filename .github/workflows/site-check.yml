@@ -1,0 +1,54 @@
+name: Site check
+
+# Builds the site on any pull request that could break it, and checks every
+# link in the output.
+#
+# The link check earns its place: docs/ cross-links by heading anchor
+# (`troubleshooting.md#the-claude-code-cli`), and renaming a heading breaks
+# those silently — the markdown still renders, the link just goes nowhere.
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'web/**'
+      - 'src-tauri/tauri.conf.json'
+      - '.github/workflows/site-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        working-directory: web
+        run: npm ci
+
+      - name: Build
+        working-directory: web
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run build
+
+      - name: Check links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Offline: internal links and their fragments only. External links
+          # would make this job fail on somebody else's outage, and a rate
+          # limit from GitHub would fail it on every second run.
+          args: >-
+            --offline
+            --include-fragments
+            --root-dir ${{ github.workspace }}/web/dist
+            --exclude-path web/dist/pagefind
+            'web/dist/**/*.html'
+          fail: true

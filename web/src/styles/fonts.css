@@ -1,0 +1,11 @@
+/* Fonts are self-hosted. Agento's whole claim is that nothing leaves your
+   machine; loading the marketing site's type from a third party would put a
+   request to Google on every page view, which is the wrong note to open on. */
+@import '@fontsource/instrument-serif/400.css';
+@import '@fontsource/instrument-serif/400-italic.css';
+@import '@fontsource-variable/newsreader/index.css';
+@import '@fontsource-variable/jetbrains-mono/index.css';
+@import '@fontsource/karla/400.css';
+@import '@fontsource/karla/500.css';
+@import '@fontsource/karla/600.css';
+@import '@fontsource/karla/700.css';

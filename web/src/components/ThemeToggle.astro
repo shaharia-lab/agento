@@ -1,0 +1,31 @@
+---
+/**
+ * Theme switch for the pages Starlight does not render.
+ *
+ * It reads and writes the same `starlight-theme` localStorage key Starlight's
+ * own selector uses, so a choice made on the landing page survives into the
+ * docs and back. Diverging here would give one site two memories.
+ */
+---
+<button class="themetoggle" type="button" aria-label="Switch between light and dark">
+  <span class="themetoggle__t">Theme</span>
+</button>
+
+<script is:inline>
+  (() => {
+    const KEY = 'starlight-theme';
+    const root = document.documentElement;
+    const apply = (t) => {
+      if (t === 'dark' || t === 'light') root.setAttribute('data-theme', t);
+      else root.removeAttribute('data-theme');
+    };
+    apply(localStorage.getItem(KEY));
+    document.querySelector('.themetoggle')?.addEventListener('click', () => {
+      const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+      const now = root.getAttribute('data-theme') || (dark ? 'dark' : 'light');
+      const next = now === 'dark' ? 'light' : 'dark';
+      localStorage.setItem(KEY, next);
+      apply(next);
+    });
+  })();
+</script>
