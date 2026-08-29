@@ -9,6 +9,7 @@
     "preview": "astro preview",
     "check": "astro check",
     "clean": "node scripts/clean.mjs",
+    "build:og": "node scripts/render-og.mjs",
     "check:links": "node scripts/check-links.mjs"
   },
   "dependencies": {

@@ -2,8 +2,43 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import sitemap from '@astrojs/sitemap';
-import { SITE, BASE, REPO } from './site.config.mjs';
+import { SITE, BASE, REPO, OG_IMAGE, abs, gtmId, gtmSnippet } from './site.config.mjs';
 import { GROUPS, PAGES } from './docs.manifest.mjs';
+
+/**
+ * The half of the <head> that Starlight owns.
+ *
+ * Starlight builds its own head and does not read src/layouts/Page.astro, so
+ * anything that must be true of EVERY page has to be stated twice — once in
+ * that layout, once here. Only what Starlight does not already emit belongs in
+ * this list: it emits the title, description, canonical, `og:title`,
+ * `og:description`, `og:url`, `og:type`, `og:locale`, `og:site_name` and
+ * `twitter:card` itself, and repeating one of those produces a duplicate tag
+ * rather than an override.
+ *
+ * What it does not emit is an image, which is why every share of a docs page
+ * rendered a blank card.
+ */
+const starlightHead = [
+  { tag: 'meta', attrs: { property: 'og:image', content: abs(OG_IMAGE.path) } },
+  { tag: 'meta', attrs: { property: 'og:image:width', content: String(OG_IMAGE.width) } },
+  { tag: 'meta', attrs: { property: 'og:image:height', content: String(OG_IMAGE.height) } },
+  {
+    tag: 'meta',
+    attrs: {
+      property: 'og:image:alt',
+      content: 'The Agento mark over an abstract session-cost chart',
+    },
+  },
+  { tag: 'meta', attrs: { name: 'twitter:image', content: abs(OG_IMAGE.path) } },
+];
+
+// Analytics, on the same terms as the other half: absent entirely when no
+// container id was supplied to the build. See gtmId() in site.config.mjs.
+const gtm = gtmId();
+if (gtm) {
+  starlightHead.push({ tag: 'script', content: gtmSnippet(gtm) });
+}
 
 /** The sidebar is derived from the manifest, so it cannot drift from the pages. */
 const sidebar = [
@@ -76,6 +111,7 @@ export default defineConfig({
       },
       description:
         'Cost analytics, session history and scheduled agents for Claude Code — a desktop app that reads what is already on your disk.',
+      head: starlightHead,
       social: [{ icon: 'github', label: 'GitHub', href: REPO }],
       editLink: { baseUrl: `${REPO}/edit/main/` },
       sidebar,
