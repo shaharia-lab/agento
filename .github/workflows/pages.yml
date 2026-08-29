@@ -26,6 +26,17 @@ on:
 # at startup with "This run likely failed because of a workflow file issue" and
 # no job logs, which is a slow thing to diagnose — so check the policy before
 # adding an action here.
+#
+# **Pinning this file is not enough — the rule applies transitively.** A
+# composite action's own `uses:` lines are resolved on the runner and checked
+# against the same policy, so a composite that references its dependency by tag
+# is refused however carefully we pinned the composite itself. That is what
+# broke the first deploy: `upload-pages-artifact@v3` calls
+# `actions/upload-artifact@v4` by tag, and the run failed at "Getting action
+# download info" with "The action actions/upload-artifact@v4 is not allowed" —
+# naming an action that appears nowhere in this file. All three Pages actions
+# are on versions that SHA-pin their own dependencies; check `action.yml` at the
+# tag before bumping any of them.
 
 permissions:
   contents: read
@@ -62,8 +73,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: npm run build
 
-      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: web/dist
 
@@ -75,4 +86,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
