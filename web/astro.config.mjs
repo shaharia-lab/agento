@@ -32,7 +32,9 @@ const INK = '#0B0C07';
 
 export default defineConfig({
   site: SITE,
-  base: BASE,
+  // BASE is '' rather than '/' so the raw concatenations in scripts/ stay
+  // correct (see site.config.mjs); Astro wants a real path for the site root.
+  base: BASE || '/',
   trailingSlash: 'always',
   integrations: [
     starlight({

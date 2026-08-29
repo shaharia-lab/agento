@@ -34,7 +34,7 @@ async function htmlFiles(dir) {
   return out;
 }
 
-/** `/agento/docs/installation/` -> the file that serves it. */
+/** `/docs/installation/` -> the file that serves it. */
 function fileFor(href) {
   const path = href.slice(BASE.length) || '/';
   const rel = path.endsWith('/') ? `${path}index.html` : path;
