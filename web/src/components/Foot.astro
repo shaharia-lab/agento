@@ -1,5 +1,6 @@
 ---
-import { url, REPO } from '../../site.config.mjs';
+import { url, REPO, gtmId } from '../../site.config.mjs';
+const gtm = gtmId();
 const year = new Date().getFullYear();
 ---
 <footer class="foot">
@@ -9,5 +10,13 @@ const year = new Date().getFullYear();
   <a href={`${REPO}/releases`}>Releases</a>
   <a href={`${REPO}/issues`}>Issues</a>
   <a href={`${REPO}/blob/main/SECURITY.md`}>Security</a>
+  {/* Reopens the consent banner. It is a link rather than a button because it
+      sits in a row of links, and href="#" with preventDefault keeps it
+      keyboard-reachable; the handler is delegated, so it works on the docs
+      half too, where this component does not render but Starlight's own
+      footer can carry the same attribute. When no container id was supplied
+      to the build there is no banner and nothing listens — the link is then
+      inert, which is why it is not rendered at all in that case. */}
+  {gtm && <a href="#" data-cookie-settings>Cookies</a>}
   <span class="label foot__end">runs entirely on your machine —</span>
 </footer>

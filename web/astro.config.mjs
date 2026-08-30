@@ -2,7 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import sitemap from '@astrojs/sitemap';
-import { SITE, BASE, REPO, OG_IMAGE, abs, gtmId, gtmSnippet } from './site.config.mjs';
+import { SITE, BASE, REPO, OG_IMAGE, abs, url, gtmId, gtmSnippet, consentDefaultSnippet, consentBannerSnippet } from './site.config.mjs';
 import { GROUPS, PAGES } from './docs.manifest.mjs';
 
 /**
@@ -35,9 +35,18 @@ const starlightHead = [
 
 // Analytics, on the same terms as the other half: absent entirely when no
 // container id was supplied to the build. See gtmId() in site.config.mjs.
+// Consent Mode's defaults have to reach the dataLayer before the container
+// does, so these push in order: default, container, banner. Starlight has no
+// body extension point, which is why the banner is a script rather than
+// markup — see consentBannerSnippet() in site.config.mjs.
 const gtm = gtmId();
 if (gtm) {
+  starlightHead.push({ tag: 'script', content: consentDefaultSnippet() });
   starlightHead.push({ tag: 'script', content: gtmSnippet(gtm) });
+  starlightHead.push({
+    tag: 'script',
+    content: consentBannerSnippet(url('/docs/user-guide/#privacy')),
+  });
 }
 
 /** The sidebar is derived from the manifest, so it cannot drift from the pages. */
@@ -78,6 +87,7 @@ export default defineConfig({
         './src/styles/fonts.css',
         './src/styles/tokens.css',
         './src/styles/starlight.css',
+        './src/styles/consent.css',
       ],
       expressiveCode: {
         // One theme for both site themes: code blocks are always inverted
@@ -114,6 +124,9 @@ export default defineConfig({
       head: starlightHead,
       social: [{ icon: 'github', label: 'GitHub', href: REPO }],
       editLink: { baseUrl: `${REPO}/edit/main/` },
+      // The only component override on the site, and it adds one link — see
+      // the file for why the docs half needs its own.
+      components: { Footer: './src/components/starlight/Footer.astro' },
       sidebar,
       // The docs pages are generated from ../docs by scripts/sync-docs.mjs.
       // Editing them in src/content/ has no effect; the next build overwrites.
