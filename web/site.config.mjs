@@ -85,6 +85,99 @@ export function gtmSnippet(id) {
   return `(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','${id}');`;
 }
 
+/**
+ * The consent key, shared by the two snippets below and by the footer's
+ * "Cookie settings" link. One spelling, in one place.
+ */
+export const CONSENT_KEY = 'agento-consent';
+
+/**
+ * Google Consent Mode v2 defaults, emitted `is:inline` IMMEDIATELY BEFORE the
+ * GTM loader on both halves of the site. The order is the whole point: a
+ * default set after the container has loaded is a default the container never
+ * saw, and the tags inside it will already have fired.
+ *
+ * Everything is denied except `security_storage`, and denied *globally* rather
+ * than for the EEA alone. Consent Mode supports a `region` argument and this
+ * deliberately does not use it: a site whose own FAQ answers "there is no
+ * account, no telemetry and no analytics" should not be measuring the visitors
+ * whose regulator happens not to require asking. It also removes a whole class
+ * of bug, since the untested branch of a region rule is the one that runs for
+ * almost everybody.
+ *
+ * `wait_for_update` holds tags for 500ms so a returning visitor's stored grant
+ * lands before anything fires. The replay below is what usually beats it —
+ * reading localStorage is synchronous, so the update is pushed in the same
+ * task as the default and the wait never elapses. The 500ms is the fallback
+ * for the first visit, where the answer comes from a click.
+ *
+ * v2 is the current version and there is no v4: `ad_user_data` and
+ * `ad_personalization` are the two signals v2 added to v1, and both are here.
+ */
+export function consentDefaultSnippet() {
+  return `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag('consent','default',{ad_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',analytics_storage:'denied',functionality_storage:'denied',personalization_storage:'denied',security_storage:'granted',wait_for_update:500});try{var c=localStorage.getItem('${CONSENT_KEY}');if(c==='granted'||c==='denied'){var v=c==='granted'?'granted':'denied';gtag('consent','update',{ad_storage:v,ad_user_data:v,ad_personalization:v,analytics_storage:v,functionality_storage:v,personalization_storage:v})}}catch(e){}`;
+}
+
+/**
+ * The banner itself: built in JavaScript rather than authored as markup, and
+ * that is a constraint rather than a preference. Starlight builds its own
+ * document and its only extension point is the head — which is why GTM's
+ * <noscript> half is omitted (see gtmSnippet). A banner authored in
+ * Page.astro would exist on the landing page and the blog and simply not on
+ * the docs, which is the worst of the three outcomes. One head snippet reaches
+ * both halves, and the banner needs JavaScript to do its job anyway.
+ *
+ * Four things here are requirements rather than choices:
+ *
+ * - **Accept and Reject are the same control.** Same size, same weight, same
+ *   colour, adjacent. Regulators have repeatedly treated a prominent Accept
+ *   beside a muted Reject as consent that was not freely given, and the design
+ *   system has an accent that would make styling one of them "primary" the
+ *   natural thing to do. Do not make Accept the primary button.
+ * - **Refusing is one click**, same as accepting. There is no "manage
+ *   preferences" step in between, because there is one purpose to consent to.
+ * - **The choice is withdrawable.** `window.agentoConsent.open()` reopens the
+ *   banner and the footer link calls it, so changing your mind costs what
+ *   giving consent cost.
+ * - **It is inserted first in <body>**, not last. Fixed to the bottom visually,
+ *   but early in the tab order — a keyboard visitor should not have to traverse
+ *   the whole page to reach the thing blocking their consent decision.
+ *
+ * Dismissing without choosing is not offered: there is no X, and Escape does
+ * not close it. An unanswered banner leaves the denied default in force, so
+ * nothing is measured either way — but a dismiss control that silently means
+ * "no" while looking like "later" is the pattern this is avoiding.
+ */
+export function consentBannerSnippet(privacyHref) {
+  return `(function(){
+var K='${CONSENT_KEY}',el=null;
+function set(v){try{localStorage.setItem(K,v)}catch(e){}
+  if(window.gtag){gtag('consent','update',{ad_storage:v,ad_user_data:v,ad_personalization:v,analytics_storage:v,functionality_storage:v,personalization_storage:v})}
+  if(el){el.remove();el=null}}
+function build(){
+  if(el)return;
+  el=document.createElement('div');
+  el.className='cc';el.setAttribute('role','dialog');
+  el.setAttribute('aria-labelledby','cc-t');el.tabIndex=-1;
+  el.innerHTML='<div class="cc__in"><div class="cc__x"><span class="cc__l" id="cc-t">Cookies</span>'+
+    '<p class="cc__p">This site uses Google Analytics to count visits, and nothing else. '+
+    'The app itself sends nothing anywhere — that is not what this is. '+
+    '<a class="cc__a" href="${privacyHref}">What Agento stores</a></p></div>'+
+    '<div class="cc__b"><button type="button" class="cc__btn" data-v="denied">Reject</button>'+
+    '<button type="button" class="cc__btn" data-v="granted">Accept</button></div></div>';
+  el.addEventListener('click',function(e){var b=e.target.closest('[data-v]');if(b)set(b.getAttribute('data-v'))});
+  document.body.insertBefore(el,document.body.firstChild);
+}
+window.agentoConsent={open:function(){build();el.focus()}};
+function start(){var c=null;try{c=localStorage.getItem(K)}catch(e){}
+  if(c!=='granted'&&c!=='denied')build();
+  document.addEventListener('click',function(e){
+    var t=e.target.closest('[data-cookie-settings]');
+    if(t){e.preventDefault();window.agentoConsent.open()}});}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
+})();`;
+}
+
 /** Join a site-absolute path onto the base. `url('/docs/')` → `/docs/`. */
 export function url(path = '/') {
   const p = path.startsWith('/') ? path : `/${path}`;

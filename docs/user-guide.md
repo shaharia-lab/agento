@@ -818,6 +818,16 @@ reference, along with any `OTEL_*` environment variables pinning them.
   `~/.agento` as sensitive.
 - Your Claude Code transcripts in `~/.claude` are read only, never modified.
 
+**The website is a separate thing, and it is not the app.** myagento.app loads
+Google Analytics through Google Tag Manager to count visits. Nothing above
+changes: the app has no analytics, and the site cannot see anything the app
+does — it is a static site on GitHub Pages that has never met your database.
+
+Consent is asked for on your first visit and **denied until you accept**, in
+every country rather than only where a regulator requires the question. Refuse
+and nothing is loaded. The choice is remembered in your browser's local storage
+and can be changed at any time from the **Cookies** link in the site footer.
+
 ---
 
 ## Getting help

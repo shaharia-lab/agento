@@ -8,9 +8,10 @@
 import '../styles/fonts.css';
 import '../styles/tokens.css';
 import '../styles/site.css';
+import '../styles/consent.css';
 import Masthead from '../components/Masthead.astro';
 import Foot from '../components/Foot.astro';
-import { url, abs, OG_IMAGE, SITE_NAME, gtmId, gtmSnippet } from '../../site.config.mjs';
+import { url, abs, OG_IMAGE, SITE_NAME, gtmId, gtmSnippet, consentDefaultSnippet, consentBannerSnippet } from '../../site.config.mjs';
 
 interface Props {
   title: string;
@@ -54,7 +55,12 @@ const gtm = gtmId();
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:image" content={ogImage} />
     <slot name="head" />
+    {/* Consent Mode's defaults must be in the dataLayer BEFORE the container
+        loads, so these three are one ordered group: default, container,
+        banner. Keep them adjacent and keep them in this order. */}
+    {gtm && <script is:inline set:html={consentDefaultSnippet()} />}
     {gtm && <script is:inline set:html={gtmSnippet(gtm)} />}
+    {gtm && <script is:inline set:html={consentBannerSnippet(url('/docs/user-guide/#privacy'))} />}
     <script is:inline>
       // Applied before first paint so a dark-mode visitor never sees a flash
       // of the paper ground.
