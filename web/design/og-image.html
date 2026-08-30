@@ -21,8 +21,9 @@
      image degrades to the same mark whatever the consumer does to its sides.
 
   The vocabulary is styles/tokens.css: bone paper, hard ink borders, a solid
-  offset shadow, one electric accent. Colours are literals here rather than
-  tokens because this file is rendered standalone, with no stylesheet behind it.
+  offset shadow, one accent. Colours are literals here rather than tokens
+  because this file is rendered standalone, with no stylesheet behind it — keep
+  them in step with @shaharia-lab/agento-code's light palette by hand.
 -->
 <html lang="en">
   <head>
@@ -31,7 +32,7 @@
       :root {
         --paper: #f0eee6;
         --ink: #0b0c07;
-        --blue: #1dc1ff;
+        --accent: #1f7a4c;
         --faint: #d8d5c9;
       }
       * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -98,7 +99,7 @@
         width: 90px;
         height: 90px;
         border-radius: 50%;
-        background: var(--blue);
+        background: var(--accent);
         border: 10px solid var(--ink);
       }
 
@@ -117,7 +118,7 @@
         border: 5px solid var(--ink);
         border-radius: 3px;
       }
-      .bar--fill { background: var(--blue); }
+      .bar--fill { background: var(--accent); }
     </style>
   </head>
   <body>
