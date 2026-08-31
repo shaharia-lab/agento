@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../lib/api";
 import { describeError, useResource } from "../lib/hooks";
 import { dateTime, relativeTime } from "../lib/format";
@@ -36,7 +36,41 @@ import "../styles/integrations.css";
 
 /* ============================================================================
    Integrations — connect a provider, then choose what its agents may call.
+
+   **The connect screen and the edit screen render the same form** (#517).
+   `ConnectForm` and `IntegrationDetail` were written independently and every
+   wrapper around the two shared pieces (`CredentialFields`, `ServiceEditor`)
+   drifted: the same Name field sat under two different headings, in two
+   different positions, and the one sentence explaining what the checkbox grid
+   means was shown only to people who had never used the app before.
+
+   The rule that replaced it, and the three things that keep it true:
+
+   * **`ConnectionFields` and `ServicesSection` are the shared body**, composed
+     by both screens. A field cannot appear on one and not the other, and it
+     cannot move on one screen alone.
+   * **Every heading and help string below is a module constant.** Two screens
+     spelling one heading twice is exactly how the drift started, so a rename
+     here changes both.
+   * **Edit-only sections render *after* the shared body** — Authorisation, the
+     trigger rules, the webhook and the *Enabled* switch. Both screens therefore
+     open on the same thing, and the layout a user learns on the way in is the
+     one they meet on the way back.
    ========================================================================== */
+
+/** The heading over Name, the auth method and the credential fields. */
+const CONNECTION_TITLE = "Connection";
+/** The heading over the service/tool grid. */
+const SERVICES_TITLE = "Services and tools";
+/** The heading over the edit-only *Enabled* switch. */
+const AVAILABILITY_TITLE = "Availability";
+
+const NAME_HELP =
+  "How this connection is labelled in Agento. Useful when you connect the same provider twice.";
+const SERVICES_HELP =
+  "Only the tools you leave on are exposed to agents. You can change this later.";
+const STORED_SECRET_HELP =
+  "Agento cannot show a stored secret back to you, and does not need to — leave this alone and saving keeps it.";
 
 type Selection =
   | {
@@ -442,6 +476,11 @@ function ConnectForm({
       const created = await api.post<Integration>("/integrations", {
         name: name.trim(),
         type: provider.type,
+        // **Deliberately not offered on this screen** (#517), which is why the
+        // *Availability* switch is the one control the edit screen has and this
+        // one does not. Connecting a provider is an act of turning it on;
+        // a switch here would only ever be used to create something inert, and
+        // the edit screen is one click away for the day that changes.
         enabled: true,
         credentials: buildCredentials(provider, mode, values),
         services,
@@ -520,63 +559,33 @@ function ConnectForm({
 
           <div className="divider" />
 
-          <div className="formsec">
-            <div className="formsec__title">Connection</div>
-            <div className="formrow">
-              <div className="formrow__label">Name</div>
-              <div className="formrow__control">
-                <label className="field">
-                  <input
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder={provider.label}
-                    spellCheck={false}
-                  />
-                </label>
-                <div className="formrow__help">
-                  How this connection is labelled in Agento. Useful when you connect the
-                  same provider twice.
+          <ConnectionFields
+            provider={provider}
+            name={name}
+            onName={setName}
+            mode={mode}
+            modeValue={modeValue}
+            onMode={setModeValue}
+            values={values}
+            onValues={setValues}
+            note={
+              mode.kind === "oauth" && (
+                <div className="msgline">
+                  <span className="msgline__icon">
+                    <Icon name="info" size={13} />
+                  </span>
+                  <span>
+                    After the integration is created you will be sent to {provider.label} in
+                    your browser to authorise it.
+                  </span>
                 </div>
-              </div>
-            </div>
-
-            {provider.modes.length > 1 && (
-              <div className="formrow">
-                <div className="formrow__label">Auth method</div>
-                <div className="formrow__control">
-                  <Segmented
-                    value={modeValue}
-                    options={provider.modes.map((m) => ({ value: m.value, label: m.label }))}
-                    onChange={setModeValue}
-                  />
-                </div>
-              </div>
-            )}
-
-            <CredentialFields mode={mode} values={values} onChange={setValues} />
-
-            {mode.kind === "oauth" && (
-              <div className="msgline">
-                <span className="msgline__icon">
-                  <Icon name="info" size={13} />
-                </span>
-                <span>
-                  After the integration is created you will be sent to {provider.label} in
-                  your browser to authorise it.
-                </span>
-              </div>
-            )}
-          </div>
+              )
+            }
+          />
 
           <div className="divider" />
 
-          <div className="formsec">
-            <div className="formsec__title">Services and tools</div>
-            <div className="formrow__help">
-              Only the tools you leave on are exposed to agents. You can change this later.
-            </div>
-            <ServiceEditor provider={provider} services={services} onChange={setServices} />
-          </div>
+          <ServicesSection provider={provider} services={services} onChange={setServices} />
 
           {error && (
             <div className="msgline msgline--error">
@@ -609,6 +618,144 @@ function ConnectForm({
         </div>
       </div>
     </>
+  );
+}
+
+/* --- The shared form body ------------------------------------------------ */
+
+/**
+ * Name, the auth method and the credential fields — the block both screens
+ * open on (#517).
+ *
+ * `stored` is the one difference between them, and it is a difference in what
+ * exists rather than in layout: only a saved integration can have a secret to
+ * keep, so only the edit screen passes it. While it is present the masked line
+ * stands in for the auth method and the fields, because the method rides
+ * *inside* the credential blob and offering it beside a secret nobody is
+ * replacing would let the user change something that sends nothing — see
+ * `IntegrationDetail`'s note on `canSave`.
+ */
+function ConnectionFields({
+  provider,
+  name,
+  onName,
+  mode,
+  modeValue,
+  onMode,
+  values,
+  onValues,
+  stored,
+  note,
+}: {
+  provider: Provider;
+  name: string;
+  onName(next: string): void;
+  mode: AuthMode;
+  modeValue: string;
+  onMode(next: string): void;
+  values: Record<string, string>;
+  onValues(next: Record<string, string>): void;
+  /**
+   * Edit-only, and present only while a stored secret is being kept: renders
+   * `••• stored` behind an explicit *Replace* in place of the auth method and
+   * the fields (#515).
+   */
+  stored?: { onReplace(): void };
+  /** Anything the screen wants at the foot of the section. */
+  note?: ReactNode;
+}) {
+  /**
+   * An OAuth provider that carries no credential fields at all has nothing to
+   * put here, so the block is Name alone rather than an empty headed section —
+   * on both screens, since the gate is on the shared body.
+   */
+  const needsCredentials = mode.fields.length > 0;
+
+  return (
+    <div className="formsec">
+      <div className="formsec__title">{CONNECTION_TITLE}</div>
+      <div className="formrow">
+        <div className="formrow__label">Name</div>
+        <div className="formrow__control">
+          <label className="field">
+            <input
+              value={name}
+              onChange={(e) => onName(e.target.value)}
+              placeholder={provider.label}
+              spellCheck={false}
+            />
+          </label>
+          <div className="formrow__help">{NAME_HELP}</div>
+        </div>
+      </div>
+
+      {needsCredentials &&
+        (stored ? (
+          /* The label stays generic rather than becoming `mode.label`. The
+             stored mode *is* reportable since #513, and the inspector reports
+             it — but only when the row records one. A multi-mode row saved
+             before that field existed records nothing, and `modeValue` falls
+             back to `provider.modes[0]` for it, so a Slack row connected by
+             OAuth would still be captioned "Bot token" here. As a caption on a
+             stored secret that is a claim the app cannot make for every row,
+             and this one caption serves all of them. */
+          <div className="formrow">
+            <div className="formrow__label">Credentials</div>
+            <div className="formrow__control">
+              <div className="int-storedsecret">
+                <span className="mono">••••••••••• stored</span>
+                <button className="btn btn--ghost" onClick={stored.onReplace}>
+                  Replace
+                </button>
+              </div>
+              <div className="formrow__help">{STORED_SECRET_HELP}</div>
+            </div>
+          </div>
+        ) : (
+          <>
+            {provider.modes.length > 1 && (
+              <div className="formrow">
+                <div className="formrow__label">Auth method</div>
+                <div className="formrow__control">
+                  <Segmented
+                    value={modeValue}
+                    options={provider.modes.map((m) => ({ value: m.value, label: m.label }))}
+                    onChange={onMode}
+                  />
+                </div>
+              </div>
+            )}
+
+            <CredentialFields mode={mode} values={values} onChange={onValues} />
+          </>
+        ))}
+
+      {note}
+    </div>
+  );
+}
+
+/**
+ * The service/tool grid under its heading, with the one sentence that explains
+ * what the grid means (#517) — which used to render on the connect screen only,
+ * so the people who had to live with the choice were the ones never told what
+ * it did.
+ */
+function ServicesSection({
+  provider,
+  services,
+  onChange,
+}: {
+  provider: Provider;
+  services: Services;
+  onChange(next: Services): void;
+}) {
+  return (
+    <div className="formsec">
+      <div className="formsec__title">{SERVICES_TITLE}</div>
+      <div className="formrow__help">{SERVICES_HELP}</div>
+      <ServiceEditor provider={provider} services={services} onChange={onChange} />
+    </div>
   );
 }
 
@@ -982,6 +1129,33 @@ function IntegrationDetail({
 
       <div className="scroll" style={{ flex: 1, padding: "var(--sp-8)" }}>
         <div className="form">
+          {/* The shared body first, and the edit-only sections after it
+              (#517): this screen and the connect screen open on the same
+              block, so the layout learned on the way in is the one met on the
+              way back. */}
+          <ConnectionFields
+            provider={provider}
+            name={name}
+            onName={setName}
+            mode={mode}
+            modeValue={modeValue}
+            onMode={setModeValue}
+            values={values}
+            onValues={setValues}
+            /* The auth method is part of the credential blob, so it is offered
+               only alongside the fields that carry it: changing it on its own
+               would send nothing and silently do nothing. That is also why
+               `canSave` demands a complete credential whenever the mode
+               changed — see the note on it. */
+            stored={replacing ? undefined : { onReplace: () => setReplacing(true) }}
+          />
+
+          <div className="divider" />
+
+          <ServicesSection provider={provider} services={services} onChange={setServices} />
+
+          <div className="divider" />
+
           <AuthSection
             item={item}
             mode={mode}
@@ -1000,79 +1174,11 @@ function IntegrationDetail({
 
           <div className="divider" />
 
-          {/* The connect screen's *Connection* block, and deliberately the
-              same shape: Name, then the auth method, then the credential —
-              rather than the quarantined bottom section this used to be. See
-              `credentialsToSave`. */}
+          {/* Edit-only, and the last thing on the screen for that reason: a
+              row has to exist before it can be turned off, and the connect
+              screen deliberately offers no such switch — see `create()`. */}
           <div className="formsec">
-            <div className="formsec__title">Connection</div>
-            <div className="formrow">
-              <div className="formrow__label">Name</div>
-              <div className="formrow__control">
-                <label className="field">
-                  <input
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    spellCheck={false}
-                  />
-                </label>
-              </div>
-            </div>
-
-            {needsCredentials &&
-              (replacing ? (
-                <>
-                  {provider.modes.length > 1 && (
-                    <div className="formrow">
-                      <div className="formrow__label">Auth method</div>
-                      <div className="formrow__control">
-                        <Segmented
-                          value={modeValue}
-                          options={provider.modes.map((m) => ({
-                            value: m.value,
-                            label: m.label,
-                          }))}
-                          onChange={setModeValue}
-                        />
-                      </div>
-                    </div>
-                  )}
-                  <CredentialFields mode={mode} values={values} onChange={setValues} />
-                </>
-              ) : (
-                /* The auth method is part of the credential blob, so it is
-                   offered only alongside the fields that carry it: changing it
-                   on its own would send nothing and silently do nothing. That
-                   is also why `canSave` demands a complete credential whenever
-                   the mode changed — see the note on it.
-
-                   The label stays generic rather than becoming `mode.label`.
-                   The stored mode *is* reportable since #513, and the inspector
-                   reports it — but only when the row records one. A multi-mode
-                   row saved before that field existed records nothing, and
-                   `modeValue` falls back to `provider.modes[0]` for it, so a
-                   Slack row connected by OAuth would still be captioned "Bot
-                   token" here. As a caption on a stored secret that is a claim
-                   the app cannot make for every row, and this one caption
-                   serves all of them. `storedMode`'s note above draws the same
-                   distinction for the auth actions. */
-                <div className="formrow">
-                  <div className="formrow__label">Credentials</div>
-                  <div className="formrow__control">
-                    <div className="int-storedsecret">
-                      <span className="mono">••••••••••• stored</span>
-                      <button className="btn btn--ghost" onClick={() => setReplacing(true)}>
-                        Replace
-                      </button>
-                    </div>
-                    <div className="formrow__help">
-                      Agento cannot show a stored secret back to you, and does not need to —
-                      leave this alone and saving keeps it.
-                    </div>
-                  </div>
-                </div>
-              ))}
-
+            <div className="formsec__title">{AVAILABILITY_TITLE}</div>
             <div className="formrow">
               <div className="formrow__label">Enabled</div>
               <div className="formrow__control">
@@ -1084,13 +1190,6 @@ function IntegrationDetail({
                 </div>
               </div>
             </div>
-          </div>
-
-          <div className="divider" />
-
-          <div className="formsec">
-            <div className="formsec__title">Services and tools</div>
-            <ServiceEditor provider={provider} services={services} onChange={setServices} />
           </div>
 
           {error && (
@@ -1307,8 +1406,12 @@ function AuthSection({
           ) : null}
           {!isOAuth && !modeIsUnsaved && (
             <div className="formrow__help">
+              {/* "above" since #517 moved this section below the connection
+                  block — the sentence points at the credential fields, so it
+                  has to follow them rather than describe where they used to
+                  be. */}
               Checks the credentials already saved on the server, not any unsaved edits
-              below.
+              above.
             </div>
           )}
 
