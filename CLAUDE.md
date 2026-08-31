@@ -2334,14 +2334,31 @@ reproduces Go's one real effect there — a column holding `''` or the literal
 four bytes `null` becomes SQL `NULL`, because `Save` writes `authJSON` only when
 `IsAuthenticated()`.
 
-**Three things about the `PUT` that read as bugs and are Go's behaviour**, all
+**Two things about the `PUT` that read as bugs and are Go's behaviour**, both
 pinned by `parity_writes::the_integration_id_write_answers_match_go` against a
 live server: it runs **no** credential validation (`validateIntegrationCredentials`
 is `Create`'s alone, so an empty name, an empty type and a `{}` blob are all
-200s); a request omitting `credentials` **wipes** them, because the store's
-upsert overwrites the column wholesale; and an omitted `services` is stored and
-returned as `null`, not `{}`, because `Update` skips the `make(...)` that
-`Create` does.
+200s); and an omitted `services` is stored and returned as `null`, not `{}`,
+because `Update` skips the `make(...)` that `Create` does.
+
+**There was a third, and #515 fixed it rather than reproducing it.** A request
+omitting `credentials` used to **wipe** them, because the store's upsert
+overwrote the column wholesale — and `GET` scrubs the column, so the
+read-then-write an edit form performs destroyed the secret. It is now
+three-valued, `gateway::config::update_provider`'s contract: **absent leaves
+the column out of the `SET` list** so the stored blob survives byte for byte,
+and **any present value replaces it**, so `{}` and `null` are an explicit
+clear. Two `UPDATE` statements, not one with a `CASE` — the difference is
+*which columns are assigned*, and a `CASE` would still bind the blob's
+parameter slot on the path that must not have one. The absent arm never reads
+the credential into this process, so the module-header rule is intact.
+
+Two consequences worth carrying: the read gained **`has_credentials`**, a
+SQL-computed boolean (`''`, `null` and `{}` all count as absent, trimmed of
+ASCII whitespace) sorting between `enabled` and `id` on a response whose key
+order is the contract; and the reload stays **outside** both arms, because it
+is the *replace* path that must reload — a revoked token otherwise keeps
+answering `tools/call` for the life of the process.
 
 **Do not open the live database with a bare `rusqlite::Connection::open`.** It
 opens `READWRITE|CREATE`, and against a WAL database another process holds, that
@@ -2514,16 +2531,21 @@ busy timeout.
   `internal/api/types.go` has no such field, so the REST API silently drops it
   even though `AgentConfig` and the validator both know about it. The service
   also only accepts `""`, `bypass` or `default`, rejecting `plan`/`dontAsk`.
-- **`PUT /integrations/{id}` destroys credentials on a scrubbed round-trip.**
-  `integrationService.Update` explicitly preserves `Auth` ("unless the caller
-  provides a new one") but does **not** do the same for `Credentials`, which it
-  replaces wholesale — while `GET` scrubs them. So read-then-write wipes the
-  stored secrets. Reproduced live: a working Telegram token went from
-  `invalid bot token: … Unauthorized` (reaching Telegram) to
-  `credentials are empty` after one such PUT. The reference web frontend has
-  this flaw. **This UI refuses to save an integration with pending changes
-  until credentials are re-entered**, rather than silently wiping them —
-  do not "simplify" that away.
+- **`PUT /integrations/{id}` no longer destroys credentials on a scrubbed
+  round-trip, and this entry used to say the opposite** (#515). Go's
+  `integrationService.Update` preserved `Auth` ("unless the caller provides a
+  new one") and did **not** do the same for `Credentials`, which it replaced
+  wholesale while `GET` scrubbed them — reproduced live: a working Telegram
+  token went from `invalid bot token: … Unauthorized` (reaching Telegram) to
+  `credentials are empty` after one such PUT. **An omitted `credentials` key
+  now preserves the stored blob**, so a rename or a tool toggle is an ordinary
+  save. The UI's old workaround — refusing to save until the credentials were
+  re-entered, behind a warning in its own bottom section — is **gone with it**,
+  and must not be reintroduced: it existed to defend against this and now only
+  demands a token the user cannot read back. A stored secret renders as
+  `••• stored` behind an explicit *Replace*, beside **Name** on both the
+  connect and the edit screen, and an untouched field sends no `credentials`
+  key at all.
 - **Validation errors are 422**, conflicts 409 — not 400.
 - An invalid `sort` on the sessions list is silently accepted (falls back to
   `recent`); only a cursor/sort mismatch 400s.
@@ -3563,11 +3585,13 @@ Three things about it are decisions:
   existing. A command would have been wrong anyway: `logs.rs` is a command
   because the app log belongs to the *process*; gateway config is API surface.
 - **An omitted `api_key` preserves the stored one, and that is the whole point
-  of `config::update_provider`.** `PUT /api/integrations/{id}` wipes
+  of `config::update_provider`.** `PUT /api/integrations/{id}` used to wipe
   credentials the caller omits while `GET` scrubs them, so a read-then-write
-  round trip — exactly what an edit form does — destroys the secret. That is
-  reproduced there deliberately because it was Go's behaviour, and it must not
-  be inherited here. `api_key` is `Option<String>` with three meanings: absent
+  round trip — exactly what an edit form does — destroyed the secret. That was
+  reproduced there deliberately because it was Go's behaviour, and this surface
+  refused to inherit it; **#515 has since fixed the integrations side by
+  copying this one**, so the two now share a contract rather than disagreeing
+  about it. `api_key` is `Option<String>` with three meanings: absent
   leaves the column out of the `SET` list entirely, `Some("")` is a deliberate
   clear, `Some(k)` replaces. `a_scrubbed_read_written_straight_back_preserves_the_stored_key`
   drives the **real** `GET` body back through the `PUT`, and fails with `""` on
@@ -4282,12 +4306,13 @@ implementation existed and diverging from it would have made two installs
 behave differently on the same database. That constraint no longer exists —
 these are now simply Agento's bugs, and fixing them is unblocked.
 
-- **`PUT /api/integrations/{id}` wipes stored credentials on a scrubbed
-  round-trip.** `Update` preserves `Auth` but replaces `Credentials` wholesale,
-  while `GET` scrubs them — so read-then-write destroys the secret. The UI
-  works around it by refusing to save an integration with pending changes until
-  credentials are re-entered; **do not "simplify" that away** before the API is
-  fixed. This is data loss and the highest-value fix on this list.
+- ~~**`PUT /api/integrations/{id}` wipes stored credentials on a scrubbed
+  round-trip.**~~ **Fixed by #515** — the entry is kept struck through rather
+  than deleted, because it was the one this list called "data loss and the
+  highest-value fix", and the workaround it licensed (the UI refusing to save
+  until credentials were re-entered) is the thing a future session would
+  otherwise restore. See *Wire-format traps* above for the contract that
+  replaced it.
 - **An agent's `permission_mode` cannot be persisted.** `AgentRequest` has no
   such field, so the API silently drops it even though the config type and the
   validator both know about it.
