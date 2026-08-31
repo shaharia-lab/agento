@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { api } from "../lib/api";
 import { describeError, useResource } from "../lib/hooks";
 import { dateTime, relativeTime } from "../lib/format";
-import { partnerLabel, submitLabel, SUBMIT_CREATE } from "../lib/formVerbs";
+import { DESTROY, partnerLabel, submitLabel, SUBMIT_CREATE } from "../lib/formVerbs";
 import { Icon } from "../lib/icons";
 import { openExternal } from "../lib/tauri";
 import {
@@ -25,6 +25,7 @@ import type {
   WebhookStatus,
 } from "../lib/types";
 import {
+  connectionState,
   modeFor,
   PROVIDERS,
   providerFor,
@@ -158,6 +159,20 @@ function countTools(services: Services | null | undefined): number {
     (n, s) => n + (s.enabled ? (s.tools?.length ?? 0) : 0),
     0
   );
+}
+
+/**
+ * The connection-state badge, wherever it appears (#518).
+ *
+ * Three badges rendered one boolean and two of them disagreed about the word.
+ * A component rather than three calls to `connectionState`, because the class
+ * name and the label have to move together: the amber/green pair *is* the
+ * state, and a site that took the label and picked its own tone would be the
+ * same defect in a different column.
+ */
+function ConnectionBadge({ authenticated }: { authenticated: boolean }) {
+  const state = connectionState(authenticated);
+  return <span className={`badge badge--${state.tone}`}>{state.label}</span>;
 }
 
 /* ============================================================================
@@ -355,7 +370,13 @@ function IntegrationRow({
         </div>
         <div className="listrow__preview">
           {provider?.label ?? item.type} ·{" "}
-          {item.authenticated ? `${countTools(item.services)} tools` : "Not connected"}
+          {/* The positive case says something the badges cannot — how many
+              tools this row grants — so only the negative label comes from the
+              helper. It is still the helper's: this line is what a user scans
+              first, and it is where the two words were most visibly two. */}
+          {item.authenticated
+            ? `${countTools(item.services)} tools`
+            : connectionState(false).label}
         </div>
       </div>
     </button>
@@ -1111,27 +1132,23 @@ function IntegrationDetail({
           <Icon name={provider.icon} size={13} />
         </div>
         <div className="toolbar__title">{item.name}</div>
-        {item.authenticated ? (
-          <span className="badge badge--green">Connected</span>
-        ) : (
-          <span className="badge badge--amber">Not connected</span>
-        )}
+        <ConnectionBadge authenticated={item.authenticated} />
         {!item.enabled && <span className="badge">Disabled</span>}
         <div className="spacer" />
         {confirmDelete ? (
           <span className="confirm">
-            Remove {item.name}?
+            {DESTROY} {item.name}? Its stored credentials go with it.
             <button className="btn btn--ghost" onClick={() => setConfirmDelete(false)}>
               Cancel
             </button>
             <button className="btn btn--danger" onClick={remove} disabled={busy}>
-              Remove
+              {DESTROY}
             </button>
           </span>
         ) : (
           <button className="btn btn--danger" onClick={() => setConfirmDelete(true)}>
             <Icon name="trash" size={13} />
-            Remove
+            {DESTROY}
           </button>
         )}
       </div>
@@ -1371,11 +1388,11 @@ function AuthSection({
         <div className="formrow__label">Status</div>
         <div className="formrow__control">
           <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
-            {item.authenticated ? (
-              <span className="badge badge--green">Authenticated</span>
-            ) : (
-              <span className="badge badge--amber">Not authenticated</span>
-            )}
+            {/* The same word the sidebar, the toolbar and the inspector use.
+                The section is still called Authorisation and its buttons still
+                say Authorise, because those name the *action*; only the state
+                had two names. */}
+            <ConnectionBadge authenticated={item.authenticated} />
             {isOAuth ? (
               <button
                 className="btn"
@@ -1582,7 +1599,7 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
               </div>
               {confirmDelete === r.id ? (
                 <span className="confirm">
-                  Delete rule?
+                  {DESTROY} {r.name || "Untitled rule"}?
                   <button className="btn btn--ghost" onClick={() => setConfirmDelete(undefined)}>
                     Cancel
                   </button>
@@ -1596,7 +1613,7 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
                       })
                     }
                   >
-                    Delete
+                    {DESTROY}
                   </button>
                 </span>
               ) : (
@@ -1635,7 +1652,7 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
                   </button>
                   <button
                     className="iconbtn"
-                    title="Delete"
+                    title={DESTROY}
                     onClick={() => setConfirmDelete(r.id)}
                   >
                     <Icon name="trash" size={13} />
@@ -1905,11 +1922,7 @@ function ConnectedInspector({
     <>
       <InspGroup title="Status">
         <InspRow label="State">
-          {item.authenticated ? (
-            <span className="badge badge--green">Connected</span>
-          ) : (
-            <span className="badge badge--amber">Not authenticated</span>
-          )}
+          <ConnectionBadge authenticated={item.authenticated} />
         </InspRow>
         <InspRow label="Enabled">{item.enabled ? "Yes" : "No"}</InspRow>
         <InspRow label="Provider">{provider?.label ?? item.type}</InspRow>

@@ -553,6 +553,47 @@ enforcement. Note `.savebar` is declared in `styles/integrations.css` **and**
 `styles/settings.css` and is available everywhere only because `App.tsx` imports
 both views statically.
 
+**Destroying a stored record is `Delete`, everywhere, and `Remove` means
+something else** (#518). One gesture had three words — Integrations said
+`Remove`, Tasks and Settings profiles said `Delete`, Agents said `Delete
+agent`. `formVerbs.ts`'s `DESTROY` / `DESTROYING` is the spelling and the
+compile-time pin; `Delete` won because it was already the majority and because
+`Remove` reads as *detach without destroying*, which is not what
+`DELETE /api/integrations/{id}` does — the row and its stored credentials go.
+
+- **The verb is the same in all three places**: the danger button, the
+  icon-button `title`, and the confirmation. Not `Delete agent` — the record's
+  kind is already on screen, and a per-view suffix is how a fourth word starts.
+- **A confirmation is `Delete <name>? <what goes with it>.`** — the verb, the
+  record's own name, and one clause naming the collateral (`Its run history
+  goes with it.`). Not `Delete this task and its history?`, which names no row,
+  and not a bare `Delete rule?`.
+- **`Remove` survives for detaching, and only that**: taking a row out of a
+  list nothing has stored yet (a gateway alias's fallback target), or
+  unregistering something from a third party while the record it belongs to
+  stays (the Telegram webhook). If the record is gone afterwards, it is
+  `Delete`.
+
+**One connection state gets one word, and it is `Connected`** (#518).
+`Integration.authenticated` renders in four places visible at once — the
+sidebar row's preview, the detail toolbar badge, the Authorisation section's
+Status row and the inspector's State row — and each was written at its call
+site, so one row read `GitHub · Not connected` in the sidebar and `Not
+authenticated` in the inspector. Two words for one boolean reads as two states.
+
+`connectionState()` in `views/integrations/catalog.ts` is the only place either
+word is spelled, pinned the same way, and `IntegrationsView.tsx`'s
+`ConnectionBadge` carries the label **and** its `badge--green`/`badge--amber`
+tone together — a site that took the label and picked its own tone would be the
+same defect in a different column. `Connected` rather than `Authenticated`
+because it is the word the surrounding screen already speaks (the sidebar's
+`Connected` group, `Nothing connected yet.`, `Not connected yet — …`) and
+because it is the *user's* word rather than the wire's: `authenticated` is a
+column whose meaning is under review (#513), and copy spelled after a column
+has to be re-read every time the column moves. The Authorisation section keeps
+its heading and its `Authorise` / `Validate credentials` buttons, which name
+the **action**; only the state had two names.
+
 **The window's origin has to be in the capability's scope, or every IPC
 command is denied — silently.** This is the single most expensive thing to
 re-discover in this shell, because it fails *only in release builds* and it

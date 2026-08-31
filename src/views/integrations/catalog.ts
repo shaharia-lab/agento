@@ -16,6 +16,7 @@
 
 import type { IconName } from "../../lib/icons";
 import type { Tone } from "../../lib/format";
+import type { Eq, Expect } from "../../lib/typeAssert";
 
 export interface CredField {
   key: string;
@@ -441,6 +442,62 @@ export function unavailableCopy(type: string): { title: string; text: string } {
     text: "This integration was created by a newer version of Agento than this app knows about.",
   };
 }
+
+/* --- One connection state, one word (#518) --------------------------------
+   `Integration.authenticated` renders in four places that are on screen at the
+   same time — the sidebar row's preview line, the detail toolbar badge, the
+   Authorisation section's Status row and the inspector's State row — and each
+   was written at its own call site, so one row read `GitHub · Not connected` in
+   the sidebar and `Not authenticated` in the inspector two inches apart. Two
+   words for one boolean reads as two states, and the reporter went looking for
+   a second thing to fix.
+
+   `Connected` is the word, in both directions. It is the one the surrounding
+   screen already speaks — the sidebar's own `Connected` group heading, the
+   `Nothing connected yet.` empty state, the connect screen's `Not connected
+   yet — …` — and it is the user's word rather than the wire's. That last part
+   matters beyond taste: `authenticated` is a *wire* field whose meaning is
+   under review (#513), so copy spelled after the column would have to be
+   re-read every time the column moves. This is the only place it is spelled,
+   so if #513 changes what the boolean means, one function changes.
+
+   The tone travels with the label because both badge sites need it and
+   `format.ts`'s `Tone` is emphatically not a status→tone map — it hashes a key
+   to pick a stable *tile* colour. Status colour is an explicit `badge--green` /
+   `badge--amber` class, so the union here is written out rather than imported.
+   ------------------------------------------------------------------------ */
+
+/** What a verified integration is called. */
+export const CONNECTED = "Connected";
+/** What an unverified one is called — the same word, negated. */
+export const NOT_CONNECTED = "Not connected";
+
+export interface ConnectionState {
+  label: string;
+  tone: "green" | "amber";
+}
+
+/**
+ * The one description of an integration's connection state.
+ *
+ * Takes the boolean rather than the row: it is the only input, and passing the
+ * wire type would put `lib/types.ts` into a module that otherwise describes
+ * only what this app knows about providers.
+ */
+export function connectionState(authenticated: boolean): ConnectionState {
+  return authenticated
+    ? { label: CONNECTED, tone: "green" }
+    : { label: NOT_CONNECTED, tone: "amber" };
+}
+
+/**
+ * Respell either word and these stop compiling, which fails `npm run build`
+ * and therefore CI — the frontend has no test harness, so this is the guard.
+ * Exported so `noUnusedLocals` does not delete it; see `lib/typeAssert.ts` for
+ * why `Eq` and not `extends`.
+ */
+export type PinConnected = Expect<Eq<typeof CONNECTED, "Connected">>;
+export type PinNotConnected = Expect<Eq<typeof NOT_CONNECTED, "Not connected">>;
 
 /**
  * The mode a stored integration is using.
