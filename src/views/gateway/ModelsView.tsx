@@ -542,15 +542,17 @@ function AliasForm({
                   ? "Add at least one target."
                   : "Every target needs a provider and a model id."}
           </span>
-          {/* `onCancel` is only passed while creating, and abandoning a draft
-              is what `Discard` names — see `lib/formVerbs.ts`. */}
+          {/* `onCancel` is passed only when `alias` is undefined, so it is
+              present exactly while `creating` — and abandoning a draft is what
+              `Discard` names, where `Revert` restores a stored row. See
+              `lib/formVerbs.ts`. */}
           {onCancel ? (
             <button className="btn" onClick={onCancel} disabled={busy}>
-              {partnerLabel(true)}
+              {partnerLabel(creating)}
             </button>
           ) : (
             <button className="btn" onClick={revert} disabled={busy}>
-              {partnerLabel(false)}
+              {partnerLabel(creating)}
             </button>
           )}
           <button

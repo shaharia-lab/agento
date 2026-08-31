@@ -427,7 +427,11 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                     onClick={save}
                     disabled={busy || (!dirty && !creating)}
                   >
-                    {submitLabel(creating, busy)}
+                    {/* Never the in-flight label: this view's `busy` is shared
+                        with pause/resume, so passing it here would make the
+                        submit read "Saving…" while an unrelated request runs.
+                        The disabled state already covers that case. */}
+                    {submitLabel(creating, false)}
                   </button>
                   {!creating && (
                     <>
