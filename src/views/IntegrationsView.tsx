@@ -27,6 +27,7 @@ import type {
 import {
   connectionState,
   modeFor,
+  NOT_CONNECTED,
   PROVIDERS,
   providerFor,
   unavailableCopy,
@@ -370,13 +371,11 @@ function IntegrationRow({
         </div>
         <div className="listrow__preview">
           {provider?.label ?? item.type} ·{" "}
-          {/* The positive case says something the badges cannot — how many
-              tools this row grants — so only the negative label comes from the
-              helper. It is still the helper's: this line is what a user scans
-              first, and it is where the two words were most visibly two. */}
-          {item.authenticated
-            ? `${countTools(item.services)} tools`
-            : connectionState(false).label}
+          {/* The positive case says something no badge can — how many tools
+              this row grants — so this line takes the negative label alone,
+              from the constant the badge's own helper returns. It is where the
+              two words were most visibly two: it is what a user scans first. */}
+          {item.authenticated ? `${countTools(item.services)} tools` : NOT_CONNECTED}
         </div>
       </div>
     </button>

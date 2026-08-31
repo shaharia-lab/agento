@@ -5,7 +5,10 @@
    service grants — /integrations/available-tools only reports tools already
    turned on, so it cannot drive a connect form for something not yet created.
    The shapes therefore live here: the credential fields each provider needs,
-   and the tool names its MCP server hosts.
+   and the tool names its MCP server hosts. Since #518 it also owns the one
+   spelling of an integration's connection state — same question ("what does
+   this app say about an integration?"), and `unavailableCopy` below was
+   already the precedent for answering it here rather than at a call site.
 
    WhatsApp is deliberately absent, and this is the list that decides it.
    `type` is a free-form string on the wire, so nothing upstream stops one
