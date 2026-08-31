@@ -329,8 +329,10 @@ src-tauri/src/
       template.rs  html/template's escaper, and why the skeleton is Go's output
       smtp.rs      go-mail's TLS policy — `ssl_tls` is *STARTTLS*, not SMTPS
     integrations.rs GET /api/integrations, /{id}, /available-tools, /{id}/triggers —
-                 credentials are never selected and auth is a bool made in SQL;
-                 plus POST /api/integrations, the trigger-rule writes (#277) and
+                 auth is a bool made in SQL, and the credentials column is
+                 reduced in SQL too — to `has_credentials` (#515) and, through
+                 an allowlist, `auth_mode` (#513); plus POST
+                 /api/integrations, the trigger-rule writes (#277) and
                  PUT/DELETE /{id} (#311)
     integrations/registry.rs
                  Start/Reload/Stop for the MCP servers of HOSTED_TYPES. The one
@@ -2319,9 +2321,26 @@ survive here: `1.50` is `"1.5"` and `0x10` is `"16"` where Go keeps the raw text
 Integers, booleans and strings are exact. Pinned, not reconciled.
 
 **Reading a credential is this module's job and nobody else's.** The rule in
-`native/integrations.rs` — `credentials` is never selected, `auth` collapses to
-a boolean in SQL — still holds there, and `registry.rs` is where the exception
-lives: its own `HOSTING_COLUMNS` projection into a `HostingRow` that derives
+`native/integrations.rs` — a stored secret never exists in this process to be
+echoed, `auth` collapses to a boolean in SQL — still holds there. What has
+changed is that the `credentials` column is no longer simply unmentioned: two
+things are now derived from it, **both entirely inside SQLite**, and neither is
+a widening.
+
+`has_credentials` (#515) is a boolean — whether the column holds anything at
+all — which is what lets the edit form say "leaving this alone keeps the stored
+one" instead of demanding a re-typed token on every save. `auth_mode` (#513) is
+the discriminator the Integrations editor reopens on, rather than guessing it
+from the provider's first mode; `auth_mode_sql` compares the extracted value
+against a fixed list of three literals (`AUTH_MODES`), so a byte the module did
+not already know cannot cross the boundary whatever a `PUT` stored under that
+key — and `update` validates nothing, so that is not hypothetical. **Copy that
+shape, not a bare `json_extract`, if a third derivation is ever needed**: the
+rule these keep is that what leaves SQLite is a value from a set this side
+already enumerated.
+
+The real exception — the one place a credential is *read* — is `registry.rs`:
+its own `HOSTING_COLUMNS` projection into a `HostingRow` that derives
 neither `Serialize` **nor `Debug`** (a `{row:?}` in a log line is the same leak
 with a longer fuse), private to the module, with only a `&str` ever leaving it.
 A credential that fails to decode reports line and column and never the serde

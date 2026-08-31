@@ -281,6 +281,8 @@ struct GitHubCredentials {
     personal_access_token: String,
 }
 
+/// A mode added here has to be added to `integrations::AUTH_MODES` too — see
+/// [`validate_slack`] for why.
 fn validate_github(credentials: Option<&RawValue>) -> Result<(), WriteError> {
     let creds: GitHubCredentials = parse("github", credentials)?;
     // Note this rejects `oauth` and `app` even though the struct carries fields
@@ -313,6 +315,12 @@ struct SlackCredentials {
     client_secret: String,
 }
 
+/// **A mode added here has to be added to `integrations::AUTH_MODES` too.**
+/// That is the SQL allowlist the scrubbed read filters `auth_mode` through, so
+/// a mode this accepts and that does not declares reads back as `""` — and the
+/// Integrations editor reopens such a row on the provider's *first* mode, which
+/// is #513 all over again for the new one. There is no enumeration of these
+/// arms to derive it from, so this note is the guard.
 fn validate_slack(credentials: Option<&RawValue>) -> Result<(), WriteError> {
     let creds: SlackCredentials = parse("slack", credentials)?;
     match creds.auth_mode.as_str() {

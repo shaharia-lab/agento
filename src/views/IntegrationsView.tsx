@@ -24,6 +24,7 @@ import type {
   WebhookStatus,
 } from "../lib/types";
 import {
+  modeFor,
   PROVIDERS,
   providerFor,
   unavailableCopy,
@@ -37,7 +38,17 @@ import "../styles/integrations.css";
    ========================================================================== */
 
 type Selection =
-  | { kind: "integration"; id: string }
+  | {
+      kind: "integration";
+      id: string;
+      /**
+       * A credential rejection the *create* form could not report, because it
+       * unmounts as this selection is made. One-shot: the detail pane seeds its
+       * own error from it and never reads it again, which is why it lives on
+       * the selection rather than beside the row.
+       */
+      authError?: string;
+    }
   | { kind: "provider"; type: string };
 
 type Services = Record<string, ServiceConfig>;
@@ -236,9 +247,9 @@ export function IntegrationsView({ inspectorOpen }: { inspectorOpen: boolean }) 
           <ConnectForm
             key={selectedProvider.type}
             provider={selectedProvider}
-            onCreated={(id) => {
+            onCreated={(id, authError) => {
               reloadAll();
-              setSelection({ kind: "integration", id });
+              setSelection({ kind: "integration", id, authError });
             }}
           />
         ) : selected && selectedProvider ? (
@@ -246,6 +257,7 @@ export function IntegrationsView({ inspectorOpen }: { inspectorOpen: boolean }) 
             key={selected.id}
             item={selected}
             provider={selectedProvider}
+            initialError={selection?.kind === "integration" ? selection.authError : undefined}
             onChanged={reloadAll}
             onDeleted={() => {
               setSelection({ kind: "provider", type: selected.type });
@@ -346,7 +358,12 @@ function ConnectForm({
   onCreated,
 }: {
   provider: Provider;
-  onCreated(id: string): void;
+  /**
+   * `authError` is the credential check's refusal, when there was one. The row
+   * exists either way, so it travels to the detail pane rather than keeping
+   * this form mounted — see [`create`].
+   */
+  onCreated(id: string, authError?: string): void;
 }) {
   const [name, setName] = useState(provider.label);
   const [modeValue, setModeValue] = useState(provider.modes[0].value);
@@ -355,7 +372,7 @@ function ConnectForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
-  const mode = provider.modes.find((m) => m.value === modeValue) ?? provider.modes[0];
+  const mode = modeFor(provider, modeValue);
   const ready = name.trim() !== "" && credentialsComplete(mode, values);
 
   async function create() {
@@ -369,6 +386,30 @@ function ConnectForm({
         credentials: buildCredentials(provider, mode, values),
         services,
       });
+      // Same rule as `IntegrationDetail.save()`: a token credential is only
+      // usable once the check has written the `auth` column, so connecting is
+      // one action.
+      //
+      // A refusal is **carried, not swallowed** — the provider's own sentence
+      // (`slack API error: invalid_auth`) is the only thing that tells the user
+      // what went wrong, and it must not die with this form. The row was
+      // created and must not be orphaned, so the error travels to the detail
+      // pane instead of keeping the user here.
+      if (mode.kind === "token") {
+        try {
+          await api.post(`/integrations/${created.id}/auth/validate`);
+        } catch (err) {
+          // The same honesty the save path owes: the user is moved out of this
+          // form into a pane for a row they may not realise now exists, so the
+          // message has to say that the integration *was* created and is simply
+          // not connected.
+          onCreated(
+            created.id,
+            `${describeError(err)} — the integration was created, but the credential was not accepted, so it is not connected.`
+          );
+          return;
+        }
+      }
       onCreated(created.id);
     } catch (err) {
       setError(describeError(err));
@@ -644,25 +685,45 @@ function ServiceEditor({
 function IntegrationDetail({
   item,
   provider,
+  initialError,
   onChanged,
   onDeleted,
 }: {
   item: Integration;
   provider: Provider;
+  /** The create form's credential rejection, when this pane opened onto one. */
+  initialError?: string;
   onChanged(): void;
   onDeleted(): void;
 }) {
   const [name, setName] = useState(item.name);
   const [enabled, setEnabled] = useState(item.enabled);
   const [services, setServices] = useState<Services>(item.services ?? {});
-  const [modeValue, setModeValue] = useState(provider.modes[0].value);
+  // Seeded from what the row actually records, so reopening a saved bot-token
+  // Slack integration lands on the tab the user picked rather than on the
+  // provider's first mode by coincidence.
+  const [modeValue, setModeValue] = useState(() => modeFor(provider, item.auth_mode).value);
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState(initialError);
   const [notice, setNotice] = useState<string>();
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const mode = provider.modes.find((m) => m.value === modeValue) ?? provider.modes[0];
+  const mode = modeFor(provider, modeValue);
+  /**
+   * `find`, deliberately, where everything else here uses `modeFor`.
+   *
+   * The case it protects is the **multi-mode row that records no mode** — a
+   * Slack integration saved before `auth_mode` reached the wire. `modeFor` would
+   * resolve that to `bot_token`, and the gate below would then read the OAuth
+   * tab as an unsaved switch and disable *Authorise* for a row whose stored mode
+   * is genuinely unknown. `undefined` is the honest answer, and it turns the
+   * gate off in both tabs, which is the behaviour such a row had before the gate
+   * existed. (Single-mode providers cannot reach the gate at all: the Auth
+   * method control only renders at `modes.length > 1`, so `mode` never leaves
+   * `modes[0]`.)
+   */
+  const storedMode = provider.modes.find((m) => m.value === item.auth_mode);
   const needsCredentials = mode.fields.length > 0;
   /**
    * Whether the credential inputs are shown at all (#515). A stored secret
@@ -675,10 +736,16 @@ function IntegrationDetail({
    */
   const [replacing, setReplacing] = useState(!item.has_credentials);
   const typedCredentials = hasTypedCredentials(mode, values);
+  /** The Auth method control is on a method the row does not record. */
+  const modeChanged = modeValue !== modeFor(provider, item.auth_mode).value;
 
   const changed =
     name !== item.name ||
     enabled !== item.enabled ||
+    // The Auth method control is an edit like any other. Leaving it out left the
+    // savebar unrendered while `AuthSection`'s gate told the user to save —
+    // greyed actions, and no Save button anywhere to press.
+    modeChanged ||
     JSON.stringify(services) !== JSON.stringify(item.services ?? {}) ||
     typedCredentials;
 
@@ -686,13 +753,30 @@ function IntegrationDetail({
   // a half-filled mode would be saved as a blob with empty values, which is a
   // broken credential rather than a preserved one. Not typing anything is now
   // a complete, valid save — that is the whole point of #515.
+  //
+  // **A mode switch is the exception, and it is #515 meeting #513.** `auth_mode`
+  // rides *inside* `credentials`, and #515 only sends that key when something
+  // was typed — so a switch on its own would send nothing, change nothing, and
+  // report "Saved.", leaving the control on a method the row does not have.
+  // Requiring the credential is also what the switch means: a stored bot token
+  // is not an OAuth client pair, so the old blob could not serve the new mode
+  // even if it were kept.
   const canSave =
-    changed && name.trim() !== "" && (!typedCredentials || credentialsComplete(mode, values));
+    changed &&
+    name.trim() !== "" &&
+    (!typedCredentials || credentialsComplete(mode, values)) &&
+    (!modeChanged || credentialsComplete(mode, values));
 
   async function save() {
     setBusy(true);
     setError(undefined);
     setNotice(undefined);
+    // A token credential is only usable once it has been checked: the check is
+    // what writes the `auth` column, and that column is what `authenticated`
+    // — and therefore hosting and `available-tools` — is computed from. So a
+    // token save runs it, rather than leaving the integration saved-but-dead
+    // behind a second button nobody knows to press.
+    const checking = mode.kind === "token" && needsCredentials && credentialsComplete(mode, values);
     try {
       const credentials = credentialsToSave(provider, mode, values);
       await api.put<Integration>(`/integrations/${item.id}`, {
@@ -714,11 +798,36 @@ function IntegrationDetail({
       // one field that would fix it. `item` is still the pre-reload prop,
       // which is exactly right on the path where no credential was sent.
       setReplacing(credentials ? false : !item.has_credentials);
-      setNotice("Saved.");
-      onChanged();
+      if (checking) {
+        // **After the PUT, never before**: the check reads the credentials the
+        // server has stored, not the ones typed above.
+        await api.post<{ valid: boolean; validated: boolean }>(
+          `/integrations/${item.id}/auth/validate`
+        );
+      }
+      setNotice(checking ? "Saved and checked against the provider." : "Saved.");
     } catch (err) {
-      setError(describeError(err));
+      // The PUT may already have committed, so this never claims the save
+      // failed — the new credential *is* stored, and saying otherwise would
+      // send the user looking for a write that happened.
+      //
+      // **A rejected check does not make the badge honest**, and the copy has
+      // to say so. `update` preserves a non-empty `auth` in SQL and
+      // `authenticated` is computed from that column, so a row that was already
+      // connected still reads `Connected` after its credential is replaced with
+      // a rejected one — and `reload_blocking` has restarted its MCP server on
+      // the new, bad token. The status the user can see is about the *previous*
+      // authorisation; only this sentence is about the credential they just
+      // saved.
+      setError(
+        checking
+          ? `${describeError(err)} — the new credential was saved but not accepted, so any earlier authorisation is what the status above still reflects.`
+          : describeError(err)
+      );
     } finally {
+      // Unconditional, and outside the `try`: the row changed even when the
+      // check refused it, so what the pane shows has to be re-read either way.
+      onChanged();
       setBusy(false);
     }
   }
@@ -738,6 +847,10 @@ function IntegrationDetail({
   function revert() {
     setName(item.name);
     setEnabled(item.enabled);
+    // Required now that the mode is part of `changed`: without it, Revert can
+    // never clear the savebar for a switched mode — and it would claim to have
+    // restored the stored row while leaving the auth actions disabled.
+    setModeValue(modeFor(provider, item.auth_mode).value);
     setServices(item.services ?? {});
     setValues({});
     setReplacing(!item.has_credentials);
@@ -779,7 +892,12 @@ function IntegrationDetail({
 
       <div className="scroll" style={{ flex: 1, padding: "var(--sp-8)" }}>
         <div className="form">
-          <AuthSection item={item} provider={provider} onChanged={onChanged} />
+          <AuthSection
+            item={item}
+            mode={mode}
+            storedMode={storedMode}
+            onChanged={onChanged}
+          />
 
           {provider.supportsTriggers && (
             <>
@@ -834,15 +952,20 @@ function IntegrationDetail({
               ) : (
                 /* The auth method is part of the credential blob, so it is
                    offered only alongside the fields that carry it: changing it
-                   on its own would send nothing and silently do nothing.
+                   on its own would send nothing and silently do nothing. That
+                   is also why `canSave` demands a complete credential whenever
+                   the mode changed — see the note on it.
 
-                   The label is deliberately **not** `mode.label`. `modeValue`
-                   seeds from `provider.modes[0]` and nothing reports the stored
-                   `auth_mode`, so on the one multi-mode provider (Slack) a row
-                   connected by OAuth would be captioned "Bot token". Before
-                   this section moved, that default sat on an *input* the user
-                   was about to fill; as a caption on a stored secret it is a
-                   statement of fact the app cannot make. */
+                   The label stays generic rather than becoming `mode.label`.
+                   The stored mode *is* reportable since #513, and the inspector
+                   reports it — but only when the row records one. A multi-mode
+                   row saved before that field existed records nothing, and
+                   `modeValue` falls back to `provider.modes[0]` for it, so a
+                   Slack row connected by OAuth would still be captioned "Bot
+                   token" here. As a caption on a stored secret that is a claim
+                   the app cannot make for every row, and this one caption
+                   serves all of them. `storedMode`'s note above draws the same
+                   distinction for the auth actions. */
                 <div className="formrow">
                   <div className="formrow__label">Credentials</div>
                   <div className="formrow__control">
@@ -904,9 +1027,15 @@ function IntegrationDetail({
                   ? "You have unsaved changes."
                   : name.trim() === ""
                     ? "A name is required."
-                    : item.has_credentials
-                      ? "Fill in every credential field, or clear them to keep the stored ones."
-                      : "Fill in every credential field."}
+                    : // Ahead of the two below, because for a switched mode
+                      // "clear them to keep the stored ones" is exactly the
+                      // thing that cannot work — the stored blob belongs to the
+                      // other method.
+                      modeChanged
+                      ? `Enter the credentials for ${mode.label} — switching the auth method replaces the stored ones.`
+                      : item.has_credentials
+                        ? "Fill in every credential field, or clear them to keep the stored ones."
+                        : "Fill in every credential field."}
               </span>
               <button className="btn" onClick={revert} disabled={busy}>
                 Revert
@@ -926,14 +1055,34 @@ function IntegrationDetail({
 
 function AuthSection({
   item,
-  provider,
+  mode,
+  storedMode,
   onChanged,
 }: {
   item: Integration;
-  provider: Provider;
+  /** The mode the editor is currently on, **not** the provider's mode list. */
+  mode: AuthMode;
+  /**
+   * The mode the *row* records, for telling an unsaved switch from a saved one.
+   * `undefined` when nothing in the provider's list matches what the row stored:
+   * a multi-mode row written before `auth_mode` reached the wire, and a GitHub
+   * row that recorded no `pat`. (The four providers whose single mode is `""`
+   * *do* match, since a row recording none reads back `""` — they simply cannot
+   * reach the gate, having no Auth method control to switch.)
+   */
+  storedMode?: AuthMode;
   onChanged(): void;
 }) {
-  const isOAuth = provider.modes.some((m) => m.kind === "oauth");
+  // Per selected mode, because a provider can offer both (#513). It was
+  // `provider.modes.some((m) => m.kind === "oauth")`, and Slack is the only
+  // provider offering an OAuth mode *and* a token mode — so `.some` was always
+  // true there and the credential check below was unreachable for the one
+  // provider that needs it.
+  const isOAuth = mode.kind === "oauth";
+  // The section follows the Auth method control, which is unsaved; both actions
+  // read the *stored* credentials. When those disagree, neither action is asking
+  // a question the answer would be about.
+  const modeIsUnsaved = storedMode !== undefined && storedMode.value !== mode.value;
 
   const [waiting, setWaiting] = useState(false);
   const [authUrl, setAuthUrl] = useState<string>();
@@ -1003,11 +1152,13 @@ function AuthSection({
       const res = await api.post<{ valid: boolean; validated: boolean }>(
         `/integrations/${item.id}/auth/validate`
       );
-      setNotice(
-        res.validated
-          ? "Credentials checked against the provider and accepted."
-          : "Credentials stored. This provider has no live check, so they are not verified."
-      );
+      // `validated` is a hardcoded list of three types on the server
+      // (`token_validate.rs`'s `REPORTS_VALIDATED`) that omits github and slack
+      // even though both really do call their provider — so it says nothing
+      // about whether a check happened, and the old copy here ("this provider
+      // has no live check") was simply untrue for the two it omits. The 200 is
+      // what carries the meaning: the credentials were accepted.
+      setNotice(res.validated ? "Credentials checked and accepted." : "Credentials accepted.");
       onChangedRef.current();
     } catch (err) {
       setError(describeError(err));
@@ -1029,24 +1180,43 @@ function AuthSection({
               <span className="badge badge--amber">Not authenticated</span>
             )}
             {isOAuth ? (
-              <button className="btn" onClick={startOAuth} disabled={busy || waiting}>
+              <button
+                className="btn"
+                onClick={startOAuth}
+                disabled={busy || waiting || modeIsUnsaved}
+              >
                 <Icon name="external" size={13} />
                 {item.authenticated ? "Re-authorise" : "Authorise"}
               </button>
             ) : (
-              <button className="btn" onClick={validate} disabled={busy}>
+              <button className="btn" onClick={validate} disabled={busy || modeIsUnsaved}>
                 <Icon name="check" size={13} />
                 {busy ? "Checking…" : "Validate credentials"}
               </button>
             )}
           </div>
 
-          {isOAuth && (
+          {/* Both actions read what is *stored*, while this section follows the
+              Auth method control, which is unsaved state. One click on the other
+              tab of a connected Slack row would otherwise check an OAuth blob
+              with the bot-token action — an empty bearer, answered `not_authed`
+              — or start an OAuth flow against credentials the row does not
+              hold. Neither writes anything, so this is a confusing answer
+              rather than data loss; it is still the wrong question to ask. */}
+          {modeIsUnsaved ? (
+            <div className="formrow__help">
+              Save this auth method first — both actions use the credentials stored on the
+              server, which are still{" "}
+              {/* `?.` is for the type-checker only: `modeIsUnsaved` is false
+                  whenever `storedMode` is undefined, so the arm cannot render. */}
+              {storedMode?.label ?? "the previous method"}.
+            </div>
+          ) : isOAuth ? (
             <div className="formrow__help">
               Authorisation opens in your normal browser, not inside this window.
             </div>
-          )}
-          {!isOAuth && (
+          ) : null}
+          {!isOAuth && !modeIsUnsaved && (
             <div className="formrow__help">
               Checks the credentials already saved on the server, not any unsaved edits
               below.
@@ -1542,7 +1712,16 @@ function ConnectedInspector({
         </InspRow>
         <InspRow label="Enabled">{item.enabled ? "Yes" : "No"}</InspRow>
         <InspRow label="Provider">{provider?.label ?? item.type}</InspRow>
-        <InspRow label="Auth">{provider?.modes[0].label ?? "—"}</InspRow>
+        {/* The row's own mode, and `find` rather than `modeFor` for the same
+            reason the gate uses it: this is a *report*, so where the editor may
+            fall back to a first mode in order to render some fields, this must
+            not — `modeFor` would label a legacy Slack row (`auth_mode: ""`)
+            "Bot token" whatever it actually uses, which is the exact wrong
+            label #513 removed from this row. The em-dash is the honest answer
+            for a row that records nothing. */}
+        <InspRow label="Auth">
+          {provider?.modes.find((m) => m.value === item.auth_mode)?.label ?? "—"}
+        </InspRow>
       </InspGroup>
 
       <InspGroup title="Access">

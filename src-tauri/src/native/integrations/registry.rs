@@ -1133,7 +1133,10 @@ fn service_tool_table(
 /// Deliberately not built on `INTEGRATION_COLUMNS`, which is the projection the
 /// response types are scanned from: sharing one would put `credentials` one
 /// `SELECT` away from every read in `native/integrations.rs`, and the whole
-/// point of that constant is that the column is not in it.
+/// point of that projection is that the column's *value* is not in it. It names
+/// `credentials` once, inside `auth_mode_sql`, which can return nothing but a
+/// known discriminator — the exception that is enforced in SQL rather than
+/// promised in a comment. This one selects the column itself.
 const HOSTING_COLUMNS: &str = "SELECT id, type, enabled,
             (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
             credentials, services, COALESCE(auth, '')
