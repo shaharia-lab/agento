@@ -510,21 +510,36 @@ pub fn status(db_path: &std::path::Path, id: &str) -> Result<bool, WriteError> {
 }
 
 #[cfg(test)]
-pub(super) fn reset_flows_for_test() {
-    lock_flows().clear();
-}
-
-#[cfg(test)]
 mod tests {
+    //! # The ids are the isolation, and nothing here may clear the flow map
+    //!
+    //! [`flows()`] is process-global — it mirrors `integrationService.oauthFlows`,
+    //! which is one map per server — and `cargo test` runs this module's tests in
+    //! parallel inside one process. So **every test uses a flow id unique within
+    //! this module**: `no-oauth`, `unknown-probe`, `bound-port`, `denied`,
+    //! `settled`, `waiting`, `denied-then-timed-out`, `stored`, `tok`, `present`
+    //! (plus `nope` and `gone`, which are looked up and never inserted). Two
+    //! tests therefore never touch the same entry. Distinct ids rather than a
+    //! mutex, because the global is the thing under test.
+    //!
+    //! **A new test needs a new id, not a reset.** A `#[cfg(test)]` helper
+    //! calling `lock_flows().clear()` opened six of these tests until [#527];
+    //! clearing the *whole* map deletes every other test's entry, so the unique
+    //! ids bought nothing and the module failed roughly one run in eight. Two
+    //! windows are real, which is why it was never the same
+    //! test twice: a clear between a test's insert and its read makes
+    //! `.expect("state")` panic, and one between the insert and
+    //! [`fail_flow_if_in_flight`] — which *inserts* when the id is absent — leaves
+    //! a wrong entry and fails an assertion instead. Nothing needs the map empty;
+    //! each test needs only its own key absent, which a unique id already
+    //! guarantees.
+    //!
+    //! [#527]: https://github.com/shaharia-lab/agento/issues/527
+
     use super::*;
 
     /// A fresh database with one integration, under an id **unique to the
-    /// caller**.
-    ///
-    /// The flow map is process-global — it mirrors `integrationService.oauthFlows`,
-    /// which is one map per server — so two tests sharing an id share a flow,
-    /// and `cargo test` runs them in parallel. Distinct ids rather than a mutex,
-    /// because the global is the thing under test.
+    /// caller** — see the module doc for why that is the isolation.
     fn migrated(
         dir: &std::path::Path,
         id: &str,
@@ -573,7 +588,6 @@ mod tests {
 
     #[tokio::test]
     async fn starting_a_flow_answers_a_url_carrying_the_port_it_bound() {
-        reset_flows_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(
             dir.path(),
@@ -611,7 +625,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_flow_is_remembered_as_a_500_rather_than_reported_as_unauthenticated() {
-        reset_flows_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(
             dir.path(),
@@ -641,7 +654,6 @@ mod tests {
     /// stored and the MCP server running.
     #[test]
     fn the_deadline_cannot_overwrite_a_flow_that_already_succeeded() {
-        reset_flows_for_test();
         lock_flows().insert(
             "settled".to_string(),
             FlowState {
@@ -660,7 +672,6 @@ mod tests {
 
     #[test]
     fn the_deadline_does_fail_a_flow_still_in_flight() {
-        reset_flows_for_test();
         lock_flows().insert("waiting".to_string(), FlowState::default());
 
         fail_flow_if_in_flight("waiting");
@@ -673,7 +684,6 @@ mod tests {
     #[test]
     fn a_failed_flow_is_not_re_failed_by_the_deadline() {
         // Also finished — the first reason is the useful one to keep.
-        reset_flows_for_test();
         lock_flows().insert(
             "denied-then-timed-out".to_string(),
             FlowState {
@@ -697,7 +707,6 @@ mod tests {
 
     #[test]
     fn with_no_flow_the_status_is_the_stored_token() {
-        reset_flows_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(dir.path(), "stored", "google", r#"{"client_id":"c"}"#);
         assert!(!status(&db, "stored").expect("status"), "auth is empty");
