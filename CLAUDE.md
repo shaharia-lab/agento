@@ -1640,6 +1640,24 @@ Five things it brought that #313 will want:
   reqwest decompresses in its service stack, so `bytes_stream()` yields
   decompressed bytes and `read_capped` caps what Go's `io.LimitReader` over a
   gunzipped `resp.Body` caps.
+- **`reqwest` sends no `User-Agent` where `net/http` sends one, and GitHub
+  answers 403 without it** (#514). Go's transport sets `Go-http-client/1.1`
+  unasked; `reqwest` sets nothing unless asked, and the port never asked — a
+  byte lost silently, because no response, stored value or parity vector records
+  it (`google_vectors.json` says outright that `User-Agent` is deliberately not
+  recorded). GitHub *requires* it, so **all twenty tools and `validate_pat`
+  403'd**, and the message names the credential rather than the header: the user
+  saw `validation error for "credentials.personal_access_token"` and regenerated
+  a PAT that was never the problem. **Every client comes from
+  `native::http::client_builder()`**, which pre-sets
+  `Agento/<CARGO_PKG_VERSION> (+https://myagento.app)` and touches nothing else
+  — the timeouts still differ per integration and GitHub keeps its second
+  no-redirect client. The version is `env!("CARGO_PKG_VERSION")` and **not**
+  `native::version::VERSION`, which answers `dev` in every unstamped build.
+  `no_client_is_built_outside_this_module` reads the crate's own sources so the
+  eighth client cannot omit it the way the first seven did; it found one the
+  issue's own table had missed, the OAuth token exchange in
+  `integrations/oauth/flow.rs`.
 - **The test seam is `#[cfg(test)]`, and should stay that way in #313.**
   `githubAPIBase` had to be *exported* on the Go side (`parity.go`) because
   `parity` is a different package; both Rust callers are in-crate, so

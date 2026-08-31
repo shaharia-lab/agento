@@ -447,7 +447,7 @@ fn http_client() -> Option<&'static reqwest::Client> {
             // for the reason `desktop/CLAUDE.md` gives: a handler with no client
             // timeout is what an unbounded graceful shutdown waits on. 60s
             // matches the longest any sibling uses.
-            reqwest::Client::builder()
+            crate::native::http::client_builder()
                 .timeout(Duration::from_secs(60))
                 .build()
                 .ok()
@@ -986,5 +986,23 @@ mod tests {
         );
 
         set_api_base(None);
+    }
+}
+
+/// The `User-Agent` this module's client puts on the wire (#514).
+///
+/// Read off a request a loopback server received, not off the builder: a
+/// `ClientBuilder`'s default headers cannot be inspected, and asserting that
+/// this file *calls* `client_builder` would only restate
+/// `native::http`'s own source guard.
+#[cfg(test)]
+mod user_agent {
+    #[tokio::test]
+    async fn the_google_client_sends_the_agento_user_agent() {
+        let client = super::http_client().expect("a usable HTTP client");
+        assert_eq!(
+            crate::native::http::testing::user_agent_seen_by_a_server(client).await,
+            crate::native::http::USER_AGENT,
+        );
     }
 }
