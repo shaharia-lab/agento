@@ -2333,6 +2333,45 @@ writes a credential and must reload the hosted server, so
 `integrations::reload_after_forward` is the route predicate and the place to
 read why the list is one entry long.
 
+**A *rejected* credential check is a state change; an *unreachable* one is
+not** (#521). That route now has a second write, on the failure path:
+`native/integrations/check.rs`'s `CheckKind` — `Rejected` when the provider
+answered and refused the credential (a 401 or 403, or a refusal carried in a
+200 envelope: Slack's `ok:false`, Telegram's), `Unreachable` for everything
+else. On `Rejected`, `token_validate::clear_auth` empties the `auth` column and
+reloads, so `authenticated` goes false, `reload` hits its `!is_startable()`
+early return with the server already stopped, and `available-tools` drops the
+row's tools. On `Unreachable`, nothing moves at all.
+
+Four things about it are load-bearing:
+
+- **Both halves are the fix, and each is the other's inverse.** Without the
+  clear, replacing a working token with a rejected one left the badge reading
+  `Connected` about the *previous* authorisation while the hosted server went on
+  answering `tools/call` with the credential just refused — three correct
+  behaviours composing into a lie (`PUT` preserves a non-empty `auth` in SQL so
+  the token is never read into the process; `authenticated` is computed from
+  that column alone; the `PUT` reloads before any check can run). With a **flat**
+  clear, a provider that is briefly unreachable disconnects a working
+  integration — the same dishonesty pointing the other way. **A test that only
+  exercises the 401 passes against a flat clear**; the unreachable case needs its
+  own, over a row that *was* authorised, because a clear against a NULL `auth`
+  is unobservable.
+- **`Unreachable` is the default for anything unrecognised.** Misclassifying a
+  refusal leaves the old bug standing for one shape; misclassifying a transport
+  failure invents a new one.
+- **Each validator decides its own kind**, because only it can see the status or
+  the envelope. `CheckFailure::from_status` is the one place 401 and 403 are
+  grouped — `gateway_api/catalog.rs`'s reasoning verbatim, since some providers
+  report an exhausted quota as 403.
+- **Nothing else moves.** The 400 body is byte-identical on both classes — three
+  keys, `error` · `valid` · `validated`, and `REPORTS_VALIDATED` is untouched —
+  and `credentials` keeps the bytes the `PUT` stored, so re-running the check
+  after fixing the token restores the authorisation. A failed `clear_auth` is
+  logged and still answers the 400, and a row with nothing to clear is not
+  written at all. The UI tells the two classes apart by **re-reading the row**,
+  never by matching on the error string.
+
 **Shutdown is graceful, and it took one line's placement.** Go stops a server
 with `httpServer.Shutdown(context.Background())` and hands each tool handler the
 *HTTP request's* context, so a `tools/call` in flight when the server is torn

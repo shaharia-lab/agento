@@ -21,6 +21,7 @@
 //! the alternative is a native handler that succeeds where Go fails.
 
 use crate::claude::CancellationToken;
+use crate::native::integrations::check::CheckFailure;
 
 use super::client::{api_base, http_client, read_capped};
 
@@ -58,23 +59,28 @@ struct AuthTest {
 }
 
 /// `ValidateToken(ctx, token)` — the team name on success.
-pub async fn validate_token(ct: &CancellationToken, token: &str) -> Result<String, String> {
+///
+/// The status is ignored and `ok` decides, so the refusal is `ok:false` — which
+/// is what an empty OAuth-mode bot token reaches, as `not_authed`. A **429** is
+/// deliberately *not* a refusal: Slack is declining to answer, not refusing the
+/// token.
+pub async fn validate_token(ct: &CancellationToken, token: &str) -> Result<String, CheckFailure> {
     let failed = "calling Slack auth.test: request failed".to_string();
     let url = reqwest::Url::parse(&format!("{}/auth.test", api_base()))
-        .map_err(|e| format!("creating Slack auth.test request: {e}"))?;
+        .map_err(|e| CheckFailure::unreachable(format!("creating Slack auth.test request: {e}")))?;
 
     // A POST with **no body** and `Content-Type: application/json` — Go builds
     // it with a nil body and sets the header anyway.
     let request = http_client()
-        .ok_or_else(|| failed.clone())?
+        .ok_or_else(|| CheckFailure::unreachable(failed.clone()))?
         .post(url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/json");
 
     // Go discards `client.Do`'s error: the request carries the bot token.
     let response = tokio::select! {
-        () = ct.cancelled() => return Err(failed.clone()),
-        result = request.send() => result.map_err(|_| failed)?,
+        () = ct.cancelled() => return Err(CheckFailure::unreachable(failed.clone())),
+        result = request.send() => result.map_err(|_| CheckFailure::unreachable(failed))?,
     };
 
     // Checked before the body is read, and it returns without reading it.
@@ -84,22 +90,26 @@ pub async fn validate_token(ct: &CancellationToken, token: &str) -> Result<Strin
             .get("Retry-After")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        return Err(format!(
+        return Err(CheckFailure::unreachable(format!(
             "slack rate limited, retry after {retry_after} seconds"
-        ));
+        )));
     }
 
     let body = read_capped(ct, response)
         .await
-        .map_err(|e| format!("reading Slack response: {e}"))?;
+        .map_err(|e| CheckFailure::unreachable(format!("reading Slack response: {e}")))?;
 
     let result: AuthTest =
         serde_json::from_str::<Option<crate::native::gojson::GoStruct<AuthTest>>>(&body)
             .map(|wrapped| wrapped.map_or_else(AuthTest::default, |wrapped| wrapped.0))
-            .map_err(|e| format!("parsing Slack response: {e}"))?;
+            .map_err(|e| CheckFailure::unreachable(format!("parsing Slack response: {e}")))?;
 
     if !result.ok {
-        return Err(format!("slack API error: {}", result.error));
+        // Slack refuses a bad token inside a 200 — this is the refusal.
+        return Err(CheckFailure::rejected(format!(
+            "slack API error: {}",
+            result.error
+        )));
     }
     Ok(result.team)
 }
