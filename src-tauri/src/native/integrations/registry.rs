@@ -170,6 +170,16 @@ impl HostingRow {
         self.enabled && self.authenticated
     }
 
+    /// `cfg.IsAuthenticated()` on its own — whether the `auth` column holds
+    /// anything.
+    ///
+    /// The boolean, never the value: [`Self::auth`] stays private to this
+    /// module, and the one caller outside it ([`super::token_validate`]) only
+    /// needs to know whether there is an authorisation to clear (#521).
+    pub(crate) fn is_authenticated(&self) -> bool {
+        self.authenticated
+    }
+
     /// The services map a starter sees. A stored `null` is a nil Go map, which
     /// ranges zero times — an empty map is the same thing to every reader here.
     fn services(&self) -> BTreeMap<String, ServiceConfig> {

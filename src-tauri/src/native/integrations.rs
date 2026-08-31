@@ -142,6 +142,10 @@
 /// job, and this module still never reads a credential — [`registry`] does,
 /// through a projection of its own that no response type can reach.
 pub mod base_url;
+/// What a failed credential check concluded — refused, or never answered (#521).
+/// Read by the five validators below and by [`token_validate`], which is the one
+/// caller that acts on the difference.
+pub mod check;
 pub mod confluence;
 pub mod github;
 pub mod google;
@@ -323,7 +327,7 @@ fn auth_mode_sql() -> String {
 /// `auth_mode_sql`'s answer for a credential blob this process is already
 /// holding, for the two writes that build their response by hand instead of
 /// re-reading the row.
-fn auth_mode_of(credentials: &str) -> String {
+pub(crate) fn auth_mode_of(credentials: &str) -> String {
     serde_json::from_str::<serde_json::Value>(credentials)
         .ok()
         .as_ref()

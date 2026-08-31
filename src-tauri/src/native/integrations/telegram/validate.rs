@@ -18,6 +18,7 @@
 //! in `callTelegram`.
 
 use crate::claude::CancellationToken;
+use crate::native::integrations::check::CheckFailure;
 
 use super::client::{api_base, http_client, read_capped, TelegramResponse};
 
@@ -46,24 +47,33 @@ struct BotUser {
 }
 
 /// `ValidateBotToken(ctx, token)` — the bot's username on success.
-pub async fn validate_bot_token(ct: &CancellationToken, token: &str) -> Result<String, String> {
+///
+/// The status is never looked at, so the *only* [`CheckFailure::rejected`] here
+/// is the envelope's `ok:false` — a refusal Telegram delivers with HTTP 200.
+/// Everything else is a transport or decode failure and changes nothing.
+pub async fn validate_bot_token(
+    ct: &CancellationToken,
+    token: &str,
+) -> Result<String, CheckFailure> {
     // Every failure between here and the response is this one sentence: Go
     // discards `client.Do`'s error rather than wrapping it, because the URL
     // carries the bot token and the error would print it.
     let failed = "calling Telegram getMe: request failed".to_string();
 
-    let url = endpoint(token).ok_or_else(|| failed.clone())?;
-    let request = http_client().ok_or_else(|| failed.clone())?.get(url);
+    let url = endpoint(token).ok_or_else(|| CheckFailure::unreachable(failed.clone()))?;
+    let request = http_client()
+        .ok_or_else(|| CheckFailure::unreachable(failed.clone()))?
+        .get(url);
 
     let response = tokio::select! {
-        () = ct.cancelled() => return Err(failed.clone()),
-        result = request.send() => result.map_err(|_| failed)?,
+        () = ct.cancelled() => return Err(CheckFailure::unreachable(failed.clone())),
+        result = request.send() => result.map_err(|_| CheckFailure::unreachable(failed))?,
     };
 
     let body = read_capped(ct, response)
         .await
         // `fmt.Errorf("reading Telegram response: %w", err)`.
-        .map_err(|e| format!("reading Telegram response: {e}"))?;
+        .map_err(|e| CheckFailure::unreachable(format!("reading Telegram response: {e}")))?;
 
     // `json.Unmarshal` into a struct: a bare `null` body leaves it zeroed and
     // returns no error, so Go falls through to the `!ok` branch with an empty
@@ -75,10 +85,14 @@ pub async fn validate_bot_token(ct: &CancellationToken, token: &str) -> Result<S
             // `encoding/json`'s wording is not reproducible, so this carries serde's —
             // the same pinned divergence `client::read_response` records. It cannot
             // leak the token: what is being parsed is Telegram's response.
-            .map_err(|e| format!("parsing Telegram response: {e}"))?;
+            .map_err(|e| CheckFailure::unreachable(format!("parsing Telegram response: {e}")))?;
 
     if !envelope.ok {
-        return Err(format!("telegram API error: {}", envelope.description));
+        // Telegram refuses a bad token inside a 200 — this is the refusal.
+        return Err(CheckFailure::rejected(format!(
+            "telegram API error: {}",
+            envelope.description
+        )));
     }
 
     // `json.Unmarshal(tgResp.Result, &bot)`. An *absent* `result` is `nil` to
@@ -89,7 +103,7 @@ pub async fn validate_bot_token(ct: &CancellationToken, token: &str) -> Result<S
     let bot: BotUser =
         serde_json::from_str::<Option<crate::native::gojson::GoStruct<BotUser>>>(envelope.result())
             .map(|wrapped| wrapped.map_or_else(BotUser::default, |wrapped| wrapped.0))
-            .map_err(|e| format!("parsing bot user: {e}"))?;
+            .map_err(|e| CheckFailure::unreachable(format!("parsing bot user: {e}")))?;
 
     Ok(bot.username)
 }

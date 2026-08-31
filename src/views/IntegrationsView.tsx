@@ -1019,18 +1019,34 @@ function IntegrationDetail({
       // failed — the new credential *is* stored, and saying otherwise would
       // send the user looking for a write that happened.
       //
-      // **A rejected check does not make the badge honest**, and the copy has
-      // to say so. `update` preserves a non-empty `auth` in SQL and
-      // `authenticated` is computed from that column, so a row that was already
-      // connected still reads `Connected` after its credential is replaced with
-      // a rejected one — and `reload_blocking` has restarted its MCP server on
-      // the new, bad token. The status the user can see is about the *previous*
-      // authorisation; only this sentence is about the credential they just
-      // saved.
+      // **A failed check now has two outcomes, and the copy has to pick the
+      // right one** (#521). A credential the provider *refused* clears the
+      // `auth` column and stops the hosted server, so the status is about to
+      // read *Not connected* and the old sentence — "any earlier authorisation
+      // is what the status above still reflects" — would be a fresh lie. A
+      // check that could not reach the provider changes nothing, and there that
+      // sentence is exactly right.
+      //
+      // **The row is what tells them apart, not the error string.** No wire
+      // field distinguishes the two (both are the same three-key 400), and
+      // matching on the message would be prose coupling that breaks the day a
+      // provider rewords its refusal. `authenticated` after the check is the
+      // fact itself. A read that fails leaves `stillAuthorised` false, which is
+      // the sentence that claims less.
+      let stillAuthorised = false;
+      if (checking) {
+        try {
+          stillAuthorised = (await api.get<Integration>(`/integrations/${item.id}`)).authenticated;
+        } catch {
+          // Nothing to add — the honest-either-way sentence is below.
+        }
+      }
       setError(
-        checking
-          ? `${describeError(err)} — the new credential was saved but not accepted, so any earlier authorisation is what the status above still reflects.`
-          : describeError(err)
+        !checking
+          ? describeError(err)
+          : stillAuthorised
+            ? `${describeError(err)} — the new credential was saved but not accepted, so any earlier authorisation is what the status above still reflects.`
+            : `${describeError(err)} — the new credential was saved but the provider refused it, so this integration is not connected and its tools are not being served.`
       );
     } finally {
       // Unconditional, and outside the `try`: the row changed even when the

@@ -35,16 +35,19 @@
 //! dropping the decode would turn it into a success.
 
 use crate::claude::CancellationToken;
+use crate::native::integrations::check::CheckFailure;
 
 use super::client::{http_client, read_capped_at};
 
 /// Why a validation failed, and whether this port can spell Go's sentence.
 pub enum Refusal {
-    /// A sentence Go produces verbatim, safe to put on the wire.
-    Reproducible(String),
+    /// A sentence Go produces verbatim, safe to put on the wire — carrying the
+    /// outcome's kind (#521) as well as its wording.
+    Reproducible(CheckFailure),
     /// A wording this build does not reproduce. The caller answers a 500 with
     /// the reason in the log rather than inventing a sentence the user sees —
-    /// safe here because it can only arise before the network call.
+    /// safe here because it can only arise before the network call, which is
+    /// also why it needs no kind: nothing was asked, so nothing was refused.
     Unreproducible(String),
 }
 
@@ -87,7 +90,9 @@ pub async fn validate_credentials(
         if e.starts_with("invalid site URL: ") {
             Refusal::Unreproducible(e)
         } else {
-            Refusal::Reproducible(e)
+            // A site URL this build refuses outright never reached Atlassian,
+            // so it says nothing about the token.
+            Refusal::Reproducible(CheckFailure::unreachable(e))
         }
     })?;
 
@@ -99,7 +104,7 @@ pub async fn validate_credentials(
         .map_err(|e| Refusal::Unreproducible(format!("creating confluence request: {e}")))?;
 
     let request = http_client()
-        .ok_or_else(|| Refusal::Reproducible(failed.clone()))?
+        .ok_or_else(|| Refusal::Reproducible(CheckFailure::unreachable(failed.clone())))?
         .get(url)
         // `req.SetBasicAuth(email, apiToken)`.
         .basic_auth(email, Some(api_token))
@@ -108,30 +113,45 @@ pub async fn validate_credentials(
     // Go discards `client.Do`'s error rather than wrapping it: the URL is the
     // customer's site and the header is a credential.
     let response = tokio::select! {
-        () = ct.cancelled() => return Err(Refusal::Reproducible(failed.clone())),
-        result = request.send() => result.map_err(|_| Refusal::Reproducible(failed))?,
+        () = ct.cancelled() => {
+            return Err(Refusal::Reproducible(CheckFailure::unreachable(failed.clone())))
+        }
+        result = request.send() => {
+            result.map_err(|_| Refusal::Reproducible(CheckFailure::unreachable(failed)))?
+        }
     };
 
     let status = response.status().as_u16();
     let body = read_capped_at(ct, response, MAX_VALIDATE_BYTES)
         .await
-        .map_err(|e| Refusal::Reproducible(format!("reading confluence response: {e}")))?;
+        .map_err(|e| {
+            Refusal::Reproducible(CheckFailure::unreachable(format!(
+                "reading confluence response: {e}"
+            )))
+        })?;
 
+    // The only one of the five whose refusal is already singled out by status,
+    // so this arm *is* the rejection — Go's own 401/403 grouping, and the same
+    // grouping `CheckFailure::from_status` applies for the other four.
     if status == 401 || status == 403 {
-        return Err(Refusal::Reproducible(
-            "invalid credentials: check email and API token".to_string(),
-        ));
+        return Err(Refusal::Reproducible(CheckFailure::rejected(
+            "invalid credentials: check email and API token",
+        )));
     }
     if status != 200 {
-        return Err(Refusal::Reproducible(format!(
+        return Err(Refusal::Reproducible(CheckFailure::unreachable(format!(
             "confluence API returned status {status}: {body}"
-        )));
+        ))));
     }
 
     // `json.Unmarshal` into a struct: a bare `null` leaves it zeroed and
     // succeeds, and a JSON array is a type error to Go but decodes positionally
     // in serde — hence the `Option` and `GoStruct` this codebase uses for both.
     serde_json::from_str::<Option<crate::native::gojson::GoStruct<SpacesResponse>>>(&body)
-        .map_err(|e| Refusal::Reproducible(format!("parsing confluence response: {e}")))?;
+        .map_err(|e| {
+            Refusal::Reproducible(CheckFailure::unreachable(format!(
+                "parsing confluence response: {e}"
+            )))
+        })?;
     Ok(())
 }

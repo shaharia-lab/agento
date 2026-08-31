@@ -46,6 +46,26 @@
 //! integration: %w` goes into the very same 400 body. So a failed write is
 //! answered with that 400, and nothing on this path returns `Fallback` once the
 //! network has been touched.
+//!
+//! # A rejected check is a state change; an unreachable one is not (#521)
+//!
+//! There are now **two** writes, and the second is on the failure path. When the
+//! provider *answers and refuses* the credential, [`clear_auth`] empties the
+//! `auth` column and the server is reloaded — so `authenticated` goes false,
+//! [`registry::reload`] hits its `!is_startable()` early return with the server
+//! already stopped, and `available-tools` drops the row's tools. When the check
+//! merely could not be completed, nothing moves at all.
+//!
+//! [`super::check`] carries the whole argument for why the distinction exists
+//! and why `Unreachable` is the default. Two rules local to this module:
+//!
+//! - **The clear must not turn a 400 into a 500.** The credential is refused
+//!   whichever way the write goes, so a failed `clear_auth` is logged and the
+//!   400 is answered anyway — the same reasoning as the reload's own swallowing.
+//! - **A row with nothing to clear is not written.** `updated_at` moving is
+//!   observable, and a check refused against a row that was never authorised has
+//!   changed nothing; the reload still runs, because it is what proves no handle
+//!   is left.
 
 use std::path::Path;
 
@@ -55,6 +75,7 @@ use crate::claude::CancellationToken;
 use crate::native::writes::WriteError;
 use crate::native::{goquote, Answer};
 
+use super::check::{CheckFailure, CheckKind};
 use super::registry;
 
 /// `map[string]any{"valid": …, "validated": …}` — a Go map, so the wire order
@@ -179,10 +200,41 @@ fn validate_token_auth(db_path: &Path, row: &registry::HostingRow) -> Result<(),
 
     // ── Nothing above has called out; nothing below may return Fallback ──────
     let ct = CancellationToken::new();
-    let stored = super::super::trigger::block_on_result(
-        "validating integration credentials",
-        call(integration_type, &ct, &creds, rewritten),
-    )?;
+    // `trigger::block_on_result`'s body, spelled here — including its
+    // no-runtime sentence verbatim — because that helper is fixed to
+    // `WriteError` and this call has to carry the outcome's *kind* alongside
+    // one.
+    let called = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(call(integration_type, &ct, &creds, rewritten)),
+        Err(_) => Err(CallFailure {
+            kind: CheckKind::Unreachable,
+            error: WriteError::Fallback(
+                "validating integration credentials: no tokio runtime on this thread".to_string(),
+            ),
+        }),
+    };
+
+    let stored = match called {
+        Ok(stored) => stored,
+        Err(failure) => {
+            // The provider answered and refused it: the stored authorisation is
+            // about a credential that is no longer in use, so it goes — and the
+            // reload is what stops the server hosting the refused one.
+            if failure.kind == CheckKind::Rejected && clears_on_refusal(row) {
+                if row.is_authenticated() {
+                    if let Err(e) = clear_auth(db_path, &row.id) {
+                        log::warn!(
+                            "could not clear the authorisation of an integration \
+                             whose credential was refused: id={:?} error={e}",
+                            row.id
+                        );
+                    }
+                }
+                registry::reload_blocking(db_path, &row.id);
+            }
+            return Err(failure.error);
+        }
+    };
 
     // Go's `saving validated integration: %w` arm, which lands in the *same*
     // 400 body as a failed validation — so this is the inherited behaviour,
@@ -197,16 +249,45 @@ fn validate_token_auth(db_path: &Path, row: &registry::HostingRow) -> Result<(),
     Ok(())
 }
 
+/// A failed remote call: the answer it earns, and which class it was.
+///
+/// The `error` is exactly what this function used to return, so the 400 body is
+/// byte-identical on both classes; `kind` is the new half, and it decides only
+/// whether the caller clears the stored authorisation.
+struct CallFailure {
+    kind: CheckKind,
+    error: WriteError,
+}
+
+impl CallFailure {
+    /// Wrap a validator's [`CheckFailure`] in the `ValidationError` Go builds
+    /// around it, keeping the kind. `field` and the message prefix are the
+    /// per-type wording and do not move.
+    fn validation(field: &str, prefix: &str, failure: CheckFailure) -> Self {
+        Self {
+            kind: failure.kind,
+            error: WriteError::Validation {
+                field: field.to_string(),
+                message: format!("{prefix}{}", failure.message),
+            },
+        }
+    }
+}
+
 /// The five remote calls, each returning the `auth` payload its own MCP server
 /// reads. The payloads are built with [`goquote::quote`] and not a JSON encoder
 /// — Go builds them with `fmt.Sprintf("%q")`, whose output differs from
 /// `encoding/json`'s on `&`, `<`, `>` and every control character.
+///
+/// Each validator decides its own [`CheckKind`], because only it can see the
+/// status or the envelope; this function does no classifying of its own beyond
+/// giving the two shapes that never touched the network the safe default.
 async fn call(
     integration_type: &str,
     ct: &CancellationToken,
     creds: &Credentials,
     rewritten: Option<String>,
-) -> Result<Stored, WriteError> {
+) -> Result<Stored, CallFailure> {
     let auth = match integration_type {
         "confluence" => {
             use super::confluence::validate::Refusal;
@@ -218,25 +299,27 @@ async fn call(
             )
             .await
             .map_err(|refusal| match refusal {
-                Refusal::Reproducible(message) => WriteError::Validation {
-                    field: "credentials".to_string(),
-                    message: format!("invalid credentials: {message}"),
-                },
+                Refusal::Reproducible(failure) => {
+                    CallFailure::validation("credentials", "invalid credentials: ", failure)
+                }
                 // A `url.Parse` refusal, whose wording is not reproducible. It
                 // can only arise **before** the request, so a 500 costs nothing
-                // — see `confluence::validate`'s header.
-                Refusal::Unreproducible(why) => WriteError::Fallback(format!(
-                    "confluence site URL needs net/url's own message: {why}"
-                )),
+                // — see `confluence::validate`'s header — and nothing was
+                // refused, so it changes no stored state either.
+                Refusal::Unreproducible(why) => CallFailure {
+                    kind: CheckKind::Unreachable,
+                    error: WriteError::Fallback(format!(
+                        "confluence site URL needs net/url's own message: {why}"
+                    )),
+                },
             })?;
             r#"{"validated":true}"#.to_string()
         }
         "telegram" => {
             let username = super::telegram::validate::validate_bot_token(ct, &creds.bot_token)
                 .await
-                .map_err(|e| WriteError::Validation {
-                    field: "credentials.bot_token".to_string(),
-                    message: format!("invalid bot token: {e}"),
+                .map_err(|e| {
+                    CallFailure::validation("credentials.bot_token", "invalid bot token: ", e)
                 })?;
             format!(
                 r#"{{"validated":true,"bot_username":{}}}"#,
@@ -251,10 +334,7 @@ async fn call(
                 &creds.api_token,
             )
             .await
-            .map_err(|e| WriteError::Validation {
-                field: "credentials".to_string(),
-                message: format!("invalid jira credentials: {e}"),
-            })?;
+            .map_err(|e| CallFailure::validation("credentials", "invalid jira credentials: ", e))?;
             format!(
                 r#"{{"validated":true,"display_name":{}}}"#,
                 goquote::quote(&display_name)
@@ -263,9 +343,12 @@ async fn call(
         "github" => {
             let username = super::github::validate::validate_pat(ct, &creds.personal_access_token)
                 .await
-                .map_err(|e| WriteError::Validation {
-                    field: "credentials.personal_access_token".to_string(),
-                    message: format!("invalid personal access token: {e}"),
+                .map_err(|e| {
+                    CallFailure::validation(
+                        "credentials.personal_access_token",
+                        "invalid personal access token: ",
+                        e,
+                    )
                 })?;
             format!(
                 r#"{{"validated":true,"username":{}}}"#,
@@ -277,9 +360,8 @@ async fn call(
         "slack" => {
             let team = super::slack::validate::validate_token(ct, &creds.bot_token)
                 .await
-                .map_err(|e| WriteError::Validation {
-                    field: "credentials.bot_token".to_string(),
-                    message: format!("invalid bot token: {e}"),
+                .map_err(|e| {
+                    CallFailure::validation("credentials.bot_token", "invalid bot token: ", e)
                 })?;
             format!(
                 r#"{{"validated":true,"team_name":{}}}"#,
@@ -288,9 +370,12 @@ async fn call(
         }
         // Unreachable: the caller filtered the type before anything was called.
         other => {
-            return Err(WriteError::Fallback(format!(
-                "no token validation for integration type {other:?}"
-            )))
+            return Err(CallFailure {
+                kind: CheckKind::Unreachable,
+                error: WriteError::Fallback(format!(
+                    "no token validation for integration type {other:?}"
+                )),
+            })
         }
     };
     Ok(Stored {
@@ -324,6 +409,57 @@ fn save(db_path: &Path, id: &str, stored: &Stored) -> Result<(), String> {
     }
     .map_err(|e| format!("{e}"))?;
 
+    tx.commit().map_err(|e| format!("{e}"))
+}
+
+/// Whether a refusal is about the credential `auth` actually attests.
+///
+/// **It is not, in exactly one shape, and clearing there would be the damage
+/// this issue exists to avoid rather than the fix.** A Slack row in `oauth`
+/// mode stores its OAuth2 *token* in `auth` while `credentials` holds the
+/// client pair — and `validateSlackTokenAuth` runs anyway, with
+/// `credentials.bot_token`, which is **empty** in that mode (see
+/// `slack::validate`'s header). Slack answers `not_authed`, which is a genuine
+/// refusal of a credential that was never the authorisation: clearing on it
+/// would destroy a working OAuth grant and force the user through the whole
+/// flow again, for a check that tested nothing.
+///
+/// `IntegrationsView` already says as much beside its two auth buttons — "one
+/// click on the other tab of a connected Slack row would otherwise check an
+/// OAuth blob with the bot-token action … neither writes anything, so this is a
+/// confusing answer rather than data loss". This keeps that true.
+///
+/// Read off the **stored** blob rather than any request, which is
+/// `native/integrations.rs`'s own rule for `auth_mode`, and through its
+/// three-literal allowlist — so an unrecognised or absent mode is `""` and
+/// clears, matching `resolveToken`'s own fallback to `bot_token`.
+fn clears_on_refusal(row: &registry::HostingRow) -> bool {
+    super::auth_mode_of(&row.credentials) != "oauth"
+}
+
+/// Empty the `auth` column of a row whose credential the provider refused
+/// (#521) — the one write on a failure path, and the whole of the state change.
+///
+/// It is [`save`]'s shape with one column and no value: same immediate
+/// transaction, same `updated_at`. `credentials` is deliberately untouched, so
+/// the bytes the `PUT` stored survive and re-running the check after fixing the
+/// token restores the authorisation.
+///
+/// `NULL` rather than `''` because that is what the column holds before anything
+/// validates it, and what `native/integrations.rs`'s `PUT` normalises `''` and
+/// the literal `null` back to — the three are one state to
+/// `HOSTING_COLUMNS`'s `authenticated` expression, and writing the one the rest
+/// of the port writes keeps them from drifting into two.
+fn clear_auth(db_path: &Path, id: &str) -> Result<(), String> {
+    let mut conn = crate::native::db::open_read_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin authorisation clear: {e}"))?;
+    tx.execute(
+        "UPDATE integrations SET auth = NULL, updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![crate::native::gotime::now_go_text(), id],
+    )
+    .map_err(|e| format!("{e}"))?;
     tx.commit().map_err(|e| format!("{e}"))
 }
 
@@ -694,6 +830,226 @@ mod tests {
             "got {}",
             body_of(&answer)
         );
+    }
+
+    /// Give a seeded row an authorisation, the way a successful check would.
+    ///
+    /// `migrated` leaves `auth` NULL, which is the state of a row nothing has
+    /// validated — and every failure-path assertion below is about a row that
+    /// *had* one, because that is the state the bug produced a lie about.
+    fn authorise(db: &Path, id: &str) {
+        let conn = rusqlite::Connection::open(db).expect("open");
+        conn.execute(
+            "UPDATE integrations SET auth = ?1 WHERE id = ?2",
+            rusqlite::params![r#"{"validated":true}"#, id],
+        )
+        .expect("authorise");
+    }
+
+    /// #521: a provider that **answers and refuses** the credential clears the
+    /// stored authorisation and leaves nothing hosted.
+    ///
+    /// Both halves matter and neither implies the other. The column is what
+    /// `authenticated` — and therefore the badge, `is_startable` and
+    /// `available-tools` — is computed from; the handle is what would otherwise
+    /// go on answering `tools/call` with the token the provider just refused,
+    /// for the life of the process.
+    ///
+    /// The row is genuinely hosted first, so the second assertion is about a
+    /// listener that existed rather than one that never started.
+    #[tokio::test]
+    async fn a_rejected_check_clears_the_authorisation_and_stops_the_server() {
+        use crate::native::integrations::telegram::client::{api_base_lock, set_api_base};
+        let _guard = api_base_lock().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(
+            dir.path(),
+            "tg-521-rejected",
+            "telegram",
+            &format!(r#"{{"bot_token":"{TOKEN}"}}"#),
+        );
+        authorise(&db, "tg-521-rejected");
+        registry::reload(&db, "tg-521-rejected")
+            .await
+            .expect("host the row");
+        assert!(
+            registry::registry().is_hosted("tg-521-rejected"),
+            "the row has to be hosted before the check, or the assertion below \
+             would pass against a server that never started"
+        );
+
+        // `{"ok":false}` is how Telegram refuses a bad token — at HTTP 200.
+        let base = fake(
+            StatusCode::OK,
+            r#"{"ok":false,"description":"Unauthorized"}"#,
+        )
+        .await;
+        set_api_base(Some(base));
+        let db2 = db.clone();
+        let answer = tokio::task::spawn_blocking(move || serve(&db2, "tg-521-rejected")).await;
+        set_api_base(None);
+        let answer = answer.expect("join").expect("served");
+
+        // The wire is unmoved: the same three-key 400 as before #521.
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_of(&answer),
+            concat!(
+                r#"{"error":"validation error for \"credentials.bot_token\": "#,
+                "invalid bot token: telegram API error: Unauthorized",
+                r#"","valid":false,"validated":true}"#,
+                "\n",
+            )
+        );
+
+        let (auth, credentials, updated) = row(&db, "tg-521-rejected");
+        assert_eq!(auth, "", "a refused credential leaves no authorisation");
+        assert_eq!(
+            credentials,
+            format!(r#"{{"bot_token":"{TOKEN}"}}"#),
+            "only `auth` is cleared — the credential the PUT stored survives"
+        );
+        assert_ne!(
+            updated, "2026-01-01 00:00:00 +0000 UTC",
+            "the row changed, so `updated_at` moves"
+        );
+        assert!(
+            !registry::registry().is_hosted("tg-521-rejected"),
+            "the refused credential must stop being served"
+        );
+    }
+
+    /// The one refusal that must **not** clear: an OAuth-mode Slack row.
+    ///
+    /// `auth` there is the OAuth2 token the flow wrote, while this check reads
+    /// `credentials.bot_token` — empty in that mode — so Slack answers
+    /// `not_authed` about a credential that was never the authorisation.
+    /// Clearing on it would destroy a working grant and force a full
+    /// re-authorisation, which is precisely the harm the classification exists
+    /// to avoid.
+    #[tokio::test]
+    async fn an_oauth_rows_refusal_does_not_clear_the_token_the_flow_wrote() {
+        use crate::native::integrations::slack::client::{api_base_lock, set_api_base};
+        let _guard = api_base_lock().await;
+        let base = fake(StatusCode::OK, r#"{"ok":false,"error":"not_authed"}"#).await;
+        set_api_base(Some(base));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(
+            dir.path(),
+            "sl-521-oauth",
+            "slack",
+            r#"{"auth_mode":"oauth","client_id":"cid","client_secret":"sec"}"#,
+        );
+        // What `oauth/flow.rs` writes: the grant itself, not a `validated` flag.
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        conn.execute(
+            "UPDATE integrations SET auth = ?1 WHERE id = 'sl-521-oauth'",
+            [r#"{"access_token":"xoxb-from-the-flow","token_type":"Bearer"}"#],
+        )
+        .expect("store the grant");
+        drop(conn);
+
+        let db2 = db.clone();
+        let answer = tokio::task::spawn_blocking(move || serve(&db2, "sl-521-oauth")).await;
+        set_api_base(None);
+        let answer = answer.expect("join").expect("served");
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        let (auth, _, updated) = row(&db, "sl-521-oauth");
+        assert_eq!(
+            auth, r#"{"access_token":"xoxb-from-the-flow","token_type":"Bearer"}"#,
+            "a refusal about an empty bot token must not destroy an OAuth grant"
+        );
+        assert_eq!(
+            updated, "2026-01-01 00:00:00 +0000 UTC",
+            "nothing is written"
+        );
+    }
+
+    /// #521's other half, and the one a flat clear would fail: a provider that
+    /// **could not be reached** says nothing about the credential, so the
+    /// authorisation, the row and the running server are left exactly as they
+    /// were.
+    ///
+    /// Its row is authorised on purpose. The pre-existing unreachable test seeds
+    /// a NULL `auth`, where a clear is unobservable — so it passes against a
+    /// flat clear and this one does not.
+    #[tokio::test]
+    async fn an_unreachable_provider_leaves_the_authorisation_standing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(
+            dir.path(),
+            "ji-521-unreachable",
+            "jira",
+            &format!(
+                r#"{{"site_url":"http://127.0.0.1:1","email":"a@b.c","api_token":"{TOKEN}"}}"#
+            ),
+        );
+        authorise(&db, "ji-521-unreachable");
+
+        let db2 = db.clone();
+        let answer = tokio::task::spawn_blocking(move || serve(&db2, "ji-521-unreachable"))
+            .await
+            .expect("join")
+            .expect("served");
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        let (auth, _, updated) = row(&db, "ji-521-unreachable");
+        assert_eq!(
+            auth, r#"{"validated":true}"#,
+            "a provider that never answered must not disconnect a working integration"
+        );
+        assert_eq!(
+            updated, "2026-01-01 00:00:00 +0000 UTC",
+            "nothing is written on the unreachable path"
+        );
+    }
+
+    /// The status classification itself, over the two shapes that share one
+    /// sentence: GitHub reports a revoked token and a broken API the same way
+    /// (`github API error: status N: …`), so only the kind tells them apart.
+    ///
+    /// A 500 first — proving the second assertion is not simply "the clear never
+    /// runs" — then a 401 against the same row.
+    #[tokio::test]
+    async fn a_5xx_is_unreachable_where_a_401_is_a_refusal() {
+        use crate::native::integrations::github::client::{api_base_lock, set_api_base};
+        let _guard = api_base_lock().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(
+            dir.path(),
+            "gh-521",
+            "github",
+            &format!(r#"{{"auth_mode":"pat","personal_access_token":"{TOKEN}"}}"#),
+        );
+        authorise(&db, "gh-521");
+
+        for (status, expected_auth, why) in [
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"validated":true}"#,
+                "a 5xx says nothing about the token",
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "",
+                "a 401 is GitHub refusing the token",
+            ),
+        ] {
+            let base = fake(status, r#"{"message":"nope"}"#).await;
+            set_api_base(Some(base));
+            let db2 = db.clone();
+            let answer = tokio::task::spawn_blocking(move || serve(&db2, "gh-521")).await;
+            set_api_base(None);
+            let answer = answer.expect("join").expect("served");
+            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{why}");
+
+            let (auth, _, _) = row(&db, "gh-521");
+            assert_eq!(auth, expected_auth, "{why}");
+        }
     }
 
     /// A stored blob that is present but not JSON is a 500 rather than being

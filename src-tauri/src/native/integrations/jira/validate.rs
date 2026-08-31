@@ -18,6 +18,7 @@
 //! come from `client`.
 
 use crate::claude::CancellationToken;
+use crate::native::integrations::check::CheckFailure;
 
 use super::client::{http_client, read_capped};
 
@@ -40,20 +41,24 @@ struct Myself {
 
 /// `ValidateCredentials(ctx, siteURL, email, apiToken)` — the display name on
 /// success.
+///
+/// It does not single out 401/403 in its *message* (see above) and it does have
+/// to single them out in its [`CheckFailure`]: a 401 is Atlassian refusing the
+/// token, while a 404 or a 5xx says nothing about it. Same sentence either way.
 pub async fn validate_credentials(
     ct: &CancellationToken,
     site_url: &str,
     email: &str,
     api_token: &str,
-) -> Result<String, String> {
+) -> Result<String, CheckFailure> {
     let failed = "calling Jira /myself: request failed".to_string();
     let url = reqwest::Url::parse(&format!("{site_url}/rest/api/3/myself"))
         // `creating Jira myself request: %w` — `net/http`'s wording, so this
         // carries reqwest's.
-        .map_err(|e| format!("creating Jira myself request: {e}"))?;
+        .map_err(|e| CheckFailure::unreachable(format!("creating Jira myself request: {e}")))?;
 
     let request = http_client()
-        .ok_or_else(|| failed.clone())?
+        .ok_or_else(|| CheckFailure::unreachable(failed.clone()))?
         .get(url)
         .basic_auth(email, Some(api_token))
         .header("Accept", "application/json");
@@ -61,22 +66,25 @@ pub async fn validate_credentials(
     // Go discards `client.Do`'s error: the URL is the customer's site and the
     // header is a credential.
     let response = tokio::select! {
-        () = ct.cancelled() => return Err(failed.clone()),
-        result = request.send() => result.map_err(|_| failed)?,
+        () = ct.cancelled() => return Err(CheckFailure::unreachable(failed.clone())),
+        result = request.send() => result.map_err(|_| CheckFailure::unreachable(failed))?,
     };
 
     let status = response.status().as_u16();
     let body = read_capped(ct, response)
         .await
-        .map_err(|e| format!("reading Jira response: {e}"))?;
+        .map_err(|e| CheckFailure::unreachable(format!("reading Jira response: {e}")))?;
 
     if status != 200 {
-        return Err(format!("jira API error: status {status}: {body}"));
+        return Err(CheckFailure::from_status(
+            status,
+            format!("jira API error: status {status}: {body}"),
+        ));
     }
 
     let myself: Myself =
         serde_json::from_str::<Option<crate::native::gojson::GoStruct<Myself>>>(&body)
             .map(|wrapped| wrapped.map_or_else(Myself::default, |wrapped| wrapped.0))
-            .map_err(|e| format!("parsing Jira myself response: {e}"))?;
+            .map_err(|e| CheckFailure::unreachable(format!("parsing Jira myself response: {e}")))?;
     Ok(myself.display_name)
 }
