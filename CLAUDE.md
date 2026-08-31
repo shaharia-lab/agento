@@ -2364,6 +2364,19 @@ Four things about it are load-bearing:
   the envelope. `CheckFailure::from_status` is the one place 401 and 403 are
   grouped — `gateway_api/catalog.rs`'s reasoning verbatim, since some providers
   report an exhausted quota as 403.
+- **A refusal only clears when it refused the credential `auth` attests, and
+  there is exactly one row where it does not.** A Slack integration in `oauth`
+  mode keeps its OAuth2 *token* in `auth` while `credentials` holds the client
+  pair — and `validateSlackTokenAuth` runs anyway, against
+  `credentials.bot_token`, which is **empty** in that mode, so Slack answers
+  `not_authed` about a credential that was never the authorisation. Clearing
+  there would destroy a working grant and force the whole flow again, on a check
+  that tested nothing. `token_validate::clears_on_refusal` reads `auth_mode` off
+  the **stored** blob through `integrations::auth_mode_of`'s three-literal
+  allowlist, so an absent or unrecognised mode still clears — matching
+  `resolveToken`'s own fallback to `bot_token`. `IntegrationsView` states the
+  same invariant beside its two auth buttons ("neither writes anything, so this
+  is a confusing answer rather than data loss"); keep both true together.
 - **Nothing else moves.** The 400 body is byte-identical on both classes — three
   keys, `error` · `valid` · `validated`, and `REPORTS_VALIDATED` is untouched —
   and `credentials` keeps the bytes the `PUT` stored, so re-running the check

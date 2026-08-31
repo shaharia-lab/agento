@@ -327,7 +327,7 @@ fn auth_mode_sql() -> String {
 /// `auth_mode_sql`'s answer for a credential blob this process is already
 /// holding, for the two writes that build their response by hand instead of
 /// re-reading the row.
-fn auth_mode_of(credentials: &str) -> String {
+pub(crate) fn auth_mode_of(credentials: &str) -> String {
     serde_json::from_str::<serde_json::Value>(credentials)
         .ok()
         .as_ref()

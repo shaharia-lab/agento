@@ -220,7 +220,7 @@ fn validate_token_auth(db_path: &Path, row: &registry::HostingRow) -> Result<(),
             // The provider answered and refused it: the stored authorisation is
             // about a credential that is no longer in use, so it goes — and the
             // reload is what stops the server hosting the refused one.
-            if failure.kind == CheckKind::Rejected {
+            if failure.kind == CheckKind::Rejected && clears_on_refusal(row) {
                 if row.is_authenticated() {
                     if let Err(e) = clear_auth(db_path, &row.id) {
                         log::warn!(
@@ -410,6 +410,31 @@ fn save(db_path: &Path, id: &str, stored: &Stored) -> Result<(), String> {
     .map_err(|e| format!("{e}"))?;
 
     tx.commit().map_err(|e| format!("{e}"))
+}
+
+/// Whether a refusal is about the credential `auth` actually attests.
+///
+/// **It is not, in exactly one shape, and clearing there would be the damage
+/// this issue exists to avoid rather than the fix.** A Slack row in `oauth`
+/// mode stores its OAuth2 *token* in `auth` while `credentials` holds the
+/// client pair — and `validateSlackTokenAuth` runs anyway, with
+/// `credentials.bot_token`, which is **empty** in that mode (see
+/// `slack::validate`'s header). Slack answers `not_authed`, which is a genuine
+/// refusal of a credential that was never the authorisation: clearing on it
+/// would destroy a working OAuth grant and force the user through the whole
+/// flow again, for a check that tested nothing.
+///
+/// `IntegrationsView` already says as much beside its two auth buttons — "one
+/// click on the other tab of a connected Slack row would otherwise check an
+/// OAuth blob with the bot-token action … neither writes anything, so this is a
+/// confusing answer rather than data loss". This keeps that true.
+///
+/// Read off the **stored** blob rather than any request, which is
+/// `native/integrations.rs`'s own rule for `auth_mode`, and through its
+/// three-literal allowlist — so an unrecognised or absent mode is `""` and
+/// clears, matching `resolveToken`'s own fallback to `bot_token`.
+fn clears_on_refusal(row: &registry::HostingRow) -> bool {
+    super::auth_mode_of(&row.credentials) != "oauth"
 }
 
 /// Empty the `auth` column of a row whose credential the provider refused
@@ -892,6 +917,54 @@ mod tests {
         assert!(
             !registry::registry().is_hosted("tg-521-rejected"),
             "the refused credential must stop being served"
+        );
+    }
+
+    /// The one refusal that must **not** clear: an OAuth-mode Slack row.
+    ///
+    /// `auth` there is the OAuth2 token the flow wrote, while this check reads
+    /// `credentials.bot_token` — empty in that mode — so Slack answers
+    /// `not_authed` about a credential that was never the authorisation.
+    /// Clearing on it would destroy a working grant and force a full
+    /// re-authorisation, which is precisely the harm the classification exists
+    /// to avoid.
+    #[tokio::test]
+    async fn an_oauth_rows_refusal_does_not_clear_the_token_the_flow_wrote() {
+        use crate::native::integrations::slack::client::{api_base_lock, set_api_base};
+        let _guard = api_base_lock().await;
+        let base = fake(StatusCode::OK, r#"{"ok":false,"error":"not_authed"}"#).await;
+        set_api_base(Some(base));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(
+            dir.path(),
+            "sl-521-oauth",
+            "slack",
+            r#"{"auth_mode":"oauth","client_id":"cid","client_secret":"sec"}"#,
+        );
+        // What `oauth/flow.rs` writes: the grant itself, not a `validated` flag.
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        conn.execute(
+            "UPDATE integrations SET auth = ?1 WHERE id = 'sl-521-oauth'",
+            [r#"{"access_token":"xoxb-from-the-flow","token_type":"Bearer"}"#],
+        )
+        .expect("store the grant");
+        drop(conn);
+
+        let db2 = db.clone();
+        let answer = tokio::task::spawn_blocking(move || serve(&db2, "sl-521-oauth")).await;
+        set_api_base(None);
+        let answer = answer.expect("join").expect("served");
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        let (auth, _, updated) = row(&db, "sl-521-oauth");
+        assert_eq!(
+            auth, r#"{"access_token":"xoxb-from-the-flow","token_type":"Bearer"}"#,
+            "a refusal about an empty bot token must not destroy an OAuth grant"
+        );
+        assert_eq!(
+            updated, "2026-01-01 00:00:00 +0000 UTC",
+            "nothing is written"
         );
     }
 
