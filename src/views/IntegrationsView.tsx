@@ -82,12 +82,28 @@ function credentialsToSave(
   mode: AuthMode,
   values: Record<string, string>
 ): Record<string, string> | undefined {
-  const typed = mode.fields.some((f) => (values[f.key] ?? "").trim() !== "");
-  return typed ? buildCredentials(provider, mode, values) : undefined;
+  return hasTypedCredentials(mode, values)
+    ? buildCredentials(provider, mode, values)
+    : undefined;
 }
 
 function credentialsComplete(mode: AuthMode, values: Record<string, string>): boolean {
   return mode.fields.every((f) => (values[f.key] ?? "").trim() !== "");
+}
+
+/**
+ * Whether the user has supplied a credential at all — the predicate that
+ * decides both whether a save *sends* a `credentials` key and whether the form
+ * insists the blob be complete before it will.
+ *
+ * One function rather than the same `.some()` written at both sites: the two
+ * are only correct while they agree, and a gate that disagrees with what is
+ * actually sent is either a half-filled blob saved as a credential or a save
+ * button that never enables. This is the frontend half of the rule
+ * `the_two_has_credentials_rules_agree` pins on the backend.
+ */
+function hasTypedCredentials(mode: AuthMode, values: Record<string, string>): boolean {
+  return mode.fields.some((f) => (values[f.key] ?? "").trim() !== "");
 }
 
 function countTools(services: Services | null | undefined): number {
@@ -658,7 +674,7 @@ function IntegrationDetail({
    * leaving the field alone keeps the integration unusable.
    */
   const [replacing, setReplacing] = useState(!item.has_credentials);
-  const typedCredentials = mode.fields.some((f) => (values[f.key] ?? "").trim() !== "");
+  const typedCredentials = hasTypedCredentials(mode, values);
 
   const changed =
     name !== item.name ||
@@ -690,7 +706,14 @@ function IntegrationDetail({
         services,
       });
       setValues({});
-      setReplacing(false);
+      // Collapse to `••• stored` only when this save actually stored one.
+      // `IntegrationDetail` is keyed on the integration id, so `onChanged()`
+      // does not remount it and the `useState` seed below never re-runs — an
+      // unconditional `false` would leave a row with nothing stored showing
+      // the masked line, claiming a secret that is not there and hiding the
+      // one field that would fix it. `item` is still the pre-reload prop,
+      // which is exactly right on the path where no credential was sent.
+      setReplacing(credentials ? false : !item.has_credentials);
       setNotice("Saved.");
       onChanged();
     } catch (err) {
@@ -811,9 +834,17 @@ function IntegrationDetail({
               ) : (
                 /* The auth method is part of the credential blob, so it is
                    offered only alongside the fields that carry it: changing it
-                   on its own would send nothing and silently do nothing. */
+                   on its own would send nothing and silently do nothing.
+
+                   The label is deliberately **not** `mode.label`. `modeValue`
+                   seeds from `provider.modes[0]` and nothing reports the stored
+                   `auth_mode`, so on the one multi-mode provider (Slack) a row
+                   connected by OAuth would be captioned "Bot token". Before
+                   this section moved, that default sat on an *input* the user
+                   was about to fill; as a caption on a stored secret it is a
+                   statement of fact the app cannot make. */
                 <div className="formrow">
-                  <div className="formrow__label">{mode.label}</div>
+                  <div className="formrow__label">Credentials</div>
                   <div className="formrow__control">
                     <div className="int-storedsecret">
                       <span className="mono">••••••••••• stored</span>
@@ -873,7 +904,9 @@ function IntegrationDetail({
                   ? "You have unsaved changes."
                   : name.trim() === ""
                     ? "A name is required."
-                    : "Fill in every credential field, or clear them to keep the stored ones."}
+                    : item.has_credentials
+                      ? "Fill in every credential field, or clear them to keep the stored ones."
+                      : "Fill in every credential field."}
               </span>
               <button className="btn" onClick={revert} disabled={busy}>
                 Revert
