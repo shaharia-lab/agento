@@ -332,7 +332,7 @@ pub async fn build_options(
             .with_bypass_permissions(),
     };
 
-    opts = opts.with_claude_executable(claude_executable());
+    opts = opts.with_claude_executable(claude_executable().await);
 
     // `resolveAgentConfig` branches on whether the **chat names an agent**, not
     // on whether that agent has a model: it returns the agent's config outright,
@@ -865,8 +865,29 @@ fn profile_file_path_in(config_dir: &str, index_dir: &str, profile_id: &str) -> 
 ///
 /// It delegates rather than reimplementing the order, so there is nothing here
 /// that can drift from what `host_info` reports.
-fn claude_executable() -> String {
-    crate::claude_cli::executable()
+///
+/// **Off the runtime, because since #533 this can walk the order again.** The
+/// happy path is one `stat` (20.9 µs measured) and would be fine inline — but a
+/// cached path that has stopped being spawnable re-resolves, and that spawns
+/// `$SHELL -lic` bounded by three seconds plus a `--version` bounded by two,
+/// through a `std::thread::sleep` poll loop. `build_options` is awaited on the
+/// runtime by both the chat turn and the scheduler's executor, so leaving it
+/// inline puts a 3 s stall on a worker — twice the hold
+/// `a_contended_write_lock_does_not_stall_the_runtime` was written to catch,
+/// and it would falsify the "what is still on the worker" list in `CLAUDE.md`,
+/// every entry of which is a non-blocking read. It is bounded (one walk per
+/// `REFRESH_COOLDOWN`, and only one thread walks) but bounded is not the bar
+/// #366 set.
+///
+/// A `JoinError` means the blocking pool dropped the task, which leaves the
+/// same answer `executable()` gives when it finds nothing.
+async fn claude_executable() -> String {
+    tokio::task::spawn_blocking(crate::claude_cli::executable)
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("claude cli: resolving off the runtime failed: {e}");
+            "claude".to_string()
+        })
 }
 
 /// The two template variables Agento substitutes into a system prompt.

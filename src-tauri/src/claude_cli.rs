@@ -177,7 +177,11 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 /// user retrying: someone who repairs their install and presses send again
 /// should not be told the CLI is missing for as long as they can be bothered to
 /// wait. It does **not** delay the first recovery — see [`refresh_due`].
-const REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
+///
+/// `pub` for one reason: the integration test drives [`spawnable_at`] with an
+/// instant this far ahead rather than sleeping, so the two cannot drift if this
+/// number changes.
+pub const REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 
 /// The cached answer, and what is needed to produce it again.
 ///
@@ -244,8 +248,13 @@ fn cli_name() -> &'static str {
 /// semantics, and it is what stops a second caller resolving concurrently with
 /// a *different* `stored_override` and installing the losing answer.
 fn fill(stored_override: Option<&str>) -> Option<Resolution> {
-    if let Some(cached) = read_cache().as_ref() {
-        return cached.resolution.clone();
+    // An explicit scope, not an `if let`: the read guard must be dropped before
+    // the write lock is taken or this deadlocks itself, and leaving that to
+    // temporary-lifetime rules makes adding an `else` here a hang.
+    {
+        if let Some(cached) = read_cache().as_ref() {
+            return cached.resolution.clone();
+        }
     }
     let mut guard = write_cache();
     // Somebody may have filled it between dropping the read lock and taking
@@ -318,26 +327,46 @@ pub fn executable() -> String {
             return explicit;
         }
     }
-    spawnable()
+    spawnable_at(Instant::now())
         .map(|r| r.path)
         .unwrap_or_else(|| "claude".to_string())
 }
 
 /// The cached resolution, re-resolved if it has stopped being spawnable (#533).
 ///
-/// Three outcomes, and the second is the whole issue: the path still stats as
-/// an executable file and is returned untouched; it does not and the walk runs
-/// again; it does not and a walk has already run too recently, in which case
-/// the stale answer is returned and the spawn fails with the unchanged
-/// `claude: binary not found` message.
-fn spawnable() -> Option<Resolution> {
+/// Three outcomes, and the second is the whole issue:
+///
+/// 1. The path still stats as an executable file — returned untouched, which is
+///    every ordinary turn.
+/// 2. It does not, and no walk has run too recently — the order is walked again
+///    and **whatever it concludes is what the cache now holds**, including
+///    `None`. A walk that finds nothing must not leave the old path behind: the
+///    banner reads the same value, and a banner claiming an install that is not
+///    there is exactly the #503 defect. The spawn then falls back to the bare
+///    name and fails with `claude: binary not found: "claude"` — which is what
+///    a machine that never had the CLI has always reported, so the failure is
+///    unchanged rather than newly worded.
+/// 3. It does not, and a walk *has* run too recently — whatever that walk
+///    concluded is returned unchanged, and no probe is paid for.
+///
+/// `now` is a parameter so a test can place the cooldown boundary instead of
+/// sleeping through it; [`executable`] is the production entry point and passes
+/// the real clock.
+pub fn spawnable_at(now: Instant) -> Option<Resolution> {
     let (resolution, stored_override) = {
         // `fill` first, so a caller reached before `prime` still gets an
-        // answer — the ordering safety net `cached` documents.
-        let current = fill(None);
+        // answer — the ordering safety net `cached` documents. Then **one**
+        // guard for both fields: taking two would let a refresh land between
+        // them and pair one walk's path with another walk's override, which is
+        // the same defect `host_info`'s read-once split avoids.
+        fill(None);
         let guard = read_cache();
-        let stored = guard.as_ref().and_then(|c| c.stored_override.clone());
-        (current, stored)
+        match guard.as_ref() {
+            Some(cached) => (cached.resolution.clone(), cached.stored_override.clone()),
+            // `fill` has just populated it, so this is unreachable; answering
+            // "nothing resolved" beats an `expect` on a spawn path.
+            None => (None, None),
+        }
     };
 
     if let Some(found) = resolution.as_ref() {
@@ -356,8 +385,8 @@ fn spawnable() -> Option<Resolution> {
     {
         let mut guard = write_cache();
         match guard.as_mut() {
-            Some(cached) if refresh_due(cached.refreshed_at, Instant::now()) => {
-                cached.refreshed_at = Some(Instant::now());
+            Some(cached) if refresh_due(cached.refreshed_at, now) => {
+                cached.refreshed_at = Some(now);
             }
             _ => return resolution,
         }
@@ -370,9 +399,11 @@ fn spawnable() -> Option<Resolution> {
     {
         let mut guard = write_cache();
         if let Some(cached) = guard.as_mut() {
+            // Unconditional, `None` included — see outcome 2 above.
             cached.resolution = fresh.clone();
-            // From completion rather than from the claim, so a walk that took
-            // its full five seconds does not immediately allow another.
+            // The real clock rather than `now`, and from completion rather than
+            // from the claim, so a walk that took its full five seconds does
+            // not immediately allow another.
             cached.refreshed_at = Some(Instant::now());
         }
     }

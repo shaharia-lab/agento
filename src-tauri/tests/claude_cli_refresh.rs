@@ -32,7 +32,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use agento_lib::claude_cli::{cached, executable, prime, Source};
+use agento_lib::claude_cli::{cached, executable, prime, spawnable_at, Source, REFRESH_COOLDOWN};
 
 #[test]
 fn a_cli_that_stops_being_spawnable_is_resolved_again_without_a_restart() {
@@ -166,7 +166,7 @@ fn a_cli_that_stops_being_spawnable_is_resolved_again_without_a_restart() {
         assert_eq!(
             executable(),
             wrapper.to_string_lossy(),
-            "the stale path is returned, so the spawn fails with the unchanged message"
+            "inside the cooldown the last walk's answer is returned untouched"
         );
     }
     // With nothing at the override's path any more, a walk would fall through
@@ -178,6 +178,33 @@ fn a_cli_that_stops_being_spawnable_is_resolved_again_without_a_restart() {
         "a walk ran inside the cooldown; a missing CLI would re-probe on every turn"
     );
 
+    // ── A walk that finds nothing is allowed to say so. ──────────────────────
+    // Past the cooldown the order is walked again, and this time there is no
+    // CLI anywhere. The old path is **not** kept: `cached()` is what the banner
+    // reads, and a banner claiming an install that is not there is the #503
+    // defect this module exists to prevent. The spawn falls back to the bare
+    // name, which is what a machine that never had the CLI has always reported
+    // — so the failure a user sees is unchanged rather than newly worded.
+    //
+    // The boundary is constructed rather than slept through: `spawnable_at`
+    // takes the clock, and `REFRESH_COOLDOWN` is read from the crate so the two
+    // cannot drift.
+    let past_cooldown = std::time::Instant::now() + REFRESH_COOLDOWN;
+    assert!(
+        spawnable_at(past_cooldown).is_none(),
+        "a walk with no CLI anywhere must resolve to nothing"
+    );
+    assert_eq!(walks(&counter), 2, "the cooldown never expired");
+    assert_eq!(
+        executable(),
+        "claude",
+        "a CLI that is genuinely gone must report the same failure it always did"
+    );
+    assert!(
+        cached().is_none(),
+        "the banner is claiming an install that detection could not find"
+    );
+
     // ── The environment override is verbatim, and never stat-gated. ──────────
     // Rule 1 is taken on trust by design: a wrapper script is a documented
     // reason to set it, and a spawn error naming the user's own path is a better
@@ -186,7 +213,7 @@ fn a_cli_that_stops_being_spawnable_is_resolved_again_without_a_restart() {
     assert_eq!(executable(), "/nonexistent/wrapper/claude");
     assert_eq!(
         walks(&counter),
-        1,
+        2,
         "the environment override must not trigger a walk"
     );
     unsafe { std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE") }
