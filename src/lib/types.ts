@@ -124,6 +124,12 @@ export interface Integration {
   enabled: boolean;
   authenticated: boolean;
   /**
+   * Which of the provider's auth methods this row was configured with — the
+   * `auth_mode` recorded in its credentials, never the credentials themselves.
+   * `""` for the single-mode providers, which record none (#513).
+   */
+  auth_mode: string;
+  /**
    * Whether a credential is stored — never the credential itself (#515).
    * Computed in SQL, so the value never reaches this process, let alone the
    * webview. It is what lets the edit form say "leaving this alone keeps the

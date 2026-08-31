@@ -66,11 +66,22 @@
 //!
 //! `integrations.credentials` and `integrations.auth` hold **plaintext
 //! secrets** — OAuth refresh tokens, bot tokens, API keys. `scrubIntegration`
-//! drops both from every response, and the port goes one better: the
-//! `credentials` column is **never selected**, and `auth` is reduced to a
-//! boolean *in SQL* (`authenticated`) so neither value ever exists in this
+//! drops both from every response, and the port goes one better: `auth` is
+//! reduced to a boolean *in SQL* (`authenticated`) and `credentials` yields
+//! nothing but a value from a fixed allowlist, so no secret ever exists in this
 //! process. A field that is not read cannot be echoed back by a later edit that
 //! adds a key to the response.
+//!
+//! That column was selected by nothing at all until #513, and the exception it
+//! needed is the shape to copy rather than to widen. The Integrations editor
+//! cannot reopen on the auth method the user chose without knowing which one it
+//! was, and guessing it from the provider's first mode is the defect #513
+//! names. So the *discriminator* is read — and read the way an allowlist reads,
+//! comparing against three literals inside SQLite (`auth_mode_sql`), so the
+//! question "can a stored secret reach the wire through this?" is answered by
+//! the query rather than by trusting every future caller. `update` validates
+//! nothing, so a `PUT` really can store an arbitrary string under that key;
+//! what it cannot do is get it back out.
 //!
 //! That is also why the response types here are hand-written rather than
 //! derived from a row struct: a row struct would carry the secret as a field
@@ -173,6 +184,22 @@ use super::writes::{decode_body, finish, WriteError};
 /// once, here, rather than leaving it to a container's iteration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ScrubbedIntegration {
+    /// Which of the provider's auth methods this row was configured with, so
+    /// the editor can reopen on the tab the user chose (#513).
+    ///
+    /// **A wire addition with no Go ancestor.** `scrubIntegration`'s map had no
+    /// such key; this one exists because the alternative — the UI guessing from
+    /// `provider.modes[0]` — is what made a bot-token Slack integration
+    /// unreachable in the first place. It sorts first, before `authenticated`,
+    /// which is where the alphabetical rule above puts it. Empty means "the row
+    /// records no mode", which is every row of a single-mode provider.
+    ///
+    /// **It is a discriminator, never a secret**, and that is enforced rather
+    /// than asserted: the value is drawn out of `credentials` *in SQLite* and
+    /// only if it is one of [`AUTH_MODES`], so no other byte of that column can
+    /// leave the database through this field however a `PUT` filled it. See
+    /// [`auth_mode_sql`].
+    pub auth_mode: String,
     /// `IsAuthenticated()`: a stored `auth` that is present, non-empty and not
     /// the four bytes `null`. Computed in SQL so the token itself never reaches
     /// this process.
@@ -248,23 +275,88 @@ pub struct TriggerRule {
     pub updated_at: GoTime,
 }
 
+/// Every `auth_mode` a credential blob may legitimately carry.
+///
+/// The set `integration_credentials`' validators accept: `pat` for github,
+/// `bot_token` and `oauth` for slack. Every other provider is single-mode and
+/// writes no `auth_mode` at all.
+///
+/// `every_declared_auth_mode_is_one_a_validator_accepts` probes those validators
+/// and holds this list to them, so a literal here that nothing accepts fails.
+/// **It cannot prove the converse** — the accepted set lives in `match` arms
+/// with nothing to enumerate — so a mode added to a validator and not to this
+/// list is guarded by the notes on `validate_slack` and `validate_github`, where
+/// that edit is made. Read the test's own doc before relying on either
+/// direction.
+const AUTH_MODES: [&str; 3] = ["bot_token", "oauth", "pat"];
+
+/// `auth_mode`, as an expression that cannot return anything but [`AUTH_MODES`]
+/// or the empty string.
+///
+/// **This is the one place the `credentials` column appears in a read, and the
+/// allowlist is why it may.** The module header's rule is that a stored secret
+/// never exists in this process to be echoed; an unfiltered
+/// `json_extract(credentials, '$.auth_mode')` would weaken it to a promise
+/// about one key, and `update` validates nothing, so a `PUT` can put any string
+/// under that key. Comparing against a fixed set of literals *inside SQLite*
+/// keeps the original guarantee exactly: a value this module did not already
+/// know cannot cross the boundary.
+///
+/// The `CASE` is nested rather than `AND`-ed because `json_extract` raises on a
+/// column that is not JSON, and `''` is what a `PUT` that omits `credentials`
+/// leaves behind (see [`update`]).
+fn auth_mode_sql() -> String {
+    let allowed = AUTH_MODES
+        .iter()
+        .map(|m| format!("'{m}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CASE WHEN json_valid(credentials) THEN
+                CASE WHEN json_extract(credentials, '$.auth_mode') IN ({allowed})
+                     THEN json_extract(credentials, '$.auth_mode')
+                     ELSE '' END
+              ELSE '' END"
+    )
+}
+
+/// `auth_mode_sql`'s answer for a credential blob this process is already
+/// holding, for the two writes that build their response by hand instead of
+/// re-reading the row.
+fn auth_mode_of(credentials: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(credentials)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("auth_mode"))
+        .and_then(|v| v.as_str())
+        .filter(|mode| AUTH_MODES.contains(mode))
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// The projection every integration read shares.
 ///
-/// `credentials` is absent on purpose — see this module's header — and `auth`
-/// is collapsed to a boolean before it leaves SQLite. `ORDER BY name ASC` is
-/// the store's, and it has no tiebreak in Go either.
-/// A function rather than a `const` since #515, because it now interpolates
+/// The blob itself is never selected — see this module's header. What is, and
+/// only in SQL: `auth` as a boolean (`authenticated`), whether a credential is
+/// stored at all (`has_credentials`, #515) and which auth method the row was
+/// configured with (`auth_mode`, #513, through [`auth_mode_sql`]'s allowlist).
+/// `ORDER BY name ASC` is the store's, and it has no tiebreak in Go either.
+///
+/// A function rather than a `const` since #515, because it interpolates
 /// [`has_credentials_sql`] — which `existing_for_update` needs too, and one
-/// predicate written out twice is one that drifts. Both callers already built
-/// their statement with `format!`.
+/// predicate written out twice is one that drifts — and since #513
+/// [`auth_mode_sql`] as well. Both callers already built their statement with
+/// `format!`.
 fn integration_columns() -> String {
     format!(
         "SELECT id, name, type, enabled,
             (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
             {} AS has_credentials,
-            services, created_at, updated_at
+            services, created_at, updated_at,
+            {} AS auth_mode
      FROM integrations",
-        has_credentials_sql()
+        has_credentials_sql(),
+        auth_mode_sql()
     )
 }
 
@@ -329,6 +421,9 @@ fn scan_integration(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScrubbedIntegra
     let created_at: String = row.get(7)?;
     let updated_at: String = row.get(8)?;
     Ok(ScrubbedIntegration {
+        // Index 9, appended last: the columns are positional, and `auth_mode`
+        // is deliberately not in wire order here — the struct decides that.
+        auth_mode: row.get(9)?,
         authenticated: authenticated != 0,
         created_at: super::gotime::from_sql_text(&created_at, 7)?,
         enabled: enabled != 0,
@@ -839,6 +934,10 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     .map_err(|e| WriteError::Fallback(format!("saving integration: {e}")))?;
 
     let created = ScrubbedIntegration {
+        // Read off the bytes that were just stored, so the 201 says what the
+        // next `GET` will. Jira rewrites its blob, which is why this is taken
+        // from `credentials` rather than from the request.
+        auth_mode: auth_mode_of(&credentials),
         authenticated: false,
         created_at: parse_written(&now)?,
         enabled: req.enabled,
@@ -1026,6 +1125,16 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     registry::reload_blocking(db_path, id);
 
     let updated = ScrubbedIntegration {
+        // `auth_mode` rides *inside* `credentials`, so it follows the same
+        // three-valued rule the column does (#515): the request's blob when one
+        // was sent, and the stored mode when the key was absent and the blob
+        // therefore survived. Reading it off the request unconditionally would
+        // report a mode the row does not have — and the editor reopens on this
+        // field, so the next visit would show the wrong tab.
+        auth_mode: match credentials {
+            Some(blob) => auth_mode_of(blob),
+            None => existing.auth_mode,
+        },
         authenticated: existing.authenticated,
         created_at,
         enabled: req.enabled,
@@ -1086,6 +1195,10 @@ struct ExistingIntegration {
     created_at: String,
     authenticated: bool,
     has_credentials: bool,
+    /// The stored discriminator, for the same reason as `has_credentials`: a
+    /// `PUT` that omits `credentials` preserves the column, so the response has
+    /// to report what is already there rather than what the request implies.
+    auth_mode: String,
     integration_type: String,
 }
 
@@ -1098,9 +1211,11 @@ fn existing_for_update(
             "SELECT created_at,
                 (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
                 {} AS has_credentials,
-                type
+                type,
+                {} AS auth_mode
          FROM integrations WHERE id = ?1",
-            has_credentials_sql()
+            has_credentials_sql(),
+            auth_mode_sql()
         ),
         [id],
         |row| {
@@ -1110,6 +1225,7 @@ fn existing_for_update(
                 created_at: row.get(0)?,
                 authenticated: authenticated != 0,
                 has_credentials: has_credentials != 0,
+                auth_mode: row.get(4)?,
                 integration_type: row.get(3)?,
             })
         },
@@ -1454,9 +1570,11 @@ mod tests {
                '{{"pat":"{SECRET}"}}', NULL,
                '{{"repos":{{"enabled":true,"tools":["list_repos"]}}}}',
                '2026-08-01 08:00:00 +0000 UTC', '2026-08-01 08:00:00 +0000 UTC'),
-              -- The literal four bytes `null` are NOT authentication.
+              -- The literal four bytes `null` are NOT authentication. Its
+              -- credentials carry a real `auth_mode` beside the secret, which
+              -- is what makes the extraction assertions non-vacuous.
               ('november-int', 'November', 'slack', 1,
-               '{{}}', 'null',
+               '{{"auth_mode":"bot_token","bot_token":"{SECRET}"}}', 'null',
                '{{"chat":{{"enabled":true,"tools":["post"]}}}}',
                '2026-08-01 07:00:00 +0000 UTC', '2026-08-01 07:00:00 +0000 UTC');
 
@@ -1500,8 +1618,134 @@ mod tests {
             // contains the word. A bare substring check would either fail on
             // that or, softened to a word, stop catching `"credentials":`.
             assert!(!json.contains(r#""credentials""#), "{json}");
-            assert!(!json.contains("bot_token"), "{json}");
             assert!(!json.contains(r#""auth""#), "{json}");
+            // The *key*, with its colon, rather than the bare word: since #513
+            // `bot_token` is also a legal `auth_mode` value, so a bare-substring
+            // check would fail on a discriminator the wire is meant to carry
+            // while still passing for `{"bot_token":"…"}` — the shape that
+            // would mean the blob itself had been echoed. That form is what is
+            // asserted absent.
+            assert!(!json.contains(r#""bot_token":"#), "{json}");
+        }
+    }
+
+    /// The discriminator the editor reopens on (#513): the recorded
+    /// `auth_mode`, and `""` for the single-mode providers that record none.
+    #[test]
+    fn the_recorded_auth_mode_is_read_back() {
+        let file = fixture();
+        let by_id: BTreeMap<String, String> = list(file.path())
+            .expect("list")
+            .into_iter()
+            .map(|i| (i.id, i.auth_mode))
+            .collect();
+        // The slack row records one.
+        assert_eq!(by_id["november-int"], "bot_token");
+        // The other three store a credential blob with no `auth_mode` key.
+        assert_eq!(by_id["zulu-int"], "");
+        assert_eq!(by_id["alpha-int"], "");
+        assert_eq!(by_id["mike-int"], "");
+        // `get` reads through the same projection.
+        assert_eq!(
+            get(file.path(), "november-int")
+                .expect("get")
+                .unwrap()
+                .auth_mode,
+            "bot_token"
+        );
+    }
+
+    /// **The allowlist is the whole reason this read may touch `credentials`.**
+    ///
+    /// `update` validates nothing, so a `PUT` can store any string under
+    /// `auth_mode` — including the token the user meant to put elsewhere. Only
+    /// a value SQLite recognised may leave, so an unrecognised one reads as
+    /// `""` and never reaches the wire. Reverting `auth_mode_sql` to a bare
+    /// `json_extract` fails this.
+    ///
+    /// The unparseable and empty blobs are here for a different reason:
+    /// `json_extract` *raises* on a column that is not JSON, and `''` is what a
+    /// `PUT` omitting `credentials` leaves behind — so without the `json_valid`
+    /// guard this is not a wrong answer but a failed read of the whole list.
+    #[test]
+    fn only_a_recognised_auth_mode_leaves_the_credentials_column() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let conn = Connection::open(file.path()).expect("open");
+        conn.execute_batch(SCHEMA).expect("schema");
+        conn.execute_batch(&format!(
+            r#"
+            INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                      created_at, updated_at)
+            VALUES
+              ('a', 'A', 'slack', 1, '{{"auth_mode":"{SECRET}"}}', NULL, '{{}}',
+               '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 10:00:00 +0000 UTC'),
+              ('b', 'B', 'slack', 1, 'not json at all', NULL, '{{}}',
+               '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 10:00:00 +0000 UTC'),
+              ('c', 'C', 'slack', 1, '', NULL, '{{}}',
+               '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 10:00:00 +0000 UTC'),
+              -- Not a string: `json_extract` answers a number, which a bare
+              -- `row.get::<String>` would fail to convert.
+              ('d', 'D', 'slack', 1, '{{"auth_mode":7}}', NULL, '{{}}',
+               '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 10:00:00 +0000 UTC'),
+              ('e', 'E', 'slack', 1, '{{"auth_mode":"oauth"}}', NULL, '{{}}',
+               '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 10:00:00 +0000 UTC');
+            "#
+        ))
+        .expect("rows");
+
+        let rows = list(file.path()).expect("list");
+        let modes: Vec<&str> = rows.iter().map(|i| i.auth_mode.as_str()).collect();
+        assert_eq!(modes, ["", "", "", "", "oauth"]);
+
+        let body =
+            String::from_utf8(super::super::gojson::to_vec(&rows).expect("encode")).expect("utf8");
+        assert!(!body.contains(SECRET), "a secret reached the wire: {body}");
+    }
+
+    /// Every literal in [`AUTH_MODES`] is one a validator really accepts, and
+    /// the empty string is not.
+    ///
+    /// **Read what this does and does not prove.** It probes
+    /// `integration_credentials::validate`, so a literal here that no validator
+    /// accepts — a typo, or a mode deleted upstream — fails: the allowlist
+    /// cannot rot into permitting a string nothing else recognises. The
+    /// *converse* is not provable this way, because the accepted set lives in
+    /// `match` arms with no enumeration to read: a mode added to a validator and
+    /// not to `AUTH_MODES` is caught only if the sample below happens to name
+    /// it. That direction is guarded where the edit is made instead — see the
+    /// pointer on `validate_slack` and `validate_github`. The consequence of
+    /// missing it is #513's own defect for the new mode (the editor reopens on
+    /// the wrong tab), not a leak: an unrecognised value still reads as `""`.
+    #[test]
+    fn every_declared_auth_mode_is_one_a_validator_accepts() {
+        // Every credential field the two multi-mode providers know, so a mode is
+        // refused for being unrecognised rather than for a field its own arm
+        // happens to require.
+        let accepts = |mode: &str| {
+            ["slack", "github"].into_iter().any(|integration_type| {
+                let blob = format!(
+                    r#"{{"auth_mode":"{mode}","bot_token":"t","client_id":"c",
+                         "client_secret":"s","personal_access_token":"t"}}"#
+                );
+                let raw = serde_json::from_str::<Box<RawValue>>(&blob).expect("raw");
+                super::super::integration_credentials::validate(
+                    integration_type,
+                    Some(raw.as_ref()),
+                )
+                .is_ok()
+            })
+        };
+
+        for mode in AUTH_MODES {
+            assert!(accepts(mode), "{mode:?} is declared but accepted by nobody");
+        }
+        // `""` is what a row with no recorded mode reads as, so it must never
+        // become a declared one — and no validator may start accepting it.
+        assert!(!AUTH_MODES.contains(&""));
+        assert!(!accepts(""), "an absent auth_mode must not validate");
+        // A sample of plausible near-misses, so the literals are not arbitrary.
+        for mode in ["app_token", "basic", "user_token", "BOT_TOKEN"] {
+            assert!(!accepts(mode), "{mode:?} validates but is not declared");
         }
     }
 
@@ -1545,7 +1789,12 @@ mod tests {
         for json in bodies {
             assert!(!json.contains(SECRET), "a secret reached the wire: {json}");
             assert!(!json.contains(r#""credentials""#), "{json}");
-            assert!(!json.contains("pat"), "{json}");
+            // The *key*, with its colon, rather than the bare word — the same
+            // narrowing `no_response_carries_a_credential_or_a_token` needed for
+            // `bot_token`. Since #513 `pat` is also github's `auth_mode` value,
+            // so every one of these bodies legitimately carries `"pat"` as a
+            // discriminator; only `"pat":` means the blob itself was echoed.
+            assert!(!json.contains(r#""pat":"#), "{json}");
         }
     }
 
@@ -1644,7 +1893,11 @@ mod tests {
         assert_eq!(
             String::from_utf8(body).expect("utf8"),
             concat!(
-                r#"{"authenticated":true,"created_at":"2026-08-01T10:00:00Z","enabled":true,"#,
+                // #513's addition sorts **first** — `_` is 0x5F and `e` is
+                // 0x65, so `auth_mode` precedes `authenticated` — and telegram
+                // is single-mode, so it is empty.
+                r#"{"auth_mode":"","authenticated":true,"#,
+                r#""created_at":"2026-08-01T10:00:00Z","enabled":true,"#,
                 // #515's addition, and its **position** is the assertion: it
                 // sorts between `enabled` and `id`, which is where the field
                 // sits in the struct. Declared anywhere else it would move a
@@ -1877,7 +2130,7 @@ mod tests {
         let body = body_of(&answer);
         // Alphabetical, because Go builds the response as a map.
         assert!(
-            body.starts_with(r#"{"authenticated":false,"created_at":"#),
+            body.starts_with(r#"{"auth_mode":"","authenticated":false,"created_at":"#),
             "{body}"
         );
         assert!(body.contains(r#""name":"Work""#), "{body}");
@@ -2081,7 +2334,7 @@ mod tests {
         let body = body_of(&answer);
         // Alphabetical, because Go builds the response from a map.
         assert!(
-            body.starts_with(r#"{"authenticated":true,"created_at":"#),
+            body.starts_with(r#"{"auth_mode":"","authenticated":true,"created_at":"#),
             "{body}"
         );
         assert!(body.contains(r#""name":"Renamed""#), "{body}");
@@ -2119,6 +2372,71 @@ mod tests {
         assert_eq!(
             stored(&file, "SELECT created_at FROM integrations"),
             "2026-01-01 00:00:00 +0000 UTC"
+        );
+    }
+
+    /// `create` and `update` build their bodies by hand rather than re-reading
+    /// the row, so `auth_mode` has to be supplied twice more — and it must say
+    /// what the next `GET` will say, which for `update` is the request's blob
+    /// and not the row it replaced.
+    #[test]
+    fn the_write_answers_report_the_auth_mode_they_just_stored() {
+        let file = migrated();
+        let answer = create(
+            file.path(),
+            br#"{"name":"S","type":"slack","enabled":true,
+                 "credentials":{"auth_mode":"bot_token","bot_token":"xoxb-1"}}"#,
+        )
+        .expect("create");
+        let body = body_of(&answer);
+        assert!(
+            body.starts_with(r#"{"auth_mode":"bot_token","authenticated":false,"#),
+            "{body}"
+        );
+        let id = list(file.path()).expect("list")[0].id.clone();
+        // A `GET` through the SQL projection agrees with the 201.
+        assert_eq!(
+            get(file.path(), &id).expect("get").unwrap().auth_mode,
+            "bot_token"
+        );
+
+        // Switching mode: the answer follows the request, not the stored row.
+        let answer = update(
+            file.path(),
+            &id,
+            br#"{"name":"S","type":"slack","enabled":true,
+                 "credentials":{"auth_mode":"oauth","client_id":"c","client_secret":"s"}}"#,
+        )
+        .expect("update");
+        let body = body_of(&answer);
+        assert!(
+            body.starts_with(r#"{"auth_mode":"oauth","authenticated":false,"#),
+            "{body}"
+        );
+        assert_eq!(
+            get(file.path(), &id).expect("get").unwrap().auth_mode,
+            "oauth"
+        );
+
+        // **#515's path, and the one that reads backwards.** A `PUT` omitting
+        // `credentials` preserves the blob, and `auth_mode` lives inside it — so
+        // the answer must report the *stored* mode, not the request's silence.
+        // Reading it off the request here would answer `""`, and the editor
+        // reopens on this field, so the next visit would show the first tab.
+        let answer = update(
+            file.path(),
+            &id,
+            br#"{"name":"Renamed","type":"slack","enabled":true}"#,
+        )
+        .expect("update");
+        let body = body_of(&answer);
+        assert!(
+            body.starts_with(r#"{"auth_mode":"oauth","authenticated":false,"#),
+            "{body}"
+        );
+        assert_eq!(
+            get(file.path(), &id).expect("get").unwrap().auth_mode,
+            "oauth"
         );
     }
 

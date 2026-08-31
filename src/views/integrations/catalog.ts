@@ -442,9 +442,18 @@ export function unavailableCopy(type: string): { title: string; text: string } {
   };
 }
 
-/** The mode a stored integration is using, best-effort from its type alone. */
-export function defaultMode(provider: Provider): AuthMode {
-  return provider.modes[0];
+/**
+ * The mode a stored integration is using.
+ *
+ * `authMode` is the row's recorded `auth_mode` — a discriminator the scrubbed
+ * read carries since #513. It is empty for every single-mode provider, and for
+ * a Slack row written before that field existed, so the first mode remains the
+ * fallback. What it must not be is a *guess* for a provider with more than one
+ * mode: Slack's first mode is `bot_token`, so guessing showed an OAuth row the
+ * bot-token tab and its credential fields.
+ */
+export function modeFor(provider: Provider, authMode: string): AuthMode {
+  return provider.modes.find((m) => m.value === authMode) ?? provider.modes[0];
 }
 
 export function serviceLabel(provider: Provider | undefined, key: string): string {
