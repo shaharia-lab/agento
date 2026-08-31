@@ -4,7 +4,8 @@ import { BrandMark } from "../../components/BrandMark";
 import { Dropdown, Empty, FormRow, Search, Splitter, Switch } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
-import { DESTROY, partnerLabel, submitLabel } from "../../lib/formVerbs";
+import { DESTROY, submitLabel } from "../../lib/formVerbs";
+import { SaveBar } from "../../components/SaveBar";
 import type {
   GatewayProviderRequest,
   GatewayProviderSummary,
@@ -684,65 +685,61 @@ function ProviderForm({
       </div>
 
       {(changed || creating) && (
-        <div className="savebar">
-          <span className="savebar__text">
-            {canSave
+        /* `onCancel` is passed only when `provider` is undefined, so it is
+           present exactly while `creating` — and abandoning a draft is what
+           `Discard` names, where `Revert` restores a stored row. See
+           `lib/formVerbs.ts`; the word itself comes from `creating`, so only
+           the handler differs. */
+        <SaveBar
+          creating={creating}
+          busy={busy}
+          canSubmit={canSave}
+          message={
+            canSave
               ? "You have unsaved changes."
               : name.trim() === ""
                 ? "A name is required."
                 : !haveCredential
                   ? "Enter the API key to save."
-                  : "Check the credentials, or save anyway."}
-          </span>
-          {/* `onCancel` is passed only when `provider` is undefined, so it is
-              present exactly while `creating` — and abandoning a draft is what
-              `Discard` names, where `Revert` restores a stored row. See
-              `lib/formVerbs.ts`. */}
-          {onCancel ? (
-            <button className="btn" onClick={onCancel} disabled={busy}>
-              {partnerLabel(creating)}
-            </button>
-          ) : (
-            <button className="btn" onClick={revert} disabled={busy}>
-              {partnerLabel(creating)}
-            </button>
-          )}
-          {/*
-            The override, and it is not optional. A base that serves no
-            list-models endpoint — a proxy, something self-hosted, an
-            OpenAI-compatible vendor that implements only completions — cannot
-            ever produce a green verdict, so a gate without this would make it
-            permanently unsaveable. It is offered whenever the check has not
-            passed, including before it has been run at all: a user who knows
-            their setup should not have to fail a check first.
+                  : "Check the credentials, or save anyway."
+          }
+          onDiscard={onCancel ?? revert}
+          onSubmit={save}
+          extra={
+            /*
+              The override, and it is not optional. A base that serves no
+              list-models endpoint — a proxy, something self-hosted, an
+              OpenAI-compatible vendor that implements only completions —
+              cannot ever produce a green verdict, so a gate without this would
+              make it permanently unsaveable. It is offered whenever the check
+              has not passed, including before it has been run at all: a user
+              who knows their setup should not have to fail a check first.
 
-            It **saves**, rather than merely arming Save. Setting `overridden`
-            alone would make the button vanish on click — the condition below is
-            what renders it — leaving the user hunting for the Save it just
-            enabled, from a label that promised the save itself. `save()` reads
-            neither `overridden` nor `canSave`, so calling it here is the whole
-            of it; the flag is still set, so a failed save leaves Save armed.
-          */}
-          {!checked && !overridden && haveCredential && name.trim() !== "" && (
-            <button
-              className="btn"
-              onClick={() => {
-                setOverridden(true);
-                void save();
-              }}
-              disabled={busy}
-            >
-              {`${submitLabel(creating, false)} anyway`}
-            </button>
-          )}
-          <button
-            className="btn btn--primary"
-            onClick={save}
-            disabled={!canSave || busy}
-          >
-            {submitLabel(creating, busy)}
-          </button>
-        </div>
+              It **saves**, rather than merely arming Save. Setting `overridden`
+              alone would make the button vanish on click — the condition here
+              is what renders it — leaving the user hunting for the Save it just
+              enabled, from a label that promised the save itself. `save()`
+              reads neither `overridden` nor `canSave`, so calling it here is
+              the whole of it; the flag is still set, so a failed save leaves
+              Save armed.
+
+              It is the sole reason `SaveBar` takes an `extra` slot: every other
+              savebar in the app is exactly two buttons.
+            */
+            !checked && !overridden && haveCredential && name.trim() !== "" ? (
+              <button
+                className="btn"
+                onClick={() => {
+                  setOverridden(true);
+                  void save();
+                }}
+                disabled={busy}
+              >
+                {`${submitLabel(creating, false)} anyway`}
+              </button>
+            ) : undefined
+          }
+        />
       )}
     </>
   );

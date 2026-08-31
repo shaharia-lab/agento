@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { api } from "../lib/api";
 import { describeError, useResource } from "../lib/hooks";
 import { dateTime, relativeTime } from "../lib/format";
-import { DESTROY, partnerLabel, submitLabel, SUBMIT_CREATE } from "../lib/formVerbs";
+import { DESTROY, SUBMIT_CREATE } from "../lib/formVerbs";
+import { SaveBar } from "../components/SaveBar";
 import { Icon } from "../lib/icons";
 import { openExternal } from "../lib/tauri";
 import {
@@ -403,65 +404,6 @@ function ProviderRow({
         <div className="listrow__preview">{provider.blurb}</div>
       </div>
     </button>
-  );
-}
-
-/* --- The action strip ---------------------------------------------------- */
-
-/**
- * The one place either half of this view submits from — and the reason it is a
- * component rather than two copies of the same JSX (#516).
- *
- * Integrations used to be the only view whose primary action *moved*: a
- * `+ Create` in the top toolbar while connecting, a `Save` in the bottom
- * savebar while editing. One strip rendered from both components is what makes
- * a future divergence a deliberate edit rather than an oversight.
- *
- * **The grammar it encodes is repo-wide, not this view's** — see *Conventions*
- * in `CLAUDE.md`, which is where it is written down for the views that do not
- * import this file:
- *
- * - **Primary verb follows existence**: `Create` while the record does not
- *   exist yet, `Save` once it does. The in-flight label follows it.
- * - **Partner follows the same split**: `Discard` throws away a record that
- *   was never stored, `Revert` restores one that was. Two words because they
- *   undo two different things; a single "Cancel" would claim to undo a save.
- * - **No `+` icon.** The `+` marks a list-level *New X* that opens a blank
- *   thing; on a submit it reads as "add another one", which is the confusion
- *   this issue was reported for.
- *
- * `message` is the savebar's own explanation of why the primary is disabled,
- * so a form never leaves the user guessing at a greyed-out button.
- */
-function SaveBar({
-  creating,
-  busy,
-  canSubmit,
-  message,
-  onDiscard,
-  onSubmit,
-}: {
-  creating: boolean;
-  busy: boolean;
-  canSubmit: boolean;
-  message: string;
-  onDiscard(): void;
-  onSubmit(): void;
-}) {
-  return (
-    <div className="savebar">
-      <span className="savebar__text">{message}</span>
-      <button className="btn" onClick={onDiscard} disabled={busy}>
-        {partnerLabel(creating)}
-      </button>
-      <button
-        className="btn btn--primary"
-        onClick={onSubmit}
-        disabled={!canSubmit || busy}
-      >
-        {submitLabel(creating, busy)}
-      </button>
-    </div>
   );
 }
 

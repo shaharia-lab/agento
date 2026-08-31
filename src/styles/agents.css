@@ -75,29 +75,6 @@
   line-height: var(--leading-normal);
 }
 
-/* --- Save / revert bar ---------------------------------------------------- */
-.agents-savebar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-  padding: var(--sp-4) var(--sp-7);
-  border-top: var(--hairline) solid var(--line);
-  background: var(--bg-content);
-  box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.04);
-}
-.agents-savebar__msg {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  min-width: 0;
-  font-size: var(--text-sm);
-  color: var(--fg-tertiary);
-}
-.agents-savebar__msg--error {
-  color: var(--red);
-}
-
 /* --- Inline delete confirmation (never window.confirm — it blocks the
    webview and stalls the whole window). --------------------------------- */
 .agents-confirm {

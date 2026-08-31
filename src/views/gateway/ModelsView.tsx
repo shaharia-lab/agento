@@ -11,7 +11,8 @@ import {
 } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
-import { DESTROY, partnerLabel, submitLabel } from "../../lib/formVerbs";
+import { DESTROY } from "../../lib/formVerbs";
+import { SaveBar } from "../../components/SaveBar";
 import type { ViewId } from "../../lib/nav";
 import type {
   GatewayModelAlias,
@@ -532,37 +533,26 @@ function AliasForm({
       </div>
 
       {(changed || creating) && (
-        <div className="savebar">
-          <span className="savebar__text">
-            {canSave
+        /* `onCancel` is passed only when `alias` is undefined, so it is present
+           exactly while `creating` — and abandoning a draft is what `Discard`
+           names, where `Revert` restores a stored row. See `lib/formVerbs.ts`;
+           the word itself comes from `creating`, so only the handler differs. */
+        <SaveBar
+          creating={creating}
+          busy={busy}
+          canSubmit={canSave}
+          message={
+            canSave
               ? "You have unsaved changes."
               : name.trim() === ""
                 ? "A model name is required."
                 : targets.length === 0
                   ? "Add at least one target."
-                  : "Every target needs a provider and a model id."}
-          </span>
-          {/* `onCancel` is passed only when `alias` is undefined, so it is
-              present exactly while `creating` — and abandoning a draft is what
-              `Discard` names, where `Revert` restores a stored row. See
-              `lib/formVerbs.ts`. */}
-          {onCancel ? (
-            <button className="btn" onClick={onCancel} disabled={busy}>
-              {partnerLabel(creating)}
-            </button>
-          ) : (
-            <button className="btn" onClick={revert} disabled={busy}>
-              {partnerLabel(creating)}
-            </button>
-          )}
-          <button
-            className="btn btn--primary"
-            onClick={save}
-            disabled={!canSave || busy}
-          >
-            {submitLabel(creating, busy)}
-          </button>
-        </div>
+                  : "Every target needs a provider and a model id."
+          }
+          onDiscard={onCancel ?? revert}
+          onSubmit={save}
+        />
       )}
     </>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, qs } from "../../lib/api";
 import { FormRow, Splitter, Switch } from "../../components/ui";
+import { SaveBar } from "../../components/SaveBar";
 import { Icon } from "../../lib/icons";
 import {
   describeError,
@@ -486,35 +487,26 @@ export function GatewaySettingsView({
         </div>
 
         {changed && (
-          <div className="savebar">
-            <span className="savebar__text">
-              {canSave
+          <SaveBar
+            creating={false}
+            busy={busy}
+            canSubmit={canSave}
+            message={
+              canSave
                 ? "You have unsaved changes."
                 : portValid
                   ? "Fix the retention horizon to save."
-                  : "Fix the port to save."}
-            </span>
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() => {
-                if (!settings.data) return;
-                setEnabled(settings.data.enabled);
-                setStartWithApp(settings.data.start_with_app);
-                setPort(String(settings.data.port));
-                setRetention(String(settings.data.usage_retention_days));
-              }}
-            >
-              Revert
-            </button>
-            <button
-              className="btn btn--primary"
-              onClick={save}
-              disabled={!canSave || busy}
-            >
-              {busy ? "Saving…" : "Save"}
-            </button>
-          </div>
+                  : "Fix the port to save."
+            }
+            onDiscard={() => {
+              if (!settings.data) return;
+              setEnabled(settings.data.enabled);
+              setStartWithApp(settings.data.start_with_app);
+              setPort(String(settings.data.port));
+              setRetention(String(settings.data.usage_retention_days));
+            }}
+            onSubmit={save}
+          />
         )}
       </div>
 

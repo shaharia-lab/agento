@@ -1,0 +1,58 @@
+/* ============================================================================
+   The savebar — the one action strip at the foot of a form (#519).
+
+   These rules lived in `integrations.css` **and** `settings.css`, byte for
+   byte, and were reachable from the gateway views only because `App.tsx`
+   imports `IntegrationsView` and `SettingsView` statically — so a section that
+   stopped being statically imported would have unstyled savebars and nothing
+   would say so. They live here now and `components/SaveBar.tsx` imports this
+   sheet itself, which is the `components/charts.tsx` shape: a shared component
+   carries its own stylesheet so a consumer in any section can use it without
+   importing another section's sheet.
+
+   Moving a stylesheet is only safe when its selectors are unique to it — Vite
+   fixes a CSS file's bundle position at its first importer, so a sheet sharing
+   a selector with another can change cascade when it moves. `.savebar*` is
+   declared nowhere else, which is what makes this lift provably a no-op; the
+   emitted rules are identical.
+   ========================================================================== */
+
+/* Pinned to the bottom of the scroll container so a change made at the top of
+   a long pane can still be committed without scrolling back. */
+.savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-top: var(--sp-6);
+  padding: var(--sp-4) var(--sp-6);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  box-shadow: 0 0 0 var(--hairline) var(--line-strong), var(--shadow-md);
+}
+.savebar__text {
+  flex: 1;
+  font-size: var(--text-base);
+  color: var(--fg-secondary);
+}
+
+/* --- The message's two optional shapes ----------------------------------- */
+
+/* Both are *additive*: a savebar that passes neither an icon nor a tone emits
+   exactly the markup and classes it did before this file existed, which is
+   what keeps the five pre-existing savebars byte-identical in the built CSS.
+
+   `--icon` is what `.agents-savebar__msg` was: a flex row so the icon sits
+   beside the text, with `min-width: 0` so the inner `.truncate` can actually
+   shorten a long message rather than stretching the strip. */
+.savebar__text--icon {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.savebar__text--error {
+  color: var(--red);
+}
