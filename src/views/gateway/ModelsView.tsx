@@ -11,7 +11,7 @@ import {
 } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
-import { partnerLabel, submitLabel } from "../../lib/formVerbs";
+import { DESTROY, partnerLabel, submitLabel } from "../../lib/formVerbs";
 import type { ViewId } from "../../lib/nav";
 import type {
   GatewayModelAlias,
@@ -449,7 +449,7 @@ function AliasForm({
         {!creating &&
           (confirmDelete ? (
             <span className="confirm">
-              Delete {alias.alias}?
+              {DESTROY} {alias.alias}? Every request naming it stops routing.
               <button
                 className="btn btn--ghost"
                 onClick={() => setConfirmDelete(false)}
@@ -457,7 +457,7 @@ function AliasForm({
                 Cancel
               </button>
               <button className="btn btn--danger" onClick={remove} disabled={busy}>
-                Delete
+                {DESTROY}
               </button>
             </span>
           ) : (
@@ -466,7 +466,7 @@ function AliasForm({
               onClick={() => setConfirmDelete(true)}
             >
               <Icon name="trash" size={13} />
-              Delete
+              {DESTROY}
             </button>
           ))}
       </div>

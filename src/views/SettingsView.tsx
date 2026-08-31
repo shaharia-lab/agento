@@ -9,6 +9,7 @@ import {
 import { api, ApiError, qs } from "../lib/api";
 import { describeError, useResource, type Resource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath, usd } from "../lib/format";
+import { DESTROY } from "../lib/formVerbs";
 import { Icon, type IconName } from "../lib/icons";
 import { Checkbox, Dropdown, Empty, FormRow, Switch } from "../components/ui";
 import { openExternal } from "../lib/tauri";
@@ -856,7 +857,7 @@ function ProfilesSection() {
               ) : confirmDelete === p.id ? (
                 <>
                   <span className="confirm" style={{ flex: 1 }}>
-                    Delete “{p.name}”? The settings file is removed.
+                    {DESTROY} {p.name}? Its settings file goes with it.
                   </span>
                   <button className="btn btn--ghost" onClick={() => setConfirmDelete(undefined)}>
                     Cancel
@@ -871,7 +872,7 @@ function ProfilesSection() {
                       })
                     }
                   >
-                    Delete
+                    {DESTROY}
                   </button>
                 </>
               ) : (
@@ -921,7 +922,7 @@ function ProfilesSection() {
                   </button>
                   <button
                     className="iconbtn"
-                    title="Delete"
+                    title={DESTROY}
                     disabled={p.is_default}
                     onClick={() => setConfirmDelete(p.id)}
                   >

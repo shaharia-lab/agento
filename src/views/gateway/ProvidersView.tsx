@@ -4,7 +4,7 @@ import { BrandMark } from "../../components/BrandMark";
 import { Dropdown, Empty, FormRow, Search, Splitter, Switch } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
-import { partnerLabel, submitLabel } from "../../lib/formVerbs";
+import { DESTROY, partnerLabel, submitLabel } from "../../lib/formVerbs";
 import type {
   GatewayProviderRequest,
   GatewayProviderSummary,
@@ -430,7 +430,7 @@ function ProviderForm({
       // reads as nonsense on a delete. The status is what carries the meaning.
       setError(
         err instanceof ApiError && err.status === 409
-          ? `A model alias still routes to ${provider.name}. Remove or re-point it first.`
+          ? `A model alias still routes to ${provider.name}. Delete or re-point it first.`
           : describeError(err)
       );
       setConfirmDelete(false);
@@ -454,7 +454,7 @@ function ProviderForm({
         {!creating &&
           (confirmDelete ? (
             <span className="confirm">
-              Remove {provider.name}?
+              {DESTROY} {provider.name}? Its stored key goes with it.
               <button
                 className="btn btn--ghost"
                 onClick={() => setConfirmDelete(false)}
@@ -462,7 +462,7 @@ function ProviderForm({
                 Cancel
               </button>
               <button className="btn btn--danger" onClick={remove} disabled={busy}>
-                Remove
+                {DESTROY}
               </button>
             </span>
           ) : (
@@ -471,7 +471,7 @@ function ProviderForm({
               onClick={() => setConfirmDelete(true)}
             >
               <Icon name="trash" size={13} />
-              Remove
+              {DESTROY}
             </button>
           ))}
       </div>

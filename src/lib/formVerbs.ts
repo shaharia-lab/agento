@@ -1,5 +1,5 @@
 /* ============================================================================
-   The words on a form's two action buttons (#516).
+   The words on a view's action buttons (#516, #518).
 
    Agento had three dialects for one gesture. Tasks said `Discard` + `Create`,
    Agents said `Discard` + `Create agent`, the gateway said `Cancel` + `Save`,
@@ -27,6 +27,19 @@
    The `+` icon rule cannot be expressed here, because it is the *absence* of an
    `<Icon name="plus" />` beside these labels. It is written down in `CLAUDE.md`
    under *Conventions*, with the rest of the grammar.
+
+   #518 added the third verb — the destructive one — for the same reason and by
+   the same mechanism. One gesture had three words: Integrations said `Remove`,
+   Tasks and Settings profiles said `Delete`, Agents said `Delete agent`.
+   `Delete` wins on both counts a tie needs: it was already the majority, and
+   `Remove` reads as *detach without destroying*, which is not what
+   `DELETE /api/integrations/{id}` does — the row and its stored credentials go.
+
+   What `Remove` still means, and why it survives in two places: taking a row
+   out of a list that is not stored yet (a gateway alias's fallback target) and
+   unregistering something from a third party while the record it belongs to
+   stays (the Telegram webhook). Both really are detaching, so both keep the
+   word this module deliberately does not lend them.
    ========================================================================== */
 
 import type { Eq, Expect } from "./typeAssert";
@@ -43,6 +56,10 @@ export const SUBMIT_SAVING = "Saving…";
 export const PARTNER_DISCARD = "Discard";
 /** The partner, once the record exists: restore what is stored. */
 export const PARTNER_REVERT = "Revert";
+/** Destroying a stored record — button, icon-button title and confirmation. */
+export const DESTROY = "Delete";
+/** The same, while the delete is in flight. */
+export const DESTROYING = "Deleting…";
 
 /**
  * What the primary button reads, given the two states that decide it.
@@ -75,3 +92,5 @@ export type PinSubmitCreating = Expect<Eq<typeof SUBMIT_CREATING, "Creating…">
 export type PinSubmitSaving = Expect<Eq<typeof SUBMIT_SAVING, "Saving…">>;
 export type PinPartnerDiscard = Expect<Eq<typeof PARTNER_DISCARD, "Discard">>;
 export type PinPartnerRevert = Expect<Eq<typeof PARTNER_REVERT, "Revert">>;
+export type PinDestroy = Expect<Eq<typeof DESTROY, "Delete">>;
+export type PinDestroying = Expect<Eq<typeof DESTROYING, "Deleting…">>;

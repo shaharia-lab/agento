@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { describeError, useResource } from "../lib/hooks";
-import { partnerLabel, submitLabel } from "../lib/formVerbs";
+import { DESTROY, DESTROYING, partnerLabel, submitLabel } from "../lib/formVerbs";
 import { initials, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
 import type {
@@ -398,7 +398,7 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
               {!creating && (
                 <button
                   className="iconbtn"
-                  title="Delete agent"
+                  title={DESTROY}
                   onClick={() => setConfirmDelete(true)}
                 >
                   <Icon name="trash" size={14} />
@@ -412,8 +412,8 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                   <Icon name="alert" size={15} />
                 </span>
                 <span style={{ flex: 1 }}>
-                  Delete <strong>{baseline.name}</strong>? Its configuration is
-                  removed for good.
+                  {DESTROY} <strong>{baseline.name}</strong>? Its configuration
+                  goes with it.
                 </span>
                 <button className="btn" onClick={() => setConfirmDelete(false)}>
                   Cancel
@@ -423,7 +423,7 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                   disabled={busyDelete}
                   onClick={remove}
                 >
-                  {busyDelete ? "Deleting…" : "Delete"}
+                  {busyDelete ? DESTROYING : DESTROY}
                 </button>
               </div>
             )}

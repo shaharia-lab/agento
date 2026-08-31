@@ -8,7 +8,7 @@ import type {
   ScheduledTask,
 } from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
-import { partnerLabel, submitLabel } from "../lib/formVerbs";
+import { DESTROY, partnerLabel, submitLabel } from "../lib/formVerbs";
 import { dateTime, duration, relativeTime, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
 import { DirField, useDirPicker } from "../components/DirField";
@@ -404,7 +404,9 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
               {confirmDelete ? (
                 <div className="confirm">
-                  <span className="confirm__text">Delete this task and its history?</span>
+                  <span className="confirm__text">
+                    {DESTROY} {draft.name || "Untitled task"}? Its run history goes with it.
+                  </span>
                   <button
                     className="btn btn--ghost"
                     onClick={() => setConfirmDelete(false)}
@@ -412,7 +414,7 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                     Cancel
                   </button>
                   <button className="btn btn--danger" onClick={remove} disabled={busy}>
-                    Delete
+                    {DESTROY}
                   </button>
                 </div>
               ) : (
@@ -449,7 +451,7 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                       </button>
                       <button
                         className="iconbtn"
-                        title="Delete"
+                        title={DESTROY}
                         onClick={() => setConfirmDelete(true)}
                       >
                         <Icon name="trash" size={14} />
