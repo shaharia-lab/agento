@@ -293,34 +293,86 @@ mod tests {
 
     /// Is line `number` (0-based) inside a `#[cfg(test)]` item?
     ///
-    /// A brace count from the nearest preceding `#[cfg(test)]`, which is enough
-    /// for this crate: every test site in the tree is a `#[cfg(test)] mod` or a
-    /// `#[cfg(test)] fn`, and the guard only has to be right about *those* —
-    /// a false "not test code" is a loud, fixable assertion failure naming the
-    /// line, never a silent pass.
+    /// **An attribute covers exactly the one item after it**, and getting that
+    /// wrong is a hole rather than a false alarm — which is why it is spelled
+    /// out rather than approximated by "count braces from the last
+    /// `#[cfg(test)]`". Five of the client files open with
+    /// `#[cfg(test)]\nuse std::sync::RwLock;`, a *brace-less* item; a walk that
+    /// stayed "inside" until the next `}` then treated everything between that
+    /// `use` and the end of the next block as test code, and a production
+    /// client written there was exempted silently. Verified by putting one
+    /// there and watching the guard pass.
+    ///
+    /// So: the line after the attribute is the item. Braces balanced on it →
+    /// the item ended there. Otherwise track depth to zero.
     fn in_test_code(source: &str, number: usize) -> bool {
-        let mut depth = 0i32;
+        let mut pending = false;
         let mut inside = false;
+        let mut depth = 0i32;
+
         for (index, line) in source.lines().enumerate() {
-            if index > number {
-                break;
-            }
-            if !inside && line.trim_start().starts_with("#[cfg(test)]") {
-                inside = true;
-                depth = 0;
-            }
+            let delta = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+
             if inside {
-                depth += line.matches('{').count() as i32;
-                depth -= line.matches('}').count() as i32;
-                if depth <= 0 && line.contains('}') {
-                    if index == number {
-                        return true;
-                    }
+                depth += delta;
+                if index == number {
+                    return true;
+                }
+                if depth <= 0 {
                     inside = false;
                 }
+                continue;
+            }
+            if pending {
+                pending = false;
+                if delta > 0 {
+                    inside = true;
+                    depth = delta;
+                }
+                // A stacked attribute (`#[cfg(test)]` then `#[allow(…)]`) is
+                // not the item, so keep waiting for one.
+                if line.trim_start().starts_with("#[") {
+                    pending = true;
+                    inside = false;
+                }
+                if index == number {
+                    return true;
+                }
+                continue;
+            }
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                pending = true;
+                if index == number {
+                    return true;
+                }
+                continue;
+            }
+            if index == number {
+                return false;
             }
         }
-        inside
+        false
+    }
+
+    /// A `#[cfg(test)]` on a brace-less item covers that item and stops.
+    ///
+    /// This is the shape five client files actually open with, and the version
+    /// of `in_test_code` this replaced answered `true` for every line after it
+    /// until the next `}` — so a production client written in that window was
+    /// exempted from the guard with nothing to say so. Reverting the fix fails
+    /// here.
+    #[test]
+    fn a_cfg_test_use_does_not_exempt_the_code_after_it() {
+        let source = "#[cfg(test)]\nuse std::sync::RwLock;\n\
+                      fn leaked() {\n    reqwest::Client::new();\n}\n";
+        assert!(
+            in_test_code(source, 1),
+            "line 2 is the item the attribute covers"
+        );
+        assert!(
+            !in_test_code(source, 3),
+            "line 4 is production code: an attribute covers one item, not a region"
+        );
     }
 
     /// The guard's own reading of test code, pinned — a `in_test_code` that
