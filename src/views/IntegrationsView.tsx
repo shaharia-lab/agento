@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { describeError, useResource } from "../lib/hooks";
 import { dateTime, relativeTime } from "../lib/format";
+import { partnerLabel, submitLabel, SUBMIT_CREATE } from "../lib/formVerbs";
 import { Icon } from "../lib/icons";
 import { openExternal } from "../lib/tauri";
 import {
@@ -351,6 +352,65 @@ function ProviderRow({
   );
 }
 
+/* --- The action strip ---------------------------------------------------- */
+
+/**
+ * The one place either half of this view submits from — and the reason it is a
+ * component rather than two copies of the same JSX (#516).
+ *
+ * Integrations used to be the only view whose primary action *moved*: a
+ * `+ Create` in the top toolbar while connecting, a `Save` in the bottom
+ * savebar while editing. One strip rendered from both components is what makes
+ * a future divergence a deliberate edit rather than an oversight.
+ *
+ * **The grammar it encodes is repo-wide, not this view's** — see *Conventions*
+ * in `CLAUDE.md`, which is where it is written down for the views that do not
+ * import this file:
+ *
+ * - **Primary verb follows existence**: `Create` while the record does not
+ *   exist yet, `Save` once it does. The in-flight label follows it.
+ * - **Partner follows the same split**: `Discard` throws away a record that
+ *   was never stored, `Revert` restores one that was. Two words because they
+ *   undo two different things; a single "Cancel" would claim to undo a save.
+ * - **No `+` icon.** The `+` marks a list-level *New X* that opens a blank
+ *   thing; on a submit it reads as "add another one", which is the confusion
+ *   this issue was reported for.
+ *
+ * `message` is the savebar's own explanation of why the primary is disabled,
+ * so a form never leaves the user guessing at a greyed-out button.
+ */
+function SaveBar({
+  creating,
+  busy,
+  canSubmit,
+  message,
+  onDiscard,
+  onSubmit,
+}: {
+  creating: boolean;
+  busy: boolean;
+  canSubmit: boolean;
+  message: string;
+  onDiscard(): void;
+  onSubmit(): void;
+}) {
+  return (
+    <div className="savebar">
+      <span className="savebar__text">{message}</span>
+      <button className="btn" onClick={onDiscard} disabled={busy}>
+        {partnerLabel(creating)}
+      </button>
+      <button
+        className="btn btn--primary"
+        onClick={onSubmit}
+        disabled={!canSubmit || busy}
+      >
+        {submitLabel(creating, busy)}
+      </button>
+    </div>
+  );
+}
+
 /* --- Connect a new integration ------------------------------------------- */
 
 function ConnectForm({
@@ -417,6 +477,21 @@ function ConnectForm({
     }
   }
 
+  /**
+   * Throw away everything typed so far without leaving the screen — the
+   * connect form's half of the `Discard`/`Revert` pair. There is no stored
+   * record to restore, so "back" means the state this form opened in, and
+   * `values` is emptied outright because it is the one field that can hold a
+   * secret the user pasted by mistake.
+   */
+  function discard() {
+    setName(provider.label);
+    setModeValue(provider.modes[0].value);
+    setValues({});
+    setServices(emptyServices(provider, true));
+    setError(undefined);
+  }
+
   return (
     <>
       <div className="toolbar">
@@ -424,11 +499,6 @@ function ConnectForm({
           <Icon name={provider.icon} size={13} />
         </div>
         <div className="toolbar__title">Connect {provider.label}</div>
-        <div className="spacer" />
-        <button className="btn btn--primary" onClick={create} disabled={!ready || busy}>
-          <Icon name="plus" size={13} />
-          {busy ? "Creating…" : "Create"}
-        </button>
       </div>
 
       <div className="scroll" style={{ flex: 1, padding: "var(--sp-8)" }}>
@@ -516,6 +586,26 @@ function ConnectForm({
               <span>{error}</span>
             </div>
           )}
+
+          {/* Always rendered, where the edit screen shows its strip only once
+              something changed: nothing here has been stored, so there is no
+              state in which the primary action should be absent. */}
+          <SaveBar
+            creating
+            busy={busy}
+            canSubmit={ready}
+            message={
+              ready
+                ? // Interpolated rather than spelled out, so the sentence
+                  // cannot drift away from the button it names.
+                  `Not connected yet — ${provider.label} is added when you press ${SUBMIT_CREATE}.`
+                : name.trim() === ""
+                  ? "A name is required."
+                  : "Fill in every credential field."
+            }
+            onDiscard={discard}
+            onSubmit={create}
+          />
         </div>
       </div>
     </>
@@ -1021,9 +1111,12 @@ function IntegrationDetail({
           )}
 
           {changed && (
-            <div className="savebar">
-              <span className="savebar__text">
-                {canSave
+            <SaveBar
+              creating={false}
+              busy={busy}
+              canSubmit={canSave}
+              message={
+                canSave
                   ? "You have unsaved changes."
                   : name.trim() === ""
                     ? "A name is required."
@@ -1035,15 +1128,11 @@ function IntegrationDetail({
                       ? `Enter the credentials for ${mode.label} — switching the auth method replaces the stored ones.`
                       : item.has_credentials
                         ? "Fill in every credential field, or clear them to keep the stored ones."
-                        : "Fill in every credential field."}
-              </span>
-              <button className="btn" onClick={revert} disabled={busy}>
-                Revert
-              </button>
-              <button className="btn btn--primary" onClick={save} disabled={!canSave || busy}>
-                {busy ? "Saving…" : "Save"}
-              </button>
-            </div>
+                        : "Fill in every credential field."
+              }
+              onDiscard={revert}
+              onSubmit={save}
+            />
           )}
         </div>
       </div>

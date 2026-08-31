@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { describeError, useResource } from "../lib/hooks";
+import { partnerLabel, submitLabel } from "../lib/formVerbs";
 import { initials, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
 import type {
@@ -705,14 +706,14 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                 </div>
                 <div className="spacer" />
                 <button className="btn btn--lg" onClick={revert} disabled={saving}>
-                  {creating ? "Discard" : "Revert"}
+                  {partnerLabel(creating)}
                 </button>
                 <button
                   className="btn btn--lg btn--primary"
                   onClick={save}
                   disabled={saving || !draft.name.trim() || !dirty}
                 >
-                  {saving ? "Saving…" : creating ? "Create agent" : "Save"}
+                  {submitLabel(creating, saving)}
                 </button>
               </div>
             )}

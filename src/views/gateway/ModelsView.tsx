@@ -11,6 +11,7 @@ import {
 } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
+import { partnerLabel, submitLabel } from "../../lib/formVerbs";
 import type { ViewId } from "../../lib/nav";
 import type {
   GatewayModelAlias,
@@ -541,13 +542,15 @@ function AliasForm({
                   ? "Add at least one target."
                   : "Every target needs a provider and a model id."}
           </span>
+          {/* `onCancel` is only passed while creating, and abandoning a draft
+              is what `Discard` names — see `lib/formVerbs.ts`. */}
           {onCancel ? (
             <button className="btn" onClick={onCancel} disabled={busy}>
-              Cancel
+              {partnerLabel(true)}
             </button>
           ) : (
             <button className="btn" onClick={revert} disabled={busy}>
-              Revert
+              {partnerLabel(false)}
             </button>
           )}
           <button
@@ -555,7 +558,7 @@ function AliasForm({
             onClick={save}
             disabled={!canSave || busy}
           >
-            {busy ? "Saving…" : "Save"}
+            {submitLabel(creating, busy)}
           </button>
         </div>
       )}

@@ -8,6 +8,7 @@ import type {
   ScheduledTask,
 } from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
+import { partnerLabel, submitLabel } from "../lib/formVerbs";
 import { dateTime, duration, relativeTime, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
 import { DirField, useDirPicker } from "../components/DirField";
@@ -418,7 +419,7 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                 <>
                   {(dirty || creating) && (
                     <button className="btn btn--ghost" onClick={revert} disabled={busy}>
-                      {creating ? "Discard" : "Revert"}
+                      {partnerLabel(creating)}
                     </button>
                   )}
                   <button
@@ -426,7 +427,7 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                     onClick={save}
                     disabled={busy || (!dirty && !creating)}
                   >
-                    {creating ? "Create" : "Save"}
+                    {submitLabel(creating, busy)}
                   </button>
                   {!creating && (
                     <>

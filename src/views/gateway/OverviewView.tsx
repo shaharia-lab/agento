@@ -265,7 +265,6 @@ export function GatewayOverviewView({
               >
                 <div className="row">
                   <button className="btn btn--primary" disabled={busy} onClick={mint}>
-                    <Icon name="plus" size={14} />
                     {busy ? "Creating…" : "Create gateway token"}
                   </button>
                 </div>

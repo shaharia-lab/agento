@@ -525,6 +525,34 @@ drag across it means "select this row", so selectable cells would leave a word
 highlighted behind the view they opened. `::selection` is focus-aware over the
 existing `--bg-select*` tokens, matching `.window--focused`.
 
+**A form's actions are a fixed grammar, and the `+` is not part of it** (#516).
+Four rules, and each of them was broken by exactly one view before it was
+written down here:
+
+- **The primary verb follows existence**: `Create` while the record does not
+  exist yet, `Save` once it does — with the in-flight label following it
+  (`Creating…` / `Saving…`). Not `Create agent`, not `Save` for something that
+  was never stored.
+- **Its partner follows the same split**: `Discard` throws away a record that
+  was never stored, `Revert` restores one that was. Two words because they undo
+  two different things — a single `Cancel` claims to undo a save, which is why
+  the gateway's spelling of it went rather than spreading.
+- **A `+` icon marks a list-level *New X* / *Add X*** — an action that opens a
+  blank thing (`New task`, `New rule`, `New profile`, `Add fallback`). **Never a
+  submit.** `+ Create` on the Integrations connect screen is what this issue was
+  reported for: it reads as "add another one" rather than "save this form".
+- **Placement is one strip per view, used by both states.** Integrations was the
+  only view whose primary action *moved* — toolbar while creating, savebar while
+  editing. Which strip a view uses is its own choice (Tasks is the toolbar,
+  everything else is the `.savebar` at the foot of the form); moving between
+  them inside one view is not.
+
+`IntegrationsView.tsx`'s `SaveBar` is the grammar as code and the component to
+copy from; nothing forces a view to import it, so this paragraph is the
+enforcement. Note `.savebar` is declared in `styles/integrations.css` **and**
+`styles/settings.css` and is available everywhere only because `App.tsx` imports
+both views statically.
+
 **The window's origin has to be in the capability's scope, or every IPC
 command is denied — silently.** This is the single most expensive thing to
 re-discover in this shell, because it fails *only in release builds* and it
