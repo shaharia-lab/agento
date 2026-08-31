@@ -4409,7 +4409,7 @@ answer is cached, and **revalidated before every spawn** (#533, below).
   restarted**, naming a path that works perfectly in a terminal. `executable()`
   therefore `stat`s the cached path (`is_executable_file`, which follows
   symlinks and is exactly the check a dangling one fails) and re-runs the walk
-  when it no longer holds. Four rules, each of them an acceptance criterion:
+  when it no longer holds. Five rules, each of them an acceptance criterion:
   - **The refresh is given the stored override the first walk was given**, held
     beside the resolution in the cache rather than re-derived — losing it would
     silently demote a user's configured path to whatever detection finds, which

@@ -80,7 +80,7 @@
 //! So [`executable`] revalidates: one `stat` (through [`is_executable_file`],
 //! which follows symlinks and is therefore exactly the check a dangling one
 //! fails), and only when that fails does the walk run again — with the stored
-//! override the first walk was given, never `None`. Three properties hold it
+//! override the first walk was given, never `None`. Four properties hold it
 //! together, and each is an acceptance criterion rather than an optimisation:
 //!
 //! - **The happy path costs one `stat` and no subprocess.** The `--version`
@@ -95,6 +95,14 @@
 //!   attempts, so it is keyed on the last refresh rather than on when the
 //!   resolution was made — a CLI that vanishes two seconds after launch still
 //!   recovers on the very next turn.
+//! - **A walk that finds nothing overwrites the cache with nothing.** The old
+//!   path is not kept: [`cached`] is what the banner reads, and a banner
+//!   claiming an install detection could not find is the #503 defect wearing a
+//!   different hat. The spawn then falls back to the bare name and fails with
+//!   `binary not found: "claude"`, which is what a machine that never had the
+//!   CLI has always reported — so the failure a user sees is unchanged rather
+//!   than newly worded. The price is that a *transient* break recovers on the
+//!   next due walk instead of the next free `stat`.
 //!
 //! [`cached`] reads the same value, so the banner and Settings report the
 //! recovery rather than the stale path. That is #503's invariant — the banner
