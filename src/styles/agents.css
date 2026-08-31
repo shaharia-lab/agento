@@ -75,7 +75,6 @@
   line-height: var(--leading-normal);
 }
 
-
 /* --- Inline delete confirmation (never window.confirm — it blocks the
    webview and stalls the whole window). --------------------------------- */
 .agents-confirm {

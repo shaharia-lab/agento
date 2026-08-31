@@ -194,7 +194,6 @@
   white-space: nowrap;
 }
 
-
 /* --- A stored secret, in place of the input that would replace it --------- */
 
 /* The gateway's `.gw-storedkey` is the same row, and this is deliberately a
