@@ -4,6 +4,7 @@ import { BrandMark } from "../../components/BrandMark";
 import { Dropdown, Empty, FormRow, Search, Splitter, Switch } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
+import { partnerLabel, submitLabel } from "../../lib/formVerbs";
 import type {
   GatewayProviderRequest,
   GatewayProviderSummary,
@@ -693,13 +694,17 @@ function ProviderForm({
                   ? "Enter the API key to save."
                   : "Check the credentials, or save anyway."}
           </span>
+          {/* `onCancel` is passed only when `provider` is undefined, so it is
+              present exactly while `creating` — and abandoning a draft is what
+              `Discard` names, where `Revert` restores a stored row. See
+              `lib/formVerbs.ts`. */}
           {onCancel ? (
             <button className="btn" onClick={onCancel} disabled={busy}>
-              Cancel
+              {partnerLabel(creating)}
             </button>
           ) : (
             <button className="btn" onClick={revert} disabled={busy}>
-              Revert
+              {partnerLabel(creating)}
             </button>
           )}
           {/*
@@ -727,7 +732,7 @@ function ProviderForm({
               }}
               disabled={busy}
             >
-              Save anyway
+              {`${submitLabel(creating, false)} anyway`}
             </button>
           )}
           <button
@@ -735,7 +740,7 @@ function ProviderForm({
             onClick={save}
             disabled={!canSave || busy}
           >
-            {busy ? "Saving…" : "Save"}
+            {submitLabel(creating, busy)}
           </button>
         </div>
       )}

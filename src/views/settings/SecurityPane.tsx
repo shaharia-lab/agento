@@ -365,7 +365,6 @@ export function SecurityPane() {
                 })
               }
             >
-              <Icon name="plus" size={14} />
               Create token
             </button>
           </div>

@@ -11,6 +11,7 @@ import {
 } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
+import { partnerLabel, submitLabel } from "../../lib/formVerbs";
 import type { ViewId } from "../../lib/nav";
 import type {
   GatewayModelAlias,
@@ -541,13 +542,17 @@ function AliasForm({
                   ? "Add at least one target."
                   : "Every target needs a provider and a model id."}
           </span>
+          {/* `onCancel` is passed only when `alias` is undefined, so it is
+              present exactly while `creating` — and abandoning a draft is what
+              `Discard` names, where `Revert` restores a stored row. See
+              `lib/formVerbs.ts`. */}
           {onCancel ? (
             <button className="btn" onClick={onCancel} disabled={busy}>
-              Cancel
+              {partnerLabel(creating)}
             </button>
           ) : (
             <button className="btn" onClick={revert} disabled={busy}>
-              Revert
+              {partnerLabel(creating)}
             </button>
           )}
           <button
@@ -555,7 +560,7 @@ function AliasForm({
             onClick={save}
             disabled={!canSave || busy}
           >
-            {busy ? "Saving…" : "Save"}
+            {submitLabel(creating, busy)}
           </button>
         </div>
       )}
