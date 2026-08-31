@@ -666,8 +666,16 @@ function ConnectionFields({
 }) {
   /**
    * An OAuth provider that carries no credential fields at all has nothing to
-   * put here, so the block is Name alone rather than an empty headed section —
-   * on both screens, since the gate is on the shared body.
+   * mask, so the stored-secret line is gated on this — the block is then Name
+   * alone rather than an empty headed section.
+   *
+   * **The auth-method control is deliberately *not* gated on it.** It is the
+   * only way to reach a method that does have fields, so hiding it for a
+   * fieldless mode would strand the form on that mode (`modeValue` seeds to
+   * `provider.modes[0]`, and nothing else changes it). `CredentialFields`
+   * needs no gate at all: it maps over `mode.fields` and renders nothing for
+   * an empty one. Unreachable with today's catalogue — every mode of all six
+   * providers carries at least one field — and cheap to keep right.
    */
   const needsCredentials = mode.fields.length > 0;
 
@@ -689,8 +697,8 @@ function ConnectionFields({
         </div>
       </div>
 
-      {needsCredentials &&
-        (stored ? (
+      {stored ? (
+        needsCredentials && (
           /* The label stays generic rather than becoming `mode.label`. The
              stored mode *is* reportable since #513, and the inspector reports
              it — but only when the row records one. A multi-mode row saved
@@ -711,24 +719,25 @@ function ConnectionFields({
               <div className="formrow__help">{STORED_SECRET_HELP}</div>
             </div>
           </div>
-        ) : (
-          <>
-            {provider.modes.length > 1 && (
-              <div className="formrow">
-                <div className="formrow__label">Auth method</div>
-                <div className="formrow__control">
-                  <Segmented
-                    value={modeValue}
-                    options={provider.modes.map((m) => ({ value: m.value, label: m.label }))}
-                    onChange={onMode}
-                  />
-                </div>
+        )
+      ) : (
+        <>
+          {provider.modes.length > 1 && (
+            <div className="formrow">
+              <div className="formrow__label">Auth method</div>
+              <div className="formrow__control">
+                <Segmented
+                  value={modeValue}
+                  options={provider.modes.map((m) => ({ value: m.value, label: m.label }))}
+                  onChange={onMode}
+                />
               </div>
-            )}
+            </div>
+          )}
 
-            <CredentialFields mode={mode} values={values} onChange={onValues} />
-          </>
-        ))}
+          <CredentialFields mode={mode} values={values} onChange={onValues} />
+        </>
+      )}
 
       {note}
     </div>
