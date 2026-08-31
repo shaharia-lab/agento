@@ -110,7 +110,7 @@ fn client() -> Option<&'static reqwest::Client> {
     static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
+            crate::native::http::client_builder()
                 .timeout(TIMEOUT)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -500,5 +500,23 @@ mod tests {
     #[test]
     fn a_base_with_a_dot_segment_is_refused_rather_than_followed() {
         assert!(Base::new("https://api.openai.com/v1/..").is_err());
+    }
+}
+
+/// The `User-Agent` this module's client puts on the wire (#514).
+///
+/// Read off a request a loopback server received, not off the builder: a
+/// `ClientBuilder`'s default headers cannot be inspected, and asserting that
+/// this file *calls* `client_builder` would only restate
+/// `native::http`'s own source guard.
+#[cfg(test)]
+mod user_agent {
+    #[tokio::test]
+    async fn the_gateway_catalog_client_sends_the_agento_user_agent() {
+        let client = super::client().expect("a usable HTTP client");
+        assert_eq!(
+            crate::native::http::testing::user_agent_seen_by_a_server(client).await,
+            crate::native::http::USER_AGENT,
+        );
     }
 }

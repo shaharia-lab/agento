@@ -37,6 +37,7 @@ pub mod goquote;
 pub mod gotime;
 pub mod gourl;
 pub mod health;
+pub mod http;
 pub mod insights;
 pub mod integration_credentials;
 pub mod integrations;

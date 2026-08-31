@@ -63,7 +63,7 @@ pub(super) fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
+            crate::native::http::client_builder()
                 .timeout(Duration::from_secs(15))
                 .build()
                 .ok()
@@ -370,5 +370,23 @@ mod tests {
             .await
             .expect("a 200 is a success however long the body is");
         assert_eq!(body.len(), MAX_RESPONSE_BYTES);
+    }
+}
+
+/// The `User-Agent` this module's client puts on the wire (#514).
+///
+/// Read off a request a loopback server received, not off the builder: a
+/// `ClientBuilder`'s default headers cannot be inspected, and asserting that
+/// this file *calls* `client_builder` would only restate
+/// `native::http`'s own source guard.
+#[cfg(test)]
+mod user_agent {
+    #[tokio::test]
+    async fn the_jira_client_sends_the_agento_user_agent() {
+        let client = super::http_client().expect("a usable HTTP client");
+        assert_eq!(
+            crate::native::http::testing::user_agent_seen_by_a_server(client).await,
+            crate::native::http::USER_AGENT,
+        );
     }
 }

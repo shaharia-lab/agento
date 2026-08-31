@@ -241,6 +241,12 @@ struct Recorded {
     authorization: String,
     accept: String,
     content_type: String,
+    /// Not a vector field — no golden records a `User-Agent`, and
+    /// `parity/google_vectors.json` says so in as many words. It is captured so
+    /// the twenty tools' real requests can be asserted to carry Agento's own
+    /// (#514), which is what the Go server got free from `net/http` and this
+    /// port did not.
+    user_agent: String,
     body: String,
 }
 
@@ -295,6 +301,7 @@ async fn serve_fake(
             authorization: header("authorization"),
             accept: header("accept"),
             content_type: header("content-type"),
+            user_agent: header("user-agent"),
             body: String::from_utf8_lossy(&body).into_owned(),
         });
         (fake.status, fake.location.clone(), fake.body.clone())
@@ -409,6 +416,16 @@ async fn every_call_matches_the_go_vectors() {
                     case.case
                 );
                 assert_eq!(got.body, want.body, "{}: request body", case.case);
+                // Every one of the twenty tools, not just the client that
+                // built the first request: GitHub answers 403 to a request
+                // without it, so this is the difference between the
+                // integration working and none of it working.
+                assert_eq!(
+                    got.user_agent,
+                    crate::native::http::USER_AGENT,
+                    "{}: User-Agent",
+                    case.case
+                );
             }
         }
     }

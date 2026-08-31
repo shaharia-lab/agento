@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::native::http;
 use crate::native::integrations::registry;
 use crate::native::writes::WriteError;
 
@@ -327,8 +328,32 @@ async fn handle_callback(
             .into_response();
     }
 
+    // Not in #514's own table of seven, and a production client all the same:
+    // this is the token exchange, an outbound HTTPS call carrying the
+    // `client_secret`. `reqwest::Client::new()` panics on an unusable trust
+    // store where every sibling constructor answers `Option` — inside a
+    // `tokio::spawn`ed callback server, which is a task that dies with nothing
+    // written to the flow state and a UI polling `auth/status` forever. Both
+    // are fixed by going through the factory.
+    let client = match http::client_builder().build() {
+        Ok(client) => client,
+        Err(e) => {
+            // The cause is never interpolated: a `reqwest` error's `Display`
+            // carries the URL it was built from, and this text is stored on the
+            // flow state and rendered by the UI.
+            log::warn!("OAuth flow id={:?}: no usable HTTP client: {e}", ctx.id);
+            fail_flow(&ctx.id, "oauth: no usable HTTP client".to_string());
+            ctx.finish();
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to exchange token\n",
+            )
+                .into_response();
+        }
+    };
+
     let token = match exchange::exchange(
-        &reqwest::Client::new(),
+        &client,
         &ctx.endpoint,
         &ctx.client_id,
         &ctx.client_secret,
