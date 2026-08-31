@@ -10,6 +10,7 @@ import { api, ApiError, qs } from "../lib/api";
 import { describeError, useResource, type Resource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath, usd } from "../lib/format";
 import { DESTROY } from "../lib/formVerbs";
+import { SaveBar } from "../components/SaveBar";
 import { Icon, type IconName } from "../lib/icons";
 import { Checkbox, Dropdown, Empty, FormRow, Switch } from "../components/ui";
 import { openExternal } from "../lib/tauri";
@@ -410,21 +411,14 @@ export function SettingsView({
               )}
 
               {dirty && (
-                <div className="savebar">
-                  <span className="savebar__text">
-                    {idleGapError ? idleGapError : "You have unsaved changes."}
-                  </span>
-                  <button className="btn" onClick={revertAll} disabled={saving}>
-                    Revert
-                  </button>
-                  <button
-                    className="btn btn--primary"
-                    onClick={save}
-                    disabled={saving || idleGapError !== undefined}
-                  >
-                    {saving ? "Saving…" : "Save"}
-                  </button>
-                </div>
+                <SaveBar
+                  creating={false}
+                  busy={saving}
+                  canSubmit={idleGapError === undefined}
+                  message={idleGapError ?? "You have unsaved changes."}
+                  onDiscard={revertAll}
+                  onSubmit={save}
+                />
               )}
             </div>
           )}

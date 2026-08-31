@@ -218,6 +218,13 @@ src/
                  stylesheet (styles/charts.css) so a consumer outside the
                  analytics section does not have to import that section's sheet.
                  The `.a-` class prefix is history, not scope
+    SaveBar.tsx  the one action strip at the foot of a form (#519) — the six
+                 savebar views' shared submit/partner pair, its verbs taken
+                 from lib/formVerbs.ts and not overridable. Lifted out of
+                 IntegrationsView when AgentsView turned out to have forked it
+                 into `.agents-savebar`; carries styles/savebar.css itself, the
+                 charts.tsx shape. See *Conventions* for what it does and does
+                 not take
   views/         one file per section
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
@@ -547,11 +554,37 @@ written down here:
   everything else is the `.savebar` at the foot of the form); moving between
   them inside one view is not.
 
-`IntegrationsView.tsx`'s `SaveBar` is the grammar as code and the component to
-copy from; nothing forces a view to import it, so this paragraph is the
-enforcement. Note `.savebar` is declared in `styles/integrations.css` **and**
-`styles/settings.css` and is available everywhere only because `App.tsx` imports
-both views statically.
+**`src/components/SaveBar.tsx` is the grammar as code, and since #519 there is
+exactly one of it.** The rules above used to be enforced by this paragraph
+alone: `IntegrationsView.tsx` owned a local `SaveBar`, described as the
+component to copy from, and nothing forced a view to import it — so `AgentsView`
+had grown `.agents-savebar`, a second strip with its own class family, its own
+message element, its own error variant and `btn--lg` buttons. **The class was
+shared and the JSX was copied, and the JSX is what drifted**, which is why the
+*component* is the shared thing now and all six savebar views import it.
+
+Three properties of it worth keeping:
+
+- **The button size is `btn`**, decided once. `btn--lg` was Agents-only and
+  appeared in no other savebar; it survives everywhere else (empty states,
+  About), just not on a save strip.
+- **The message slot takes an optional icon and an error tone**, which was the
+  only capability the fork had and the shared one lacked. Both are opt-in, so a
+  savebar passing neither emits exactly the markup it did before — that is what
+  made the merge provably a no-op for the five pre-existing strips (the emitted
+  CSS diff is three `.agents-savebar*` rules removed, two `.savebar__text--*`
+  added, and `.savebar`/`.savebar__text` byte-identical).
+- **`extra` is one slot for one caller** — the gateway provider form's "Save
+  anyway", which exists because a base serving no model list can never pass the
+  credential check. Every other savebar is exactly two buttons; do not reach for
+  `extra` to avoid thinking about a third.
+
+`.savebar*` now lives in `styles/savebar.css`, which `SaveBar.tsx` imports
+itself — the `components/charts.tsx` shape. It used to be declared in
+`styles/integrations.css` **and** `styles/settings.css` and reached the gateway
+views only because `App.tsx` imports those two statically, so a section that
+stopped being statically imported would have had unstyled savebars with nothing
+to say so.
 
 **Destroying a stored record is `Delete`, everywhere, and `Remove` means
 something else** (#518). One gesture had three words — Integrations said

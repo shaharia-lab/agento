@@ -194,24 +194,6 @@
   white-space: nowrap;
 }
 
-.savebar {
-  position: sticky;
-  bottom: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-  margin-top: var(--sp-6);
-  padding: var(--sp-4) var(--sp-6);
-  border-radius: var(--r-lg);
-  background: var(--bg-raised);
-  box-shadow: 0 0 0 var(--hairline) var(--line-strong), var(--shadow-md);
-}
-.savebar__text {
-  flex: 1;
-  font-size: var(--text-base);
-  color: var(--fg-secondary);
-}
 
 /* --- A stored secret, in place of the input that would replace it --------- */
 

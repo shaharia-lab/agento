@@ -6,12 +6,15 @@
    `.savebar`, `.confirm`, `.codebox`, `.badge`, `.dot`. Only the pieces no
    other view has are defined below.
 
-   Note where four of those come from: `.msgline*`, `.savebar*`, `.confirm` and
-   `.codebox` are declared in `integrations.css` and `settings.css` rather than
-   in a global sheet. Both are loaded unconditionally — `App.tsx` imports
+   Note where three of those come from: `.msgline*`, `.confirm` and `.codebox`
+   are declared in `integrations.css` and `settings.css` rather than in a global
+   sheet. Both are loaded unconditionally — `App.tsx` imports
    `IntegrationsView` and `SettingsView` statically, so their stylesheets are in
    the bundle whichever view is on screen — which is why this file does not
-   restate them for a third time.
+   restate them for a third time. `.savebar*` used to be a fourth and is not any
+   more: it moved to `styles/savebar.css` with #519, which
+   `components/SaveBar.tsx` imports itself, so these views' strips no longer
+   depend on another section happening to be in the bundle.
 
    Every colour is a token, so light and dark both come from `tokens.css` and
    nothing here needs a media query — a colour whose only definition sat inside

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { describeError, useResource } from "../lib/hooks";
-import { DESTROY, DESTROYING, partnerLabel, submitLabel } from "../lib/formVerbs";
+import { DESTROY, DESTROYING } from "../lib/formVerbs";
+import { SaveBar } from "../components/SaveBar";
 import { initials, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
 import type {
@@ -688,35 +689,33 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                     )}
                   </FormRow>
                 </div>
+
+                {/* The strip is inside `.form` rather than docked below the
+                    scroll container, which is where every other savebar in the
+                    app lives: `.savebar` is `position: sticky; bottom: 0`, so
+                    it needs a scrolling ancestor to pin itself against (#519).
+
+                    Its condition stays `dirty || saveError` — the one thing
+                    this view's savebar does that the others' do not. A save
+                    that failed is not a pending change, so gating on `dirty`
+                    alone would leave the failure with nowhere to show. */}
+                {(dirty || saveError) && (
+                  <SaveBar
+                    creating={creating}
+                    busy={saving}
+                    canSubmit={draft.name.trim() !== "" && dirty}
+                    message={
+                      saveError ??
+                      (creating ? "New agent — not saved yet" : "Unsaved changes")
+                    }
+                    messageIcon={saveError ? "alert" : "edit"}
+                    messageTone={saveError ? "error" : undefined}
+                    onDiscard={revert}
+                    onSubmit={save}
+                  />
+                )}
               </div>
             </div>
-
-            {(dirty || saveError) && (
-              <div className="agents-savebar">
-                <div
-                  className={`agents-savebar__msg ${
-                    saveError ? "agents-savebar__msg--error" : ""
-                  }`}
-                >
-                  <Icon name={saveError ? "alert" : "edit"} size={13} />
-                  <span className="truncate">
-                    {saveError ??
-                      (creating ? "New agent — not saved yet" : "Unsaved changes")}
-                  </span>
-                </div>
-                <div className="spacer" />
-                <button className="btn btn--lg" onClick={revert} disabled={saving}>
-                  {partnerLabel(creating)}
-                </button>
-                <button
-                  className="btn btn--lg btn--primary"
-                  onClick={save}
-                  disabled={saving || !draft.name.trim() || !dirty}
-                >
-                  {submitLabel(creating, saving)}
-                </button>
-              </div>
-            )}
           </>
         )}
       </div>

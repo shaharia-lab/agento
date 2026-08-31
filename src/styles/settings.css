@@ -47,28 +47,6 @@
   color: var(--fg-tertiary);
 }
 
-/* --- Save bar ------------------------------------------------------------ */
-
-/* Pinned to the bottom of the scroll container so a change made at the top of
-   a long pane can still be committed without scrolling back. */
-.savebar {
-  position: sticky;
-  bottom: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-  margin-top: var(--sp-6);
-  padding: var(--sp-4) var(--sp-6);
-  border-radius: var(--r-lg);
-  background: var(--bg-raised);
-  box-shadow: 0 0 0 var(--hairline) var(--line-strong), var(--shadow-md);
-}
-.savebar__text {
-  flex: 1;
-  font-size: var(--text-base);
-  color: var(--fg-secondary);
-}
 
 /* --- Status lines -------------------------------------------------------- */
 
