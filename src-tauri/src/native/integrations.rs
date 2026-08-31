@@ -285,6 +285,12 @@ fn integration_columns() -> String {
 /// endpoint accepts, and untrimmed it would report a credential that is not
 /// there.
 ///
+/// The trim covers **exterior** whitespace only, so `{ }` still reads as a
+/// credential. That is an approximation and it is the deliberate one: deciding
+/// otherwise means parsing the blob, which is reading it, which this module may
+/// not do. Nothing the UI sends can reach it — `JSON.stringify` emits no
+/// interior space — and `authenticated` still reports the truth beside it.
+///
 /// The trim set is spelled out rather than left to a bare `TRIM(X)`, which in
 /// SQLite removes **spaces only** while Rust's `str::trim` removes every
 /// Unicode whitespace character — so the two spellings disagreed on a stored
