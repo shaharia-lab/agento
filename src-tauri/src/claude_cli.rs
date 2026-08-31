@@ -1,4 +1,5 @@
-//! Where the Claude Code CLI is, decided once per launch (#503).
+//! Where the Claude Code CLI is: resolved once per launch, revalidated before
+//! every spawn (#503, #533).
 //!
 //! Everything Agento ships is self-contained except this one binary: agents run
 //! by spawning `claude` as a subprocess ([`crate::claude`]), and that CLI is a
@@ -30,7 +31,7 @@
 //!
 //! # The order
 //!
-//! First hit wins, and the result is cached for the process:
+//! First hit wins, and the result is cached:
 //!
 //! 1. **`AGENTO_CLAUDE_EXECUTABLE`** — an explicit instruction, taken verbatim.
 //! 2. **The stored `claude_executable_path` setting** — the in-product escape
@@ -62,10 +63,49 @@
 //! banner reports exactly what a turn will spawn — a wrong value produces a
 //! spawn error naming the user's own path, which is a better diagnostic than a
 //! banner claiming nothing is installed.
+//!
+//! # How long the answer is trusted (#533)
+//!
+//! **The walk runs once; its answer is checked before every spawn.** Claude
+//! Code updates itself, and the native install is a symlink
+//! (`~/.local/bin/claude`) into a versioned directory
+//! (`~/.local/share/claude/versions/<version>`) that a self-update swaps. For
+//! the length of that swap the symlink is dangling, `execve` answers `ENOENT`,
+//! and the SDK reports [`crate::claude::Error::CliNotFound`]. The path was
+//! right when it was resolved; nothing was wrong with the order. What was wrong
+//! is that the answer was never revisited — so **every chat and every scheduled
+//! run failed for the rest of the process's life**, naming a path that works
+//! perfectly in a terminal.
+//!
+//! So [`executable`] revalidates: one `stat` (through [`is_executable_file`],
+//! which follows symlinks and is therefore exactly the check a dangling one
+//! fails), and only when that fails does the walk run again — with the stored
+//! override the first walk was given, never `None`. Three properties hold it
+//! together, and each is an acceptance criterion rather than an optimisation:
+//!
+//! - **The happy path costs one `stat` and no subprocess.** The `--version`
+//!   round trip is emphatically *not* on it: it is what makes the walk
+//!   expensive, and a path that stats clean is the path that was already
+//!   verified.
+//! - **Re-resolution is rate-limited** ([`REFRESH_COOLDOWN`]). A CLI that is
+//!   genuinely gone would otherwise pay a login-shell probe plus a `--version`
+//!   per candidate on *every* turn. The slot is claimed under the write lock
+//!   before the walk starts, so two concurrent turns produce one walk.
+//! - **The first failure always refreshes.** The cooldown gates *repeated*
+//!   attempts, so it is keyed on the last refresh rather than on when the
+//!   resolution was made — a CLI that vanishes two seconds after launch still
+//!   recovers on the very next turn.
+//!
+//! [`cached`] reads the same value, so the banner and Settings report the
+//! recovery rather than the stale path. That is #503's invariant — the banner
+//! and the spawn are one answer — kept true through a refresh.
+//!
+//! What this deliberately is **not**: a filesystem watcher, a background
+//! re-detection timer, or a `--version` check per turn.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 /// How the CLI was found. Reported to the frontend so a user debugging a
@@ -116,13 +156,77 @@ pub struct Resolution {
 /// five seconds total, after which resolution simply continues down the order.
 ///
 /// The alternative — priming on a background thread — was rejected: `cached()`
-/// would then race the spawned resolution, and the loser fills the `OnceLock`
+/// would then race the spawned resolution, and the loser fills the cache
 /// *without* the stored override, so a user's configured path would be silently
 /// ignored on some launches and not others. Deterministic and bounded beats
-/// fast and occasionally wrong.
+/// fast and occasionally wrong. (#533 keeps that true from the other side: the
+/// override is stored *beside* the resolution, so a refresh cannot lose it
+/// either.)
 #[cfg(unix)]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The shortest interval between two walks of the order (#533).
+///
+/// It bounds what a *missing* CLI costs. Every re-resolution is a login-shell
+/// probe plus up to one `--version` per candidate — up to five seconds of
+/// subprocess — and with nothing installed there is no answer to find, so an
+/// ungated refresh would pay that on every turn and on every scheduled run.
+///
+/// Ten seconds rather than a minute because the other side of the trade is a
+/// user retrying: someone who repairs their install and presses send again
+/// should not be told the CLI is missing for as long as they can be bothered to
+/// wait. It does **not** delay the first recovery — see [`refresh_due`].
+const REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// The cached answer, and what is needed to produce it again.
+///
+/// `stored_override` is remembered rather than re-derived. Re-reading the
+/// setting here would mean opening a database connection from this module,
+/// which it does not do; *dropping* it would mean a refresh silently demoting a
+/// user's configured path to whatever detection finds — the exact defect the
+/// module header rejects background priming over.
+struct Cached {
+    resolution: Option<Resolution>,
+    stored_override: Option<String>,
+    /// When the last **refresh** finished, not when the resolution was made.
+    /// `None` until one has run, which is what makes the first failure recover
+    /// immediately however recently the process started.
+    refreshed_at: Option<Instant>,
+}
+
+/// A `RwLock` rather than a `OnceLock`, because the answer can now change.
+///
+/// Reads are on a hot path only in the sense that a chat turn takes one, and a
+/// chat turn also spawns a process — the lock is not the cost. Nothing holds it
+/// across a subprocess except the very first fill, which is
+/// [`OnceLock::get_or_init`]'s own behaviour and is what keeps two concurrent
+/// first callers from resolving twice with different overrides.
+static CACHE: RwLock<Option<Cached>> = RwLock::new(None);
+
+/// Is a refresh allowed yet?
+///
+/// `None` — nothing has refreshed since this process resolved — is always due,
+/// so the turn that first meets a broken path re-resolves whatever the clock
+/// says. Only the *second* and later attempts wait out [`REFRESH_COOLDOWN`].
+///
+/// Split out and given `now` as a parameter so a test can construct the
+/// boundary rather than race it.
+fn refresh_due(refreshed_at: Option<Instant>, now: Instant) -> bool {
+    refreshed_at.is_none_or(|t| now.saturating_duration_since(t) >= REFRESH_COOLDOWN)
+}
+
+/// A poisoned lock is read through rather than panicked on: every critical
+/// section here is a clone or an assignment, so there is no torn state to
+/// protect against, and a panic elsewhere must not take the CLI path down with
+/// it.
+fn read_cache() -> std::sync::RwLockReadGuard<'static, Option<Cached>> {
+    CACHE.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn write_cache() -> std::sync::RwLockWriteGuard<'static, Option<Cached>> {
+    CACHE.write().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The binary's name on this platform.
 fn cli_name() -> &'static str {
@@ -133,27 +237,60 @@ fn cli_name() -> &'static str {
     }
 }
 
-static CACHE: OnceLock<Option<Resolution>> = OnceLock::new();
+/// Fill the cache if it is empty, and hand back whatever it holds.
+///
+/// The write lock is held across [`resolve`] deliberately, which is the one
+/// place in this module that happens: it is [`OnceLock::get_or_init`]'s
+/// semantics, and it is what stops a second caller resolving concurrently with
+/// a *different* `stored_override` and installing the losing answer.
+fn fill(stored_override: Option<&str>) -> Option<Resolution> {
+    if let Some(cached) = read_cache().as_ref() {
+        return cached.resolution.clone();
+    }
+    let mut guard = write_cache();
+    // Somebody may have filled it between dropping the read lock and taking
+    // this one.
+    if let Some(cached) = guard.as_ref() {
+        return cached.resolution.clone();
+    }
+    let resolution = resolve(stored_override);
+    *guard = Some(Cached {
+        resolution: resolution.clone(),
+        stored_override: stored_override.map(str::to_owned),
+        refreshed_at: None,
+    });
+    resolution
+}
 
-/// Resolve once and remember the answer for the life of the process.
+/// Resolve once and remember the answer, along with the override that produced
+/// it.
 ///
 /// Called from `lib.rs`'s setup **after the database is open**, so the stored
 /// override is in hand; every later reader gets that same answer through
 /// [`cached`]. Priming is what keeps the expensive branch — a login shell,
 /// sourcing the user's rc files — off both the banner's path and a chat turn's.
-pub fn prime(stored_override: Option<&str>) -> Option<&'static Resolution> {
-    CACHE.get_or_init(|| resolve(stored_override)).as_ref()
+///
+/// Returns an owned value rather than a `&'static`: the answer can change under
+/// a reader now (#533), so handing out a borrow into the cache would be a lie
+/// about its lifetime as well as impossible to write.
+pub fn prime(stored_override: Option<&str>) -> Option<Resolution> {
+    fill(stored_override)
 }
 
-/// The cached resolution.
+/// The cached resolution — what the startup banner and Settings report.
 ///
 /// Resolves on first call if `prime` has not run — which is the case in unit
 /// tests and would be the case for any caller reached before setup finishes.
 /// That fallback deliberately passes **no** stored override: it is a safety net
 /// for ordering, not a second way to read the setting, and `lib.rs` primes
 /// before the proxy is listening so nothing in the app reaches it first.
-pub fn cached() -> Option<&'static Resolution> {
-    CACHE.get_or_init(|| resolve(None)).as_ref()
+///
+/// It reads, and never refreshes. A refresh is a spawn's business, and a banner
+/// that started subprocesses would put a login-shell probe behind every
+/// `host_info` — but because [`executable`] writes its recovery back here, this
+/// still reports the *refreshed* path rather than the one that failed.
+pub fn cached() -> Option<Resolution> {
+    fill(None)
 }
 
 /// The binary to spawn: the cached resolution, or the bare name when nothing
@@ -166,19 +303,91 @@ pub fn cached() -> Option<&'static Resolution> {
 /// nothing.
 ///
 /// `AGENTO_CLAUDE_EXECUTABLE` is re-read here rather than taken from the cache,
-/// and that is load-bearing for the tests rather than for the app: the cache is
-/// a `OnceLock`, so a test binary whose cases each point at a *different*
-/// scripted CLI would otherwise all run the first one's. In the app the two are
-/// the same value, because [`resolve`] reads the same variable first.
+/// and that is load-bearing for the tests rather than for the app: a test
+/// binary whose cases each point at a *different* scripted CLI would otherwise
+/// all run the first one's. In the app the two are the same value, because
+/// [`resolve`] reads the same variable first. It is also returned **verbatim**,
+/// with no `stat` and no refresh — rule 1 is taken on trust by design, and a
+/// wrapper script that does not exist yet at the moment it is asked about is a
+/// spawn error naming the user's own path, which is the better diagnostic.
+///
+/// Everything else is revalidated first — see the module header.
 pub fn executable() -> String {
     if let Ok(explicit) = std::env::var("AGENTO_CLAUDE_EXECUTABLE") {
         if !explicit.is_empty() {
             return explicit;
         }
     }
-    cached()
-        .map(|r| r.path.clone())
+    spawnable()
+        .map(|r| r.path)
         .unwrap_or_else(|| "claude".to_string())
+}
+
+/// The cached resolution, re-resolved if it has stopped being spawnable (#533).
+///
+/// Three outcomes, and the second is the whole issue: the path still stats as
+/// an executable file and is returned untouched; it does not and the walk runs
+/// again; it does not and a walk has already run too recently, in which case
+/// the stale answer is returned and the spawn fails with the unchanged
+/// `claude: binary not found` message.
+fn spawnable() -> Option<Resolution> {
+    let (resolution, stored_override) = {
+        // `fill` first, so a caller reached before `prime` still gets an
+        // answer — the ordering safety net `cached` documents.
+        let current = fill(None);
+        let guard = read_cache();
+        let stored = guard.as_ref().and_then(|c| c.stored_override.clone());
+        (current, stored)
+    };
+
+    if let Some(found) = resolution.as_ref() {
+        // One `stat`, following symlinks: a self-update that has swapped the
+        // version directory out from under `~/.local/bin/claude` leaves exactly
+        // a dangling symlink, and that is what this sees. No `--version` here —
+        // that is the expensive half, and a path that stats clean is a path the
+        // walk already verified.
+        if is_executable_file(Path::new(&found.path)) {
+            return resolution;
+        }
+    }
+
+    // Claim the refresh slot before walking, so a second turn arriving while
+    // this one is probing waits out the cooldown instead of probing too.
+    {
+        let mut guard = write_cache();
+        match guard.as_mut() {
+            Some(cached) if refresh_due(cached.refreshed_at, Instant::now()) => {
+                cached.refreshed_at = Some(Instant::now());
+            }
+            _ => return resolution,
+        }
+    }
+
+    // Outside every lock: this spawns a login shell and up to one `--version`
+    // per candidate.
+    let fresh = resolve(stored_override.as_deref());
+
+    {
+        let mut guard = write_cache();
+        if let Some(cached) = guard.as_mut() {
+            cached.resolution = fresh.clone();
+            // From completion rather than from the claim, so a walk that took
+            // its full five seconds does not immediately allow another.
+            cached.refreshed_at = Some(Instant::now());
+        }
+    }
+
+    // The same line the startup banner logs, so a recovery reads as one in the
+    // log the user exports rather than as silence between two failures.
+    match fresh.as_ref() {
+        Some(found) => log::info!(
+            "claude cli re-resolved path={:?} source={}",
+            found.path,
+            found.source.as_str()
+        ),
+        None => log::warn!("claude cli: the resolved path is gone and detection found no other"),
+    }
+    fresh
 }
 
 /// The ordered walk. `stored_override` is the `claude_executable_path` setting,
@@ -784,6 +993,37 @@ mod tests {
             "the wait was not bounded: {:?}",
             started.elapsed()
         );
+    }
+
+    /// The cooldown gates *repeated* walks, never the first one (#533).
+    ///
+    /// Keying it on "how long since this process resolved" instead would leave
+    /// the one case the issue is about — a CLI that goes away shortly after
+    /// launch — unable to recover on the turn that meets it. The boundary is
+    /// constructed rather than raced: `now` is a parameter precisely so a test
+    /// can place an instant exactly [`REFRESH_COOLDOWN`] ago.
+    #[test]
+    fn the_first_refresh_is_always_due_and_the_next_one_waits() {
+        let now = Instant::now();
+        assert!(
+            refresh_due(None, now),
+            "a path that broke before any refresh must recover on the next spawn"
+        );
+
+        assert!(
+            !refresh_due(Some(now), now),
+            "a second turn arriving immediately must not walk the order again"
+        );
+
+        let just_short = now
+            .checked_sub(REFRESH_COOLDOWN - Duration::from_millis(1))
+            .expect("an instant inside the cooldown");
+        assert!(!refresh_due(Some(just_short), now));
+
+        // Exactly on the boundary is due — `>=`, so the cooldown is the wait
+        // and not one tick more than it.
+        let exactly = now.checked_sub(REFRESH_COOLDOWN).expect("the boundary");
+        assert!(refresh_due(Some(exactly), now), "the boundary is inclusive");
     }
 
     #[cfg(unix)]

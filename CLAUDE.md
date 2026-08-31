@@ -4394,11 +4394,36 @@ answer is cached in a `OnceLock` for the process.
   are *the worst case a user waits for a window*, not a generous ceiling. A
   pathological shell degrades to "found by a later rule", never to a window that
   does not open. Priming on a background thread was rejected: `cached()` would
-  race it, and the loser fills the `OnceLock` **without the stored override**,
+  race it, and the loser fills the cache **without the stored override**,
   so a configured path would be ignored on some launches and not others.
-- **Resolution is once per launch.** Saving the setting takes effect at the next
-  start, which the Settings help says. Re-detecting live was considered and left
-  out.
+- **The walk is once per launch; its answer is revalidated before every spawn**
+  (#533). Claude Code self-updates, and the native install is a symlink into a
+  versioned directory that the update swaps — so for the length of that swap the
+  resolved path dangles, `execve` answers `ENOENT`, and a `OnceLock` filled at
+  startup meant **every chat and every scheduled run failed until the app was
+  restarted**, naming a path that works perfectly in a terminal. `executable()`
+  therefore `stat`s the cached path (`is_executable_file`, which follows
+  symlinks and is exactly the check a dangling one fails) and re-runs the walk
+  when it no longer holds. Four rules, each of them an acceptance criterion:
+  - **The refresh is given the stored override the first walk was given**, held
+    beside the resolution in the cache rather than re-derived — losing it would
+    silently demote a user's configured path to whatever detection finds, which
+    is the same defect background priming was rejected over.
+  - **`AGENTO_CLAUDE_EXECUTABLE` is returned verbatim and is never stat-gated**,
+    because rule 1 is taken on trust by design.
+  - **Re-resolution is rate-limited** (`REFRESH_COOLDOWN`, 10 s), or a CLI that
+    is genuinely gone pays a login-shell probe plus a `--version` per candidate
+    on every turn. The slot is claimed under the write lock *before* the walk, so
+    two concurrent turns produce one walk; the cooldown is keyed on the last
+    **refresh**, not on when the resolution was made, so the first failure always
+    recovers however recently the process started. Inside the cooldown the stale
+    path is returned and the failure message is unchanged.
+  - **`cached()` reads the refreshed value**, so the banner and Settings report
+    the recovery — #503's "the banner and the spawn are one answer", kept true
+    through a refresh. `host_info` reads it **once** and splits, or a refresh
+    between two reads would report one rule's path beside another rule's name.
+  There is no filesystem watcher and no background re-detection timer. Saving
+  the setting still takes effect at the next start, which the Settings help says.
 
 ---
 
