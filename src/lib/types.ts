@@ -123,6 +123,13 @@ export interface Integration {
   type: string;
   enabled: boolean;
   authenticated: boolean;
+  /**
+   * Whether a credential is stored — never the credential itself (#515).
+   * Computed in SQL, so the value never reaches this process, let alone the
+   * webview. It is what lets the edit form say "leaving this alone keeps the
+   * stored one" rather than demanding a re-typed token on every save.
+   */
+  has_credentials: boolean;
   services: Record<string, ServiceConfig>;
   created_at: string;
   updated_at: string;

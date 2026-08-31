@@ -61,6 +61,31 @@ function buildCredentials(
   return out;
 }
 
+/**
+ * The credentials blob for a *save*, or `undefined` when the user typed
+ * nothing (#515).
+ *
+ * `PUT /api/integrations/{id}` is three-valued: an absent `credentials` key
+ * leaves the stored blob alone, and any present value — `{}` included —
+ * replaces it. So "the user did not touch the credential fields" has to be
+ * spelled as *sending no key*, which is what `undefined` becomes when the
+ * request object is spread. Building the blob unconditionally is what used to
+ * make every save a wipe, and it is why the field had its own quarantined
+ * section behind a warning.
+ *
+ * This is `ProvidersView`'s `...(hasKey ? { api_key } : {})`, one level up:
+ * there the credential is one string, here it is a map, so "typed nothing" is
+ * "no field of the selected mode has a value".
+ */
+function credentialsToSave(
+  provider: Provider,
+  mode: AuthMode,
+  values: Record<string, string>
+): Record<string, string> | undefined {
+  const typed = mode.fields.some((f) => (values[f.key] ?? "").trim() !== "");
+  return typed ? buildCredentials(provider, mode, values) : undefined;
+}
+
 function credentialsComplete(mode: AuthMode, values: Record<string, string>): boolean {
   return mode.fields.every((f) => (values[f.key] ?? "").trim() !== "");
 }
@@ -623,29 +648,49 @@ function IntegrationDetail({
 
   const mode = provider.modes.find((m) => m.value === modeValue) ?? provider.modes[0];
   const needsCredentials = mode.fields.length > 0;
+  /**
+   * Whether the credential inputs are shown at all (#515). A stored secret
+   * renders as `••• stored` behind an explicit *Replace*, because Agento
+   * cannot show it back and no longer needs to: an untouched field sends no
+   * `credentials` key and the stored blob survives.
+   *
+   * It starts open when there is nothing stored, which is the one case where
+   * leaving the field alone keeps the integration unusable.
+   */
+  const [replacing, setReplacing] = useState(!item.has_credentials);
+  const typedCredentials = mode.fields.some((f) => (values[f.key] ?? "").trim() !== "");
 
   const changed =
     name !== item.name ||
     enabled !== item.enabled ||
     JSON.stringify(services) !== JSON.stringify(item.services ?? {}) ||
-    Object.values(values).some((v) => v.trim() !== "");
+    typedCredentials;
 
+  // A credential is required only when the user is actually supplying one:
+  // a half-filled mode would be saved as a blob with empty values, which is a
+  // broken credential rather than a preserved one. Not typing anything is now
+  // a complete, valid save — that is the whole point of #515.
   const canSave =
-    changed && name.trim() !== "" && (!needsCredentials || credentialsComplete(mode, values));
+    changed && name.trim() !== "" && (!typedCredentials || credentialsComplete(mode, values));
 
   async function save() {
     setBusy(true);
     setError(undefined);
     setNotice(undefined);
     try {
+      const credentials = credentialsToSave(provider, mode, values);
       await api.put<Integration>(`/integrations/${item.id}`, {
         name: name.trim(),
         type: item.type,
         enabled,
-        credentials: buildCredentials(provider, mode, values),
+        // Spread, never `credentials: undefined` — `JSON.stringify` drops an
+        // undefined value, but spelling it this way is what makes "send no
+        // key" the visible intent rather than a serializer side effect.
+        ...(credentials ? { credentials } : {}),
         services,
       });
       setValues({});
+      setReplacing(false);
       setNotice("Saved.");
       onChanged();
     } catch (err) {
@@ -672,6 +717,7 @@ function IntegrationDetail({
     setEnabled(item.enabled);
     setServices(item.services ?? {});
     setValues({});
+    setReplacing(!item.has_credentials);
     setError(undefined);
     setNotice(undefined);
   }
@@ -723,8 +769,12 @@ function IntegrationDetail({
 
           <div className="divider" />
 
+          {/* The connect screen's *Connection* block, and deliberately the
+              same shape: Name, then the auth method, then the credential —
+              rather than the quarantined bottom section this used to be. See
+              `credentialsToSave`. */}
           <div className="formsec">
-            <div className="formsec__title">Settings</div>
+            <div className="formsec__title">Connection</div>
             <div className="formrow">
               <div className="formrow__label">Name</div>
               <div className="formrow__control">
@@ -737,6 +787,48 @@ function IntegrationDetail({
                 </label>
               </div>
             </div>
+
+            {needsCredentials &&
+              (replacing ? (
+                <>
+                  {provider.modes.length > 1 && (
+                    <div className="formrow">
+                      <div className="formrow__label">Auth method</div>
+                      <div className="formrow__control">
+                        <Segmented
+                          value={modeValue}
+                          options={provider.modes.map((m) => ({
+                            value: m.value,
+                            label: m.label,
+                          }))}
+                          onChange={setModeValue}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <CredentialFields mode={mode} values={values} onChange={setValues} />
+                </>
+              ) : (
+                /* The auth method is part of the credential blob, so it is
+                   offered only alongside the fields that carry it: changing it
+                   on its own would send nothing and silently do nothing. */
+                <div className="formrow">
+                  <div className="formrow__label">{mode.label}</div>
+                  <div className="formrow__control">
+                    <div className="int-storedsecret">
+                      <span className="mono">••••••••••• stored</span>
+                      <button className="btn btn--ghost" onClick={() => setReplacing(true)}>
+                        Replace
+                      </button>
+                    </div>
+                    <div className="formrow__help">
+                      Agento cannot show a stored secret back to you, and does not need to —
+                      leave this alone and saving keeps it.
+                    </div>
+                  </div>
+                </div>
+              ))}
+
             <div className="formrow">
               <div className="formrow__label">Enabled</div>
               <div className="formrow__control">
@@ -756,44 +848,6 @@ function IntegrationDetail({
             <div className="formsec__title">Services and tools</div>
             <ServiceEditor provider={provider} services={services} onChange={setServices} />
           </div>
-
-          {needsCredentials && (
-            <>
-              <div className="divider" />
-              <div className="formsec">
-                <div className="formsec__title">Credentials</div>
-                {/* The API replaces credentials wholesale on every update and
-                    never sends the stored ones back, so a save that omitted
-                    them would silently wipe the integration's secrets. */}
-                <div className="msgline msgline--warn">
-                  <span className="msgline__icon">
-                    <Icon name="shield" size={13} />
-                  </span>
-                  <span>
-                    Agento never returns stored secrets, and saving replaces them. Re-enter
-                    the credentials below to save any change on this page — otherwise the
-                    stored ones would be cleared.
-                  </span>
-                </div>
-                {provider.modes.length > 1 && (
-                  <div className="formrow">
-                    <div className="formrow__label">Auth method</div>
-                    <div className="formrow__control">
-                      <Segmented
-                        value={modeValue}
-                        options={provider.modes.map((m) => ({
-                          value: m.value,
-                          label: m.label,
-                        }))}
-                        onChange={setModeValue}
-                      />
-                    </div>
-                  </div>
-                )}
-                <CredentialFields mode={mode} values={values} onChange={setValues} />
-              </div>
-            </>
-          )}
 
           {error && (
             <div className="msgline msgline--error">
@@ -817,9 +871,9 @@ function IntegrationDetail({
               <span className="savebar__text">
                 {canSave
                   ? "You have unsaved changes."
-                  : needsCredentials
-                    ? "Re-enter the credentials above to save."
-                    : "A name is required."}
+                  : name.trim() === ""
+                    ? "A name is required."
+                    : "Fill in every credential field, or clear them to keep the stored ones."}
               </span>
               <button className="btn" onClick={revert} disabled={busy}>
                 Revert

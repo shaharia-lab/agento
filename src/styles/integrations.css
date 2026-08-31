@@ -212,3 +212,18 @@
   font-size: var(--text-base);
   color: var(--fg-secondary);
 }
+
+/* --- A stored secret, in place of the input that would replace it --------- */
+
+/* The gateway's `.gw-storedkey` is the same row, and this is deliberately a
+   second declaration rather than a shared class: `gateway.css` is imported only
+   by the gateway views, so reaching for `.gw-` here would leave this row
+   styled by whichever other section happened to be bundled — an accident of the
+   build, not an import. Same reasoning as `charts.tsx` carrying its own sheet. */
+.int-storedsecret {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: var(--control-h);
+  color: var(--fg-secondary);
+}

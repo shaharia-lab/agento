@@ -179,6 +179,19 @@ pub struct ScrubbedIntegration {
     pub authenticated: bool,
     pub created_at: GoTime,
     pub enabled: bool,
+    /// Whether a credential is stored — **not** the credential (#515).
+    ///
+    /// A wire addition with no Go ancestor, and the only way an edit form can
+    /// tell "a secret is stored" from "no secret" now that omitting the field
+    /// preserves it: without it the UI cannot know whether leaving the input
+    /// alone keeps something or keeps nothing. Computed in SQL by
+    /// [`has_credentials_sql`], the same discipline `authenticated` uses, so the
+    /// value itself never reaches this process.
+    ///
+    /// It sits here because the field order **is** the wire order and this one
+    /// is alphabetical (Go built the object from a map): `enabled` <
+    /// `has_credentials` < `id`.
+    pub has_credentials: bool,
     pub id: String,
     pub name: String,
     /// A nil Go map is `null` and an empty one is `{}`, and the stored column
@@ -240,26 +253,85 @@ pub struct TriggerRule {
 /// `credentials` is absent on purpose — see this module's header — and `auth`
 /// is collapsed to a boolean before it leaves SQLite. `ORDER BY name ASC` is
 /// the store's, and it has no tiebreak in Go either.
-const INTEGRATION_COLUMNS: &str = "SELECT id, name, type, enabled,
+/// A function rather than a `const` since #515, because it now interpolates
+/// [`has_credentials_sql`] — which `existing_for_update` needs too, and one
+/// predicate written out twice is one that drifts. Both callers already built
+/// their statement with `format!`.
+fn integration_columns() -> String {
+    format!(
+        "SELECT id, name, type, enabled,
             (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
+            {} AS has_credentials,
             services, created_at, updated_at
-     FROM integrations";
+     FROM integrations",
+        has_credentials_sql()
+    )
+}
+
+/// "This row stores a credential", decided in SQL so the blob is never selected.
+///
+/// Three shapes mean *no* credential and all three are reachable: `''` (what a
+/// pre-#515 `PUT` that omitted the key wrote, so every install has rows like
+/// this), the literal four bytes `null`, and `{}` — the column's own default,
+/// what `create`'s validator calls "credentials are empty", and what an
+/// explicit clear now stores.
+///
+/// Two differences from `authenticated`'s otherwise identical predicate, both
+/// deliberate. There is no `IS NOT NULL` arm, because `credentials` is
+/// `NOT NULL DEFAULT '{}'` where `auth` is nullable — an unreachable clause
+/// reads as a case somebody checked. And `TRIM` is here because `auth` is
+/// written by the OAuth flow, which only ever emits compact JSON, while
+/// `credentials` is stored **verbatim from the caller**: ` {} ` is a body this
+/// endpoint accepts, and untrimmed it would report a credential that is not
+/// there.
+///
+/// The trim set is spelled out rather than left to a bare `TRIM(X)`, which in
+/// SQLite removes **spaces only** while Rust's `str::trim` removes every
+/// Unicode whitespace character — so the two spellings disagreed on a stored
+/// `"\n"`, which is what [`tests::the_two_has_credentials_rules_agree`] caught.
+/// Both sides now trim exactly these four ASCII bytes and nothing else.
+/// (A function only because a `const` cannot interpolate the trim set, which
+/// appears three times.)
+fn has_credentials_sql() -> String {
+    // Space, tab, LF, CR — the same four `stores_a_credential` trims.
+    const WS: &str = "char(32) || char(9) || char(10) || char(13)";
+    format!(
+        "(TRIM(credentials, {WS}) != ''
+             AND TRIM(credentials, {WS}) != 'null'
+             AND TRIM(credentials, {WS}) != '{{}}')"
+    )
+}
+
+/// [`has_credentials_sql`] over bytes this process already holds, for the two
+/// writes that know what they just stored and must not re-read it.
+///
+/// Kept in step with the SQL by
+/// [`tests::the_two_has_credentials_rules_agree`], which runs both over the
+/// same shapes — a second spelling of a rule is a rule that drifts.
+fn stores_a_credential(raw: &str) -> bool {
+    // `str::trim`, deliberately not: it removes every Unicode whitespace
+    // character and SQLite's `TRIM(X, Y)` removes exactly the bytes in `Y`.
+    let raw = raw.trim_matches([' ', '\t', '\n', '\r']);
+    !raw.is_empty() && raw != "null" && raw != "{}"
+}
 
 fn scan_integration(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScrubbedIntegration> {
     let enabled: i64 = row.get(3)?;
     let authenticated: i64 = row.get(4)?;
-    let services: String = row.get(5)?;
-    let created_at: String = row.get(6)?;
-    let updated_at: String = row.get(7)?;
+    let has_credentials: i64 = row.get(5)?;
+    let services: String = row.get(6)?;
+    let created_at: String = row.get(7)?;
+    let updated_at: String = row.get(8)?;
     Ok(ScrubbedIntegration {
         authenticated: authenticated != 0,
-        created_at: super::gotime::from_sql_text(&created_at, 6)?,
+        created_at: super::gotime::from_sql_text(&created_at, 7)?,
         enabled: enabled != 0,
+        has_credentials: has_credentials != 0,
         id: row.get(0)?,
         name: row.get(1)?,
         services: decode_services(&services),
         integration_type: row.get(2)?,
-        updated_at: super::gotime::from_sql_text(&updated_at, 7)?,
+        updated_at: super::gotime::from_sql_text(&updated_at, 8)?,
     })
 }
 
@@ -284,7 +356,7 @@ fn decode_services(raw: &str) -> Option<BTreeMap<String, ServiceConfig>> {
 /// an install with none answers `[]` rather than `null`.
 pub fn list(db_path: &Path) -> Result<Vec<ScrubbedIntegration>, String> {
     let conn = super::db::open_read_only(db_path)?;
-    let sql = format!("{INTEGRATION_COLUMNS}\n     ORDER BY name ASC");
+    let sql = format!("{}\n     ORDER BY name ASC", integration_columns());
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("preparing integration list: {e}"))?;
@@ -301,7 +373,7 @@ pub fn list(db_path: &Path) -> Result<Vec<ScrubbedIntegration>, String> {
 /// One integration, or `None` when no row has that id.
 pub fn get(db_path: &Path, id: &str) -> Result<Option<ScrubbedIntegration>, String> {
     let conn = super::db::open_read_only(db_path)?;
-    let sql = format!("{INTEGRATION_COLUMNS}\n     WHERE id = ?1");
+    let sql = format!("{}\n     WHERE id = ?1", integration_columns());
     conn.query_row(&sql, [id], scan_integration)
         .optional()
         .map_err(|e| format!("getting integration {id:?}: {e}"))
@@ -764,6 +836,9 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         authenticated: false,
         created_at: parse_written(&now)?,
         enabled: req.enabled,
+        // From the bytes just stored rather than a re-read: this is the one
+        // path that legitimately holds the blob, because the caller supplied it.
+        has_credentials: stores_a_credential(&credentials),
         id,
         name: req.name,
         services: Some(services),
@@ -818,12 +893,30 @@ struct UpdateIntegrationRequest {
 /// as are an empty `name` and an empty `type`. Adding the create-side checks
 /// here would refuse requests Go applies.
 ///
-/// Three things the store's upsert does that look like bugs and are the
+/// **`credentials` used to be overwritten wholesale, and since #515 it is
+/// not.** This is the one place the port deliberately diverges from the
+/// behaviour it inherited, because that behaviour was data loss: `GET` scrubs
+/// the column, so a read-then-write round trip — which is exactly what an edit
+/// form is — destroyed the stored secret, and the UI had to demand a re-typed
+/// token before it would save a rename. The field is now three-valued, the
+/// contract `gateway::config::update_provider` already uses for `api_key`:
+///
+/// - **absent** — the column is left out of the `SET` list entirely, so the
+///   stored blob survives byte for byte. This is what a scrubbed `GET`
+///   round-trips to.
+/// - **present** — stored verbatim, whatever it is. `{}` and `null` are
+///   therefore an explicit *clear*: they replace the secret with a blob that
+///   [`stores_a_credential`] reads as empty, which is what `create`'s own
+///   validator already calls "credentials are empty". There is no separate
+///   sentinel, because "replace with what you sent" needs none.
+///
+/// The absent arm never reads the stored credential into this process, so the
+/// module-header rule holds — it is the same discipline the `auth` rewrite
+/// below uses, one level up: *do not read what you only need to keep*.
+///
+/// Two things the store's upsert does that look like bugs and **are** the
 /// behaviour to reproduce:
 ///
-/// - **`credentials` is overwritten wholesale.** A `PUT` that omits the key
-///   stores `""` — it wipes the secret rather than preserving it. The frontend
-///   always sends the whole object; a hand-written request does not have to.
 /// - **`services` is not defaulted.** `Create` fills a nil map with `make(...)`
 ///   before saving; `Update` does not, so an omitted `services` is the literal
 ///   `null` in the column *and* `null` in the response, where a create would
@@ -851,11 +944,10 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     let created_at = parse_stored(&existing.created_at)?;
 
     let now = super::gotime::now_go_text();
-    let credentials = req
-        .credentials
-        .as_ref()
-        .map(|c| c.get().to_string())
-        .unwrap_or_default();
+    // Three-valued, and `.unwrap_or_default()` here was the whole bug: it
+    // flattened "the caller sent nothing" into "the caller sent an empty
+    // string" and then wrote it.
+    let credentials = req.credentials.as_ref().map(|c| c.get());
     // `json.Marshal(cfg.Services)`: a nil map is `null`, an empty one is `{}`.
     let services_json = super::gojson::to_vec_marshal(&req.services)
         .map_err(|e| WriteError::Fallback(format!("marshaling services: {e}")))?;
@@ -873,8 +965,15 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     // round trip does change is the two non-token spellings — a column holding
     // `''` or the literal four bytes `null` fails `IsAuthenticated`, so the
     // update writes SQL `NULL` in its place.
-    conn.execute(
-        "UPDATE integrations SET
+    //
+    // Two statements rather than one with a `CASE`, which is
+    // `gateway::config::update_provider`'s reasoning verbatim: the difference
+    // is *which columns are assigned*, and a
+    // `CASE WHEN ?4 IS NULL THEN credentials ELSE ?4 END` would still bind the
+    // blob's parameter slot on the path that must not have one.
+    match credentials {
+        Some(blob) => conn.execute(
+            "UPDATE integrations SET
             name = ?1, type = ?2, enabled = ?3,
             credentials = ?4, services = ?5, updated_at = ?6,
             auth = CASE
@@ -882,16 +981,35 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
                 ELSE NULL
             END
          WHERE id = ?7",
-        rusqlite::params![
-            &req.name,
-            &req.integration_type,
-            i64::from(req.enabled),
-            &credentials,
-            &services_json,
-            &now,
-            id,
-        ],
-    )
+            rusqlite::params![
+                &req.name,
+                &req.integration_type,
+                i64::from(req.enabled),
+                blob,
+                &services_json,
+                &now,
+                id,
+            ],
+        ),
+        None => conn.execute(
+            "UPDATE integrations SET
+            name = ?1, type = ?2, enabled = ?3,
+            services = ?4, updated_at = ?5,
+            auth = CASE
+                WHEN auth IS NOT NULL AND auth != '' AND auth != 'null' THEN auth
+                ELSE NULL
+            END
+         WHERE id = ?6",
+            rusqlite::params![
+                &req.name,
+                &req.integration_type,
+                i64::from(req.enabled),
+                &services_json,
+                &now,
+                id,
+            ],
+        ),
+    }
     .map_err(|e| WriteError::Fallback(format!("saving integration: {e}")))?;
     drop(conn);
 
@@ -905,6 +1023,12 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
         authenticated: existing.authenticated,
         created_at,
         enabled: req.enabled,
+        // What the row holds *now*: the blob just written when the caller sent
+        // one, and whatever was already there when it did not.
+        has_credentials: match credentials {
+            Some(blob) => stores_a_credential(blob),
+            None => existing.has_credentials,
+        },
         id: id.to_string(),
         name: req.name,
         services: req.services.map(unwrap_services),
@@ -948,11 +1072,14 @@ fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 ///
 /// `created_at` because the response carries it and the column keeps it;
 /// `authenticated` because the response reports it — computed in SQL, so this
-/// stays a read that cannot hold a secret; `type` because it decides whether
-/// this process may answer at all. Absent means 404.
+/// stays a read that cannot hold a secret; `has_credentials` for the same
+/// reason and on the same terms, because a `PUT` that omits the field now
+/// preserves the column and so has to report what is *already* there; `type`
+/// because it decides whether this process may answer at all. Absent means 404.
 struct ExistingIntegration {
     created_at: String,
     authenticated: bool,
+    has_credentials: bool,
     integration_type: String,
 }
 
@@ -961,17 +1088,23 @@ fn existing_for_update(
     id: &str,
 ) -> Result<Option<ExistingIntegration>, WriteError> {
     conn.query_row(
-        "SELECT created_at,
+        &format!(
+            "SELECT created_at,
                 (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
+                {} AS has_credentials,
                 type
          FROM integrations WHERE id = ?1",
+            has_credentials_sql()
+        ),
         [id],
         |row| {
             let authenticated: i64 = row.get(1)?;
+            let has_credentials: i64 = row.get(2)?;
             Ok(ExistingIntegration {
                 created_at: row.get(0)?,
                 authenticated: authenticated != 0,
-                integration_type: row.get(2)?,
+                has_credentials: has_credentials != 0,
+                integration_type: row.get(3)?,
             })
         },
     )
@@ -1356,9 +1489,57 @@ mod tests {
         for body in bodies {
             let json = String::from_utf8(body).expect("utf8");
             assert!(!json.contains(SECRET), "a secret reached the wire: {json}");
-            assert!(!json.contains("credentials"), "{json}");
+            // The **key**, quoted on both sides: since #515 every body carries
+            // `has_credentials`, which is a boolean about the column and
+            // contains the word. A bare substring check would either fail on
+            // that or, softened to a word, stop catching `"credentials":`.
+            assert!(!json.contains(r#""credentials""#), "{json}");
             assert!(!json.contains("bot_token"), "{json}");
             assert!(!json.contains(r#""auth""#), "{json}");
+        }
+    }
+
+    /// The same guarantee over the **write** bodies, which the read-side test
+    /// above cannot reach: `create` is the one path that legitimately holds the
+    /// blob, and `update` echoes a row whose credential it just preserved
+    /// without reading. Over the bytes, not over a struct field — a
+    /// field-level check only proves the fields the test already knows about.
+    #[test]
+    fn no_write_response_carries_a_credential_either() {
+        let file = migrated();
+        let created = create(
+            file.path(),
+            format!(
+                r#"{{"name":"N","type":"github",
+                     "credentials":{{"auth_mode":"pat","personal_access_token":"{SECRET}"}}}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("create");
+        let id = serde_json::from_str::<serde_json::Value>(&body_of(&created)).expect("json")["id"]
+            .as_str()
+            .expect("an id")
+            .to_string();
+
+        let bodies = [
+            body_of(&created),
+            // The preserve arm…
+            body_of(&update(file.path(), &id, br#"{"name":"R","type":"github"}"#).expect("update")),
+            // …and the replace arm.
+            body_of(
+                &update(
+                    file.path(),
+                    &id,
+                    format!(r#"{{"name":"R","type":"github","credentials":{{"pat":"{SECRET}"}}}}"#)
+                        .as_bytes(),
+                )
+                .expect("update"),
+            ),
+        ];
+        for json in bodies {
+            assert!(!json.contains(SECRET), "a secret reached the wire: {json}");
+            assert!(!json.contains(r#""credentials""#), "{json}");
+            assert!(!json.contains("pat"), "{json}");
         }
     }
 
@@ -1458,6 +1639,11 @@ mod tests {
             String::from_utf8(body).expect("utf8"),
             concat!(
                 r#"{"authenticated":true,"created_at":"2026-08-01T10:00:00Z","enabled":true,"#,
+                // #515's addition, and its **position** is the assertion: it
+                // sorts between `enabled` and `id`, which is where the field
+                // sits in the struct. Declared anywhere else it would move a
+                // byte on a response whose key order is the contract.
+                r#""has_credentials":true,"#,
                 // `<` and `>` arrive escaped: `writeJSON` uses `json.Encoder`,
                 // which HTML-escapes by default.
                 r#""id":"zulu-int","name":"Zulu \u003cwork\u003e","services":{"messaging":"#,
@@ -1904,8 +2090,10 @@ mod tests {
             "{body}"
         );
         assert!(!body.contains("2026-01-02T00:00:00Z"), "{body}");
-        // No secret, on either the way in or the way out.
-        assert!(!body.contains("credentials"), "{body}");
+        // No secret, on either the way in or the way out. The key is quoted
+        // on both sides because `has_credentials` contains the word.
+        assert!(!body.contains(r#""credentials""#), "{body}");
+        assert!(body.contains(r#""has_credentials":true"#), "{body}");
         assert!(!body.contains("pat"), "{body}");
         assert!(!body.contains("KEEP-ME"), "{body}");
 
@@ -1928,17 +2116,235 @@ mod tests {
         );
     }
 
-    /// The store's upsert overwrites `credentials` wholesale, so a `PUT` that
-    /// omits the key **wipes the secret**. Not helpfully preserved: the write
-    /// has to be the one Go performs, or the two databases diverge on a column
-    /// nothing else can reconcile.
+    /// #515, and the inverse of what this test asserted until then: a `PUT`
+    /// that omits the key **preserves** the secret, byte for byte.
+    ///
+    /// It was `a_put_that_omits_credentials_wipes_them`, pinning the store's
+    /// wholesale overwrite on the reasoning that the write "has to be the one
+    /// Go performs, or the two databases diverge on a column nothing else can
+    /// reconcile". There is no second implementation to diverge from since
+    /// #391, and what the rule was protecting was a data-loss bug: `GET`
+    /// scrubs this column, so the read-then-write an edit form performs
+    /// destroyed the stored credential.
+    ///
+    /// The fixture blob is **multi-key, out of alphabetical order, with a
+    /// trailing-zero decimal and interior whitespace** for the same reason
+    /// `decode_body`'s own tests use one: a single-key blob is a fixed point of
+    /// every round trip that could rebuild it, so it would pass against a
+    /// preservation that went through a re-serialization.
     #[test]
-    fn a_put_that_omits_credentials_wipes_them() {
+    fn a_put_that_omits_credentials_preserves_them() {
+        let file = migrated();
+        let conn = Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                       created_at, updated_at)
+             VALUES ('int-1', 'Original', 'github', 1, ?1, '{\"token\":\"t\"}', '{}',
+                     '2026-01-01 00:00:00 +0000 UTC', '2026-01-02 00:00:00 +0000 UTC')",
+            [r#"{"zebra":"z", "pat":"KEEP-ME","rate":1.50}"#],
+        )
+        .expect("seed");
+        drop(conn);
+
+        let answer =
+            update(file.path(), "int-1", br#"{"name":"N","type":"github"}"#).expect("update");
+
+        assert_eq!(
+            stored(&file, "SELECT credentials FROM integrations"),
+            r#"{"zebra":"z", "pat":"KEEP-ME","rate":1.50}"#,
+            "an omitted credentials key must leave the column untouched"
+        );
+        // The rest of the row still moved, so this is preservation rather than
+        // a write that did not happen.
+        assert_eq!(stored(&file, "SELECT name FROM integrations"), "N");
+        // And the response says a credential is there, which is the only way an
+        // edit form can tell "leaving this alone keeps something" from
+        // "leaving this alone keeps nothing".
+        assert!(
+            body_of(&answer).contains(r#""has_credentials":true"#),
+            "{}",
+            body_of(&answer)
+        );
+    }
+
+    /// The other two arms of the three-valued field. Both are a `Some`, so both
+    /// are stored verbatim — there is no clear sentinel, because "replace with
+    /// what you sent" needs none, and both spellings read as empty.
+    #[test]
+    fn an_explicit_empty_credentials_clears_the_stored_one() {
+        for (body, want) in [
+            (
+                br#"{"name":"N","type":"github","credentials":{}}"#.as_slice(),
+                "{}",
+            ),
+            (
+                br#"{"name":"N","type":"github","credentials":null}"#.as_slice(),
+                "null",
+            ),
+        ] {
+            let file = migrated();
+            seed_full_integration(&file, "int-1", Some(r#"{"token":"t"}"#));
+
+            let answer = update(file.path(), "int-1", body).expect("update");
+
+            assert_eq!(
+                stored(&file, "SELECT credentials FROM integrations"),
+                want,
+                "an explicit {want} must replace the stored blob"
+            );
+            assert!(
+                body_of(&answer).contains(r#""has_credentials":false"#),
+                "{}",
+                body_of(&answer)
+            );
+        }
+    }
+
+    /// The integration twin of
+    /// `gateway::config::tests::a_scrubbed_read_written_straight_back_preserves_the_stored_key`,
+    /// and the shape that matters: it drives the **real** `GET` body back
+    /// through the `PUT` rather than a hand-written approximation of it, so it
+    /// fails if the read ever starts emitting a `credentials` key the write
+    /// would then honour as an empty blob.
+    ///
+    /// This is the user-facing bug in one test: open an integration, change its
+    /// name, save. It fails on the revert.
+    #[test]
+    fn a_scrubbed_read_written_straight_back_preserves_the_stored_credential() {
         let file = migrated();
         seed_full_integration(&file, "int-1", Some(r#"{"token":"t"}"#));
+        let before = stored(&file, "SELECT credentials FROM integrations");
+        assert!(before.contains(SECRET), "the fixture must seed a secret");
 
-        update(file.path(), "int-1", br#"{"name":"N","type":"github"}"#).expect("update");
-        assert_eq!(stored(&file, "SELECT credentials FROM integrations"), "");
+        // Exactly what the edit form has: the scrubbed read, with one field
+        // edited and nothing else touched.
+        let read = get(file.path(), "int-1").expect("get").expect("a row");
+        let mut round_trip: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&super::super::gojson::to_vec(&read).expect("encode"))
+                .expect("decode");
+        assert!(
+            !round_trip.contains_key("credentials"),
+            "the read must not carry the column at all: {round_trip:?}"
+        );
+        round_trip.insert("name".into(), serde_json::json!("Renamed"));
+
+        update(
+            file.path(),
+            "int-1",
+            &serde_json::to_vec(&round_trip).expect("encode request"),
+        )
+        .expect("update");
+
+        assert_eq!(
+            stored(&file, "SELECT credentials FROM integrations"),
+            before,
+            "renaming an integration destroyed its credential"
+        );
+        assert_eq!(stored(&file, "SELECT name FROM integrations"), "Renamed");
+    }
+
+    /// The reload is **outside** the credentials branch, so neither arm can
+    /// skip it.
+    ///
+    /// This is the hazard #515's two-statement split introduces and nothing
+    /// else would report: a hosted MCP server closes over the credential it was
+    /// started with, so an update that persists a *replaced* token without
+    /// reloading leaves the revoked one answering `tools/call` for the life of
+    /// the process — a 200 saying the save worked. Moving `reload_blocking`
+    /// into the `Some` arm even *reads* like a tightening ("only reload when
+    /// the credential changed"), and it is the exact inverse: it is the replace
+    /// path that must reload.
+    ///
+    /// Asserted against the source because `reload_blocking` is
+    /// `block_on_detached` fire-and-forget with no observable effect on a
+    /// database this test could inspect — the same reason
+    /// `lib.rs`'s startup-ordering guards read their own file. It is a
+    /// structural claim, and structure is what the source shows.
+    #[test]
+    fn the_registry_reload_is_not_inside_either_credentials_arm() {
+        const SOURCE: &str = include_str!("integrations.rs");
+        let update_fn = SOURCE
+            .split_once("fn update(db_path: &Path, id: &str, body: &[u8])")
+            .expect("update is still spelled this way")
+            .1;
+        let body = &update_fn[..update_fn.find("fn delete(").expect("delete follows update")];
+
+        let branch = body
+            .find("match credentials {")
+            .expect("the three-valued branch");
+        let reload = body
+            .find("registry::reload_blocking(db_path, id);")
+            .expect("the reload");
+        assert!(
+            reload > branch,
+            "the reload must follow the branch, not precede it"
+        );
+        // Between them there must be the branch's own closing `.map_err(...)?`
+        // and the `drop(conn)` — i.e. the reload is at the function's top
+        // level. The cheap structural proxy: exactly one `reload_blocking`
+        // call, so it cannot have been duplicated into both arms either.
+        assert_eq!(
+            body.matches("registry::reload_blocking").count(),
+            1,
+            "one unconditional reload, not one per arm"
+        );
+        let between = &body[branch..reload];
+        assert!(
+            between.contains("drop(conn);"),
+            "the reload sits after the write completes, outside the match"
+        );
+    }
+
+    /// One rule, two spellings — [`has_credentials_sql`] and
+    /// [`stores_a_credential`] — because the write path knows the bytes it just
+    /// stored and must not re-read a column this module is not allowed to
+    /// select. Drift between them is a response that lies about whether a
+    /// secret is there, so it is asserted rather than assumed.
+    #[test]
+    fn the_two_has_credentials_rules_agree() {
+        let file = migrated();
+        let conn = Connection::open(file.path()).expect("open");
+        let shapes = [
+            "",
+            "null",
+            "{}",
+            " {} ",
+            "\n",
+            "\t{}\r\n",
+            // A NO-BREAK SPACE, which `str::trim` removes and SQLite's
+            // `TRIM(X, Y)` does not — so both sides must call this one a
+            // credential, and neither may quietly widen its trim set.
+            "\u{a0}",
+            r#"{"pat":"x"}"#,
+            r#"{"pat":""}"#,
+            "[]",
+            "0",
+        ];
+        for (n, shape) in shapes.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                           created_at, updated_at)
+                 VALUES (?1, 'n', 'github', 1, ?2, NULL, '{}',
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                rusqlite::params![format!("row-{n}"), shape],
+            )
+            .expect("seed");
+            let in_sql: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM integrations WHERE id = ?1",
+                        has_credentials_sql()
+                    ),
+                    [format!("row-{n}")],
+                    |row| row.get(0),
+                )
+                .expect("query");
+            assert_eq!(
+                in_sql != 0,
+                stores_a_credential(shape),
+                "the two rules disagree about {shape:?}"
+            );
+        }
     }
 
     /// `Update` does **not** default a nil services map the way `Create` does,
