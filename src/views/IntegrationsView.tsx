@@ -952,15 +952,20 @@ function IntegrationDetail({
               ) : (
                 /* The auth method is part of the credential blob, so it is
                    offered only alongside the fields that carry it: changing it
-                   on its own would send nothing and silently do nothing.
+                   on its own would send nothing and silently do nothing. That
+                   is also why `canSave` demands a complete credential whenever
+                   the mode changed — see the note on it.
 
-                   The label is deliberately **not** `mode.label`. `modeValue`
-                   seeds from `provider.modes[0]` and nothing reports the stored
-                   `auth_mode`, so on the one multi-mode provider (Slack) a row
-                   connected by OAuth would be captioned "Bot token". Before
-                   this section moved, that default sat on an *input* the user
-                   was about to fill; as a caption on a stored secret it is a
-                   statement of fact the app cannot make. */
+                   The label stays generic rather than becoming `mode.label`.
+                   The stored mode *is* reportable since #513, and the inspector
+                   reports it — but only when the row records one. A multi-mode
+                   row saved before that field existed records nothing, and
+                   `modeValue` falls back to `provider.modes[0]` for it, so a
+                   Slack row connected by OAuth would still be captioned "Bot
+                   token" here. As a caption on a stored secret that is a claim
+                   the app cannot make for every row, and this one caption
+                   serves all of them. `storedMode`'s note above draws the same
+                   distinction for the auth actions. */
                 <div className="formrow">
                   <div className="formrow__label">Credentials</div>
                   <div className="formrow__control">
