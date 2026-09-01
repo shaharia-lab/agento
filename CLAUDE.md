@@ -3003,9 +3003,8 @@ either way is the easy mistake here.
 `claude_cli::executable()` and then the bare name — see *The one external
 dependency* for the whole order and why a `PATH` scan was never enough. The
 override is re-read per call rather than taken from the cache, and that is for
-the tests rather than the app: the cache is a `OnceLock`, so a test binary whose
-cases each point at a *different* scripted CLI would otherwise all run the
-first one's.
+the tests rather than the app: a test binary whose cases each point at a
+*different* scripted CLI would otherwise all run the first one's.
 
 ### The scan (#289)
 
@@ -3430,7 +3429,13 @@ option-building — `TurnSettings::stored` and `registry::can_host`, shared by a
 three callers, plus `runner::load`, which is the chat turn's alone. Every one is
 `open_read_only`, and a WAL reader does not wait on a writer, which is why they
 are left: the test's contention is a write lock, so it says nothing about them
-either way. A *write* added there would be a different matter. A panic *inside* a handed-off
+either way. A *write* added there would be a different matter. **So is a
+subprocess**, and #533 nearly added one: `runner::claude_executable` can now
+re-walk the CLI order, which spawns a login shell bounded at 3 s plus a
+`--version` bounded at 2 s through a `std::thread::sleep` poll loop — twice the
+hold this test was written to catch. It is `spawn_blocking`ed at that one call
+site for exactly this rule; the list above is "non-blocking reads", not
+"whatever option-building happens to do". A panic *inside* a handed-off
 section is the one thing `db::blocking` cannot make safe: the executor's `finish`
 may have written the session results and not the job row, leaving a `running`
 row nothing will finish, which is why the rule is "every path ends in a job
@@ -4363,7 +4368,7 @@ runtime, which is not a packaging change.
 (#503). `AGENTO_CLAUDE_EXECUTABLE` → the stored `claude_executable_path` setting
 (migration 38) → **`$SHELL -lic 'command -v claude'`** → the `PATH` this process
 was launched with → a list of known install locations. First hit wins; the
-answer is cached in a `OnceLock` for the process.
+answer is cached, and **revalidated before every spawn** (#533, below).
 
 - **The login-shell probe is not decoration, and it must not be "simplified"
   away.** A GUI application does not inherit the user's shell `PATH`: a macOS
@@ -4394,11 +4399,46 @@ answer is cached in a `OnceLock` for the process.
   are *the worst case a user waits for a window*, not a generous ceiling. A
   pathological shell degrades to "found by a later rule", never to a window that
   does not open. Priming on a background thread was rejected: `cached()` would
-  race it, and the loser fills the `OnceLock` **without the stored override**,
+  race it, and the loser fills the cache **without the stored override**,
   so a configured path would be ignored on some launches and not others.
-- **Resolution is once per launch.** Saving the setting takes effect at the next
-  start, which the Settings help says. Re-detecting live was considered and left
-  out.
+- **The walk is once per launch; its answer is revalidated before every spawn**
+  (#533). Claude Code self-updates, and the native install is a symlink into a
+  versioned directory that the update swaps — so for the length of that swap the
+  resolved path dangles, `execve` answers `ENOENT`, and a `OnceLock` filled at
+  startup meant **every chat and every scheduled run failed until the app was
+  restarted**, naming a path that works perfectly in a terminal. `executable()`
+  therefore `stat`s the cached path (`is_executable_file`, which follows
+  symlinks and is exactly the check a dangling one fails) and re-runs the walk
+  when it no longer holds. Five rules, each of them an acceptance criterion:
+  - **The refresh is given the stored override the first walk was given**, held
+    beside the resolution in the cache rather than re-derived — losing it would
+    silently demote a user's configured path to whatever detection finds, which
+    is the same defect background priming was rejected over.
+  - **`AGENTO_CLAUDE_EXECUTABLE` is returned verbatim and is never stat-gated**,
+    because rule 1 is taken on trust by design.
+  - **Re-resolution is rate-limited** (`REFRESH_COOLDOWN`, 10 s), or a CLI that
+    is genuinely gone pays a login-shell probe plus a `--version` per candidate
+    on every turn. The slot is claimed under the write lock *before* the walk, so
+    two concurrent turns produce one walk; the cooldown is keyed on the last
+    **refresh**, not on when the resolution was made, so the first failure always
+    recovers however recently the process started. Inside the cooldown, whatever
+    the last walk concluded is returned untouched.
+  - **A walk that finds nothing overwrites the cache with nothing**, and that is
+    the deliberate half of the previous rule rather than an oversight in it. The
+    old path is not kept: `cached()` is what the banner reads, and a banner
+    claiming an install detection could not find is the #503 defect wearing a
+    different hat. The spawn falls back to the bare name and fails with
+    `binary not found: "claude"` — which is what a machine that never had the
+    CLI has always reported, so the failure a user sees is unchanged rather than
+    newly worded. The cost is that recovery from a *transient* break waits for
+    the next due walk instead of the next free `stat`, and a ≤10 s wait is the
+    right price for a banner that cannot lie.
+  - **`cached()` reads the refreshed value**, so the banner and Settings report
+    the recovery — #503's "the banner and the spawn are one answer", kept true
+    through a refresh. `host_info` reads it **once** and splits, or a refresh
+    between two reads would report one rule's path beside another rule's name.
+  There is no filesystem watcher and no background re-detection timer. Saving
+  the setting still takes effect at the next start, which the Settings help says.
 
 ---
 

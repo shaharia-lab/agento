@@ -86,7 +86,9 @@ pub struct HostInfo {
     /// Resolved path to the Claude Code CLI, or null when it could not be
     /// found. **The same resolution a turn spawns** ([`claude_cli`]) — the two
     /// were separate lookups that happened to call one function, and a banner
-    /// that disagrees with the spawn is #503.
+    /// that disagrees with the spawn is #503. Re-read per call rather than
+    /// captured, so a turn that recovered from a CLI self-update (#533) is
+    /// reported here too.
     pub claude_cli: Option<String>,
     /// Which rule produced `claude_cli` — `env`, `setting`, `login-shell`,
     /// `path` or `candidate`. Null exactly when `claude_cli` is.
@@ -105,6 +107,7 @@ pub struct HostInfo {
 
 #[tauri::command]
 fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
+    let claude = claude_cli::cached();
     HostInfo {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
@@ -120,8 +123,12 @@ fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
             log::error!("minting the webview session token: {e}");
             String::new()
         }),
-        claude_cli: claude_cli::cached().map(|r| r.path.clone()),
-        claude_cli_source: claude_cli::cached().map(|r| r.source.as_str().to_string()),
+        // Read once and split, rather than twice: since #533 this is a lock
+        // read and a clone rather than a `OnceLock` peek, and — more to the
+        // point — a refresh between the two calls would report one rule's path
+        // beside another rule's name.
+        claude_cli: claude.as_ref().map(|r| r.path.clone()),
+        claude_cli_source: claude.as_ref().map(|r| r.source.as_str().to_string()),
         can_self_update: install_kind() != "package",
         install_kind: install_kind().to_string(),
     }
