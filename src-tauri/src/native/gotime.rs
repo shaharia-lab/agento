@@ -12,7 +12,7 @@
 //! divergence again there would cost the same day twice.
 
 use chrono::{DateTime, FixedOffset, Utc};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A timestamp that serializes exactly as Go's `time.Time` does.
 ///
@@ -245,6 +245,27 @@ impl Serialize for GoTime {
     }
 }
 
+/// The inverse of [`Serialize`], for the request bodies that carry an instant.
+///
+/// `time.Time.UnmarshalJSON` reads a JSON string with the RFC 3339 layout, so
+/// this parses through [`parse_rfc3339`] — Go's own grammar — rather than
+/// `chrono::DateTime::parse_from_rfc3339`, which disagrees with it in five
+/// ways and would refuse three shapes `encoding/json` accepts. A value that
+/// does not parse is a decode error, which `writes::decode_body` renders as
+/// the same 400 every other mistyped field answers.
+///
+/// The offset is preserved, exactly as [`GoTime::parse`] preserves it; a write
+/// path that stores through `to_go_string_utc` is what normalizes to UTC, and
+/// that is the storage layer's business rather than the decoder's.
+impl<'de> Deserialize<'de> for GoTime {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        parse_rfc3339(&text)
+            .map(GoTime)
+            .ok_or_else(|| serde::de::Error::custom(format!("parsing time {text:?}")))
+    }
+}
+
 /// Render a timestamp as Go's `time.RFC3339Nano` layout:
 /// `2006-01-02T15:04:05.999999999Z07:00`, where the `9`s mean "trailing zeros
 /// removed, and the point with them".
@@ -455,6 +476,54 @@ pub fn from_sql_text(text: &str, index: usize) -> rusqlite::Result<GoTime> {
 mod rfc3339_tests {
     use super::*;
     use chrono::Timelike;
+
+    /// The [`Deserialize`] impl parses through [`parse_rfc3339`], and **this is
+    /// the test that makes that a decision rather than a preference** (#540).
+    /// Swapping the impl body to `DateTime::parse_from_rfc3339` leaves the rest
+    /// of the suite entirely green — every `stop_after_time` fixture is a shape
+    /// both parsers accept — so without this the divergence the module header
+    /// says "would cost the same day twice" could be reintroduced by a
+    /// simplification with nothing red to stop it. Both directions are pinned,
+    /// because each fails differently: chrono's laxity accepts rows the wire
+    /// refuses, and chrono's strictness 400s input the wire takes.
+    #[test]
+    fn deserializing_a_gotime_uses_gos_grammar_and_not_chronos() {
+        let parsed = |json: &str| serde_json::from_str::<GoTime>(json);
+
+        // Go accepts, chrono rejects — the direction that turns into refusing
+        // a body `encoding/json` would have taken.
+        assert_eq!(
+            parsed(r#""2026-06-01T12:00:00,5Z""#)
+                .expect("a comma decimal separator")
+                .0
+                .nanosecond(),
+            500_000_000
+        );
+        assert_eq!(
+            parsed(r#""2026-06-01T5:04:05Z""#)
+                .expect("a one-digit hour")
+                .0
+                .hour(),
+            5
+        );
+        assert!(
+            parsed(r#""2026-06-01T12:00:00+24:00""#).is_ok(),
+            "the offset hour is unbounded to Go"
+        );
+
+        // Go rejects, chrono accepts — the direction that stores a row the
+        // wire would have refused.
+        assert!(parsed(r#""2026-06-01t12:00:00z""#).is_err());
+        assert!(
+            parsed(r#""2026-06-30T23:59:60Z""#).is_err(),
+            "a leap second is `second out of range` to Go"
+        );
+
+        // And the shape neither parser is asked about: a JSON value that is
+        // not a string at all.
+        assert!(parsed("1780000000").is_err());
+        assert!(parsed(r#"["2026-06-01T12:00:00Z"]"#).is_err());
+    }
 
     /// The five disagreements [`parse_rfc3339`] exists for, each measured
     /// against the pinned Go toolchain rather than reasoned about.

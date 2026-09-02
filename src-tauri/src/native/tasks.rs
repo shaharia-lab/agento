@@ -963,22 +963,129 @@ mod tests {
         assert_eq!(stored, "{}");
     }
 
+    /// The inverse of `the_five_columns_the_request_cannot_reach_are_stored_at_
+    /// their_zero_values`, kept in that shape rather than deleted (#540) — the
+    /// way `a_full_length_positional_array` was inverted — so a later session
+    /// reading "Go discards these" cannot restore the drop without a red test.
     #[test]
-    fn the_five_columns_the_request_cannot_reach_are_stored_at_their_zero_values() {
-        // Go's handler copies nine fields out of the request and leaves the
-        // rest zero, so a body naming them changes nothing. Reproduced rather
-        // than "fixed" — accepting them here would store what Go discards.
+    fn the_five_columns_go_never_carried_now_reach_the_row() {
         let file = migrated();
         let task = created(
             &file,
             r#"{"name":"N","prompt":"p","working_directory":"/tmp","model":"opus",
-                "settings_profile_id":"prof","stop_after_count":9}"#,
+                "settings_profile_id":"prof","stop_after_count":9,
+                "stop_after_time":"2027-06-01T12:00:00Z"}"#,
         );
-        assert!(task.working_directory.is_empty());
-        assert!(task.model.is_empty());
-        assert!(task.settings_profile_id.is_empty());
-        assert_eq!(task.stop_after_count, 0);
-        assert!(task.stop_after_time.is_none());
+        assert_eq!(task.working_directory, "/tmp");
+        assert_eq!(task.model, "opus");
+        assert_eq!(task.settings_profile_id, "prof");
+        assert_eq!(task.stop_after_count, 9);
+        assert_eq!(
+            task.stop_after_time.map(|t| t.rfc3339_nano_utc()),
+            Some("2027-06-01T12:00:00Z".to_string()),
+        );
+    }
+
+    /// The whole hop the report was about: create with all five set, read them
+    /// back off the *stored row*, then `PUT` a change to each and re-read.
+    #[test]
+    fn the_five_fields_round_trip_through_create_read_and_update() {
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","working_directory":"/w/one","model":"sonnet",
+                "settings_profile_id":"prof-a","stop_after_count":3,
+                "stop_after_time":"2027-06-01T12:00:00Z"}"#,
+        );
+
+        update_task(
+            file.path(),
+            &task.id,
+            br#"{"name":"N","prompt":"p","working_directory":"/w/two","model":"opus",
+                 "settings_profile_id":"prof-b","stop_after_count":7,
+                 "stop_after_time":"2028-01-02T03:04:05Z"}"#,
+        )
+        .expect("update");
+
+        let stored = get_task(file.path(), &task.id)
+            .expect("read")
+            .expect("task");
+        assert_eq!(stored.working_directory, "/w/two");
+        assert_eq!(stored.model, "opus");
+        assert_eq!(stored.settings_profile_id, "prof-b");
+        assert_eq!(stored.stop_after_count, 7);
+        assert_eq!(
+            stored.stop_after_time.map(|t| t.rfc3339_nano_utc()),
+            Some("2028-01-02T03:04:05Z".to_string()),
+        );
+    }
+
+    /// `stop_after_time` is the one genuinely nullable field of the five, so
+    /// absent and an explicit `null` must agree — and a value must come back
+    /// spelled exactly as it went in, since the read path is what the `full`
+    /// golden pins.
+    #[test]
+    fn stop_after_time_is_none_when_absent_or_null_and_byte_identical_otherwise() {
+        for body in [
+            r#"{"name":"N","prompt":"p"}"#,
+            r#"{"name":"N","prompt":"p","stop_after_time":null}"#,
+        ] {
+            let file = migrated();
+            assert!(created(&file, body).stop_after_time.is_none(), "for {body}");
+        }
+
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","stop_after_time":"2027-06-01T12:00:00Z"}"#,
+        );
+        let encoded =
+            String::from_utf8(crate::native::gojson::to_vec(&task).expect("encode")).expect("utf8");
+        assert!(
+            encoded.contains(r#""stop_after_time":"2027-06-01T12:00:00Z""#),
+            "re-emitted as it arrived, in {encoded}"
+        );
+    }
+
+    /// An unparsable instant is a decode failure, not a silently dropped field
+    /// — the same 400 any other mistyped value on this body answers.
+    #[test]
+    fn an_unparsable_stop_after_time_is_a_400_rather_than_a_silent_none() {
+        let file = migrated();
+        let err = create_task(
+            file.path(),
+            br#"{"name":"N","prompt":"p","stop_after_time":"the first of June"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            list_tasks(file.path()).expect("list").is_empty(),
+            "a rejected create stores nothing"
+        );
+    }
+
+    /// The documented `PUT` semantics: replace, not preserve. An omitted key
+    /// resets its column, exactly as it does for `description` or `agent_slug`.
+    #[test]
+    fn an_omitted_field_on_update_resets_it_rather_than_preserving_it() {
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","working_directory":"/w","model":"opus",
+                "settings_profile_id":"prof","stop_after_count":9,
+                "stop_after_time":"2027-06-01T12:00:00Z"}"#,
+        );
+
+        update_task(file.path(), &task.id, br#"{"name":"N","prompt":"p"}"#).expect("update");
+
+        let stored = get_task(file.path(), &task.id)
+            .expect("read")
+            .expect("task");
+        assert!(stored.working_directory.is_empty());
+        assert!(stored.model.is_empty());
+        assert!(stored.settings_profile_id.is_empty());
+        assert_eq!(stored.stop_after_count, 0);
+        assert!(stored.stop_after_time.is_none());
     }
 
     #[test]
@@ -1636,12 +1743,25 @@ pub fn update_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String
 /// and two identical structs here would only be two places to forget an
 /// attribute.
 ///
-/// **Note what is absent**: `working_directory`, `model`, `settings_profile_id`,
-/// `stop_after_count` and `stop_after_time` are columns the table has and the
-/// request body does not, so both handlers build a `ScheduledTask` with those at
-/// their zero values. Reproduced rather than "fixed": a create that accepted a
-/// working directory here would store one Go's create discards, and an update
-/// that preserved the existing one would keep a value Go's update clears.
+/// **Five fields here have no Go ancestor, and that is deliberate** (#540).
+/// `working_directory`, `model`, `settings_profile_id`, `stop_after_count` and
+/// `stop_after_time` are columns the table has, the executor reads and the `GET`
+/// returns, and Go's two request types never carried — so both handlers built a
+/// `ScheduledTask` with them at their zero values and a form that posted them
+/// got a `200` and stored nothing. The port reproduced that while a second
+/// implementation shared the database; #391 deleted the Go tree, so the
+/// constraint is gone and this is simply Agento's bug. **Do not "restore
+/// parity" by taking them out again** — the Tasks form has edited all five
+/// since before the port, and dropping them is silent data loss.
+///
+/// **The `PUT` semantics are replace, for these five as for every other field
+/// on this route**: an omitted key resets the column to its zero value, because
+/// the only client posts the whole record back and a per-field preserve rule
+/// would make "clear my working directory" unexpressible. That is deliberately
+/// *not* `gateway::config::update_provider`'s three-valued absent/empty/present
+/// contract, nor the one #515 gave the integrations `PUT`: those exist because
+/// the field is a secret the caller cannot read back and therefore cannot
+/// resend, which is true of none of these five.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct TaskRequest {
@@ -1666,11 +1786,39 @@ struct TaskRequest {
     timeout_minutes: i64,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     save_output: bool,
+
+    // The five described in the doc comment above: Go's request types
+    // stopped at `save_output`.
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    working_directory: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    model: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    settings_profile_id: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    stop_after_count: i64,
+    /// The one genuinely nullable field, so a **plain** `Option` and no
+    /// `null_is_zero_value`: absent and explicit `null` both mean `None`, which
+    /// is what a bare `Option` already gives, and the column is `DATETIME NULL`
+    /// rather than a zero-valued `NOT NULL`. Note this is also the one field
+    /// where `deserialize_with` would change the shape rather than only the
+    /// value — see `CLAUDE.md` → *They are types rather than `deserialize_with`
+    /// functions*.
+    stop_after_time: Option<GoTime>,
 }
 
 impl TaskRequest {
     /// The `storage.ScheduledTask` both handlers build from the request — the
-    /// nine fields they copy, and nothing else.
+    /// fourteen fields they copy, and nothing else.
+    ///
+    /// The other seven are the row's own, and they split three ways. `id` is
+    /// minted on a create and re-set from the URL on an update; `updated_at` is
+    /// restamped by every write. Four are taken from the **stored row** by
+    /// `update_task` — `created_at`, `run_count`, `last_run_at` and
+    /// `last_run_status` — which is what stops an edit resetting a task's
+    /// history. `next_run_at` is the exception in both directions: nothing in
+    /// this crate ever writes it, and an update **clears** it rather than
+    /// carrying it over. See `update_task`'s own doc comment.
     fn into_task(self) -> ScheduledTask {
         ScheduledTask {
             id: String::new(),
@@ -1678,14 +1826,14 @@ impl TaskRequest {
             description: self.description,
             prompt: self.prompt,
             agent_slug: self.agent_slug,
-            working_directory: String::new(),
-            model: String::new(),
-            settings_profile_id: String::new(),
+            working_directory: self.working_directory,
+            model: self.model,
+            settings_profile_id: self.settings_profile_id,
             timeout_minutes: self.timeout_minutes,
             schedule_type: self.schedule_type,
             schedule_config: self.schedule_config.0,
-            stop_after_count: 0,
-            stop_after_time: None,
+            stop_after_count: self.stop_after_count,
+            stop_after_time: self.stop_after_time,
             save_output: self.save_output,
             status: self.status,
             run_count: 0,
@@ -1812,7 +1960,12 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
 const DEFAULT_TIMEOUT_MINUTES: i64 = 30;
 
 /// `taskService.CreateTask`.
-fn create_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+///
+/// `pub(crate)` for one caller outside this module: the scheduler's own
+/// `a_stop_after_count_task_created_through_the_api_pauses_on_the_limit`
+/// (#540), which has to build its task the way the app does rather than by
+/// `INSERT`, or it cannot see the write hop that was dropping the budget.
+pub(crate) fn create_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     let req = decode_body::<TaskRequest>(body)?;
     let mut task = req.into_task();
     validate_task(&mut task)?;

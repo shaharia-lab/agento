@@ -4615,6 +4615,17 @@ these are now simply Agento's bugs, and fixing them is unblocked.
   until credentials were re-entered) is the thing a future session would
   otherwise restore. See *Wire-format traps* above for the contract that
   replaced it.
+- ~~**`POST`/`PUT /api/tasks` silently discard five fields the Tasks form can
+  edit** — `working_directory`, `model`, `settings_profile_id`,
+  `stop_after_count` and `stop_after_time`.~~ **Fixed by #540**, and struck
+  through rather than deleted for #515's reason: the note it replaced said
+  outright that accepting them "would store what Go discards", so a session
+  reading only `TaskRequest` could reasonably restore the drop. It must not —
+  the executor has always read all five, the `GET` has always returned them, and
+  the write hop was the only broken one. **The `PUT` is replace, not preserve**:
+  an omitted key resets its column, because the form posts the whole record and
+  none of the five is a write-only secret. `TaskRequest`'s own doc comment
+  carries the reasoning.
 - **An agent's `permission_mode` cannot be persisted.** `AgentRequest` has no
   such field, so the API silently drops it even though the config type and the
   validator both know about it.
