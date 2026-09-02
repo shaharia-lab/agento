@@ -199,15 +199,20 @@ export function AreaChart({
     : undefined;
   const offset = points.length - (cmp?.length ?? 0);
 
-  // Two peaks, and they are for two different things. `peak` is the *current*
-  // window's own, because that is what the caption and the aria-label name —
-  // reporting the combined maximum there would attribute a figure to a period
-  // it never occurred in. `scaleTo` is the combined one, because the two lines
-  // have to share a y-maximum or a smaller series draws above a larger one,
-  // which is a false crossover rather than a comparison.
+  // Two maxima, and they are for two different things. `peak` is the *current*
+  // window's own, and it is the only one named anywhere: it is exact, because
+  // the caller's trim removes zero buckets only. `scaleTo` also bounds the
+  // comparison, because the two lines have to share a y-maximum or a smaller
+  // series draws above a larger one, which is a false crossover rather than a
+  // comparison — but it is deliberately **not** captioned. `cmp` is a truncated,
+  // window-aligned slice of the comparison, so its maximum describes the drawn
+  // span rather than the period, and a number captioned "previous period peak"
+  // would attribute a figure to a window that may never have had it.
   const peak = points.reduce((m, p) => Math.max(m, p.value), 0);
-  const comparePeak = cmp?.reduce((m, p) => Math.max(m, p.value), 0) ?? 0;
-  const scaleTo = Math.max(peak, comparePeak);
+  const scaleTo = Math.max(
+    peak,
+    cmp?.reduce((m, p) => Math.max(m, p.value), 0) ?? 0
+  );
   // A flat-zero series still has to draw a baseline rather than divide by zero.
   const max = scaleTo > 0 ? scaleTo * 1.15 : 1;
   const step = points.length > 1 ? W / (points.length - 1) : 0;
@@ -241,11 +246,7 @@ export function AreaChart({
       <Scale
         max={peak}
         format={format}
-        note={
-          cmp
-            ? `${compareLabel} peak ${format(comparePeak)}, dashed`
-            : undefined
-        }
+        note={cmp ? `dashed = ${compareLabel}` : undefined}
       />
       <svg
         className="a-chart__plot"
@@ -255,7 +256,7 @@ export function AreaChart({
         role="img"
         aria-label={
           cmp
-            ? `${points.length} buckets, peak ${format(peak)}, against the ${compareLabel}, peak ${format(comparePeak)}`
+            ? `${points.length} buckets, peak ${format(peak)}, with the ${compareLabel} overlaid`
             : `${points.length} buckets, peak ${format(peak)}`
         }
       >

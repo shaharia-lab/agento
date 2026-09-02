@@ -271,9 +271,10 @@ export function trimEmpty<T>(points: T[], value: (p: T) => number): T[] {
 }
 
 /**
- * `previous`, windowed to the span `trimEmpty` selects from `current` (#539).
+ * The trimmed current series and the comparison series windowed to match it
+ * (#539).
  *
- * **Trimming the comparison series on its own rule is the bug this exists to
+ * **Trimming the comparison on its own rule is the bug this exists to
  * prevent**, and it is not obvious: the rule really is the same, but the
  * *result* is data-dependent, and it is the result the overlay's alignment
  * depends on. `AreaChart` lines the two series up from their last elements, on
@@ -288,24 +289,40 @@ export function trimEmpty<T>(points: T[], value: (p: T) => number): T[] {
  * its own zeros. Both arrays are first aligned at their ends — equal-duration
  * windows can still hold different bucket counts across a DST transition or
  * unequal month lengths — and then the current series' `[start, end)` is applied
- * to both. Positions with no counterpart can only be a leading run (the shift
- * is monotonic and the end is aligned), so what comes back is contiguous and
- * still end-aligned; `AreaChart`'s own truncation stays the residual safety net
- * it was written to be.
+ * to both. Positions with no counterpart can only be a leading run (the shift is
+ * monotonic and the end is aligned), so what comes back is contiguous and still
+ * end-aligned; `AreaChart`'s own truncation stays the residual safety net it was
+ * written to be.
+ *
+ * **Both series come back from one call because they must share one `value`
+ * predicate.** Two calls is two chances to pass different ones, and a
+ * disagreement there misaligns the overlay silently — which is the failure this
+ * function is for.
+ *
+ * **What comes back is a positional subset, so never derive a whole-window
+ * aggregate from it.** `trimEmpty` only ever removes zero buckets, so a count or
+ * an average over the current series is still the whole window's; `alignedPair`
+ * drops *non-zero* comparison buckets wherever the current window was idle, so
+ * the same count over the comparison is not. Aggregate over
+ * `previous.time_series` itself.
  */
-export function alignedTo<T, U>(
+export function alignedPair<T, U>(
   current: T[],
-  previous: U[],
+  previous: U[] | undefined,
   value: (p: T) => number
-): U[] {
+): { series: T[]; compare: U[] | undefined } {
   const { start, end } = trimBounds(current, value);
+  const series =
+    start === 0 && end === current.length ? current : current.slice(start, end);
+  if (!previous) return { series, compare: undefined };
+
   const shift = current.length - previous.length;
-  const out: U[] = [];
+  const compare: U[] = [];
   for (let i = start; i < end; i++) {
     const j = i - shift;
-    if (j >= 0 && j < previous.length) out.push(previous[j]);
+    if (j >= 0 && j < previous.length) compare.push(previous[j]);
   }
-  return out;
+  return { series, compare };
 }
 
 /** Project paths are absolute on the wire; folded/unresolved ones are not. */
