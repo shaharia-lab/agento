@@ -6,6 +6,7 @@ import type {
   ScheduleConfig,
   ScheduleType,
   ScheduledTask,
+  TaskRunStarted,
 } from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import { DESTROY, partnerLabel, submitLabel } from "../lib/formVerbs";
@@ -169,6 +170,26 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const [draft, setDraft] = useState<ScheduledTask | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  /**
+   * Starting a manual run, kept **separate from `busy`** (#541).
+   *
+   * `busy` is already shared by save, pause/resume and delete, which is why the
+   * submit button below cannot use it as an in-flight label. Folding a third
+   * verb into it would widen that problem; a run also has to disable a
+   * different button from the one a save disables.
+   */
+  const [starting, setStarting] = useState(false);
+  /**
+   * The `job_history` id the last **Run now** answered with, held until that
+   * row reaches a terminal status (#541).
+   *
+   * `starting` covers the *request*, which returns in milliseconds; the run
+   * itself waits for one of the scheduler's three permits and can then take
+   * hours, so clearing on the response would put the button back to "Run now"
+   * while the run it started had not begun. The row may not exist yet either,
+   * which is why "unknown id" reads as in flight rather than as finished.
+   */
+  const [startedJobId, setStartedJobId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string>();
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -208,6 +229,25 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
     [selectedId, creating]
   );
   usePoll(historyRes.reload, POLL_MS, !!selectedId && !creating);
+
+  const startedJob = useMemo(
+    () =>
+      startedJobId
+        ? (historyRes.data ?? []).find((j) => j.id === startedJobId)
+        : undefined,
+    [historyRes.data, startedJobId]
+  );
+  /** The started run has landed and finished, so the button is free again. */
+  useEffect(() => {
+    if (startedJob && startedJob.status !== "running") setStartedJobId(null);
+  }, [startedJob]);
+  /** Selecting another task drops the previous one's pending run. */
+  useEffect(() => {
+    setStartedJobId(null);
+  }, [selectedId]);
+
+  /** The request, or the run it started — either shuts the action strip. */
+  const runInFlight = starting || startedJobId !== null;
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -279,6 +319,34 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
     }
     setDirty(false);
     setActionError(undefined);
+  }
+
+  /**
+   * `POST /api/tasks/{id}/run` (#541) — the verb the ▶ glyph used to be
+   * mistaken for, now its own labelled control beside the one that means
+   * *enabled*.
+   *
+   * The route answers `202` as soon as the run is *accepted*, which is not the
+   * same as started — so the id it answers with is kept, and the strip stays
+   * shut until that row turns up in the history below with a terminal status.
+   * `historyRes` is already polling, so nothing new has to be scheduled here.
+   *
+   * It deliberately does not reload `tasksRes` — a manual run changes nothing
+   * about the task row, which is the whole point of it.
+   */
+  async function runNow() {
+    if (!draft?.id) return;
+    setStarting(true);
+    setActionError(undefined);
+    try {
+      const started = await api.post<TaskRunStarted>(`/tasks/${draft.id}/run`);
+      setStartedJobId(started?.job_id ?? null);
+      historyRes.reload();
+    } catch (err) {
+      setActionError(describeError(err));
+    } finally {
+      setStarting(false);
+    }
   }
 
   async function toggleStatus() {
@@ -427,27 +495,51 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                   <button
                     className="btn btn--primary"
                     onClick={save}
-                    disabled={busy || (!dirty && !creating)}
+                    disabled={busy || runInFlight || (!dirty && !creating)}
                   >
                     {/* Never the in-flight label: this view's `busy` is shared
-                        with pause/resume, so passing it here would make the
-                        submit read "Saving…" while an unrelated request runs.
-                        The disabled state already covers that case. */}
+                        with pause/resume and delete, so passing it here would
+                        make the submit read "Saving…" while an unrelated
+                        request runs. The disabled state already covers that
+                        case, and `runInFlight` joins it for the same
+                        reason. */}
                     {submitLabel(creating, false)}
                   </button>
                   {!creating && (
                     <>
                       <div className="toolbar__sep" />
+                      {/* Two verbs, two words. This strip used to carry one
+                          ▶/⏸ icon button whose only affordance was a `title`,
+                          and ▶ is the universal *execute* glyph — so the one
+                          control that meant "enabled" was drawn as the one that
+                          means "run", and the run it was mistaken for did not
+                          exist anywhere in the product (#541). Neither carries
+                          a `+`: both act on a record that already exists, which
+                          is the rule in CLAUDE.md → *A form's actions are a
+                          fixed grammar*. */}
+                      {/* Disabled while the draft is dirty — which is exactly
+                          when `save` above is enabled. The run reads the stored
+                          *row*; the route never sees the draft, so running with
+                          unsaved edits would test the previous configuration
+                          and file a job_history row that reads as a test of
+                          what is on screen. */}
                       <button
-                        className="iconbtn"
-                        title={draft.status === "active" ? "Pause" : "Resume"}
-                        onClick={toggleStatus}
-                        disabled={busy}
+                        className="btn"
+                        onClick={runNow}
+                        disabled={busy || runInFlight || dirty}
                       >
-                        <Icon
-                          name={draft.status === "active" ? "pause" : "play"}
-                          size={14}
-                        />
+                        {starting
+                          ? "Starting…"
+                          : startedJobId
+                            ? "Running…"
+                            : "Run now"}
+                      </button>
+                      <button
+                        className="btn"
+                        onClick={toggleStatus}
+                        disabled={busy || runInFlight}
+                      >
+                        {draft.status === "active" ? "Disable" : "Enable"}
                       </button>
                       <button
                         className="iconbtn"
@@ -499,7 +591,14 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                       label="Enabled"
                       help="Paused tasks keep their history but never fire."
                     >
-                      <Switch on={draft.status === "active"} onChange={toggleStatus} />
+                      {/* The same guard as the toolbar's twin above: both
+                          drive `toggleStatus`, so one of them staying live
+                          during a write would be the asymmetry, not a mercy. */}
+                      <Switch
+                        on={draft.status === "active"}
+                        onChange={toggleStatus}
+                        disabled={busy || runInFlight}
+                      />
                     </FormRow>
                   )}
                 </div>

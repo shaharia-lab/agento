@@ -214,6 +214,12 @@ export interface ScheduledTask {
   updated_at: string;
 }
 
+/** The `202` body of `POST /api/tasks/{id}/run` (#541). */
+export interface TaskRunStarted {
+  job_id: string;
+  task_id: string;
+}
+
 export interface JobHistory {
   id: string;
   task_id: string;

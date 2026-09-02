@@ -124,11 +124,113 @@ pub struct Scheduler {
     /// timer, exactly as Go's `executeTask` does — a job whose turn is waiting
     /// still advances its own schedule.
     semaphore: Arc<Semaphore>,
+    /// Task id → how many runs of it are in flight **right now**, in this
+    /// process (#541).
+    ///
+    /// The manual-run route needs to answer "is this task already running?" and
+    /// there was nothing here to ask: `jobs` holds *timers*, not runs, and a
+    /// task's timer exists whether or not it is executing. The durable
+    /// alternative — a `job_history` row still marked `running` — cannot be
+    /// used, because [`super::executor`]'s own header records that a panic in
+    /// `finish` leaves exactly such a row behind with nothing to finish it, so
+    /// a crash would 409 that task for ever.
+    ///
+    /// A **count**, not a set: a scheduled run that outlives its own interval
+    /// overlaps the next one (the semaphore bounds the overlap, it does not
+    /// prevent it), and a set would have the first to finish clear an entry the
+    /// second still owns.
+    ///
+    /// **Both run paths mark; only the manual one refuses.** Scheduled firing is
+    /// untouched by this map — [`Scheduler::mark_running`] always succeeds — so
+    /// nothing about the timer's behaviour changes, while
+    /// [`Scheduler::try_mark_running`] can still see a scheduled run and answer
+    /// the route's 409 honestly.
+    in_flight: Mutex<HashMap<String, usize>>,
+}
+
+/// A run's entry in [`Scheduler::in_flight`], removed when the run ends.
+///
+/// RAII rather than a matching `unmark` call, because a run has many exits —
+/// every early return in the executor, plus a panic inside `db::blocking`,
+/// which is caught by the blocking pool and would otherwise leak the entry and
+/// 409 that task until the app restarts.
+pub struct RunGuard {
+    scheduler: Arc<Scheduler>,
+    task_id: String,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        let mut in_flight = self
+            .scheduler
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match in_flight.get_mut(&self.task_id) {
+            Some(count) if *count > 1 => *count -= 1,
+            _ => {
+                in_flight.remove(&self.task_id);
+            }
+        }
+    }
 }
 
 impl Scheduler {
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// The three-slot execution semaphore, for a caller that is a request
+    /// rather than a timer (#541).
+    ///
+    /// A manual run takes a permit like any other, so a burst of them cannot
+    /// outnumber what the machine was sized for — and so it queues behind the
+    /// scheduled runs already using them rather than beside them.
+    pub fn semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.semaphore)
+    }
+
+    /// Record that a run of `task_id` has started. Always succeeds.
+    ///
+    /// This is the *scheduled* path's marker: a timer's fire is never refused
+    /// by the in-flight map, it only becomes visible in it.
+    pub fn mark_running(self: &Arc<Self>, task_id: &str) -> RunGuard {
+        *self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(task_id.to_string())
+            .or_insert(0) += 1;
+        RunGuard {
+            scheduler: Arc::clone(self),
+            task_id: task_id.to_string(),
+        }
+    }
+
+    /// Record a run of `task_id`, or `None` when one is already in flight.
+    ///
+    /// The check and the mark are one operation under one lock, which is what
+    /// makes two simultaneous `POST /api/tasks/{id}/run` requests answer one
+    /// `202` and one `409` rather than starting two runs.
+    pub fn try_mark_running(self: &Arc<Self>, task_id: &str) -> Option<RunGuard> {
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if in_flight.contains_key(task_id) {
+            return None;
+        }
+        in_flight.insert(task_id.to_string(), 1);
+        drop(in_flight);
+        Some(RunGuard {
+            scheduler: Arc::clone(self),
+            task_id: task_id.to_string(),
+        })
+    }
+
+    /// Whether a run of `task_id` is in flight in this process.
+    pub fn is_running(&self, task_id: &str) -> bool {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(task_id)
     }
 
     /// `ScheduleTask`: add or replace a task's schedule.
@@ -452,6 +554,7 @@ pub fn start(db_path: PathBuf) {
         jobs: Mutex::new(HashMap::new()),
         swept: Mutex::new(HashMap::new()),
         semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
+        in_flight: Mutex::new(HashMap::new()),
     });
     if RUNNING.set(Arc::clone(&scheduler)).is_err() {
         log::warn!("task scheduler already started; ignoring a second start");
@@ -526,6 +629,7 @@ pub fn detached(db_path: impl Into<PathBuf>) -> Arc<Scheduler> {
         jobs: Mutex::new(HashMap::new()),
         swept: Mutex::new(HashMap::new()),
         semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
+        in_flight: Mutex::new(HashMap::new()),
     })
 }
 
@@ -640,6 +744,7 @@ mod tests {
             jobs: Mutex::new(HashMap::new()),
             swept: Mutex::new(HashMap::new()),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
+            in_flight: Mutex::new(HashMap::new()),
         });
         let task = ScheduledTask {
             id: "legacy".to_string(),

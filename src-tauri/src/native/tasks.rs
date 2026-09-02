@@ -387,6 +387,16 @@ fn page_offset(query: &str) -> i64 {
 
 // ─── The seam ─────────────────────────────────────────────────────────────────
 
+/// The routes here that exist **only** in the desktop build (#541).
+///
+/// The third owner of `parity/desktop_routes.json`, whose assertion is set
+/// equality over the union of every owner's const — so this list and that file
+/// move together or `the_desktop_only_routes_are_recorded_in_both_directions`
+/// fails. Everything else this module claims came from Go and is recorded in
+/// `read_routes.json` / `write_routes.json`, which are frozen records of Go's
+/// surface and cannot carry a route Go never had.
+pub const ROUTES: &[(&str, &str)] = &[("POST", "/api/tasks/{id}/run")];
+
 /// This module's entry in `native::ENDPOINTS`.
 pub const ENDPOINT: super::Endpoint = super::Endpoint {
     name: "tasks",
@@ -400,6 +410,7 @@ enum Route<'a> {
     Task(&'a str),
     TaskPause(&'a str),
     TaskResume(&'a str),
+    TaskRun(&'a str),
     TaskJobHistory(&'a str),
     JobHistoryList,
     JobHistory(&'a str),
@@ -422,7 +433,10 @@ fn claims(method: &Method, path: &str) -> bool {
         // again the same edit.
         Method::POST => matches!(
             route_of(path),
-            Some(Route::TaskList) | Some(Route::TaskPause(_)) | Some(Route::TaskResume(_))
+            Some(Route::TaskList)
+                | Some(Route::TaskPause(_))
+                | Some(Route::TaskResume(_))
+                | Some(Route::TaskRun(_))
         ),
         Method::PUT => matches!(route_of(path), Some(Route::Task(_))),
         Method::DELETE => matches!(
@@ -437,7 +451,7 @@ fn claims(method: &Method, path: &str) -> bool {
 ///
 /// The ids are single segments, so `/api/tasks/{id}/pause` and `/resume` cannot
 /// be swallowed by the `/api/tasks/{id}` arm, and an empty id is not a match
-/// because chi routes `/api/tasks/` to nothing. The three suffixed forms are
+/// because chi routes `/api/tasks/` to nothing. The four suffixed forms are
 /// checked before the bare one for the same reason.
 fn route_of(path: &str) -> Option<Route<'_>> {
     if path == "/api/tasks" {
@@ -458,6 +472,9 @@ fn route_of(path: &str) -> Option<Route<'_>> {
         }
         if let Some(id) = rest.strip_suffix("/resume") {
             return segment(id).map(Route::TaskResume);
+        }
+        if let Some(id) = rest.strip_suffix("/run") {
+            return segment(id).map(Route::TaskRun);
         }
         return segment(rest).map(Route::Task);
     }
@@ -482,6 +499,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         (Method::POST, Some(Route::TaskList)) => finish(create_task(db, req.body)),
         (Method::POST, Some(Route::TaskPause(id))) => finish(pause_task(db, id)),
         (Method::POST, Some(Route::TaskResume(id))) => finish(resume_task(db, id)),
+        (Method::POST, Some(Route::TaskRun(id))) => finish(run_task_now(id)),
         (Method::PUT, Some(Route::Task(id))) => finish(update_task(db, id, req.body)),
         (Method::GET, _) => serve_read(ctx, req),
         _ => Err(format!("{} {} is not ported", req.method, req.path)),
@@ -523,10 +541,10 @@ fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, S
             None => return Err(format!("job history {id:?} not found")),
         },
 
-        // The two POST-only paths reach `serve_read` from nowhere — `serve`
+        // The three POST-only paths reach `serve_read` from nowhere — `serve`
         // routes them by method first — so this arm is the same "not a read"
         // answer the `None` arm gives.
-        Some(Route::TaskPause(_)) | Some(Route::TaskResume(_)) | None => {
+        Some(Route::TaskPause(_)) | Some(Route::TaskResume(_)) | Some(Route::TaskRun(_)) | None => {
             return Err(format!("{} is not a task read", req.path))
         }
     };
@@ -1512,6 +1530,7 @@ mod tests {
         assert!(claims(&Method::DELETE, "/api/tasks/t1"));
         assert!(claims(&Method::POST, "/api/tasks/t1/pause"));
         assert!(claims(&Method::POST, "/api/tasks/t1/resume"));
+        assert!(claims(&Method::POST, "/api/tasks/t1/run"));
 
         // Mounted paths this module must *not* answer for the wrong method —
         // chi would 405, and claiming one would turn that into a native error.
@@ -1520,7 +1539,88 @@ mod tests {
         assert!(!claims(&Method::POST, "/api/tasks/t1"));
         assert!(!claims(&Method::POST, "/api/job-history"));
         assert!(!claims(&Method::PUT, "/api/tasks/t1/pause"));
+        assert!(!claims(&Method::GET, "/api/tasks/t1/run"));
+        assert!(!claims(&Method::DELETE, "/api/tasks/t1/run"));
         assert!(!claims(&Method::PATCH, "/api/tasks/t1"));
+    }
+
+    /// #541. Driven through [`start_manual_run`] rather than [`run_task_now`],
+    /// because `running()` reads the process-wide `OnceLock` a test may not
+    /// install; `detached` is the same `Scheduler` without it.
+    #[tokio::test]
+    async fn a_manual_run_is_accepted_for_any_task_and_answers_with_its_job_id() {
+        crate::native::writes::testlog::install();
+        let file = migrated();
+        // An agent that resolves to nothing, so the spawned run fails at
+        // `resolve_agent` and never reaches a subprocess. What is under test is
+        // the route's answer, not the run.
+        let task = created(
+            &file,
+            r#"{"name":"n","prompt":"p","agent_slug":"no-such-agent"}"#,
+        );
+        // **Paused**, which is most of the point: the one control the product
+        // had made a task un-runnable, and this route has to ignore it.
+        pause_task(file.path(), &task.id).expect("pause");
+
+        let scheduler = crate::native::schedule::runtime::detached(file.path());
+        let answer = start_manual_run(&scheduler, &task.id).expect("run");
+        assert_eq!(answer.status, StatusCode::ACCEPTED);
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&answer.body.expect("body")).expect("json");
+        assert_eq!(body["task_id"], serde_json::json!(task.id));
+        let job_id = body["job_id"].as_str().expect("job_id").to_string();
+        assert!(!job_id.is_empty());
+
+        crate::native::writes::testlog::assert_info_once(&format!(
+            r#"task run started id={:?} job_id={job_id:?}"#,
+            task.id
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_manual_run_of_an_unknown_task_is_404() {
+        let file = migrated();
+        let scheduler = crate::native::schedule::runtime::detached(file.path());
+        let err = start_manual_run(&scheduler, "nope").unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), r#"task "nope" not found"#);
+    }
+
+    /// The 409, driven off the in-flight map directly: holding the guard is
+    /// exactly the state a run in flight leaves behind, and it is the only way
+    /// to assert the refusal without racing a background run to finish.
+    #[tokio::test]
+    async fn a_second_manual_run_while_one_is_in_flight_is_409() {
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"n","prompt":"p","agent_slug":"no-such-agent"}"#,
+        );
+        let scheduler = crate::native::schedule::runtime::detached(file.path());
+
+        let guard = scheduler.mark_running(&task.id);
+        let err = start_manual_run(&scheduler, &task.id).unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.message(), "a run of this task is already in progress");
+        // A *different* task is unaffected — the map is per task, not a lock on
+        // the scheduler.
+        let other = created(
+            &file,
+            r#"{"name":"o","prompt":"p","agent_slug":"no-such-agent"}"#,
+        );
+        assert_eq!(
+            start_manual_run(&scheduler, &other.id).expect("run").status,
+            StatusCode::ACCEPTED
+        );
+
+        // And the refusal lifts when the run ends.
+        drop(guard);
+        assert!(!scheduler.is_running(&task.id));
+        assert_eq!(
+            start_manual_run(&scheduler, &task.id).expect("run").status,
+            StatusCode::ACCEPTED
+        );
     }
 
     /// #335: the two job-history deletes, which are all this module claims.
@@ -2128,6 +2228,111 @@ fn resume_task(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     log::info!("task resumed id={id:?}");
     super::schedule::runtime::schedule_if_running(&task, "resumed");
     encode_task(&task)
+}
+
+/// `POST /api/tasks/{id}/run` (#541): fire a task now, whatever its schedule
+/// says.
+///
+/// **This route has no Go ancestor.** Nothing in the product could run a
+/// configured task on demand; the only way to make one fire was to change its
+/// schedule type to `run_immediately`, i.e. destroy the schedule under test in
+/// order to test it once. See `ROUTES` for where it is recorded.
+///
+/// Four properties, each of which is the whole point of one of the issue's
+/// acceptance criteria:
+///
+/// - **It answers within a request round-trip.** `Endpoint::serve` is a sync
+///   `fn` on `spawn_blocking` and a run reaches 240 minutes, so the run is
+///   spawned and the response is built here. `202 Accepted` carries the
+///   `job_history` id the run will write — see [`TaskRunStarted`] for why that
+///   row may not exist yet.
+/// - **It refuses a second concurrent run of the same task**, `409`, through
+///   the scheduler's in-flight map — claimed *here*, under one lock, so two
+///   simultaneous requests answer one `202` and one `409` rather than both
+///   passing a check and then both starting.
+/// - **A paused task is runnable**, and so is one past its `stop_after_count`.
+///   [`super::schedule::executor::run_manual`] deliberately does not go through
+///   `due_task`.
+/// - **It changes nothing about the schedule.** See [`RunKind::Manual`].
+fn run_task_now(id: &str) -> Result<super::Answer, WriteError> {
+    let Some(scheduler) = super::schedule::runtime::running() else {
+        // No scheduler means no database (`shell_owns_scheduler`), which is not
+        // a state a shipped build reaches — every other write here would have
+        // answered 500 for the same reason.
+        return Err(WriteError::Fallback(
+            "the task scheduler is not running".to_string(),
+        ));
+    };
+    start_manual_run(&scheduler, id)
+}
+
+/// [`run_task_now`] against a scheduler the caller supplies, so the tests can
+/// drive it without the process-wide `OnceLock`.
+///
+/// The task is read through **the scheduler's** database rather than the
+/// request context's. They are the same file in this process, and taking it
+/// from one place is what stops the `404` check and the run itself from ever
+/// disagreeing about which row is meant.
+fn start_manual_run(
+    scheduler: &std::sync::Arc<super::schedule::runtime::Scheduler>,
+    id: &str,
+) -> Result<super::Answer, WriteError> {
+    let Some(task) = get_task(scheduler.db_path(), id).map_err(WriteError::Fallback)? else {
+        return Err(WriteError::NotFound {
+            resource: "task".to_string(),
+            id: id.to_string(),
+        });
+    };
+
+    let Some(guard) = scheduler.try_mark_running(id) else {
+        return Err(WriteError::ConflictMessage(
+            "a run of this task is already in progress".to_string(),
+        ));
+    };
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    // Built before anything is spawned: the write-path rule is that nothing
+    // fallible may sit after the effect, and here the effect is a subprocess
+    // rather than a commit.
+    let body = super::gojson::to_vec(&TaskRunStarted {
+        job_id: &job_id,
+        task_id: id,
+    })
+    .map_err(|e| WriteError::Fallback(format!("encoding task run: {e}")))?;
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return Err(WriteError::Fallback(
+            "no tokio runtime to start a manual task run on".to_string(),
+        ));
+    };
+    handle.spawn(super::schedule::executor::run_manual(
+        std::sync::Arc::clone(scheduler),
+        task,
+        job_id.clone(),
+        guard,
+    ));
+
+    log::info!("task run started id={id:?} job_id={job_id:?}");
+    Ok(super::Answer::json_status(StatusCode::ACCEPTED, body))
+}
+
+/// The `202` body of `POST /api/tasks/{id}/run`.
+///
+/// **The job id names a row that does not exist yet**, and a caller has to
+/// tolerate that rather than assume a short window. The row is written by the
+/// run's own preparation, and the run first waits for one of the scheduler's
+/// three permits — so with three long runs already going (they reach 240
+/// minutes) `GET /api/job-history/{job_id}` answers 404 until one of them ends.
+/// That is a property of the queue, not a race to lose.
+///
+/// It is still worth answering with, because it is the only thing that makes
+/// the started run *identifiable*: the alternative is a caller diffing the
+/// history list and guessing which row is its own. Navigation on top of it
+/// (#542) has to treat "not there yet" as a state rather than an error.
+#[derive(Serialize)]
+struct TaskRunStarted<'a> {
+    job_id: &'a str,
+    task_id: &'a str,
 }
 
 /// The read-modify-write both status actions share, in one transaction.

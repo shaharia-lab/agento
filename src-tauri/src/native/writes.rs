@@ -54,6 +54,16 @@ pub enum WriteError {
     Validation { field: String, message: String },
     /// `service.ConflictError` → 409.
     Conflict { resource: String, id: String },
+    /// A 409 whose body is a fixed string rather than `ConflictError`'s
+    /// wording, for a conflict that is not "this already exists".
+    ///
+    /// [`Self::Conflict`] renders `<resource> with id "<id>" already exists`,
+    /// which is the only thing Go's service layer ever raised a 409 for.
+    /// `POST /api/tasks/{id}/run` (#541) has no Go ancestor and its conflict is
+    /// temporal — a run of that task is in flight — so the existence wording
+    /// would be a plain lie about a task that exists and is fine.
+    /// [`Self::NotFoundMessage`] is the same escape hatch one status up.
+    ConflictMessage(String),
     /// `service.NotFoundError` → 404, formatted as that error formats.
     NotFound { resource: String, id: String },
     /// A 404 whose body is a fixed string rather than the service error's
@@ -109,7 +119,7 @@ impl WriteError {
         match self {
             Self::InvalidBody | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::Conflict { .. } | Self::ConflictMessage(_) => StatusCode::CONFLICT,
             Self::NotFound { .. } | Self::NotFoundMessage(_) => StatusCode::NOT_FOUND,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
@@ -139,6 +149,7 @@ impl WriteError {
             }
             // `service.NotFoundError.Error()`.
             Self::NotFound { resource, id } => format!("{resource} {:?} not found", id),
+            Self::ConflictMessage(m) => m.clone(),
             Self::NotFoundMessage(m) => m.clone(),
             Self::Forbidden(m) => m.clone(),
             Self::NotImplemented(m) => m.clone(),

@@ -462,6 +462,7 @@ mod tests {
         assert!(claims(&Method::POST, "/api/tasks"));
         assert!(claims(&Method::PUT, "/api/tasks/abc-123"));
         assert!(claims(&Method::POST, "/api/tasks/abc-123/pause"));
+        assert!(claims(&Method::POST, "/api/tasks/abc-123/run"));
         assert!(claims(&Method::POST, "/api/tasks/abc-123/resume"));
         assert!(claims(&Method::DELETE, "/api/tasks/abc-123"));
         assert!(claims(&Method::DELETE, "/api/job-history"));
@@ -827,14 +828,15 @@ mod tests {
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
         //
-        // The file has **two owners** since #426, so the claimed set is the
-        // union of both modules' consts. A third owner appends here; leaving it
-        // out would silently weaken the assertion from set equality to "the
-        // owners I remembered", which is the one-directional property this test
-        // exists to escape.
+        // The file has **three owners** since #541, so the claimed set is the
+        // union of all three modules' consts. A fourth owner appends here;
+        // leaving it out would silently weaken the assertion from set equality
+        // to "the owners I remembered", which is the one-directional property
+        // this test exists to escape.
         let claimed: BTreeSet<(String, String)> = security::ROUTES
             .iter()
             .chain(gateway_api::ROUTES.iter())
+            .chain(tasks::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(
