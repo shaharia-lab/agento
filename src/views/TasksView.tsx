@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type {
   Agent,
@@ -126,8 +126,34 @@ function fromLocalStamp(v: string): string {
    seed something a user would plausibly have typed, or the control lands on
    the number it exists to stop meaning. -------------------------------------- */
 
-/** What "Run limit" starts at. Any value ≥ 1 works; ten is a short leash. */
+/** How many *further* runs "Run limit" starts at.
+ *
+ *  Ten more, not a flat ten: `should_auto_pause` is
+ *  `stop_after_count > 0 && run_count >= stop_after_count`, evaluated *before*
+ *  the run and answered by declining it **silently** — no `job_history` row,
+ *  nothing on screen. So seeding a bare `10` on a task with 42 runs behind it
+ *  would hand the user a value that stops their schedule for good the moment
+ *  they save, with no record saying why. */
 const FIRST_STOP_AFTER_COUNT = 10;
+
+/** What "Run limit" starts at for a task that has already run this often. */
+function firstStopAfterCount(runCount: number): number {
+  return FIRST_STOP_AFTER_COUNT + Math.max(0, runCount);
+}
+
+/** What each limit was last set to, so flicking a mode switch off and back on
+ *  restores it instead of re-seeding.
+ *
+ *  This is a **memory, never a source of truth** — the mode stays derived from
+ *  the stored value, so there is no second copy of it to fall out of step with
+ *  the draft. It carries the task id it belongs to, so a value stashed on one
+ *  task cannot surface on another. */
+type LimitStash = { id: string; count: number; time: string | null };
+
+/** The stash, but only when it belongs to this task. */
+function stashFor(s: LimitStash, id: string): LimitStash {
+  return s.id === id ? s : { id, count: 0, time: null };
+}
 
 /** What "End date" starts at: a week out, truncated to the minute the picker
  *  shows — so the stored instant and the displayed one agree from the start
@@ -226,6 +252,8 @@ export function TasksView({
   const [startedJobId, setStartedJobId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string>();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** See `LimitStash` — what the two Limits switches restore when flicked back on. */
+  const lastLimits = useRef<LimitStash>({ id: "", count: 0, time: null });
 
   const selected = selectedId ? tasks.find((t) => t.id === selectedId) ?? null : null;
 
@@ -307,6 +335,7 @@ export function TasksView({
     setConfirmDelete(false);
     setActionError(undefined);
     setDraft(blankTask(agents[0]?.slug ?? ""));
+    lastLimits.current = { id: "", count: 0, time: null };
     setDirty(true);
   }
 
@@ -351,6 +380,8 @@ export function TasksView({
     } else {
       setDraft(selected);
     }
+    // The stash remembers edits; a revert throws those edits away.
+    lastLimits.current = { id: "", count: 0, time: null };
     setDirty(false);
     setActionError(undefined);
   }
@@ -739,12 +770,21 @@ export function TasksView({
                           { value: "none", label: "No limit" },
                           { value: "count", label: "Run limit" },
                         ]}
-                        onChange={(v) =>
+                        onChange={(v) => {
+                          if (v === "none") {
+                            lastLimits.current = {
+                              ...stashFor(lastLimits.current, draft.id),
+                              count: draft.stop_after_count,
+                            };
+                            edit({ stop_after_count: 0 });
+                            return;
+                          }
+                          const kept = stashFor(lastLimits.current, draft.id).count;
                           edit({
                             stop_after_count:
-                              v === "count" ? FIRST_STOP_AFTER_COUNT : 0,
-                          })
-                        }
+                              kept > 0 ? kept : firstStopAfterCount(draft.run_count),
+                          });
+                        }}
                       />
                       {draft.stop_after_count > 0 && (
                         <>
@@ -787,12 +827,18 @@ export function TasksView({
                           { value: "none", label: "No end date" },
                           { value: "date", label: "End date" },
                         ]}
-                        onChange={(v) =>
-                          edit({
-                            stop_after_time:
-                              v === "date" ? firstStopAfterTime() : null,
-                          })
-                        }
+                        onChange={(v) => {
+                          if (v === "none") {
+                            lastLimits.current = {
+                              ...stashFor(lastLimits.current, draft.id),
+                              time: draft.stop_after_time ?? null,
+                            };
+                            edit({ stop_after_time: null });
+                            return;
+                          }
+                          const kept = stashFor(lastLimits.current, draft.id).time;
+                          edit({ stop_after_time: kept ?? firstStopAfterTime() });
+                        }}
                       />
                       {draft.stop_after_time && (
                         <label className="field field--stamp">
@@ -800,15 +846,19 @@ export function TasksView({
                             type="datetime-local"
                             value={toLocalStamp(draft.stop_after_time)}
                             onChange={(e) => {
-                              /* Both ways of ending up with nothing collapse
-                                 to `null`: an emptied picker, and a value
-                                 `fromLocalStamp` cannot parse — which answers
-                                 `""`, and `""` is not "no end date" to the
-                                 API. */
-                              const iso = e.target.value
-                                ? fromLocalStamp(e.target.value)
-                                : "";
-                              edit({ stop_after_time: iso || null });
+                              /* An empty value is an edit in progress, not a
+                                 clear. A `datetime-local` reports `""` for
+                                 anything that is not a *complete* datetime, so
+                                 backspacing one segment to retype it would
+                                 otherwise write `null`, unmount this input
+                                 under the user and lose the date — the same
+                                 collapse the count input is floored against.
+                                 "No end date" beside it is the clear, and the
+                                 only one. `fromLocalStamp`'s own unparseable
+                                 `""` folds in here too: `""` is not "no end
+                                 date" to the API. */
+                              const iso = fromLocalStamp(e.target.value);
+                              if (iso) edit({ stop_after_time: iso });
                             }}
                           />
                         </label>
