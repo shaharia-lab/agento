@@ -23,7 +23,11 @@
 }
 
 .sess-link__error {
+  display: block;
   margin-top: var(--sp-2);
   font-size: var(--text-xs);
   color: var(--red);
+  /* The link itself is nowrap-and-ellipsis; a failure has to be readable, and
+     its container may be narrow. */
+  white-space: normal;
 }

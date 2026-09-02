@@ -892,7 +892,9 @@ function ResumedHistory({
         <span className="truncate" title={projectPath || sessionId}>
           Continued from {projectPath ? tildePath(projectPath) : "a Claude session"}
         </span>
-        <span className="resumed__id mono truncate">
+        {/* No `truncate` here: `SessionLink` truncates itself, and this
+            container clipping would hide the failure line it renders. */}
+        <span className="resumed__id mono">
           <SessionLink sessionId={sessionId} project={projectPath} />
         </span>
       </div>

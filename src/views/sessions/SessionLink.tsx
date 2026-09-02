@@ -231,7 +231,10 @@ export function SessionLink({
       >
         {label}
       </button>
-      {error && <div className="sess-link__error">{error}</div>}
+      {/* A `span`, not a `div`: this component is used inside phrasing content
+          (the Chats banner's `.resumed__id`), where a block element is invalid
+          nesting. `display: block` in the stylesheet does the layout. */}
+      {error && <span className="sess-link__error">{error}</span>}
       {at && (
         <ContextMenu at={at} items={items} onClose={() => setAt(undefined)} />
       )}
