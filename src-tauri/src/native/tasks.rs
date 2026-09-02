@@ -2244,7 +2244,8 @@ fn resume_task(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 /// - **It answers within a request round-trip.** `Endpoint::serve` is a sync
 ///   `fn` on `spawn_blocking` and a run reaches 240 minutes, so the run is
 ///   spawned and the response is built here. `202 Accepted` carries the
-///   `job_history` id the run will write, so a caller can navigate to it.
+///   `job_history` id the run will write — see [`TaskRunStarted`] for why that
+///   row may not exist yet.
 /// - **It refuses a second concurrent run of the same task**, `409`, through
 ///   the scheduler's in-flight map — claimed *here*, under one lock, so two
 ///   simultaneous requests answer one `202` and one `409` rather than both
@@ -2317,10 +2318,17 @@ fn start_manual_run(
 
 /// The `202` body of `POST /api/tasks/{id}/run`.
 ///
-/// The job id is the row the run is about to write, not one that already
-/// exists: the row is created inside the run's own preparation, milliseconds
-/// later. Answering with it is what lets the UI point at the run it just
-/// started (#542) without polling for a row it has no way to recognise.
+/// **The job id names a row that does not exist yet**, and a caller has to
+/// tolerate that rather than assume a short window. The row is written by the
+/// run's own preparation, and the run first waits for one of the scheduler's
+/// three permits — so with three long runs already going (they reach 240
+/// minutes) `GET /api/job-history/{job_id}` answers 404 until one of them ends.
+/// That is a property of the queue, not a race to lose.
+///
+/// It is still worth answering with, because it is the only thing that makes
+/// the started run *identifiable*: the alternative is a caller diffing the
+/// history list and guessing which row is its own. Navigation on top of it
+/// (#542) has to treat "not there yet" as a state rather than an error.
 #[derive(Serialize)]
 struct TaskRunStarted<'a> {
     job_id: &'a str,

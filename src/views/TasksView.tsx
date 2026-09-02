@@ -483,7 +483,17 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                           a `+`: both act on a record that already exists, which
                           is the rule in CLAUDE.md → *A form's actions are a
                           fixed grammar*. */}
-                      <button className="btn" onClick={runNow} disabled={busy || running}>
+                      {/* Disabled while the draft is dirty, which `save`
+                          above is too. The run reads the stored *row* — the
+                          route never sees the draft — so running with unsaved
+                          edits would test the previous configuration and file a
+                          job_history row that reads as a test of what is on
+                          screen. Save is right there and already enabled. */}
+                      <button
+                        className="btn"
+                        onClick={runNow}
+                        disabled={busy || running || dirty}
+                      >
                         {running ? "Starting…" : "Run now"}
                       </button>
                       <button

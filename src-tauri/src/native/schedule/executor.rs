@@ -68,6 +68,11 @@ impl RunKind {
     /// you could not try a task without spending it. `next_run_at` needs no
     /// mention here because nothing on the run path ever writes it; skipping
     /// the write-back leaves it alone by construction.
+    /// Read at **four** sites — `prepare`'s agent-resolution arm, both of
+    /// `finish`'s arms, and `record_failed_run` — each with a test that fails
+    /// when this answers `true` unconditionally. Four rather than three because
+    /// a failure can be recorded before, during or after the run, and a manual
+    /// run must spend nothing in any of them.
     fn advances_schedule(self) -> bool {
         matches!(self, Self::Scheduled)
     }
@@ -251,9 +256,12 @@ fn auto_pause(scheduler: &Arc<Scheduler>, mut task: ScheduledTask, reason: &str)
 async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
     let db_path = scheduler.db_path().to_path_buf();
 
+    // The two labels below say "task run" rather than "scheduled run": since
+    // #541 both sections serve a manual run too, and `db::blocking`'s label is
+    // what names the section in the log when one panics.
     let prepared = {
         let (scheduler, run) = (Arc::clone(scheduler), run.clone());
-        db::blocking("scheduled run preparation", move || {
+        db::blocking("task run preparation", move || {
             prepare(&scheduler, task, &run)
         })
         .await
@@ -282,7 +290,7 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
 
     let recorded = {
         let (scheduler, session) = (Arc::clone(scheduler), chat_session_id.clone());
-        db::blocking("scheduled run results", move || {
+        db::blocking("task run results", move || {
             finish(&scheduler, task, job, &session, &prompt, result, &run)
         })
         .await
@@ -1566,9 +1574,57 @@ mod tests {
         assert_eq!(stored.status, "paused");
     }
 
-    /// The third guarded site: the arm `finish` takes when the agent run itself
-    /// failed. Same shape, so a `kind` dropped from any one of the three is
-    /// caught rather than only from the one a single test happened to walk.
+    /// The site a *misconfigured* task reaches, which is the task somebody
+    /// presses **Run now** to diagnose: `prepare` finishes the running job row
+    /// and then decides whether the schedule moves.
+    ///
+    /// `at_its_limit`'s `agent_slug` is `no-such-agent`, so `resolve_agent`
+    /// fails after the session and the job row exist — the arm under test —
+    /// without needing a subprocess.
+    #[test]
+    fn the_preparation_section_honours_the_run_kind_too() {
+        for (kind, expected_count, expected_status) in [
+            (RunKind::Manual, 3, "active"),
+            (RunKind::Scheduled, 4, "paused"),
+        ] {
+            let file = at_its_limit();
+            let scheduler = test_scheduler(file.path());
+            let task = tasks::get_task(file.path(), "t1")
+                .expect("read")
+                .expect("row");
+            let run = Run {
+                kind,
+                job_id: "j-prep".to_string(),
+                started_at: Utc::now(),
+            };
+
+            // Matched rather than `expect_err`, which would need `Ready: Debug`
+            // — and `Ready` carries an `Agent`, whose system prompt has no
+            // business in a panic message.
+            match prepare(&scheduler, task, &run) {
+                Err(failed) => assert!(failed.message.contains("resolve agent"), "{kind:?}"),
+                Ok(_) => panic!("{kind:?}: the agent must not resolve"),
+            }
+
+            let stored = tasks::get_task(file.path(), "t1")
+                .expect("read")
+                .expect("row");
+            assert_eq!(stored.run_count, expected_count, "{kind:?}");
+            assert_eq!(stored.status, expected_status, "{kind:?}");
+            assert_eq!(
+                tasks::get_job_history(file.path(), "j-prep")
+                    .expect("read")
+                    .expect("row")
+                    .status,
+                "failed",
+                "{kind:?} still records the run"
+            );
+        }
+    }
+
+    /// The arm `finish` takes when the agent run itself failed. Same shape as
+    /// its siblings, so a `kind` dropped from any one of the four guarded sites
+    /// is caught rather than only from the one a single test happened to walk.
     #[test]
     fn the_finish_section_honours_the_run_kind_too() {
         for (kind, expected_count, expected_status) in [

@@ -3568,14 +3568,19 @@ omissions are the feature rather than shortcuts:
   its tenth run would make the feature hostile. `next_run_at` needs no mention:
   nothing on the run path writes it, so skipping the write-back leaves it alone
   by construction. `RunKind` is a type rather than a `bool` because it is read at
-  three call sites — `prepare`, `finish` and `record_failed_run` — and a `bool`
-  at any of them says nothing.
+  **four** call sites — `prepare`'s agent-resolution arm, both of `finish`'s
+  arms, and `record_failed_run` — each with its own `Manual`/`Scheduled` pair
+  over one fixture, because a guard dropped from any one of them ships with
+  every other test green.
 
 Everything else is identical, including the module's own rule that **every path
 ends in a `job_history` row**. That row's id is **minted by the route**, not by
 `create_initial_job_history`, so the `202` can name the row the run is about to
 write; a scheduled run passes a fresh v4 uuid, which is what that line generated
-before.
+before. **The row does not exist when the `202` is sent**, and not merely for a
+moment: `run_manual` waits for one of the three permits first, so with three
+240-minute runs in flight the id 404s until one ends. A consumer of it — #542 —
+has to treat "not there yet" as a state rather than an error.
 
 Two more properties are load-bearing. The **three-slot semaphore** is acquired
 inside `run_manual` rather than by the route, because waiting for a permit is
