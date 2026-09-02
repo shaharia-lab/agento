@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type {
   Agent,
@@ -118,6 +118,52 @@ function fromLocalStamp(v: string): string {
   return isFinite(d.getTime()) ? d.toISOString() : "";
 }
 
+/* --- The two "no limit" defaults ------------------------------------------
+   Both limits are stored as their *unset* value — `stop_after_count: 0` and
+   `stop_after_time: null` — and `0` is the longer horizon, not the shorter
+   one, the same way round as the gateway's `usage_retention_days`. The form
+   therefore never shows either unset value: switching a limit *on* has to
+   seed something a user would plausibly have typed, or the control lands on
+   the number it exists to stop meaning. -------------------------------------- */
+
+/** How many *further* runs "Run limit" starts at.
+ *
+ *  Ten more, not a flat ten: `should_auto_pause` is
+ *  `stop_after_count > 0 && run_count >= stop_after_count`, evaluated *before*
+ *  the run and answered by declining it **silently** — no `job_history` row,
+ *  nothing on screen. So seeding a bare `10` on a task with 42 runs behind it
+ *  would hand the user a value that stops their schedule for good the moment
+ *  they save, with no record saying why. */
+const FIRST_STOP_AFTER_COUNT = 10;
+
+/** What "Run limit" starts at for a task that has already run this often. */
+function firstStopAfterCount(runCount: number): number {
+  return FIRST_STOP_AFTER_COUNT + Math.max(0, runCount);
+}
+
+/** What each limit was last set to, so flicking a mode switch off and back on
+ *  restores it instead of re-seeding.
+ *
+ *  This is a **memory, never a source of truth** — the mode stays derived from
+ *  the stored value, so there is no second copy of it to fall out of step with
+ *  the draft. It carries the task id it belongs to, so a value stashed on one
+ *  task cannot surface on another. */
+type LimitStash = { id: string; count: number; time: string | null };
+
+/** The stash, but only when it belongs to this task. */
+function stashFor(s: LimitStash, id: string): LimitStash {
+  return s.id === id ? s : { id, count: 0, time: null };
+}
+
+/** What "End date" starts at: a week out, truncated to the minute the picker
+ *  shows — so the stored instant and the displayed one agree from the start
+ *  rather than only after the first edit. */
+function firstStopAfterTime(): string {
+  const d = new Date(Date.now() + 7 * 86_400_000);
+  d.setSeconds(0, 0);
+  return d.toISOString();
+}
+
 /* --- New-task template ---------------------------------------------------- */
 
 function blankTask(agentSlug: string): ScheduledTask {
@@ -206,6 +252,8 @@ export function TasksView({
   const [startedJobId, setStartedJobId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string>();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** See `LimitStash` — what the two Limits switches restore when flicked back on. */
+  const lastLimits = useRef<LimitStash>({ id: "", count: 0, time: null });
 
   const selected = selectedId ? tasks.find((t) => t.id === selectedId) ?? null : null;
 
@@ -287,6 +335,7 @@ export function TasksView({
     setConfirmDelete(false);
     setActionError(undefined);
     setDraft(blankTask(agents[0]?.slug ?? ""));
+    lastLimits.current = { id: "", count: 0, time: null };
     setDirty(true);
   }
 
@@ -331,6 +380,8 @@ export function TasksView({
     } else {
       setDraft(selected);
     }
+    // The stash remembers edits; a revert throws those edits away.
+    lastLimits.current = { id: "", count: 0, time: null };
     setDirty(false);
     setActionError(undefined);
   }
@@ -695,35 +746,134 @@ export function TasksView({
 
                 <div className="formsec">
                   <div className="formsec__title">Limits</div>
-                  <FormRow label="Stop after" help="0 keeps the task running forever.">
+                  {/* Both rows are a mode switch over one stored value, and
+                      the *unset* value is never rendered as a value: a `0` in
+                      a spinner reads as "zero runs" and an empty
+                      `datetime-local` paints the browser's own
+                      `dd/mm/yyyy, --:--` mask, each the inverse of the "no
+                      limit" it means. The segmented pair is also the clear
+                      control the picker never had — selecting "No end date"
+                      writes `null`, so an end date can be undone without
+                      recreating the task. The wire is untouched. */}
+                  <FormRow
+                    label="Stop after"
+                    help={
+                      draft.stop_after_count > 0
+                        ? "The task pauses itself once it has run this many times."
+                        : "The number of runs is not limited."
+                    }
+                  >
                     <div className="inline">
-                      <label className="field field--num">
-                        <input
-                          type="number"
-                          min={0}
-                          value={draft.stop_after_count}
-                          onChange={(e) =>
-                            edit({ stop_after_count: Number(e.target.value) || 0 })
+                      <Segmented
+                        value={draft.stop_after_count > 0 ? "count" : "none"}
+                        options={[
+                          { value: "none", label: "No limit" },
+                          { value: "count", label: "Run limit" },
+                        ]}
+                        onChange={(v) => {
+                          /* `Segmented` fires on every click, including one on
+                             the option already selected — and both arms below
+                             write. Without this guard the ordinary gesture of
+                             re-clicking the mode you are already in would
+                             re-seed a typed count, or stash the unset value
+                             over the one the stash exists to remember. */
+                          if (v === (draft.stop_after_count > 0 ? "count" : "none"))
+                            return;
+                          if (v === "none") {
+                            lastLimits.current = {
+                              ...stashFor(lastLimits.current, draft.id),
+                              count: draft.stop_after_count,
+                            };
+                            edit({ stop_after_count: 0 });
+                            return;
                           }
-                        />
-                      </label>
-                      <span className="inline__label">runs</span>
+                          const kept = stashFor(lastLimits.current, draft.id).count;
+                          edit({
+                            stop_after_count:
+                              kept > 0 ? kept : firstStopAfterCount(draft.run_count),
+                          });
+                        }}
+                      />
+                      {draft.stop_after_count > 0 && (
+                        <>
+                          <label className="field field--num">
+                            {/* The floor is 1, not 0: `0` is now reached
+                                through "No limit" alone, and letting the
+                                number fall to it would collapse the input the
+                                user is typing into. */}
+                            <input
+                              type="number"
+                              min={1}
+                              value={draft.stop_after_count}
+                              onChange={(e) =>
+                                edit({
+                                  stop_after_count: Math.max(
+                                    1,
+                                    Number(e.target.value) || 1
+                                  ),
+                                })
+                              }
+                            />
+                          </label>
+                          <span className="inline__label">runs</span>
+                        </>
+                      )}
                     </div>
                   </FormRow>
-                  <FormRow label="Stop at" help="Leave empty for no end date.">
-                    <label className="field field--stamp">
-                      <input
-                        type="datetime-local"
-                        value={toLocalStamp(draft.stop_after_time)}
-                        onChange={(e) =>
-                          edit({
-                            stop_after_time: e.target.value
-                              ? fromLocalStamp(e.target.value)
-                              : null,
-                          })
-                        }
+                  <FormRow
+                    label="Stop at"
+                    help={
+                      draft.stop_after_time
+                        ? "Local time; stored as UTC."
+                        : "The task has no end date."
+                    }
+                  >
+                    <div className="inline">
+                      <Segmented
+                        value={draft.stop_after_time ? "date" : "none"}
+                        options={[
+                          { value: "none", label: "No end date" },
+                          { value: "date", label: "End date" },
+                        ]}
+                        onChange={(v) => {
+                          // The same already-selected guard as the row above.
+                          if (v === (draft.stop_after_time ? "date" : "none")) return;
+                          if (v === "none") {
+                            lastLimits.current = {
+                              ...stashFor(lastLimits.current, draft.id),
+                              time: draft.stop_after_time ?? null,
+                            };
+                            edit({ stop_after_time: null });
+                            return;
+                          }
+                          const kept = stashFor(lastLimits.current, draft.id).time;
+                          edit({ stop_after_time: kept ?? firstStopAfterTime() });
+                        }}
                       />
-                    </label>
+                      {draft.stop_after_time && (
+                        <label className="field field--stamp">
+                          <input
+                            type="datetime-local"
+                            value={toLocalStamp(draft.stop_after_time)}
+                            onChange={(e) => {
+                              /* An empty value is an edit in progress, not a
+                                 clear. A `datetime-local` reports `""` for
+                                 anything that is not a *complete* datetime, so
+                                 backspacing one segment to retype it would
+                                 otherwise write `null`, unmount this input
+                                 under the user and lose the date — the same
+                                 collapse the count input is floored against.
+                                 "No end date" beside it is the clear, and the
+                                 only one. `fromLocalStamp`'s own unparseable
+                                 `""` folds in here too: `""` is not "no end
+                                 date" to the API. */
+                              const iso = fromLocalStamp(e.target.value);
+                              if (iso) edit({ stop_after_time: iso });
+                            }}
+                          />
+                        </label>
+                      )}
+                    </div>
                   </FormRow>
                 </div>
               </div>
