@@ -640,6 +640,26 @@
   margin-bottom: var(--sp-2);
 }
 
+/* The same header when the group collapses (#538, opt-in). `base.css` already
+   resets a button's font, colour, background, border and outline, and puts it
+   in the selection denylist, so the only thing left is the box: a block-level
+   strip the width of the pane with the chevron pushed to the far end. No
+   `cursor: pointer` — this shell draws an arrow over its own controls — and no
+   `:focus-visible` rule, because the global ring in `base.css` covers it. */
+.insp-group__title--toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: 0;
+  text-align: left;
+}
+
+.insp-group__title--toggle:hover {
+  color: var(--fg-secondary);
+}
+
 /* Label/value pairs — right-aligned labels, the inspector convention. */
 .insp-row {
   display: grid;

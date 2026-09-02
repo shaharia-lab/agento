@@ -197,6 +197,10 @@ src/
     tauri.ts     window + menu bridge; degrades to a plain browser tab
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
     newChatPrefs.ts  what the New Chat bar was last set to (localStorage)
+    inspectorPrefs.ts  which inspector groups are open (#538) — keyed by a
+                 stable slug, never the rendered title (two of them carry a
+                 count), with the ids and the shipped defaults pinned through
+                 typeAssert.ts
     logs.ts      the log commands, and the line parser (target before level)
     snippet.ts   the U+0001/U+0002 highlight sentinels, mirrored once from
                  native/search/mod.rs, and snippetParts() (#438). They are
@@ -230,6 +234,10 @@ src/
                  charts.tsx shape. See *Conventions* for what it does and does
                  not take
   views/         one file per section
+    sessions/SessionInspector.tsx  the inspector's metadata groups (#538) —
+                 `{ session }` and no handlers, the five collapsible groups and
+                 the localStorage write-through; `sessions/sessionMetrics.ts`
+                 beside it is the totals and the mode tables the table shares
     sessions/SessionLink.tsx   a session rendered as a control, wherever one is
                  *named* (#536) — left-click hands off to the Sessions section
                  through `NavTarget.sessionId`, right-click opens the row menu.
@@ -615,6 +623,49 @@ itself — the `components/charts.tsx` shape. It used to be declared in
 views only because `App.tsx` imports those two statically, so a section that
 stopped being statically imported would have had unstyled savebars with nothing
 to say so.
+
+**`InspGroup` collapsing is opt-in, and it has to stay opt-in** (#538). Eight
+views render `InspGroup` — Sessions, Analytics, Chats, Integrations, Tasks,
+Agents, Jobs and the gateway Overview — so a `collapsible` that defaulted to on
+would silently change every inspector in the app, which is `SaveBar`'s icon and
+error tone one level down. A caller passing nothing takes an early return and
+emits the `<div className="insp-group__title">` it always did; only a caller
+passing `collapsible` gets the `<button …  aria-expanded>` and the chevron.
+Proved the way the `charts.tsx` and `SaveBar.tsx` moves were: build both sides
+and diff the emitted CSS, as a sorted set **and** as an ordered selector list —
+the change is exactly two added `.insp-group__title--toggle*` rules, declared
+nowhere else, with every pre-existing rule byte-identical and in place.
+
+Three properties of it worth keeping:
+
+- **It is controlled, not self-stateful.** The caller owns `open` and persists
+  it. A group that kept its own state would need a storage key threaded in
+  anyway, and two groups would then disagree about where the state is kept.
+- **The header is a real `button`**, so Tab reaches it and Enter/Space toggle it
+  with no keydown handler here, and `base.css` already resets a button's font,
+  colour, background, border and outline and puts it in the selection denylist
+  (#469) — which is why the CSS is a five-line box reset and **not** a
+  `cursor: pointer` or a `:focus-visible` rule. This shell draws an arrow over
+  its own controls, and the global focus ring already covers a button.
+- **The persisted key is a stable slug, never the rendered title.**
+  `lib/inspectorPrefs.ts` keys on `activity`/`tokens`/`subagents`/`cost`/`prs`
+  and pins both those ids and the shipped defaults through `lib/typeAssert.ts`,
+  because two of the session groups interpolate a count into their heading
+  (`Sub-agents · 12`) — a title-keyed blob would store a new key per session and
+  remember nothing, and a respelled id silently resets everyone's saved state.
+
+**The session inspector is `views/sessions/SessionInspector.tsx`** (#538), not a
+private function in `SessionsView.tsx`, for the reason `SaveBar` is a component:
+a shape only one file can reach is a shape the next caller copies. It takes
+`{ session }` and no handlers — the action strip is `.sess-strip`, which
+`SessionsView` renders *above* `.inspector__scroll` and which #486 deliberately
+put there. Note the detail page needs no second mount: `SessionDetail` fills
+`.pane-detail`, and the `inspectorOpen` `aside.pane-inspector` is its **sibling**
+inside the same `.panes`, so a session's Transcript and Journey tabs already
+show this pane from this code. `views/sessions/sessionMetrics.ts` holds the
+totals and the permission-mode tables that came out with it, because the table's
+Cost column and its row badges call them too and exporting them from the view
+would have made the view and the inspector import each other.
 
 **Destroying a stored record is `Delete`, everywhere, and `Remove` means
 something else** (#518). One gesture had three words — Integrations said
