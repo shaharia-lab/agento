@@ -37,6 +37,23 @@ import "../styles/analytics.css";
 
 type Mode = "tokens" | "usage" | "insights";
 
+/**
+ * A report, tagged with the query string it was fetched for (#539).
+ *
+ * `useResource` never clears `data` on a dependency change — it only calls
+ * `setData` on success — which is deliberate and is what lets a failed refresh
+ * keep showing the last good figures. It also means that while a range or
+ * project change is in flight the two analytics resources resolve
+ * independently, so for a moment whichever landed first would be differenced
+ * against the *other* window's data and every tile would show a percentage
+ * describing neither. Tagging is what makes that detectable: a delta is
+ * rendered only when both halves carry the query they are being read as.
+ */
+interface Keyed {
+  key: string;
+  report: AnalyticsReport;
+}
+
 export function AnalyticsView({
   mode,
   inspectorOpen,
@@ -77,10 +94,12 @@ export function AnalyticsView({
   const ready = range !== "custom" || Boolean(period.from && period.to);
   const wantsReport = mode !== "insights";
 
-  const report = useResource<AnalyticsReport | undefined>(
+  const report = useResource<Keyed | undefined>(
     (signal) =>
       ready && wantsReport
-        ? api.get<AnalyticsReport>(`/claude-analytics${query}`, signal)
+        ? api
+            .get<AnalyticsReport>(`/claude-analytics${query}`, signal)
+            .then((r) => ({ key: query, report: r }))
         : Promise.resolve(undefined),
     [query, ready, wantsReport]
   );
@@ -98,10 +117,12 @@ export function AnalyticsView({
     tz: TZ,
   });
 
-  const previous = useResource<AnalyticsReport | undefined>(
+  const previous = useResource<Keyed | undefined>(
     (signal) =>
       wantsCompare
-        ? api.get<AnalyticsReport>(`/claude-analytics${compareQuery}`, signal)
+        ? api
+            .get<AnalyticsReport>(`/claude-analytics${compareQuery}`, signal)
+            .then((r) => ({ key: compareQuery, report: r }))
         : Promise.resolve(undefined),
     [compareQuery, wantsCompare]
   );
@@ -130,14 +151,24 @@ export function AnalyticsView({
   const sessionCount =
     mode === "insights"
       ? insights.data?.total_sessions
-      : report.data?.summary.total_sessions;
+      : report.data?.report.summary.total_sessions;
 
   // A failed comparison must not take the view down with it: the primary report
   // is what the section is for, so the deltas are dropped and one banner says
-  // why. `useResource` keeps the last good `data` on error, so the check is on
-  // `error` rather than on `data` being absent — otherwise a stale comparison
-  // from a previous window would go on being differenced against this one.
-  const comparison = wantsCompare && !previous.error ? previous.data : undefined;
+  // why.
+  //
+  // Both halves are checked against the query they were fetched for, which is
+  // what stops a report from one window being differenced against another's
+  // while a change is in flight or after one of the two failed holding stale
+  // data. A delta is a claim about a *pair*, so it is only made when the pair
+  // is known to be one.
+  const comparison =
+    wantsCompare &&
+    !previous.error &&
+    report.data?.key === query &&
+    previous.data?.key === compareQuery
+      ? previous.data.report
+      : undefined;
 
   return (
     <div className="panes">
@@ -252,7 +283,7 @@ export function AnalyticsView({
           <div className={`dash scroll a-dash ${loading ? "a-dash--stale" : ""}`}>
             <Body
               mode={mode}
-              report={report.data}
+              report={report.data?.report}
               previous={comparison}
               insights={insights.data}
               project={project}
@@ -275,7 +306,7 @@ export function AnalyticsView({
                 to={period.to}
                 comparedWith={wantsCompare ? previousWindow : undefined}
                 project={project}
-                report={report.data}
+                report={report.data?.report}
                 insights={insights.data}
               />
             </div>

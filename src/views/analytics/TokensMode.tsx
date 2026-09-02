@@ -9,6 +9,7 @@ import {
   DeltaNote,
   Tile,
   Tokens,
+  alignedTo,
   bucketLabel,
   granularityLabel,
   list,
@@ -56,7 +57,8 @@ export function TokensMode({
     s.total_cache_read_tokens +
     s.total_cache_creation_tokens;
 
-  const series = trimEmpty(list(report.time_series), (p) => p.total_tokens);
+  const raw = list(report.time_series);
+  const series = trimEmpty(raw, (p) => p.total_tokens);
   const tokenPoints: Point[] = series.map((p) => ({
     label: bucketLabel(p.date, g),
     value: p.total_tokens,
@@ -65,13 +67,15 @@ export function TokensMode({
     } session${p.sessions === 1 ? "" : "s"}`,
   }));
 
-  // Trimmed on the same rule as the current series, so the two are like for
-  // like; `AreaChart` then aligns them from the last bucket backwards.
+  // Windowed by the *current* series' trim bounds, never by its own zeros —
+  // see `alignedTo`, which is where that distinction is argued.
   const comparePoints: Point[] | undefined = previous
-    ? trimEmpty(list(previous.time_series), (p) => p.total_tokens).map((p) => ({
-        label: bucketLabel(p.date, previous.granularity),
-        value: p.total_tokens,
-      }))
+    ? alignedTo(raw, list(previous.time_series), (p) => p.total_tokens).map(
+        (p) => ({
+          label: bucketLabel(p.date, previous.granularity),
+          value: p.total_tokens,
+        })
+      )
     : undefined;
 
   const cache = trimEmpty(
