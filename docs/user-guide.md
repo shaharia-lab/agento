@@ -299,8 +299,9 @@ Other options:
 - **Model**: override the agent's model for this task.
 - **Timeout**: runs longer than this are cancelled and recorded as failed.
 - **Save output**: keep the agent's reply in the run history.
-- **Stop after**: end the task after N runs. `0` means never.
-- **Stop at**: an end date.
+- **Stop after**: **No limit**, or a **Run limit** of N runs.
+- **Stop at**: **No end date**, or an **End date**. Switching back to *No end
+  date* clears a date you already chose.
 - **Enabled**: pause without deleting.
 
 The inspector shows the next run, the last run, the total number of runs and the

@@ -118,6 +118,26 @@ function fromLocalStamp(v: string): string {
   return isFinite(d.getTime()) ? d.toISOString() : "";
 }
 
+/* --- The two "no limit" defaults ------------------------------------------
+   Both limits are stored as their *unset* value — `stop_after_count: 0` and
+   `stop_after_time: null` — and `0` is the longer horizon, not the shorter
+   one, the same way round as the gateway's `usage_retention_days`. The form
+   therefore never shows either unset value: switching a limit *on* has to
+   seed something a user would plausibly have typed, or the control lands on
+   the number it exists to stop meaning. -------------------------------------- */
+
+/** What "Run limit" starts at. Any value ≥ 1 works; ten is a short leash. */
+const FIRST_STOP_AFTER_COUNT = 10;
+
+/** What "End date" starts at: a week out, truncated to the minute the picker
+ *  shows — so the stored instant and the displayed one agree from the start
+ *  rather than only after the first edit. */
+function firstStopAfterTime(): string {
+  const d = new Date(Date.now() + 7 * 86_400_000);
+  d.setSeconds(0, 0);
+  return d.toISOString();
+}
+
 /* --- New-task template ---------------------------------------------------- */
 
 function blankTask(agentSlug: string): ScheduledTask {
@@ -695,35 +715,105 @@ export function TasksView({
 
                 <div className="formsec">
                   <div className="formsec__title">Limits</div>
-                  <FormRow label="Stop after" help="0 keeps the task running forever.">
+                  {/* Both rows are a mode switch over one stored value, and
+                      the *unset* value is never rendered as a value: a `0` in
+                      a spinner reads as "zero runs" and an empty
+                      `datetime-local` paints the browser's own
+                      `dd/mm/yyyy, --:--` mask, each the inverse of the "no
+                      limit" it means. The segmented pair is also the clear
+                      control the picker never had — selecting "No end date"
+                      writes `null`, so an end date can be undone without
+                      recreating the task. The wire is untouched. */}
+                  <FormRow
+                    label="Stop after"
+                    help={
+                      draft.stop_after_count > 0
+                        ? "The task pauses itself once it has run this many times."
+                        : "The task keeps running until you pause it."
+                    }
+                  >
                     <div className="inline">
-                      <label className="field field--num">
-                        <input
-                          type="number"
-                          min={0}
-                          value={draft.stop_after_count}
-                          onChange={(e) =>
-                            edit({ stop_after_count: Number(e.target.value) || 0 })
-                          }
-                        />
-                      </label>
-                      <span className="inline__label">runs</span>
-                    </div>
-                  </FormRow>
-                  <FormRow label="Stop at" help="Leave empty for no end date.">
-                    <label className="field field--stamp">
-                      <input
-                        type="datetime-local"
-                        value={toLocalStamp(draft.stop_after_time)}
-                        onChange={(e) =>
+                      <Segmented
+                        value={draft.stop_after_count > 0 ? "count" : "none"}
+                        options={[
+                          { value: "none", label: "No limit" },
+                          { value: "count", label: "Run limit" },
+                        ]}
+                        onChange={(v) =>
                           edit({
-                            stop_after_time: e.target.value
-                              ? fromLocalStamp(e.target.value)
-                              : null,
+                            stop_after_count:
+                              v === "count" ? FIRST_STOP_AFTER_COUNT : 0,
                           })
                         }
                       />
-                    </label>
+                      {draft.stop_after_count > 0 && (
+                        <>
+                          <label className="field field--num">
+                            {/* The floor is 1, not 0: `0` is now reached
+                                through "No limit" alone, and letting the
+                                number fall to it would collapse the input the
+                                user is typing into. */}
+                            <input
+                              type="number"
+                              min={1}
+                              value={draft.stop_after_count}
+                              onChange={(e) =>
+                                edit({
+                                  stop_after_count: Math.max(
+                                    1,
+                                    Number(e.target.value) || 1
+                                  ),
+                                })
+                              }
+                            />
+                          </label>
+                          <span className="inline__label">runs</span>
+                        </>
+                      )}
+                    </div>
+                  </FormRow>
+                  <FormRow
+                    label="Stop at"
+                    help={
+                      draft.stop_after_time
+                        ? "Local time; stored as UTC."
+                        : "The task has no end date."
+                    }
+                  >
+                    <div className="inline">
+                      <Segmented
+                        value={draft.stop_after_time ? "date" : "none"}
+                        options={[
+                          { value: "none", label: "No end date" },
+                          { value: "date", label: "End date" },
+                        ]}
+                        onChange={(v) =>
+                          edit({
+                            stop_after_time:
+                              v === "date" ? firstStopAfterTime() : null,
+                          })
+                        }
+                      />
+                      {draft.stop_after_time && (
+                        <label className="field field--stamp">
+                          <input
+                            type="datetime-local"
+                            value={toLocalStamp(draft.stop_after_time)}
+                            onChange={(e) => {
+                              /* Both ways of ending up with nothing collapse
+                                 to `null`: an emptied picker, and a value
+                                 `fromLocalStamp` cannot parse — which answers
+                                 `""`, and `""` is not "no end date" to the
+                                 API. */
+                              const iso = e.target.value
+                                ? fromLocalStamp(e.target.value)
+                                : "";
+                              edit({ stop_after_time: iso || null });
+                            }}
+                          />
+                        </label>
+                      )}
+                    </div>
                   </FormRow>
                 </div>
               </div>
