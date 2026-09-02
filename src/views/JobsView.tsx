@@ -444,10 +444,10 @@ export function JobsView({
                 // so the pane says which of the two it is rather than reading
                 // as "nothing selected" or spinning forever.
                 <div className="statepane">
-                  {focusedId && detail.error
-                    ? `Couldn't load this run — ${detail.error}`
-                    : focusedId && detail.loading
+                  {focusedId && detail.loading
                     ? "Loading run…"
+                    : focusedId && detail.error
+                    ? `Couldn't load this run — ${detail.error}`
                     : "Nothing selected"}
                 </div>
               ) : (
@@ -522,7 +522,10 @@ export function JobsView({
 
                   {job.chat_session_id && (
                     <InspGroup title="Session">
-                      <RunSession chatId={job.chat_session_id} />
+                      <RunSession
+                        chatId={job.chat_session_id}
+                        runStatus={job.status}
+                      />
                     </InspGroup>
                   )}
                 </>
@@ -566,7 +569,23 @@ export function JobsView({
  * `sdk_session_id` is one, and a failed request is not — reporting a transient
  * error as "no session" states something untrue about the user's data.
  */
-function RunSession({ chatId }: { chatId: string }) {
+function RunSession({
+  chatId,
+  runStatus,
+}: {
+  chatId: string;
+  /**
+   * The run's own status, which is a **dependency and not decoration**.
+   *
+   * `sdk_session_id` is inserted as `''` and written only by
+   * `write_session_results`, after the run finishes — so a run still going has
+   * no session yet, and with `chatId` alone in the deps (it is fixed for the
+   * row's life) the lookup would never re-run when it ends. The pane would go
+   * on denying the session while the Output group beside it, which polls,
+   * showed the finished answer.
+   */
+  runStatus: JobStatus;
+}) {
   type Resolved =
     | { kind: "pending" }
     | { kind: "found"; sessionId: string; row: ClaudeSessionSummary }
@@ -607,10 +626,18 @@ function RunSession({ chatId }: { chatId: string }) {
         if (!sessionId) {
           // Written only by `write_session_results`, so it is empty for a run
           // that failed before the CLI reported a session — and for one still
-          // going.
+          // going, which is why `runStatus` decides the wording and is in the
+          // deps. Re-resolving on completion is also the case the by-id
+          // fallback exists for: a just-finished session is not in
+          // `claude_session_cache` for up to an hour.
           setResolved({
             kind: "none",
-            reason: "This run never reported a Claude session.",
+            reason:
+              runStatus === "running"
+                ? // *Not yet*, not *never* — the same distinction the Output
+                  // group makes two blocks up with "Still running…".
+                  "This run has not reported a Claude session yet."
+                : "This run never reported a Claude session.",
           });
           return;
         }
@@ -656,7 +683,7 @@ function RunSession({ chatId }: { chatId: string }) {
       cancelled = true;
       ctl.abort();
     };
-  }, [chatId]);
+  }, [chatId, runStatus]);
 
   if (resolved.kind === "found") {
     return (
