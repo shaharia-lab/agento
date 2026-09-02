@@ -252,8 +252,9 @@ src/
                  and taking it first reads every message twice. A caller must
                  **not** pass `decoded_path` as `projectPath`: analytics ranks
                  on it and the sessions list keys on `project_path` literally,
-                 so "Copy project path" would copy a string nothing filters on. Carries `styles/sessionlink.css` itself,
-                 the `components/charts.tsx` shape, since its consumers are in
+                 so "Copy project path" would copy a string nothing filters
+                 on. Carries `styles/sessionlink.css` itself, the
+                 `components/charts.tsx` shape, since its consumers are in
                  sections that do not import `styles/sessions.css`
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing

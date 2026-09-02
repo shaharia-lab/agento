@@ -28,11 +28,16 @@
   font-size: var(--text-xs);
   color: var(--red);
   /* The link itself is nowrap-and-ellipsis; a failure has to be readable, and
-     its container may be narrow. */
+     both containers it renders in are narrow and clipping — `describeError`
+     can carry an unbreakable token (a project path has no spaces), so it needs
+     the same break `.resumed__note` needed. */
   white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .sess-link__dismiss {
-  color: var(--red);
+  /* `base.css` clears a button's font, colour, background and border, but not
+     its padding — which is why `.sess-link` zeroes it too. */
+  padding: 0;
   text-decoration: underline;
 }
