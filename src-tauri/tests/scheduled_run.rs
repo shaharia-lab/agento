@@ -230,6 +230,102 @@ async fn a_scheduled_run_records_a_successful_job_and_persists_its_chat() {
     assert_eq!(task.status, "active", "a cron task keeps running");
 }
 
+/// #541, end to end: a **paused** task, sitting **at** its `stop_after_count`,
+/// run on demand.
+///
+/// Both halves of the acceptance criteria in one pass, because they pull
+/// against each other: the run must be as complete as a scheduled one (a
+/// `job_history` row with the answer and the token counts, a persisted chat)
+/// while changing nothing the schedule owns. The fixture is the state a timer
+/// refuses outright — `execute_task` on this row returns silently, which the
+/// first assertion pins — so nothing here can pass by accident on the scheduled
+/// path.
+#[tokio::test]
+async fn a_manual_run_fires_a_paused_task_at_its_limit_and_moves_no_counter() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    {
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        conn.execute(
+            "UPDATE scheduled_tasks
+                SET status = 'paused', run_count = 2, stop_after_count = 2
+              WHERE id = ?1",
+            [&task_id],
+        )
+        .expect("park the task on its limit");
+    }
+
+    let cli = fake_cli(
+        dir.path(),
+        r#"        raw('{"type":"result","subtype":"success","is_error":false,"result":"tried it","session_id":"sdk-manual-1","usage":{"input_tokens":5,"output_tokens":6}}')"#,
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+
+    // The timer path declines this row, silently and with no row — which is
+    // exactly the gap the manual route exists to fill.
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+    assert!(
+        job_rows(&db).is_empty(),
+        "a paused task is not due; nothing may be recorded for it"
+    );
+
+    let guard = scheduler
+        .try_mark_running(&task_id)
+        .expect("nothing is in flight");
+    assert!(
+        scheduler.try_mark_running(&task_id).is_none(),
+        "and a second claim on the same task is refused, which is the route's 409"
+    );
+    agento_lib::native::schedule::executor::run_manual(
+        std::sync::Arc::clone(&scheduler),
+        agento_lib::native::tasks::get_task(&db, &task_id)
+            .expect("read")
+            .expect("row"),
+        "job-manual-1".to_string(),
+        guard,
+    )
+    .await;
+
+    // As useful as a scheduled run's: status, output and usage all present,
+    // under the id the route would have answered with.
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "the manual run is recorded: {jobs:?}");
+    let (status, error, response, input, output) = &jobs[0];
+    assert_eq!(status, "success", "error was {error:?}");
+    assert_eq!(response, "tried it");
+    assert_eq!((*input, *output), (5, 6));
+    {
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        let id: String = conn
+            .query_row("SELECT id FROM job_history", [], |r| r.get(0))
+            .expect("the job row");
+        assert_eq!(id, "job-manual-1", "the route's id is the row's id");
+    }
+    assert_eq!(session_count(&db), 1, "and the chat is persisted");
+
+    // …and the schedule is exactly where it was.
+    let task = agento_lib::native::tasks::get_task(&db, &task_id)
+        .expect("read")
+        .expect("row");
+    assert_eq!(task.run_count, 2, "no budget spent");
+    assert_eq!(task.status, "paused", "still paused; nothing resumed it");
+    assert!(task.last_run_at.is_none(), "not the schedule's last run");
+    assert!(task.last_run_status.is_empty());
+    assert!(task.next_run_at.is_none(), "the next fire has not moved");
+
+    // The guard went with the run, so the task is runnable again.
+    assert!(!scheduler.is_running(&task_id));
+}
+
 #[tokio::test]
 async fn an_error_result_is_a_failed_job_with_gos_wording() {
     if python3().is_none() {

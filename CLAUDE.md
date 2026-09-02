@@ -400,7 +400,10 @@ src-tauri/src/
                  three rate writes (#306): add and correct are not one upsert
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
-    tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
+    tasks.rs     GET /api/tasks, /api/job-history and the three reads between
+                 them, the five task writes, and POST /api/tasks/{id}/run
+                 (#541) — the desktop-only route that fires a task on demand,
+                 and this module's whole `ROUTES` const
     gateway_api.rs the LLM gateway's control plane (#426) — fifteen
                  /api/gateway/* routes; under native/ because it IS the /api
                  seam, where gateway/'s listener is not. Two of them are
@@ -3548,6 +3551,47 @@ passes against a drain that never terminates on its own — the first version of
 that test did exactly that and went green against the hang. A real CLI in session
 mode stays alive; the fake has to as well.
 
+**A run can also be started by a request, and the difference is one function
+call** (#541). `POST /api/tasks/{id}/run` goes through
+`executor::run_manual`, which is `execute_task` minus two things — and both
+omissions are the feature rather than shortcuts:
+
+- **`due_task` is not consulted.** It refuses a `paused` task and auto-pauses
+  one past its `stop_after_count`/`stop_after_time`, in both cases returning
+  *silently*. Right for a timer nobody asked to fire; wrong here, where running
+  a paused task on demand is most of the point and a task at its limit is
+  exactly the one somebody wants to try again.
+- **`update_task_after_run` is skipped**, via `RunKind::Manual`. `run_count`,
+  `last_run_at`, `last_run_status` and the two auto-pause rules are what the
+  *schedule* has done; a manual run is a test of the configuration, and
+  consuming a `stop_after_count` budget or pausing the task because the test was
+  its tenth run would make the feature hostile. `next_run_at` needs no mention:
+  nothing on the run path writes it, so skipping the write-back leaves it alone
+  by construction. `RunKind` is a type rather than a `bool` because it is read at
+  three call sites — `prepare`, `finish` and `record_failed_run` — and a `bool`
+  at any of them says nothing.
+
+Everything else is identical, including the module's own rule that **every path
+ends in a `job_history` row**. That row's id is **minted by the route**, not by
+`create_initial_job_history`, so the `202` can name the row the run is about to
+write; a scheduled run passes a fresh v4 uuid, which is what that line generated
+before.
+
+Two more properties are load-bearing. The **three-slot semaphore** is acquired
+inside `run_manual` rather than by the route, because waiting for a permit is
+precisely what must not happen inside a request — `Endpoint::serve` is a sync
+`fn` on `spawn_blocking` and a run reaches 240 minutes, so the route spawns and
+answers. And the **`409`** comes from `Scheduler::in_flight`, a *refcounted*
+task-id map added for it: `jobs` holds timers, not runs, and the durable
+alternative — a `job_history` row still marked `running` — cannot be used,
+because a panic in `finish` leaves exactly such a row with nothing to finish it,
+so a crash would 409 that task for ever. **Both run paths mark and only the
+manual one refuses**, so a timer's behaviour is untouched while the route can
+still see a scheduled run; the check and the mark are one operation under one
+lock, or two simultaneous requests both pass and both start. A count rather than
+a set, because a scheduled run that outlives its own interval overlaps the next
+one and the first to finish would clear an entry the second still owns.
+
 **A task write can fail after storing a row, so the timers are swept.**
 `Scheduler::reconcile` runs every 60 seconds and brings the installed timers
 back in line with the stored rows. It is a sweep rather than a hook on any one
@@ -3839,15 +3883,19 @@ gateway must not be able to reconfigure which provider it spends with).
 
 Three things about it are decisions:
 
-- **The route table is `parity/desktop_routes.json`, and it now has two
+- **The route table is `parity/desktop_routes.json`, and it now has three
   owners.** #405 created that file for `/api/security/*` — routes with no Go
   ancestor, which could go in neither frozen Go table without destroying what
   those are. Its guarantee is *stronger* than theirs: they assert in one
   direction, so a route claimed and never recorded passes, while this is **set
   equality** against the modules' `ROUTES` consts. The claimed set is now the
-  **union** of `security::ROUTES` and `gateway_api::ROUTES`; a third owner
-  appends there, and forgetting to would quietly weaken the assertion back to
-  one direction. The issue's "resolve at implementation time" question — grow
+  **union** of `security::ROUTES`, `gateway_api::ROUTES` and — since #541 —
+  `tasks::ROUTES`, whose single row is `POST /api/tasks/{id}/run`; a fourth
+  owner appends there, and forgetting to would quietly weaken the assertion back
+  to one direction. Note the third owner is a module that is *mostly* Go's:
+  a route with no Go ancestor belongs here whatever else its module claims, and
+  adding it to the frozen `write_routes.json` instead would be a silent contract
+  break that no test catches. The issue's "resolve at implementation time" question — grow
   the Go tables, or fall back to Tauri commands — is answered by this file
   existing. A command would have been wrong anyway: `logs.rs` is a command
   because the app log belongs to the *process*; gateway config is API surface.

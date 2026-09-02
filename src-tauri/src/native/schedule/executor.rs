@@ -42,8 +42,57 @@ use crate::native::notifications;
 use crate::native::tasks::{self, JobHistory, ScheduledTask};
 use crate::native::template;
 
+/// Which caller started a run, and therefore what accounting it owns (#541).
+///
+/// The two differ in exactly one place — [`update_task_after_run`] — and the
+/// asymmetry is the whole of the manual-run feature's risk, so it travels as a
+/// type rather than as a `bool` nobody can read at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    /// A timer fired. Advances `run_count` and `last_run_*`, and applies the
+    /// two auto-pause rules.
+    Scheduled,
+    /// `POST /api/tasks/{id}/run`. Produces an identical `job_history` row and
+    /// touches **none** of the schedule's own accounting.
+    Manual,
+}
+
+impl RunKind {
+    /// Whether this run advances the *schedule's* counters.
+    ///
+    /// `run_count`, `last_run_at`, `last_run_status` and the two auto-pause
+    /// rules are what a schedule has done, not what the agent has done. A
+    /// manual run is a test of the configuration: consuming a
+    /// `stop_after_count` budget or auto-pausing the task because the test
+    /// happened to be its tenth run would make the feature actively hostile —
+    /// you could not try a task without spending it. `next_run_at` needs no
+    /// mention here because nothing on the run path ever writes it; skipping
+    /// the write-back leaves it alone by construction.
+    fn advances_schedule(self) -> bool {
+        matches!(self, Self::Scheduled)
+    }
+}
+
+/// What describes *this* run rather than the task it is of: who started it,
+/// which `job_history` row it is, and when it began.
+///
+/// One value rather than three parameters because all three are threaded
+/// through the same three functions, and a `RunKind` sitting seventh in a
+/// positional list is exactly the argument that gets dropped by a later edit.
+#[derive(Clone)]
+struct Run {
+    kind: RunKind,
+    /// Minted by the *caller* — `POST /api/tasks/{id}/run` answers with it — so
+    /// the row a run writes is knowable before the run starts.
+    job_id: String,
+    started_at: chrono::DateTime<Utc>,
+}
+
 /// `executeTask`. The semaphore is the caller's; this is everything inside it.
 pub async fn execute_task(scheduler: &Arc<Scheduler>, task_id: &str) {
+    // Marked, never refused: the in-flight map exists so the *manual* route can
+    // answer 409, and a timer's fire must behave exactly as it did before #541.
+    let _in_flight = scheduler.mark_running(task_id);
     let due = {
         let (scheduler, task_id) = (Arc::clone(scheduler), task_id.to_string());
         db::blocking("scheduled run", move || due_task(&scheduler, &task_id)).await
@@ -67,7 +116,68 @@ pub async fn execute_task(scheduler: &Arc<Scheduler>, task_id: &str) {
         task.name,
         task.run_count + 1
     );
-    run_task(scheduler, task).await;
+    run_task(
+        scheduler,
+        task,
+        Run {
+            kind: RunKind::Scheduled,
+            job_id: uuid::Uuid::new_v4().to_string(),
+            started_at: Utc::now(),
+        },
+    )
+    .await;
+}
+
+/// One run started by `POST /api/tasks/{id}/run` (#541).
+///
+/// Everything a scheduled run does, minus the two things that belong to the
+/// schedule rather than to the run:
+///
+/// - **[`due_task`] is not consulted.** It refuses a `paused` task and
+///   auto-pauses one past its `stop_after_count`/`stop_after_time`, in both
+///   cases returning *silently* — no `job_history` row, nothing on screen. That
+///   is right for a timer, whose fire nobody asked for, and wrong here: running
+///   a paused task on demand is most of what this feature is for, and a task at
+///   its limit is exactly the one a user wants to try again. The task is read
+///   by the route, which is also what answers the `404`.
+/// - **The schedule's counters are not advanced**, via [`RunKind::Manual`].
+///
+/// `guard` is the in-flight entry the route claimed before spawning this, held
+/// here so it is released when the run ends however it ends; `permit` is the
+/// scheduler's own three-slot semaphore, acquired here rather than in the route
+/// because waiting for it is exactly what must not happen inside a request.
+pub async fn run_manual(
+    scheduler: Arc<Scheduler>,
+    task: ScheduledTask,
+    job_id: String,
+    guard: crate::native::schedule::runtime::RunGuard,
+) {
+    let _guard = guard;
+    let Ok(_permit) = scheduler.semaphore().acquire_owned().await else {
+        // The semaphore is never closed, so this is unreachable in practice;
+        // returning is what the timer path does with the same error.
+        log::warn!(
+            "manual run abandoned: the scheduler semaphore is closed task_id={:?}",
+            task.id
+        );
+        return;
+    };
+
+    log::info!(
+        "executing task manually task_id={:?} task_name={:?} job_id={job_id:?}",
+        task.id,
+        task.name
+    );
+    run_task(
+        &scheduler,
+        task,
+        Run {
+            kind: RunKind::Manual,
+            job_id,
+            started_at: Utc::now(),
+        },
+    )
+    .await;
 }
 
 /// The load-and-check half of `executeTask`: the row, its status, and the
@@ -138,14 +248,13 @@ fn auto_pause(scheduler: &Arc<Scheduler>, mut task: ScheduledTask, reason: &str)
 ///
 /// The notifications stay out here because [`publish`] already spawns and
 /// deliberately does not wait — see its own note.
-async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask) {
+async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
     let db_path = scheduler.db_path().to_path_buf();
-    let started_at = Utc::now();
 
     let prepared = {
-        let scheduler = Arc::clone(scheduler);
+        let (scheduler, run) = (Arc::clone(scheduler), run.clone());
         db::blocking("scheduled run preparation", move || {
-            prepare(&scheduler, task, started_at)
+            prepare(&scheduler, task, &run)
         })
         .await
     };
@@ -174,7 +283,7 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask) {
     let recorded = {
         let (scheduler, session) = (Arc::clone(scheduler), chat_session_id.clone());
         db::blocking("scheduled run results", move || {
-            finish(&scheduler, task, job, &session, &prompt, started_at, result)
+            finish(&scheduler, task, job, &session, &prompt, result, &run)
         })
         .await
     };
@@ -237,9 +346,10 @@ struct Failed {
 fn prepare(
     scheduler: &Arc<Scheduler>,
     mut task: ScheduledTask,
-    started_at: chrono::DateTime<Utc>,
+    run: &Run,
 ) -> Result<Ready, Box<Failed>> {
     let db_path = scheduler.db_path().to_path_buf();
+    let started_at = run.started_at;
 
     // `prepareTaskRun`. Both failures record a *complete* failed job row and
     // return — the run never reaches `createInitialJobHistory`, so there is no
@@ -252,7 +362,7 @@ fn prepare(
                 "failed to interpolate prompt task_id={:?} error={e}",
                 task.id
             );
-            record_failed_run(scheduler, &mut task, started_at, "", &message);
+            record_failed_run(scheduler, &mut task, "", &message, run);
             return Err(Box::new(Failed { task, message }));
         }
     };
@@ -265,13 +375,12 @@ fn prepare(
                 "failed to create chat session task_id={:?} error={e}",
                 task.id
             );
-            record_failed_run(scheduler, &mut task, started_at, "", &message);
+            record_failed_run(scheduler, &mut task, "", &message, run);
             return Err(Box::new(Failed { task, message }));
         }
     };
 
-    let mut job =
-        create_initial_job_history(&db_path, &task, started_at, &chat_session_id, &prompt);
+    let mut job = create_initial_job_history(&db_path, &task, &chat_session_id, &prompt, run);
 
     // `resolveAgentConfig`. From here on there *is* a running row, so every
     // failure finishes it rather than creating a second.
@@ -284,7 +393,9 @@ fn prepare(
                 task.id
             );
             finish_job_history(&db_path, &mut job, started_at, "failed", &message, None, "");
-            update_task_after_run(scheduler, &mut task, started_at, "failed");
+            if run.kind.advances_schedule() {
+                update_task_after_run(scheduler, &mut task, started_at, "failed");
+            }
             return Err(Box::new(Failed { task, message }));
         }
     };
@@ -314,17 +425,20 @@ fn finish(
     mut job: JobHistory,
     chat_session_id: &str,
     prompt: &str,
-    started_at: chrono::DateTime<Utc>,
     result: Result<RunResult, String>,
+    run: &Run,
 ) -> Recorded {
     let db_path = scheduler.db_path().to_path_buf();
+    let started_at = run.started_at;
 
     let result = match result {
         Ok(result) => result,
         Err(e) => {
             log::error!("task execution failed task_id={:?} error={e}", task.id);
             finish_job_history(&db_path, &mut job, started_at, "failed", &e, None, "");
-            update_task_after_run(scheduler, &mut task, started_at, "failed");
+            if run.kind.advances_schedule() {
+                update_task_after_run(scheduler, &mut task, started_at, "failed");
+            }
             return Recorded {
                 task,
                 job,
@@ -350,7 +464,9 @@ fn finish(
         Some(&result),
         response_text,
     );
-    update_task_after_run(scheduler, &mut task, started_at, "success");
+    if run.kind.advances_schedule() {
+        update_task_after_run(scheduler, &mut task, started_at, "success");
+    }
 
     Recorded {
         task,
@@ -407,17 +523,21 @@ fn create_task_session(db_path: &std::path::Path, task: &ScheduledTask) -> Resul
 fn create_initial_job_history(
     db_path: &std::path::Path,
     task: &ScheduledTask,
-    started_at: chrono::DateTime<Utc>,
     chat_session_id: &str,
     prompt: &str,
+    run: &Run,
 ) -> JobHistory {
     let job = JobHistory {
-        id: uuid::Uuid::new_v4().to_string(),
+        // Minted by the caller rather than here, so `POST /api/tasks/{id}/run`
+        // can answer with the id of the row this run is about to write. A
+        // scheduled run passes a fresh v4 uuid, which is what this line used to
+        // generate — the bytes are the same shape either way.
+        id: run.job_id.clone(),
         task_id: task.id.clone(),
         task_name: task.name.clone(),
         agent_slug: task.agent_slug.clone(),
         status: "running".to_string(),
-        started_at: crate::native::gotime::GoTime::from_utc(started_at),
+        started_at: crate::native::gotime::GoTime::from_utc(run.started_at),
         finished_at: None,
         duration_ms: 0,
         chat_session_id: chat_session_id.to_string(),
@@ -760,13 +880,17 @@ fn write_run_result(
 fn record_failed_run(
     scheduler: &Arc<Scheduler>,
     task: &mut ScheduledTask,
-    started_at: chrono::DateTime<Utc>,
     chat_session_id: &str,
     error_message: &str,
+    run: &Run,
 ) {
     let now = Utc::now();
+    let started_at = run.started_at;
     let job = JobHistory {
-        id: uuid::Uuid::new_v4().to_string(),
+        // The caller's id, for `create_initial_job_history`'s reason: this is
+        // the row a manual run answered with, and it must exist under that id
+        // even when the run failed before it started.
+        id: run.job_id.clone(),
         task_id: task.id.clone(),
         task_name: task.name.clone(),
         agent_slug: task.agent_slug.clone(),
@@ -792,7 +916,9 @@ fn record_failed_run(
             task.id
         );
     }
-    update_task_after_run(scheduler, task, started_at, "failed");
+    if run.kind.advances_schedule() {
+        update_task_after_run(scheduler, task, started_at, "failed");
+    }
 }
 
 /// Hand a notification to the blocking pool and **do not wait for it**.
@@ -992,8 +1118,17 @@ mod tests {
         let mut task = sample_task();
         task.id = "t1".to_string();
         let started_at = Utc::now();
-        let mut job =
-            create_initial_job_history(file.path(), &task, started_at, "chat-1", "the prompt");
+        let mut job = create_initial_job_history(
+            file.path(),
+            &task,
+            "chat-1",
+            "the prompt",
+            &Run {
+                kind: RunKind::Scheduled,
+                job_id: uuid::Uuid::new_v4().to_string(),
+                started_at,
+            },
+        );
         assert_eq!(job.status, "running");
 
         let stored = tasks::get_job_history(file.path(), &job.id)
@@ -1350,6 +1485,151 @@ mod tests {
             Utc::now() + chrono::Duration::hours(1),
         ));
         assert!(!should_auto_pause(&task));
+    }
+
+    /// #541: a manual run is a *test* of the configuration, so none of the
+    /// schedule's own accounting may move — and the task under test is at its
+    /// `stop_after_count` limit, which is the one a user most wants to try
+    /// again and the one a scheduled fire would auto-pause.
+    ///
+    /// The boundary is constructed rather than approached: `run_count` is set
+    /// **equal** to `stop_after_count`, because `>=` is what
+    /// [`write_run_result`] compares and a task merely near its limit passes
+    /// against a manual run that advances the counters exactly once.
+    #[test]
+    fn a_manual_run_leaves_run_count_the_pause_rule_and_the_row_untouched() {
+        let file = at_its_limit();
+        let scheduler = test_scheduler(file.path());
+        let mut task = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+
+        record_failed_run(
+            &scheduler,
+            &mut task,
+            "",
+            "boom",
+            &Run {
+                kind: RunKind::Manual,
+                job_id: "job-manual".to_string(),
+                started_at: Utc::now(),
+            },
+        );
+
+        let stored = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored.run_count, 3, "a manual run spends no budget");
+        assert_eq!(stored.status, "active", "and never auto-pauses the task");
+        assert!(
+            stored.last_run_at.is_none(),
+            "nor claims to be the last run"
+        );
+        assert!(stored.next_run_at.is_none(), "nor shifts the next fire");
+
+        // The other half of the rule: it is still a real run, so it leaves a
+        // job_history row — under the id the route answered with.
+        let job = tasks::get_job_history(file.path(), "job-manual")
+            .expect("read")
+            .expect("row");
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.task_id, "t1");
+    }
+
+    /// The inverse of the test above, over the identical fixture and differing
+    /// only in [`RunKind`] — which is what makes that one a regression guard
+    /// rather than an assertion about a task nothing touched.
+    #[test]
+    fn a_scheduled_run_at_the_same_limit_does_advance_and_auto_pause() {
+        let file = at_its_limit();
+        let scheduler = test_scheduler(file.path());
+        let mut task = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+
+        record_failed_run(
+            &scheduler,
+            &mut task,
+            "",
+            "boom",
+            &Run {
+                kind: RunKind::Scheduled,
+                job_id: "job-scheduled".to_string(),
+                started_at: Utc::now(),
+            },
+        );
+
+        let stored = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored.run_count, 4);
+        assert_eq!(stored.status, "paused");
+    }
+
+    /// The third guarded site: the arm `finish` takes when the agent run itself
+    /// failed. Same shape, so a `kind` dropped from any one of the three is
+    /// caught rather than only from the one a single test happened to walk.
+    #[test]
+    fn the_finish_section_honours_the_run_kind_too() {
+        for (kind, expected_count, expected_status) in [
+            (RunKind::Manual, 3, "active"),
+            (RunKind::Scheduled, 4, "paused"),
+        ] {
+            let file = at_its_limit();
+            let scheduler = test_scheduler(file.path());
+            let task = tasks::get_task(file.path(), "t1")
+                .expect("read")
+                .expect("row");
+            let run = Run {
+                kind,
+                job_id: "j1".to_string(),
+                started_at: Utc::now(),
+            };
+            let job = create_initial_job_history(file.path(), &task, "", "p", &run);
+
+            finish(
+                &scheduler,
+                task,
+                job,
+                "",
+                "p",
+                Err("the agent failed".to_string()),
+                &run,
+            );
+
+            let stored = tasks::get_task(file.path(), "t1")
+                .expect("read")
+                .expect("row");
+            assert_eq!(stored.run_count, expected_count, "{kind:?}");
+            assert_eq!(stored.status, expected_status, "{kind:?}");
+            assert_eq!(
+                tasks::get_job_history(file.path(), "j1")
+                    .expect("read")
+                    .expect("row")
+                    .status,
+                "failed",
+                "{kind:?} still records the run"
+            );
+        }
+    }
+
+    /// A task sitting **exactly** on its `stop_after_count`, still `active`.
+    fn at_its_limit() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, agent_slug, schedule_type, schedule_config, status,
+                 run_count, stop_after_count, created_at, updated_at)
+             VALUES ('t1','T','p','no-such-agent','interval','{}','active',
+                     3, 3,
+                     '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed");
+        drop(conn);
+        file
     }
 
     fn test_scheduler(db_path: &std::path::Path) -> Arc<Scheduler> {

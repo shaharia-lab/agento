@@ -306,6 +306,21 @@ Other options:
 The inspector shows the next run, the last run, the total number of runs and the
 last outcome.
 
+**Run now** runs the task immediately, whatever its schedule says. It works on a
+paused task too, and on one that has already reached its **Stop after** count —
+that is the point of it, since a task you cannot try is a task you cannot fix.
+The run lands in **Job history** like any other, with its output, timing, tokens
+and any error.
+
+A manual run **does not touch the schedule**: it does not move the next run, does
+not count towards **Stop after**, and never pauses the task. Only one run of a
+task happens at a time — pressing **Run now** while one is going says so and
+starts nothing.
+
+**Enable** / **Disable** is the other button, and it is the one that decides
+whether the schedule fires at all. It does the same thing as the **Enabled**
+switch in the form below.
+
 **Times are your local time.** They are stored in UTC and converted for display.
 
 **Agento has to be running.** A scheduled task fires from the app itself, so
@@ -315,7 +330,8 @@ nothing runs while it is closed.
 
 ## Job history
 
-Every scheduled run leaves a record: which task, when it started, how long it
+Every run leaves a record — scheduled or started with **Run now** — of which
+task, when it started, how long it
 took, whether it succeeded, the tokens and cost, and the output if you asked for
 it to be saved.
 

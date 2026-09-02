@@ -6,6 +6,7 @@ import type {
   ScheduleConfig,
   ScheduleType,
   ScheduledTask,
+  TaskRunStarted,
 } from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import { DESTROY, partnerLabel, submitLabel } from "../lib/formVerbs";
@@ -169,6 +170,15 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const [draft, setDraft] = useState<ScheduledTask | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  /**
+   * Starting a manual run, kept **separate from `busy`** (#541).
+   *
+   * `busy` is already shared by save, pause/resume and delete, which is why the
+   * submit button below cannot use it as an in-flight label. Folding a third
+   * verb into it would widen that problem; a run also has to disable a
+   * different button from the one a save disables.
+   */
+  const [running, setRunning] = useState(false);
   const [actionError, setActionError] = useState<string>();
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -279,6 +289,31 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
     }
     setDirty(false);
     setActionError(undefined);
+  }
+
+  /**
+   * `POST /api/tasks/{id}/run` (#541) — the verb the ▶ glyph used to be
+   * mistaken for, now its own labelled control beside the one that means
+   * *enabled*.
+   *
+   * The route answers `202` as soon as the run is started, so there is nothing
+   * to await beyond that: the run itself lands in the history below (and in the
+   * Jobs section), which `historyRes` is already polling. It deliberately does
+   * not reload `tasksRes` — a manual run changes nothing about the task row,
+   * which is the whole point of it.
+   */
+  async function runNow() {
+    if (!draft?.id) return;
+    setRunning(true);
+    setActionError(undefined);
+    try {
+      await api.post<TaskRunStarted>(`/tasks/${draft.id}/run`);
+      historyRes.reload();
+    } catch (err) {
+      setActionError(describeError(err));
+    } finally {
+      setRunning(false);
+    }
   }
 
   async function toggleStatus() {
@@ -427,27 +462,36 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                   <button
                     className="btn btn--primary"
                     onClick={save}
-                    disabled={busy || (!dirty && !creating)}
+                    disabled={busy || running || (!dirty && !creating)}
                   >
                     {/* Never the in-flight label: this view's `busy` is shared
-                        with pause/resume, so passing it here would make the
-                        submit read "Saving…" while an unrelated request runs.
-                        The disabled state already covers that case. */}
+                        with pause/resume and delete, so passing it here would
+                        make the submit read "Saving…" while an unrelated
+                        request runs. The disabled state already covers that
+                        case, and `running` joins it for the same reason. */}
                     {submitLabel(creating, false)}
                   </button>
                   {!creating && (
                     <>
                       <div className="toolbar__sep" />
+                      {/* Two verbs, two words. This strip used to carry one
+                          ▶/⏸ icon button whose only affordance was a `title`,
+                          and ▶ is the universal *execute* glyph — so the one
+                          control that meant "enabled" was drawn as the one that
+                          means "run", and the run it was mistaken for did not
+                          exist anywhere in the product (#541). Neither carries
+                          a `+`: both act on a record that already exists, which
+                          is the rule in CLAUDE.md → *A form's actions are a
+                          fixed grammar*. */}
+                      <button className="btn" onClick={runNow} disabled={busy || running}>
+                        {running ? "Starting…" : "Run now"}
+                      </button>
                       <button
-                        className="iconbtn"
-                        title={draft.status === "active" ? "Pause" : "Resume"}
+                        className="btn"
                         onClick={toggleStatus}
-                        disabled={busy}
+                        disabled={busy || running}
                       >
-                        <Icon
-                          name={draft.status === "active" ? "pause" : "play"}
-                          size={14}
-                        />
+                        {draft.status === "active" ? "Disable" : "Enable"}
                       </button>
                       <button
                         className="iconbtn"

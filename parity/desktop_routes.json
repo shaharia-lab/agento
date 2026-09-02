@@ -26,6 +26,13 @@
   ],
   "routes": [
     {
+      "method": "POST",
+      "route": "/api/tasks/{id}/run",
+      "status": "native",
+      "owner": "#541",
+      "reason": "fires a configured task on demand -- the one thing the product could not do, since the only way to make a task run was to change its schedule type to run_immediately and so destroy the schedule being tested. Answers 202 with the job_history id the run will write rather than blocking for the run itself, which reaches 240 minutes; 409 when a run of that task is already in flight; and a PAUSED task is deliberately runnable, which is most of the point. It advances nothing the schedule owns -- not run_count, not next_run_at, not the stop_after_count budget"
+    },
+    {
       "method": "GET",
       "route": "/api/security/keys",
       "status": "native",
