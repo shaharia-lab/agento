@@ -7,22 +7,18 @@ import {
   useState,
 } from "react";
 import { api, qs } from "../lib/api";
-import { CopyButton } from "../components/CopyButton";
 import type {
   ClaudeProject,
   ClaudeSessionDetail,
   ClaudeSessionSummary,
-  SessionCost,
   SessionFacets,
   SessionPage,
   SessionScanStatus,
-  TokenUsage,
 } from "../lib/types";
 import { describeError, useDebounced, usePoll, useResource } from "../lib/hooks";
 import {
   compactNumber,
   dateTime,
-  duration,
   groupByRecency,
   integer,
   relativeTime,
@@ -32,20 +28,24 @@ import {
 import { Icon } from "../lib/icons";
 import { useNavigate } from "../lib/nav";
 import { snippetParts, snippetText } from "../lib/snippet";
-import { sessionAgentName } from "../lib/sessionAgent";
-import { openExternal } from "../lib/tauri";
 import { copyText } from "../lib/clipboard";
 import {
   ContextMenu,
   type ContextMenuItem,
   Dropdown,
   Empty,
-  InspGroup,
-  InspRow,
   Search,
   Splitter,
 } from "../components/ui";
 import { SessionDetail } from "./sessions/SessionDetail";
+import { SessionInspector } from "./sessions/SessionInspector";
+import {
+  modeBadge,
+  modeLabel,
+  tokensIn,
+  tokensOut,
+  totalCost,
+} from "./sessions/sessionMetrics";
 import { findSessionById, sessionMenuItems } from "./sessions/SessionLink";
 import "../styles/sessions.css";
 
@@ -333,107 +333,6 @@ interface Loaded {
 }
 
 const NO_ROWS: ClaudeSessionSummary[] = [];
-
-/* --- Totals -------------------------------------------------------------- */
-
-const ZERO_USAGE: TokenUsage = {
-  input_tokens: 0,
-  output_tokens: 0,
-  cache_creation_tokens: 0,
-  cache_creation_5m_tokens: 0,
-  cache_creation_1h_tokens: 0,
-  cache_read_tokens: 0,
-};
-
-const ZERO_COST: SessionCost = {
-  input_usd: 0,
-  output_usd: 0,
-  cache_read_usd: 0,
-  cache_write_usd: 0,
-  total_usd: 0,
-};
-
-function usageOf(u: TokenUsage | undefined | null): TokenUsage {
-  return u ?? ZERO_USAGE;
-}
-
-function costOf(c: SessionCost | undefined | null): SessionCost {
-  return c ?? ZERO_COST;
-}
-
-/**
- * Billable input/output, main thread plus sub-agents. Cache tokens are billed
- * separately and are deliberately not folded in here — `facets.total_tokens`
- * is exactly the sum of these two numbers over the filtered set.
- */
-function tokensIn(s: ClaudeSessionSummary): number {
-  return usageOf(s.usage).input_tokens + usageOf(s.subagent_usage).input_tokens;
-}
-
-function tokensOut(s: ClaudeSessionSummary): number {
-  return (
-    usageOf(s.usage).output_tokens + usageOf(s.subagent_usage).output_tokens
-  );
-}
-
-function totalCost(s: ClaudeSessionSummary): number {
-  return costOf(s.cost).total_usd + costOf(s.subagent_cost).total_usd;
-}
-
-function totalDuration(s: ClaudeSessionSummary): number {
-  return (s.active_duration_ms ?? 0) + (s.subagent_active_duration_ms ?? 0);
-}
-
-/* --- Presentation helpers ------------------------------------------------- */
-
-/**
- * The permission modes Claude Code writes, and how each reads.
- *
- * One table for the row badge and the Mode filter, so the option a user picks
- * is spelled exactly as the column they picked it from. An unknown value keeps
- * its raw text in both places rather than being dropped — the corpus predates
- * some of these names.
- */
-const MODE_LABELS: Record<string, string> = {
-  bypassPermissions: "Bypass",
-  plan: "Plan",
-  acceptEdits: "Accept",
-  dontAsk: "Don't ask",
-  default: "Default",
-};
-
-const MODE_TONES: Record<string, string> = {
-  bypassPermissions: "badge--amber",
-  plan: "badge--purple",
-  acceptEdits: "badge--teal",
-  dontAsk: "badge--teal",
-};
-
-/**
- * `permission_mode` is a free-form column — the scanner copies whatever the
- * transcript's `permission-mode` event carried, with no enum in between — so
- * every read of these tables goes through a `typeof` check rather than `??`.
- * A plain object inherits `toString`, `constructor` and `valueOf`, and `??`
- * does not catch a function: the value would reach JSX as a React child and as
- * a `className`. The `switch` these tables replaced was immune by construction.
- */
-function lookup(table: Record<string, string>, key: string): string | undefined {
-  const v = table[key];
-  return typeof v === "string" ? v : undefined;
-}
-
-function modeLabel(mode: string): string {
-  return lookup(MODE_LABELS, mode) ?? mode;
-}
-
-function modeBadge(s: ClaudeSessionSummary): { label: string; tone: string } | null {
-  // `omitempty` on the Go side, so the field is absent on a row that recorded
-  // no mode — which is not the same as one whose mode this table does not know.
-  const mode = s.permission_mode ?? "";
-  const label = lookup(MODE_LABELS, mode);
-  if (label) return { label, tone: lookup(MODE_TONES, mode) ?? "" };
-  return s.mode ? { label: s.mode, tone: "" } : null;
-}
 
 /**
  * The second line under a row's title: why this row matched.
@@ -1785,7 +1684,7 @@ export function SessionsView({
             )}
             <div className="inspector__scroll scroll">
               {selected ? (
-                <Inspector session={selected} />
+                <SessionInspector session={selected} />
               ) : (
                 <div className="sess-note">No session selected.</div>
               )}
@@ -1798,219 +1697,6 @@ export function SessionsView({
         <ContextMenu at={menu.at} items={menuItems} onClose={closeMenu} />
       )}
     </div>
-  );
-}
-
-/* --- Inspector ------------------------------------------------------------ */
-
-/**
- * The metadata groups alone. The actions live in `.sess-strip` above the
- * scrolling pane this renders into, so nothing here takes a handler.
- */
-function Inspector({ session }: { session: ClaudeSessionSummary }) {
-  const usage = usageOf(session.usage);
-  const sub = usageOf(session.subagent_usage);
-  const cost = costOf(session.cost);
-  const subCost = costOf(session.subagent_cost);
-  const prs = session.prs ?? [];
-  const badge = modeBadge(session);
-  const agentName = sessionAgentName(session);
-
-  return (
-    <>
-      <InspGroup title="Session">
-        <div className="sess-heading">
-          {session.display_title || "Untitled session"}
-        </div>
-        {session.preview && (
-          <div className="sess-preview">{session.preview}</div>
-        )}
-        {/* Both of these are single values a user copies whole and neither
-            fits the pane, so the button carries the real string while the row
-            shows an abbreviated one (#469). */}
-        <InspRow label="ID">
-          <span className="row insp-row__copy">
-            <span className="mono truncate">{session.session_id}</span>
-            <CopyButton text={session.session_id} title="Copy session ID" />
-          </span>
-        </InspRow>
-        {session.custom_title && (
-          <InspRow label="Custom">{session.custom_title}</InspRow>
-        )}
-        {session.ai_title && session.ai_title !== session.display_title && (
-          <InspRow label="AI title">{session.ai_title}</InspRow>
-        )}
-        {session.native_title && (
-          <InspRow label="Native">{session.native_title}</InspRow>
-        )}
-        {/* Another name Claude Code recorded for the session, shown only when
-            it is not one of the titles above — the same suppression the AI
-            title gets, for the reasons in lib/sessionAgent.ts. It was labelled
-            "Agent" and sat beside Model and Config until it turned out never to
-            name an agent, so it belongs here with the other titles. */}
-        {agentName && <InspRow label="Named">{agentName}</InspRow>}
-        <InspRow label="Project">
-          <span className="row insp-row__copy">
-            <span className="truncate" title={session.project_path}>
-              {tildePath(session.project_path)}
-            </span>
-            <CopyButton
-              text={session.project_path}
-              title="Copy the project path"
-            />
-          </span>
-        </InspRow>
-        {session.cwd && session.cwd !== session.project_path && (
-          <InspRow label="Directory">{tildePath(session.cwd)}</InspRow>
-        )}
-        {session.relocated_cwd && (
-          <InspRow label="Relocated">{tildePath(session.relocated_cwd)}</InspRow>
-        )}
-        <InspRow label="Branch">{session.git_branch || "—"}</InspRow>
-        {session.worktree_name && (
-          <InspRow label="Worktree">
-            {session.worktree_name}
-            {session.worktree_branch ? ` · ${session.worktree_branch}` : ""}
-          </InspRow>
-        )}
-        {session.original_branch && (
-          <InspRow label="From">{session.original_branch}</InspRow>
-        )}
-        <InspRow label="Model">{session.model || "—"}</InspRow>
-        <InspRow label="Mode">
-          {badge ? (
-            <span className={`badge ${badge.tone}`}>{badge.label}</span>
-          ) : (
-            "—"
-          )}
-        </InspRow>
-        <InspRow label="Config">{session.config_dir ?? "Default"}</InspRow>
-      </InspGroup>
-
-      <InspGroup title="Activity">
-        <InspRow label="Started">{dateTime(session.start_time)}</InspRow>
-        <InspRow label="Last">{dateTime(session.last_activity)}</InspRow>
-        <InspRow label="Active">
-          <span className="tnum">{duration(session.active_duration_ms)}</span>
-        </InspRow>
-        <InspRow label="Sub-agents">
-          <span className="tnum">
-            {duration(session.subagent_active_duration_ms)}
-          </span>
-        </InspRow>
-        <InspRow label="Total">
-          <span className="tnum">{duration(totalDuration(session))}</span>
-        </InspRow>
-        <InspRow label="Messages">
-          <span className="tnum">{integer(session.message_count)}</span>
-        </InspRow>
-        <InspRow label="Events">
-          <span className="tnum">{integer(session.event_count)}</span>
-        </InspRow>
-        <InspRow label="Compactions">
-          <span className="tnum">{integer(session.compaction_count)}</span>
-        </InspRow>
-        {session.dropped_tokens > 0 && (
-          <InspRow label="Dropped">
-            <span className="tnum">{integer(session.dropped_tokens)}</span>
-          </InspRow>
-        )}
-      </InspGroup>
-
-      <InspGroup title="Tokens">
-        <InspRow label="Input">
-          <span className="tnum">{integer(usage.input_tokens)}</span>
-        </InspRow>
-        <InspRow label="Output">
-          <span className="tnum">{integer(usage.output_tokens)}</span>
-        </InspRow>
-        <InspRow label="Cache read">
-          <span className="tnum">{integer(usage.cache_read_tokens)}</span>
-        </InspRow>
-        <InspRow label="Cache write">
-          <span className="tnum">{integer(usage.cache_creation_tokens)}</span>
-        </InspRow>
-        <InspRow label="Billable">
-          <span className="tnum">
-            {integer(tokensIn(session))} in / {integer(tokensOut(session))} out
-          </span>
-        </InspRow>
-      </InspGroup>
-
-      <InspGroup title={`Sub-agents · ${integer(session.subagent_count)}`}>
-        <InspRow label="Input">
-          <span className="tnum">{integer(sub.input_tokens)}</span>
-        </InspRow>
-        <InspRow label="Output">
-          <span className="tnum">{integer(sub.output_tokens)}</span>
-        </InspRow>
-        <InspRow label="Cache read">
-          <span className="tnum">{integer(sub.cache_read_tokens)}</span>
-        </InspRow>
-        <InspRow label="Cache write">
-          <span className="tnum">{integer(sub.cache_creation_tokens)}</span>
-        </InspRow>
-        <InspRow label="Cost">
-          <span className="tnum">{usd(subCost.total_usd)}</span>
-        </InspRow>
-      </InspGroup>
-
-      <InspGroup title="Cost">
-        <InspRow label="Input">
-          <span className="tnum">{usd(cost.input_usd)}</span>
-        </InspRow>
-        <InspRow label="Output">
-          <span className="tnum">{usd(cost.output_usd)}</span>
-        </InspRow>
-        <InspRow label="Cache read">
-          <span className="tnum">{usd(cost.cache_read_usd)}</span>
-        </InspRow>
-        <InspRow label="Cache write">
-          <span className="tnum">{usd(cost.cache_write_usd)}</span>
-        </InspRow>
-        <InspRow label="Session">
-          <span className="tnum">{usd(cost.total_usd)}</span>
-        </InspRow>
-        <InspRow label="Sub-agents">
-          <span className="tnum">{usd(subCost.total_usd)}</span>
-        </InspRow>
-        <InspRow label="Total">
-          <span className="tnum" style={{ color: "var(--green)" }}>
-            {usd(totalCost(session))}
-          </span>
-        </InspRow>
-        {session.unpriced_models?.length ? (
-          <InspRow label="Unpriced">
-            <span title={session.unpriced_models.join(", ")}>
-              {session.unpriced_models.length} models ·{" "}
-              {compactNumber(session.unpriced_tokens ?? 0)} tokens
-            </span>
-          </InspRow>
-        ) : null}
-      </InspGroup>
-
-      {prs.length > 0 && (
-        <InspGroup title={`Pull requests · ${prs.length}`}>
-          <div className="sess-prs">
-            {prs.map((pr) => (
-              <div className="sess-pr" key={`${pr.pr_repository}#${pr.pr_number}`}>
-                <a
-                  href={pr.pr_url}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    openExternal(pr.pr_url);
-                  }}
-                >
-                  #{pr.pr_number}
-                </a>
-                <span className="sess-pr__repo">{pr.pr_repository}</span>
-              </div>
-            ))}
-          </div>
-        </InspGroup>
-      )}
-
-    </>
   );
 }
 

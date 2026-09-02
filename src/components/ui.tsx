@@ -904,17 +904,57 @@ export function Search({
 
 /* --- Inspector primitives ------------------------------------------------ */
 
+/**
+ * A titled group of inspector rows, optionally collapsible (#538).
+ *
+ * **Collapsing is opt-in and must stay that way.** Eight views render this, and
+ * a default-collapsible group would silently change every inspector in the app
+ * — the same reason `SaveBar`'s icon and error tone are opt-in. With
+ * `collapsible` unset the markup is byte-identical to what it has always been,
+ * which is what makes the widening provably a no-op for the other seven.
+ *
+ * It is **controlled**: the caller owns `open` and persists it. A self-stateful
+ * group would need its own storage key threaded in anyway, and the state has to
+ * live in one place or two groups disagree about where it is kept.
+ */
 export function InspGroup({
   title,
+  collapsible,
+  open = true,
+  onToggle,
   children,
 }: {
   title: string;
+  collapsible?: boolean;
+  open?: boolean;
+  onToggle?: () => void;
   children: React.ReactNode;
 }) {
+  if (!collapsible) {
+    return (
+      <div className="insp-group">
+        <div className="insp-group__title">{title}</div>
+        {children}
+      </div>
+    );
+  }
   return (
     <div className="insp-group">
-      <div className="insp-group__title">{title}</div>
-      {children}
+      {/* A real button, so Tab reaches it and Enter/Space toggle it without a
+          keydown handler of our own. `Icon` is `aria-hidden` already, so the
+          chevron is decorative and the accessible name is the title alone. */}
+      <button
+        type="button"
+        className={`insp-group__title insp-group__title--toggle${
+          open ? "" : " insp-group__title--closed"
+        }`}
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span>{title}</span>
+        <Icon name={open ? "chevronD" : "chevronR"} size={12} />
+      </button>
+      {open && children}
     </div>
   );
 }
