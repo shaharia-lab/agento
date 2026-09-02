@@ -168,6 +168,46 @@ pub async fn run_manual(
         return;
     };
 
+    // **Re-read after the permit, and only for the row's existence.**
+    //
+    // This is the half of [`due_task`] a manual run keeps. The other half —
+    // `status != "active"` and the two auto-pause rules — is schedule policy
+    // and is deliberately skipped; *this* is not policy, it is the same check
+    // Go's own comment calls "a task that vanished between the fire and the
+    // read". And the window here is far wider than the timer's: the wait above
+    // is for one of three permits, which the runs holding them may keep for
+    // 240 minutes. `job_history.task_id` cascades from `scheduled_tasks`, so a
+    // run whose task was deleted meanwhile would spawn the agent, spend the
+    // tokens, and then fail to insert its job row — leaving nothing at all to
+    // explain it, which is the one outcome this module does not allow.
+    //
+    // It also picks up an edit that landed after the request, which is the
+    // `dirty` gate in the UI applied to the window that gate cannot cover.
+    let task = {
+        let (db_path, id) = (scheduler.db_path().to_path_buf(), task.id.clone());
+        match db::blocking("manual run re-read", move || tasks::get_task(&db_path, &id)).await {
+            Some(Ok(Some(fresh))) => fresh,
+            Some(Ok(None)) => {
+                log::info!(
+                    "manual run abandoned: the task no longer exists task_id={:?}",
+                    task.id
+                );
+                return;
+            }
+            // A read failure, or a panic in the section. Neither can be told
+            // apart from a deleted row well enough to run on the snapshot, and
+            // running on it is the outcome with no evidence.
+            Some(Err(e)) => {
+                log::error!(
+                    "manual run abandoned: could not re-read the task task_id={:?} error={e}",
+                    task.id
+                );
+                return;
+            }
+            None => return,
+        }
+    };
+
     log::info!(
         "executing task manually task_id={:?} task_name={:?} job_id={job_id:?}",
         task.id,

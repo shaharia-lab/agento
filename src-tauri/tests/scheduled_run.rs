@@ -326,6 +326,68 @@ async fn a_manual_run_fires_a_paused_task_at_its_limit_and_moves_no_counter() {
     assert!(!scheduler.is_running(&task_id));
 }
 
+/// #541: a task deleted while its manual run waited for a permit is not run.
+///
+/// The wait is for one of three slots that a 240-minute run can hold, so this
+/// window is not the timer's milliseconds — and `job_history.task_id` cascades
+/// from `scheduled_tasks`, so running anyway would spawn the agent and then
+/// fail to insert the row that explains it. `execute_task` gets this from
+/// `due_task`'s vanished-row arm; `run_manual` skips `due_task` and has to
+/// re-read for itself.
+#[tokio::test]
+async fn a_manual_run_whose_task_was_deleted_while_it_queued_does_not_run() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+
+    let cli = fake_cli(
+        dir.path(),
+        r#"        raw('{"type":"result","subtype":"success","is_error":false,"result":"ran anyway","session_id":"sdk-ghost","usage":{}}')"#,
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    let task = agento_lib::native::tasks::get_task(&db, &task_id)
+        .expect("read")
+        .expect("row");
+    let guard = scheduler
+        .try_mark_running(&task_id)
+        .expect("nothing is in flight");
+
+    // The row goes after the route read it and before the run reaches the
+    // database — which is exactly what the permit wait makes reachable.
+    {
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        conn.execute("DELETE FROM scheduled_tasks WHERE id = ?1", [&task_id])
+            .expect("delete");
+    }
+
+    agento_lib::native::schedule::executor::run_manual(
+        std::sync::Arc::clone(&scheduler),
+        task,
+        "job-ghost".to_string(),
+        guard,
+    )
+    .await;
+
+    assert!(
+        job_rows(&db).is_empty(),
+        "nothing ran, so there is nothing to record"
+    );
+    assert_eq!(
+        session_count(&db),
+        0,
+        "and no chat session was created for a task that is gone"
+    );
+    assert!(!scheduler.is_running(&task_id), "the guard was released");
+}
+
 #[tokio::test]
 async fn an_error_result_is_a_failed_job_with_gos_wording() {
     if python3().is_none() {
