@@ -1809,11 +1809,16 @@ struct TaskRequest {
 
 impl TaskRequest {
     /// The `storage.ScheduledTask` both handlers build from the request — the
-    /// fourteen fields they copy, and nothing else. The other seven are the
-    /// row's own: the minted `id`, the two stamps, and the four the scheduler
-    /// writes back after a run (`run_count`, `last_run_at`, `last_run_status`,
-    /// `next_run_at`), which `update_task` restores from the stored row rather
-    /// than from the body.
+    /// fourteen fields they copy, and nothing else.
+    ///
+    /// The other seven are the row's own, and they split three ways. `id` is
+    /// minted on a create and re-set from the URL on an update; `updated_at` is
+    /// restamped by every write. Four are taken from the **stored row** by
+    /// `update_task` — `created_at`, `run_count`, `last_run_at` and
+    /// `last_run_status` — which is what stops an edit resetting a task's
+    /// history. `next_run_at` is the exception in both directions: nothing in
+    /// this crate ever writes it, and an update **clears** it rather than
+    /// carrying it over. See `update_task`'s own doc comment.
     fn into_task(self) -> ScheduledTask {
         ScheduledTask {
             id: String::new(),

@@ -477,6 +477,54 @@ mod rfc3339_tests {
     use super::*;
     use chrono::Timelike;
 
+    /// The [`Deserialize`] impl parses through [`parse_rfc3339`], and **this is
+    /// the test that makes that a decision rather than a preference** (#540).
+    /// Swapping the impl body to `DateTime::parse_from_rfc3339` leaves the rest
+    /// of the suite entirely green — every `stop_after_time` fixture is a shape
+    /// both parsers accept — so without this the divergence the module header
+    /// says "would cost the same day twice" could be reintroduced by a
+    /// simplification with nothing red to stop it. Both directions are pinned,
+    /// because each fails differently: chrono's laxity accepts rows the wire
+    /// refuses, and chrono's strictness 400s input the wire takes.
+    #[test]
+    fn deserializing_a_gotime_uses_gos_grammar_and_not_chronos() {
+        let parsed = |json: &str| serde_json::from_str::<GoTime>(json);
+
+        // Go accepts, chrono rejects — the direction that turns into refusing
+        // a body `encoding/json` would have taken.
+        assert_eq!(
+            parsed(r#""2026-06-01T12:00:00,5Z""#)
+                .expect("a comma decimal separator")
+                .0
+                .nanosecond(),
+            500_000_000
+        );
+        assert_eq!(
+            parsed(r#""2026-06-01T5:04:05Z""#)
+                .expect("a one-digit hour")
+                .0
+                .hour(),
+            5
+        );
+        assert!(
+            parsed(r#""2026-06-01T12:00:00+24:00""#).is_ok(),
+            "the offset hour is unbounded to Go"
+        );
+
+        // Go rejects, chrono accepts — the direction that stores a row the
+        // wire would have refused.
+        assert!(parsed(r#""2026-06-01t12:00:00z""#).is_err());
+        assert!(
+            parsed(r#""2026-06-30T23:59:60Z""#).is_err(),
+            "a leap second is `second out of range` to Go"
+        );
+
+        // And the shape neither parser is asked about: a JSON value that is
+        // not a string at all.
+        assert!(parsed("1780000000").is_err());
+        assert!(parsed(r#"["2026-06-01T12:00:00Z"]"#).is_err());
+    }
+
     /// The five disagreements [`parse_rfc3339`] exists for, each measured
     /// against the pinned Go toolchain rather than reasoned about.
     #[test]
