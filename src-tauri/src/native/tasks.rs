@@ -1787,7 +1787,8 @@ struct TaskRequest {
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     save_output: bool,
 
-    // The five above the doc comment: Go's request types stopped here.
+    // The five described in the doc comment above: Go's request types
+    // stopped at `save_output`.
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     working_directory: String,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
@@ -1808,10 +1809,11 @@ struct TaskRequest {
 
 impl TaskRequest {
     /// The `storage.ScheduledTask` both handlers build from the request — the
-    /// fourteen fields they copy, and nothing else. The other six are the
-    /// row's own: the minted `id`, the two stamps, and the three the scheduler
-    /// writes back after a run (`run_count`, `last_run_*`, `next_run_at`), which
-    /// `update_task` restores from the stored row rather than from the body.
+    /// fourteen fields they copy, and nothing else. The other seven are the
+    /// row's own: the minted `id`, the two stamps, and the four the scheduler
+    /// writes back after a run (`run_count`, `last_run_at`, `last_run_status`,
+    /// `next_run_at`), which `update_task` restores from the stored row rather
+    /// than from the body.
     fn into_task(self) -> ScheduledTask {
         ScheduledTask {
             id: String::new(),

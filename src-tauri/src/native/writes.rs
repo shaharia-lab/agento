@@ -242,6 +242,7 @@ pub fn finish(result: Result<super::Answer, WriteError>) -> Result<super::Answer
 /// | `integrations::UpdateIntegrationRequest` | `services`' values | yes |
 /// | `notifications::NotificationSettings` | `provider`, `preferences`, `NotificationPreferences.scheduled_tasks` | yes |
 /// | `integrations::TriggerRuleRequest` | — (two `GoList<String>`) | n/a |
+/// | `tasks::TaskRequest` | `schedule_config` | yes |
 /// | `chats::CreateChatRequest`, `chats::PatchChatRequest` | — | n/a |
 /// | `chats::BulkDeleteRequest`, `tasks::BulkDeleteRequest` | — (`GoList<String>`) | n/a |
 /// | `pricing::RateRequest` | — (the bands are not expressible in a request) | n/a |
