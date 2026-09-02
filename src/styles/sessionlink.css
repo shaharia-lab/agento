@@ -1,0 +1,29 @@
+/* A session rendered as a control, wherever one is named (#536).
+   Imported by `views/sessions/SessionLink.tsx` itself — the
+   `components/charts.tsx` / `SaveBar.tsx` shape — because its consumers sit in
+   sections that do not import `styles/sessions.css`. */
+
+.sess-link {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* `base.css` already gives every `button` `cursor: default`,
+     `user-select: none` and `font: inherit`, which is what makes this read like
+     the list's own rows rather than like a web link. */
+  color: inherit;
+}
+
+.sess-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.sess-link__error {
+  margin-top: var(--sp-2);
+  font-size: var(--text-xs);
+  color: var(--red);
+}

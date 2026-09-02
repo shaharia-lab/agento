@@ -10,6 +10,7 @@ import { api, qs } from "../lib/api";
 import { CopyButton } from "../components/CopyButton";
 import type {
   ClaudeProject,
+  ClaudeSessionDetail,
   ClaudeSessionSummary,
   SessionCost,
   SessionFacets,
@@ -45,6 +46,7 @@ import {
   Splitter,
 } from "../components/ui";
 import { SessionDetail } from "./sessions/SessionDetail";
+import { sessionMenuItems } from "./sessions/SessionLink";
 import "../styles/sessions.css";
 
 /**
@@ -587,7 +589,17 @@ function DraftMatchCount({ params }: { params: FilterParams }) {
   );
 }
 
-export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
+export function SessionsView({
+  inspectorOpen,
+  openSessionId,
+  openSessionNonce,
+}: {
+  inspectorOpen: boolean;
+  /** A session handed off from another section, to open on arrival (#536). */
+  openSessionId?: string;
+  /** `App`'s nav nonce, so the *same* hand-off twice still fires. */
+  openSessionNonce?: number;
+}) {
   const [query, setQuery] = useState("");
   const q = useDebounced(query, 250);
   const [filters, setFilters] = useState<Filters>(INITIAL_FILTERS);
@@ -794,6 +806,19 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     setLastSelected(s);
   }, []);
 
+  /**
+   * The loaded rows, readable from an effect that must not *depend* on them —
+   * the hand-off below fires on a nonce, and adding `items` to its deps would
+   * re-open the handed-off session on every later page load.
+   */
+  const itemsRef = useRef(items);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
+  /** Why a hand-off did not open, when it did not. */
+  const [handoffError, setHandoffError] = useState<string>();
+
   const openSession = useMemo(() => {
     if (!openId) return undefined;
     return (
@@ -825,9 +850,56 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   // current one is not among the loaded rows.
   useEffect(() => {
     if (!items.length) return;
+    // ...except while a transcript is open. That session is legitimately
+    // absent from the page — handed off from another section (#536), or simply
+    // filtered out while it was being read — and stealing the selection here
+    // also drops the `lastSelected` fallback `openSession` resolves through,
+    // leaving the pane with nothing to render.
+    if (selectedId && selectedId === openId) return;
     if (items.some((s) => s.session_id === selectedId)) return;
     select(items[0]);
-  }, [items, selectedId, select]);
+  }, [items, selectedId, openId, select]);
+
+  /**
+   * A hand-off from another section: open the named session's transcript.
+   *
+   * Keyed on the **nonce**, not on `items`. The page is usually still loading
+   * on arrival, so waiting for the row would leave a blank pane, and re-running
+   * on every later page change would re-open a session the user had already
+   * navigated away from. `App` clears `navTarget` on any navigation carrying
+   * none, so a stale id cannot be re-applied on a later visit.
+   *
+   * The row comes from the loaded page when it happens to be there, else from
+   * the by-id route — `ClaudeSessionDetail` **extends** `ClaudeSessionSummary`,
+   * so the answer is a row `SessionDetail` can render.
+   */
+  useEffect(() => {
+    const id = openSessionId;
+    if (!id) return;
+    setHandoffError(undefined);
+    const known = itemsRef.current.find((s) => s.session_id === id);
+    if (known) {
+      select(known);
+      setOpenId(id);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<ClaudeSessionDetail>(`/claude-sessions/${id}`)
+      .then((row) => {
+        if (cancelled) return;
+        select(row);
+        setOpenId(id);
+      })
+      .catch((err) => {
+        // A hand-off that silently does nothing is the bug #485 was filed for,
+        // so the list says why it is still showing the list.
+        if (!cancelled) setHandoffError(describeError(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [openSessionId, openSessionNonce, select]);
 
   /* --- Row actions -------------------------------------------------------- */
 
@@ -941,38 +1013,24 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     [menu, items]
   );
 
+  // The five entries come from `sessionMenuItems`, shared with `SessionLink`
+  // (#536): this view and every surface that merely *names* a session must
+  // offer the same menu, and a second hand-written array is what drifts. What
+  // each entry does stays here — the list patches its loaded page and reloads
+  // its facets, which a link rendered elsewhere has neither of.
   const menuItems = useMemo<ContextMenuItem[]>(() => {
     const s = menuSession;
     if (!s) return [];
-    return [
-      {
-        label: "View session",
-        icon: "chat",
-        onSelect: () => setOpenId(s.session_id),
-      },
-      {
-        label: s.is_favorite ? "Remove favourite" : "Add to favourites",
-        icon: "star",
-        disabled: busy !== undefined,
-        onSelect: () => toggleFavorite(s),
-      },
-      {
-        label: "Continue in chat",
-        icon: "play",
-        disabled: busy !== undefined,
-        onSelect: () => continueInChat(s),
-      },
-      {
-        label: "Copy session ID",
-        icon: "copy",
-        onSelect: () => copyValue("session ID", s.session_id),
-      },
-      {
-        label: "Copy project path",
-        icon: "copy",
-        onSelect: () => copyValue("project path", s.project_path),
-      },
-    ];
+    return sessionMenuItems({
+      sessionId: s.session_id,
+      projectPath: s.project_path,
+      isFavorite: !!s.is_favorite,
+      busy: busy !== undefined,
+      onView: () => setOpenId(s.session_id),
+      onToggleFavorite: () => toggleFavorite(s),
+      onContinue: () => continueInChat(s),
+      onCopy: copyValue,
+    });
   }, [menuSession, busy, toggleFavorite, continueInChat, copyValue]);
 
   /* --- Derived view data --------------------------------------------------- */
@@ -1601,6 +1659,24 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             </table>
           </div>
         )}
+
+        {/* A hand-off (#536) that could not resolve its session says so, rather
+            than dropping the user on an unexplained list. */}
+        {handoffError ? (
+          <div className="sess-err">
+            <Icon name="alert" size={13} />
+            <span className="sess-err__msg">
+              That session could not be opened: {handoffError}
+            </span>
+            <div className="spacer" />
+            <button
+              className="btn btn--ghost"
+              onClick={() => setHandoffError(undefined)}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
 
         {(page.error && items.length > 0) || refreshError ? (
           <div className="sess-err">

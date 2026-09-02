@@ -188,7 +188,11 @@ src/
                  not a router, and query state, filters and scroll positions do
                  not belong in it. `App` clears the target on any navigation
                  that carries none, or a consumed chat id would be re-applied on
-                 every later visit to that section
+                 every later visit to that section. **There are two destinations
+                 now, and the rule is unchanged**: `chatId` (#485) and
+                 `sessionId` (#536), one optional id each. A second destination
+                 adds one field here and nothing else — the *number* of fields
+                 is not the rule, one-id-per-destination is
     icons.tsx    16px / 1.5-stroke icon set
     tauri.ts     window + menu bridge; degrades to a plain browser tab
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
@@ -226,6 +230,24 @@ src/
                  charts.tsx shape. See *Conventions* for what it does and does
                  not take
   views/         one file per section
+    sessions/SessionLink.tsx   a session rendered as a control, wherever one is
+                 *named* (#536) — left-click hands off to the Sessions section
+                 through `NavTarget.sessionId`, right-click opens the row menu.
+                 `sessionMenuItems` is the **single** definition of those five
+                 entries: `SessionsView`'s own rows build their menu from it
+                 too, so a second hand-written array cannot drift. What an entry
+                 *does* stays with the caller — the list patches its loaded page
+                 and reloads its facets, which a link elsewhere has neither of.
+                 The favourite is the one item whose label is a function of the
+                 row, so an id-only caller hydrates it lazily on right-click
+                 through the **list** (`?q=<id>`, `add_search`'s LIKE half
+                 covers `session_id`) and never through
+                 `GET /claude-sessions/{id}`, which reads the whole transcript
+                 back to learn one boolean; while it is unknown the item is
+                 disabled and labelled neutrally, because "unknown" is not
+                 "not a favourite". Carries `styles/sessionlink.css` itself,
+                 the `components/charts.tsx` shape, since its consumers are in
+                 sections that do not import `styles/sessions.css`
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
                  and revoking scoped API tokens (#405)

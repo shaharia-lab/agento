@@ -1,6 +1,7 @@
 import { compactNumber, integer, percent, usd, duration } from "../../lib/format";
 import type { AnalyticsReport, SessionRanking } from "../../lib/types";
 import { AreaChart, BarChart, Heatmap, type Point } from "../../components/charts";
+import { SessionLink } from "../sessions/SessionLink";
 import {
   Card,
   CardEmpty,
@@ -219,12 +220,12 @@ function TopSessions({
                 <td className="num" style={{ color: "var(--fg-quaternary)" }}>
                   {i + 1}
                 </td>
-                <td
-                  className="truncate"
-                  style={{ maxWidth: 320 }}
-                  title={r.title || r.session_id}
-                >
-                  {r.title || r.session_id}
+                <td className="truncate" style={{ maxWidth: 320 }}>
+                  <SessionLink
+                    sessionId={r.session_id}
+                    title={r.title}
+                    project={r.project}
+                  />
                 </td>
                 <td
                   className="truncate"
