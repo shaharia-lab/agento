@@ -760,7 +760,7 @@ export function TasksView({
                     help={
                       draft.stop_after_count > 0
                         ? "The task pauses itself once it has run this many times."
-                        : "The task keeps running until you pause it."
+                        : "The number of runs is not limited."
                     }
                   >
                     <div className="inline">
@@ -771,6 +771,14 @@ export function TasksView({
                           { value: "count", label: "Run limit" },
                         ]}
                         onChange={(v) => {
+                          /* `Segmented` fires on every click, including one on
+                             the option already selected — and both arms below
+                             write. Without this guard the ordinary gesture of
+                             re-clicking the mode you are already in would
+                             re-seed a typed count, or stash the unset value
+                             over the one the stash exists to remember. */
+                          if (v === (draft.stop_after_count > 0 ? "count" : "none"))
+                            return;
                           if (v === "none") {
                             lastLimits.current = {
                               ...stashFor(lastLimits.current, draft.id),
@@ -828,6 +836,8 @@ export function TasksView({
                           { value: "date", label: "End date" },
                         ]}
                         onChange={(v) => {
+                          // The same already-selected guard as the row above.
+                          if (v === (draft.stop_after_time ? "date" : "none")) return;
                           if (v === "none") {
                             lastLimits.current = {
                               ...stashFor(lastLimits.current, draft.id),
