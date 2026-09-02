@@ -12,7 +12,7 @@
 //! divergence again there would cost the same day twice.
 
 use chrono::{DateTime, FixedOffset, Utc};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A timestamp that serializes exactly as Go's `time.Time` does.
 ///
@@ -242,6 +242,27 @@ impl Default for GoTime {
 impl Serialize for GoTime {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&format_go_rfc3339(&self.0))
+    }
+}
+
+/// The inverse of [`Serialize`], for the request bodies that carry an instant.
+///
+/// `time.Time.UnmarshalJSON` reads a JSON string with the RFC 3339 layout, so
+/// this parses through [`parse_rfc3339`] — Go's own grammar — rather than
+/// `chrono::DateTime::parse_from_rfc3339`, which disagrees with it in five
+/// ways and would refuse three shapes `encoding/json` accepts. A value that
+/// does not parse is a decode error, which `writes::decode_body` renders as
+/// the same 400 every other mistyped field answers.
+///
+/// The offset is preserved, exactly as [`GoTime::parse`] preserves it; a write
+/// path that stores through `to_go_string_utc` is what normalizes to UTC, and
+/// that is the storage layer's business rather than the decoder's.
+impl<'de> Deserialize<'de> for GoTime {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        parse_rfc3339(&text)
+            .map(GoTime)
+            .ok_or_else(|| serde::de::Error::custom(format!("parsing time {text:?}")))
     }
 }
 

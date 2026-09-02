@@ -1143,6 +1143,50 @@ mod tests {
         assert_eq!(stored.status, "paused", "the second run hits the limit");
     }
 
+    /// The same limit, reached by a task the **API** created rather than one an
+    /// `INSERT` seeded (#540). The sibling above pins the executor's arithmetic
+    /// and says nothing about whether a `stop_after_count` can be configured at
+    /// all — which is exactly the hop that was dropping it, so a green sibling
+    /// was compatible with a budget the user could never set.
+    #[test]
+    fn a_stop_after_count_task_created_through_the_api_pauses_on_the_limit() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        drop(conn);
+
+        tasks::create_task(
+            file.path(),
+            br#"{"name":"T","prompt":"p","schedule_type":"interval",
+                 "schedule_config":{"every_minutes":5},"stop_after_count":2}"#,
+        )
+        .expect("create");
+        let id = tasks::list_tasks(file.path()).expect("list")[0].id.clone();
+
+        let mut snapshot = tasks::get_task(file.path(), &id)
+            .expect("read")
+            .expect("row");
+        assert_eq!(snapshot.stop_after_count, 2, "the budget reached the row");
+
+        let scheduler = test_scheduler(file.path());
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+        assert_eq!(
+            tasks::get_task(file.path(), &id)
+                .expect("read")
+                .expect("row")
+                .status,
+            "active",
+            "the first run is inside the budget"
+        );
+
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+        let stored = tasks::get_task(file.path(), &id)
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored.run_count, 2);
+        assert_eq!(stored.status, "paused", "the second run hits the limit");
+    }
+
     #[test]
     fn a_task_deleted_mid_run_is_not_recreated_by_the_write_back() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
