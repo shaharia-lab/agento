@@ -273,12 +273,17 @@ src/
                  **A caller that only has an id must resolve the row before
                  offering the control** (#542, the Jobs inspector): a
                  `job_history` row stores a session id whether or not that
-                 session was ever scanned, so handing the id straight over
-                 offers a button that lands on Sessions with nothing to open.
-                 Resolve through `findSessionById` — never `GET
-                 /claude-sessions/{id}` merely to decide whether a button is
-                 enabled — and treat a *failed lookup* as its own state, not as
-                 an absence
+                 session still exists, so handing the id straight over offers a
+                 button that lands on Sessions with nothing to open. Resolve
+                 through `findSessionById` **and fall back to `GET
+                 /claude-sessions/{id}` on a miss** — `SessionsView`'s own
+                 hand-off order, and the *list* is not the authority: it reads
+                 `claude_session_cache`, which a scan only refreshes once it is
+                 an hour old (`scan.rs`'s `CACHE_TTL`), while the by-id route
+                 re-reads the transcript off disk. Concluding "absent" from the
+                 list alone withholds the control for exactly the sessions a run
+                 has *just* produced. Only that route's **404** is an absence; a
+                 failed lookup is its own state
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
                  and revoking scoped API tokens (#405)

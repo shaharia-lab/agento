@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { api, qs } from "../lib/api";
+import { ApiError, api, qs } from "../lib/api";
 import type { ClaudeSessionSummary, JobHistory, JobStatus } from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import {
@@ -543,13 +543,18 @@ export function JobsView({
  * only offered once it is known to exist — `sessionMenuItems`' own rule that
  * "unknown" is not "absent", one level up.
  *
- * The lookup is `findSessionById`, the cheap list read scoped to the id, and
- * deliberately **not** `GET /claude-sessions/{id}`: that answers the summary
- * *plus every message*, which is a whole transcript read to decide whether one
- * button is enabled — and it would run again for every run the user clicks.
- * The cost of that choice is stated below rather than hidden: a session the
- * list cannot see reads as absent even where the by-id route could still open
- * it, which is why the copy names both causes instead of asserting one.
+ * The lookup is `findSessionById` — the cheap list read scoped to the id —
+ * with `GET /claude-sessions/{id}` as the fallback **on a miss only**, which is
+ * `SessionsView`'s own hand-off resolution and is here for the same reason.
+ * The list reads `claude_session_cache`, and a scan is only forced once the
+ * cache is an hour old (`native/scan.rs`'s `CACHE_TTL`), so the session a run
+ * *just* produced is normally not in it — while the by-id route re-reads the
+ * transcript off disk and answers for a session the scanner has never reached.
+ * Concluding "absent" from the list alone would therefore withhold the control
+ * for exactly the freshest runs, which are the ones somebody clicks in *Recent
+ * runs*. The order is what keeps that affordable: the by-id read answers the
+ * summary *plus every message*, so it is never paid for a session the list can
+ * already see, and only a **404** from it is a real absence.
  */
 function RunSession({ sessionId }: { sessionId: string }) {
   type Resolved =
@@ -566,15 +571,31 @@ function RunSession({ sessionId }: { sessionId: string }) {
     let cancelled = false;
     setResolved({ kind: "pending" });
     findSessionById(sessionId, ctl.signal)
-      .then((hit) => {
+      .then(
+        (hit) =>
+          hit ??
+          // Typed as the summary because that is all this needs; the route
+          // answers a `ClaudeSessionDetail`, which is that plus the transcript.
+          api.get<ClaudeSessionSummary>(
+            `/claude-sessions/${sessionId}`,
+            ctl.signal
+          )
+      )
+      .then((row) => {
         if (cancelled) return;
-        setResolved(hit ? { kind: "found", row: hit } : { kind: "absent" });
+        setResolved({ kind: "found", row });
       })
       .catch((err) => {
-        // A failed lookup is not evidence the session is gone, so it is its own
-        // state: reporting it as absent would state something untrue about the
-        // user's data on what may be a transient error.
-        if (!cancelled) setResolved({ kind: "failed", message: describeError(err) });
+        if (cancelled) return;
+        // Only the by-id route's 404 says the session is not there. Anything
+        // else is a failed *lookup*, which is not evidence the session is gone
+        // — reporting a transient error as an absence states something untrue
+        // about the user's data.
+        setResolved(
+          err instanceof ApiError && err.status === 404
+            ? { kind: "absent" }
+            : { kind: "failed", message: describeError(err) }
+        );
       });
     return () => {
       cancelled = true;
@@ -603,7 +624,7 @@ function RunSession({ sessionId }: { sessionId: string }) {
           ? "Looking for this session…"
           : resolved.kind === "failed"
           ? `Couldn't look this session up — ${resolved.message}`
-          : "Not in the indexed sessions, so there is nothing to open — it may not have been scanned yet, or its project is hidden."}
+          : "This run's session is no longer on disk, so there is nothing to open."}
       </div>
     </>
   );
