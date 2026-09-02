@@ -376,6 +376,14 @@ textarea.field-area:focus {
   box-shadow: inset 0 0 0 1px var(--accent);
   color: #fff;
 }
+/* A box the current state cannot support (#539) — `.switch:disabled`'s rule,
+   for the same reason: it reads as unavailable rather than as off, and the two
+   are different states. The stored preference is shown unchanged, so a toggle
+   that is on stays on while the range it cannot apply to is selected. */
+.checkbox:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 
 /* --- Badges / pills ------------------------------------------------------ */
 .badge {

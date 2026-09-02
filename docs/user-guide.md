@@ -405,6 +405,36 @@ threshold. That is expected, and it happens in the background.
 Three views over the same indexed history. All of them take a date range, and
 group by hour, day, week, month or year depending on how wide that range is.
 
+### Comparing with the period before
+
+Token usage and General usage have a **Compare** box in the toolbar. Tick it and
+every headline figure gains its change against the *previous period* — the window
+immediately before the one you are looking at, of exactly the same length. On
+`30d` that is the 30 days before your 30 days; the project filter and the
+timezone are the same on both sides.
+
+Three things worth knowing about what it shows:
+
+- **The current window's last day is usually still in progress**, so the newest
+  figures are structurally a little low. The comparison does not try to correct
+  for that; it compares whole window against whole window.
+- **A change needs something to divide by.** Where the previous period had none
+  of something, the tile says *no baseline* rather than inventing a percentage.
+- **Cost is only compared when both windows are fully priced.** If either one
+  contains tokens from a model with no published rate, its total is a floor
+  rather than a figure, and the difference between two floors is not a change in
+  spend — so the cost tile says *no cost delta* instead.
+
+On the two time-series charts the previous period is drawn as a dashed grey
+line over the same axes, sharing one scale with the current one so the heights
+are directly comparable. It is lined up from the most recent bucket backwards,
+because two windows of the same length do not always contain the same number of
+buckets.
+
+The box is off by default and remembered per install. It is unavailable on
+**All time**, which is not a window of any particular length and so has nothing
+before it.
+
 ### Token usage
 
 Where the tokens and the money go.
@@ -436,8 +466,8 @@ That is intentional and the chart says so.
 Beta, and the most opinionated view.
 
 Headline numbers: sessions, average autonomy score, average turns, cache hit
-rate, and total cost. Each compared against the previous period, so you can see
-the direction.
+rate, and total cost. Unlike Token usage and General usage, this view has no
+period comparison yet — the numbers are for the selected range only.
 
 Below that, **tool call attribution**: every tool call broken down by the skill,
 plugin, MCP server, sub-agent and reasoning effort responsible. This is how you

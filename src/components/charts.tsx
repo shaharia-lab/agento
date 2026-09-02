@@ -71,23 +71,47 @@ function Grid() {
   );
 }
 
-/** Hit targets carrying the native tooltip — one invisible column per bucket. */
-function Hits({ points }: { points: Point[] }) {
+/**
+ * Hit targets carrying the native tooltip — one invisible column per bucket.
+ *
+ * There is one column per *current* bucket whether or not a comparison series
+ * is drawn: the comparison is an overlay on this axis, not a second axis, so a
+ * second row of hit targets would put two tooltips over one column. When
+ * `compare` is given, its aligned value is appended to the same `<title>`.
+ */
+function Hits({
+  points,
+  compare,
+  offset = 0,
+  compareText,
+}: {
+  points: Point[];
+  compare?: Point[];
+  /** Index in `points` the aligned comparison series starts at. */
+  offset?: number;
+  compareText?: (p: Point) => string;
+}) {
   const w = W / Math.max(1, points.length);
   return (
     <>
-      {points.map((p, i) => (
-        <rect
-          key={i}
-          className="a-chart__hit"
-          x={i * w}
-          y={0}
-          width={w}
-          height={H}
-        >
-          <title>{p.hint ?? `${p.label} — ${p.value}`}</title>
-        </rect>
-      ))}
+      {points.map((p, i) => {
+        const base = p.hint ?? `${p.label} — ${p.value}`;
+        const other = compare?.[i - offset];
+        return (
+          <rect
+            key={i}
+            className="a-chart__hit"
+            x={i * w}
+            y={0}
+            width={w}
+            height={H}
+          >
+            <title>
+              {other && compareText ? `${base} · ${compareText(other)}` : base}
+            </title>
+          </rect>
+        );
+      })}
     </>
   );
 }
@@ -111,19 +135,53 @@ function Axis({ points }: { points: Point[] }) {
   );
 }
 
-function Scale({ max, format }: { max: number; format(n: number): string }) {
-  return <div className="a-chart__scale">Peak {format(max)}</div>;
+function Scale({
+  max,
+  format,
+  note,
+}: {
+  max: number;
+  format(n: number): string;
+  note?: string;
+}) {
+  return (
+    <div className="a-chart__scale">
+      Peak {format(max)}
+      {note && ` · ${note}`}
+    </div>
+  );
 }
 
 /* --- Area chart ---------------------------------------------------------- */
 
 export function AreaChart({
   points,
+  compare,
+  compareLabel = "previous period",
   height = 180,
   format,
   emptyText = "No data in this period",
 }: {
   points: Point[];
+  /**
+   * An optional second series drawn as a stroke-only dashed line over the same
+   * axes (#539) — typically the same metric over the window immediately before
+   * this one.
+   *
+   * **It shares one y-maximum with `points`, and that is the load-bearing part**:
+   * two independently scaled lines would put a smaller series above a larger one,
+   * which is a false crossover rather than a comparison.
+   *
+   * **Alignment is from the last element backwards**, truncated to the shorter
+   * of the two. Two windows of equal *duration* can still produce different
+   * bucket counts — a weekly walk starting on a different weekday, unequal month
+   * lengths, an hourly walk across a DST transition — so zipping from index 0
+   * would slide the whole overlay by a bucket, and joining on the date key
+   * cannot work at all when the two windows share no dates by construction.
+   */
+  compare?: Point[];
+  /** How the comparison series is named in the caption and the tooltips. */
+  compareLabel?: string;
   height?: number;
   format(n: number): string;
   emptyText?: string;
@@ -132,15 +190,29 @@ export function AreaChart({
 
   if (!points.length) return <CardEmpty text={emptyText} />;
 
-  const peak = points.reduce((m, p) => Math.max(m, p.value), 0);
+  // Aligned from the last element backwards; a comparison longer than the
+  // current series loses its *oldest* buckets, which are the ones with no
+  // counterpart on this axis.
+  const cmp = compare?.length
+    ? compare.slice(Math.max(0, compare.length - points.length))
+    : undefined;
+  const offset = points.length - (cmp?.length ?? 0);
+
+  const peak = Math.max(
+    points.reduce((m, p) => Math.max(m, p.value), 0),
+    cmp?.reduce((m, p) => Math.max(m, p.value), 0) ?? 0
+  );
   // A flat-zero series still has to draw a baseline rather than divide by zero.
   const max = peak > 0 ? peak * 1.15 : 1;
   const step = points.length > 1 ? W / (points.length - 1) : 0;
+  const y = (v: number) => {
+    const at = H - (v / max) * H;
+    return isFinite(at) ? at : H;
+  };
 
   const coords = points.map((p, i) => {
     const x = points.length > 1 ? i * step : W / 2;
-    const y = H - (p.value / max) * H;
-    return `${x},${isFinite(y) ? y : H}`;
+    return `${x},${y(p.value)}`;
   });
 
   const line =
@@ -149,16 +221,33 @@ export function AreaChart({
       : `M0,${coords[0].split(",")[1]} L${W},${coords[0].split(",")[1]}`;
   const area = `${line} L${W},${H} L0,${H} Z`;
 
+  // A single comparison bucket against a multi-bucket axis has no segment to
+  // draw — one point is not a line. Its value still reaches the tooltip.
+  const compareLine =
+    cmp && cmp.length > 1
+      ? cmp.map((p, j) => `${j ? "L" : "M"}${(offset + j) * step},${y(p.value)}`).join(" ")
+      : cmp && cmp.length === 1 && points.length === 1
+        ? `M0,${y(cmp[0].value)} L${W},${y(cmp[0].value)}`
+        : undefined;
+
   return (
     <div className="a-chart">
-      <Scale max={peak} format={format} />
+      <Scale
+        max={peak}
+        format={format}
+        note={cmp ? `dashed = ${compareLabel}` : undefined}
+      />
       <svg
         className="a-chart__plot"
         viewBox={`0 0 ${W} ${H}`}
         preserveAspectRatio="none"
         style={{ height }}
         role="img"
-        aria-label={`${points.length} buckets, peak ${format(peak)}`}
+        aria-label={
+          cmp
+            ? `${points.length} buckets against the ${compareLabel}, peak ${format(peak)}`
+            : `${points.length} buckets, peak ${format(peak)}`
+        }
       >
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
@@ -169,6 +258,13 @@ export function AreaChart({
 
         <Grid />
         <path d={area} fill={`url(#${gradientId})`} />
+        {compareLine && (
+          <path
+            className="a-chart__compare"
+            d={compareLine}
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
         <path
           d={line}
           fill="none"
@@ -178,7 +274,12 @@ export function AreaChart({
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
         />
-        <Hits points={points} />
+        <Hits
+          points={points}
+          compare={cmp}
+          offset={offset}
+          compareText={(p) => `${compareLabel}: ${format(p.value)}`}
+        />
       </svg>
       <Axis points={points} />
     </div>
