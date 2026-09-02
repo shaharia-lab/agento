@@ -195,10 +195,11 @@ src/
                  further destination adds one field here and nothing else — the
                  *number* of fields is not the rule, one-id-per-destination is.
                  **Consuming one is keyed on the nonce, never on the loaded
-                 list**, and the destination's "always keep something selected"
-                 effect has to exempt the handed-off id: the row is
-                 *legitimately* absent from the page, and every one of the three
-                 destinations pages
+                 list**, and where the destination's list is a *page* its
+                 "always keep something selected" effect has to exempt the
+                 handed-off id, which is legitimately absent from it (Sessions
+                 and Jobs; `GET /api/chats` has no limit, so Chats guards with a
+                 one-shot ref instead)
     icons.tsx    16px / 1.5-stroke icon set
     tauri.ts     window + menu bridge; degrades to a plain browser tab
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
@@ -283,7 +284,13 @@ src/
                  re-reads the transcript off disk. Concluding "absent" from the
                  list alone withholds the control for exactly the sessions a run
                  has *just* produced. Only that route's **404** is an absence; a
-                 failed lookup is its own state
+                 failed lookup is its own state. And **`job_history.chat_session_id`
+                 is a `chat_sessions.id`, not a transcript id** — the executor
+                 mints a chat row per run and passes no `custom_session_id`, so
+                 the CLI's own id lands on `chat_sessions.sdk_session_id` and
+                 nowhere else. A run's Claude session is reached *through* the
+                 chat; naming the job's column directly resolves to nothing, for
+                 every run
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
                  and revoking scoped API tokens (#405)

@@ -7,7 +7,12 @@ import {
   useState,
 } from "react";
 import { ApiError, api, qs } from "../lib/api";
-import type { ClaudeSessionSummary, JobHistory, JobStatus } from "../lib/types";
+import type {
+  ChatDetailResponse,
+  ClaudeSessionSummary,
+  JobHistory,
+  JobStatus,
+} from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import {
   compactNumber,
@@ -517,7 +522,7 @@ export function JobsView({
 
                   {job.chat_session_id && (
                     <InspGroup title="Session">
-                      <RunSession sessionId={job.chat_session_id} />
+                      <RunSession chatId={job.chat_session_id} />
                     </InspGroup>
                   )}
                 </>
@@ -533,84 +538,134 @@ export function JobsView({
 /* --- The run's Claude session --------------------------------------------- */
 
 /**
- * The conversation a run produced, as a control rather than a string (#542).
+ * The Claude session a run produced, as a control rather than a string (#542).
  *
- * `job_history` stores the session **id** and nothing else, and an id is not a
- * promise that the session is there to open: the scan may not have reached the
- * transcript yet, or its project may be hidden. Handing the id straight to
- * `SessionLink` would offer a button that lands the user in the Sessions
- * section with nothing to show, so the row is resolved first and the control is
- * only offered once it is known to exist — `sessionMenuItems`' own rule that
- * "unknown" is not "absent", one level up.
+ * **`job_history.chat_session_id` is a `chat_sessions.id`, not a transcript
+ * id**, and that is the one thing to know before touching this. The executor
+ * creates a chat row per run (`schedule/executor.rs`'s `create_task_session`,
+ * a fresh v4 uuid) and stores *that* on the job; the run itself passes no
+ * `custom_session_id`, so the CLI mints its own, and `write_session_results`
+ * puts it on `chat_sessions.sdk_session_id` and nowhere else. Handing the job's
+ * column to `SessionLink` therefore names a session that cannot exist — the
+ * issue's own premise, and it misses for **every** run rather than for an
+ * unlucky one. So the chat is read first and its `sdk_session_id` is the
+ * session.
  *
- * The lookup is `findSessionById` — the cheap list read scoped to the id —
+ * Then the row is resolved before the control is offered, because an id is not
+ * a promise the transcript is there: `findSessionById` — the cheap list read —
  * with `GET /claude-sessions/{id}` as the fallback **on a miss only**, which is
- * `SessionsView`'s own hand-off resolution and is here for the same reason.
- * The list reads `claude_session_cache`, and a scan is only forced once the
- * cache is an hour old (`native/scan.rs`'s `CACHE_TTL`), so the session a run
- * *just* produced is normally not in it — while the by-id route re-reads the
- * transcript off disk and answers for a session the scanner has never reached.
- * Concluding "absent" from the list alone would therefore withhold the control
- * for exactly the freshest runs, which are the ones somebody clicks in *Recent
- * runs*. The order is what keeps that affordable: the by-id read answers the
- * summary *plus every message*, so it is never paid for a session the list can
- * already see, and only a **404** from it is a real absence.
+ * `SessionsView`'s own hand-off order. The list reads `claude_session_cache`,
+ * refreshed only once it is an hour old (`scan.rs`'s `CACHE_TTL`), so the
+ * session a run *just* produced is normally not in it, while the by-id route
+ * re-reads the transcript off disk. Concluding "absent" from the list alone
+ * would withhold the control for exactly the freshest runs. The order is what
+ * keeps that affordable: the by-id read answers the summary *plus every
+ * message*, so it is never paid for a session the list can already see.
+ *
+ * Nothing here reports an absence it cannot demonstrate. A 404 is one, an empty
+ * `sdk_session_id` is one, and a failed request is not — reporting a transient
+ * error as "no session" states something untrue about the user's data.
  */
-function RunSession({ sessionId }: { sessionId: string }) {
+function RunSession({ chatId }: { chatId: string }) {
   type Resolved =
     | { kind: "pending" }
-    | { kind: "found"; row: ClaudeSessionSummary }
-    | { kind: "absent" }
+    | { kind: "found"; sessionId: string; row: ClaudeSessionSummary }
+    /** Nothing to open, and `reason` says how that is known. */
+    | { kind: "none"; reason: string; id?: string }
     | { kind: "failed"; message: string };
 
   const [resolved, setResolved] = useState<Resolved>({ kind: "pending" });
 
   useEffect(() => {
-    // Aborted as well as flagged: `StrictMode` runs this twice in development.
+    // Aborted as well as flagged: `StrictMode` runs this twice in development,
+    // and the by-id read is the expensive one.
     const ctl = new AbortController();
     let cancelled = false;
     setResolved({ kind: "pending" });
-    findSessionById(sessionId, ctl.signal)
-      .then(
-        (hit) =>
-          hit ??
-          // Typed as the summary because that is all this needs; the route
-          // answers a `ClaudeSessionDetail`, which is that plus the transcript.
-          api.get<ClaudeSessionSummary>(
-            `/claude-sessions/${sessionId}`,
-            ctl.signal
-          )
-      )
-      .then((row) => {
+
+    void (async () => {
+      try {
+        let chat: ChatDetailResponse;
+        try {
+          chat = await api.get<ChatDetailResponse>(`/chats/${chatId}`, ctl.signal);
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) {
+            if (!cancelled) {
+              setResolved({
+                kind: "none",
+                reason:
+                  "The conversation this run was recorded against has been deleted.",
+              });
+            }
+            return;
+          }
+          throw err;
+        }
+
+        const sessionId = chat.session?.sdk_session_id ?? "";
         if (cancelled) return;
-        setResolved({ kind: "found", row });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        // Only the by-id route's 404 says the session is not there. Anything
-        // else is a failed *lookup*, which is not evidence the session is gone
-        // — reporting a transient error as an absence states something untrue
-        // about the user's data.
-        setResolved(
-          err instanceof ApiError && err.status === 404
-            ? { kind: "absent" }
-            : { kind: "failed", message: describeError(err) }
-        );
-      });
+        if (!sessionId) {
+          // Written only by `write_session_results`, so it is empty for a run
+          // that failed before the CLI reported a session — and for one still
+          // going.
+          setResolved({
+            kind: "none",
+            reason: "This run never reported a Claude session.",
+          });
+          return;
+        }
+
+        let row: ClaudeSessionSummary;
+        try {
+          row =
+            (await findSessionById(sessionId, ctl.signal)) ??
+            // Typed as the summary because that is all this needs; the route
+            // answers a `ClaudeSessionDetail`, which is that plus the
+            // transcript.
+            (await api.get<ClaudeSessionSummary>(
+              `/claude-sessions/${sessionId}`,
+              ctl.signal
+            ));
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) {
+            if (!cancelled) {
+              setResolved({
+                kind: "none",
+                id: sessionId,
+                // Deliberately two causes rather than one assertion: the by-id
+                // route only looks under the *indexed* config dirs, and an
+                // agent may carry a `claude_config_dir` of its own, so a
+                // transcript outside that set 404s while still being on disk.
+                reason:
+                  "This session is not under any indexed Claude config directory — it may have been deleted, or written somewhere the app does not index.",
+              });
+            }
+            return;
+          }
+          throw err;
+        }
+
+        if (!cancelled) setResolved({ kind: "found", sessionId, row });
+      } catch (err) {
+        if (!cancelled)
+          setResolved({ kind: "failed", message: describeError(err) });
+      }
+    })();
+
     return () => {
       cancelled = true;
       ctl.abort();
     };
-  }, [sessionId]);
+  }, [chatId]);
 
   if (resolved.kind === "found") {
     return (
-      // No `title`: the id is what this pane has always shown, and losing it
+      // No `title`: an id is what this pane has always shown, and losing it
       // would take the one string somebody debugging a run copies out of here.
       // `project_path` comes from the resolved row — never anything merely
       // path-shaped, per `SessionLink`'s own note on that prop.
       <SessionLink
-        sessionId={sessionId}
+        sessionId={resolved.sessionId}
         projectPath={resolved.row.project_path || undefined}
       />
     );
@@ -618,13 +673,15 @@ function RunSession({ sessionId }: { sessionId: string }) {
 
   return (
     <>
-      <div className="logblock">{sessionId}</div>
+      {resolved.kind === "none" && resolved.id && (
+        <div className="logblock">{resolved.id}</div>
+      )}
       <div className="runrow">
         {resolved.kind === "pending"
-          ? "Looking for this session…"
+          ? "Looking for this run's session…"
           : resolved.kind === "failed"
-          ? `Couldn't look this session up — ${resolved.message}`
-          : "This run's session is no longer on disk, so there is nothing to open."}
+          ? `Couldn't look this run's session up — ${resolved.message}`
+          : resolved.reason}
       </div>
     </>
   );
