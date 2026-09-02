@@ -633,8 +633,9 @@ emits the `<div className="insp-group__title">` it always did; only a caller
 passing `collapsible` gets the `<button …  aria-expanded>` and the chevron.
 Proved the way the `charts.tsx` and `SaveBar.tsx` moves were: build both sides
 and diff the emitted CSS, as a sorted set **and** as an ordered selector list —
-the change is exactly two added `.insp-group__title--toggle*` rules, declared
-nowhere else, with every pre-existing rule byte-identical and in place.
+the change is exactly three added rules (`.insp-group__title--toggle`, its
+`:hover`, and `.insp-group__title--closed`), declared nowhere else, with every
+pre-existing rule byte-identical and in place.
 
 Three properties of it worth keeping:
 
