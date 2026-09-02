@@ -142,7 +142,10 @@ export function previousPeriod(key: RangeKey, p: Period): Period | undefined {
     from: new Date(from - len).toISOString(),
     to: new Date(from).toISOString(),
     days,
-    label: days > 0 ? `Previous ${days} days` : "Previous period",
+    label:
+      days > 0
+        ? `Previous ${days} day${days === 1 ? "" : "s"}`
+        : "Previous period",
   };
 }
 
@@ -437,7 +440,10 @@ export function Delta({
       <Icon name={icon} size={12} />
       <span className="tnum">
         {d.dir === "up" ? "+" : ""}
-        {percent(d.pct)}
+        {/* `flat` covers the band that rounds to zero, and it includes small
+            negatives — so the figure is taken through zero rather than
+            through `pct`, which would render the literal text "-0.0%". */}
+        {percent(d.dir === "flat" ? 0 : d.pct)}
       </span>
     </div>
   );

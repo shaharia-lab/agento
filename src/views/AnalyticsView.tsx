@@ -241,7 +241,15 @@ export function AnalyticsView({
           <button
             className="iconbtn"
             title="Refresh"
-            onClick={() => active.reload()}
+            // Both resources, or Refresh pairs a freshly read current window
+            // against whatever the comparison happened to hold — and the key
+            // check above cannot see it, because neither query moved. A
+            // `/claude-analytics` read is itself what drives `ensure_scan`, so
+            // this is the one action most likely to change both windows.
+            onClick={() => {
+              active.reload();
+              if (wantsCompare) previous.reload();
+            }}
           >
             <Icon name="refresh" size={14} />
           </button>
