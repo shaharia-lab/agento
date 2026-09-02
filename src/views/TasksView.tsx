@@ -12,6 +12,7 @@ import { describeError, usePoll, useResource } from "../lib/hooks";
 import { DESTROY, partnerLabel, submitLabel } from "../lib/formVerbs";
 import { dateTime, duration, relativeTime, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
+import type { NavigateFn } from "../lib/nav";
 import { DirField, useDirPicker } from "../components/DirField";
 import {
   Dropdown,
@@ -148,7 +149,20 @@ function blankTask(agentSlug: string): ScheduledTask {
 
 /* --- View ----------------------------------------------------------------- */
 
-export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
+export function TasksView({
+  inspectorOpen,
+  onNavigate,
+}: {
+  inspectorOpen: boolean;
+  /**
+   * The cross-view hand-off, as a prop rather than `useNavigate` (#542).
+   *
+   * `App` renders this view directly, so there is nothing to thread a callback
+   * through — which is the whole of `nav.ts`'s prop-versus-context rule, and
+   * the same reason the three gateway views take one.
+   */
+  onNavigate: NavigateFn;
+}) {
   const picker = useDirPicker();
   const tasksRes = useResource<ScheduledTask[] | null>(
     (signal) => api.get("/tasks", signal),
@@ -772,6 +786,7 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                       error={historyRes.error}
                       runs={historyRes.data ?? []}
                       onRetry={historyRes.reload}
+                      onOpen={(jobId) => onNavigate("jobs", { jobId })}
                     />
                   </InspGroup>
                 </>
@@ -828,16 +843,33 @@ function TaskRow({
 
 /* --- Recent runs (inspector) ---------------------------------------------- */
 
+/**
+ * The task's last few runs — and, since #542, the way to one of them.
+ *
+ * A run *is* a record with a detail view: the Jobs section renders its output,
+ * error, timing, token counts and the Claude session it produced. Until this
+ * was a control the only route there was to leave the task, open Job History
+ * and hunt for the run by timestamp, which is the one thing anybody wants from
+ * a scheduled task that failed last night.
+ *
+ * The rows stay in `base.css`'s text-selection denylist — `button` is on that
+ * list already, so making the row a real button is what keeps a drag across it
+ * from leaving a word highlighted behind the view it just opened (#469). Do
+ * not add a per-view `user-select` here.
+ */
 function RecentRuns({
   loading,
   error,
   runs,
   onRetry,
+  onOpen,
 }: {
   loading: boolean;
   error: string | undefined;
   runs: JobHistory[];
   onRetry(): void;
+  /** Hand this run over to the Jobs section. */
+  onOpen(jobId: string): void;
 }) {
   if (loading) return <div className="runrow">Loading…</div>;
   if (error) {
@@ -857,13 +889,19 @@ function RecentRuns({
   return (
     <div className="runlist">
       {runs.slice(0, 8).map((j) => (
-        <div className="runrow" key={j.id} title={dateTime(j.started_at)}>
+        <button
+          type="button"
+          className="runrow runrow--link"
+          key={j.id}
+          title={`${dateTime(j.started_at)} — open this run`}
+          onClick={() => onOpen(j.id)}
+        >
           <span className={`dot ${statusDot(j.status)}`} />
           <span className="runrow__when">{relativeTime(j.started_at)}</span>
           <span className="runrow__val">
             {j.status === "running" ? "running" : duration(j.duration_ms)}
           </span>
-        </div>
+        </button>
       ))}
     </div>
   );

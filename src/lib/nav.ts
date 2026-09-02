@@ -100,13 +100,16 @@ export const VIEW_TITLES: Record<ViewId, string> = {
  *
  * Deliberately one optional row id per destination: this is a hand-off, not a
  * router, and it must not grow query state, filters or scroll positions. A
- * second destination adds a second optional field here, and nothing else.
+ * further destination adds one more optional field here, and nothing else —
+ * **one id per destination is the rule, not the number of fields**.
  */
 export interface NavTarget {
   /** A chat `chats` should preselect on arrival (#485). */
   chatId?: string;
   /** A session `sessions` should open the transcript of on arrival (#536). */
   sessionId?: string;
+  /** A run `jobs` should select and scroll to on arrival (#542). */
+  jobId?: string;
 }
 
 export type NavigateFn = (id: ViewId, target?: NavTarget) => void;

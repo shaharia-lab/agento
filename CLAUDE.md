@@ -180,19 +180,25 @@ src/
                  hand-off (#485): `NavTarget`, `NavProvider` and `useNavigate`.
                  **Two mechanisms, and which one to use is decided by where the
                  caller is rendered.** A view `App.tsx` renders directly takes
-                 `onNavigate={navigate}` as a prop (the three gateway views);
-                 the context is for a caller several levels down, where the prop
-                 would have to be threaded through every parent — the Sessions
-                 inspector and `SessionDetail`. `NavTarget` is a view id plus
+                 `onNavigate={navigate}` as a prop (the three gateway views
+                 and `TasksView`, #542); the context is for a caller several
+                 levels down, where the prop would have to be threaded through
+                 every parent — the Sessions inspector and `SessionDetail`.
+                 `NavTarget` is a view id plus
                  *one optional row id*, and it must stay that: it is a hand-off,
                  not a router, and query state, filters and scroll positions do
                  not belong in it. `App` clears the target on any navigation
                  that carries none, or a consumed chat id would be re-applied on
-                 every later visit to that section. **There are two destinations
-                 now, and the rule is unchanged**: `chatId` (#485) and
-                 `sessionId` (#536), one optional id each. A second destination
-                 adds one field here and nothing else — the *number* of fields
-                 is not the rule, one-id-per-destination is
+                 every later visit to that section. **There are three
+                 destinations now, and the rule is unchanged**: `chatId` (#485),
+                 `sessionId` (#536) and `jobId` (#542), one optional id each. A
+                 further destination adds one field here and nothing else — the
+                 *number* of fields is not the rule, one-id-per-destination is.
+                 **Consuming one is keyed on the nonce, never on the loaded
+                 list**, and the destination's "always keep something selected"
+                 effect has to exempt the handed-off id: the row is
+                 *legitimately* absent from the page, and every one of the three
+                 destinations pages
     icons.tsx    16px / 1.5-stroke icon set
     tauri.ts     window + menu bridge; degrades to a plain browser tab
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
@@ -263,7 +269,16 @@ src/
                  so "Copy project path" would copy a string nothing filters
                  on. Carries `styles/sessionlink.css` itself, the
                  `components/charts.tsx` shape, since its consumers are in
-                 sections that do not import `styles/sessions.css`
+                 sections that do not import `styles/sessions.css`.
+                 **A caller that only has an id must resolve the row before
+                 offering the control** (#542, the Jobs inspector): a
+                 `job_history` row stores a session id whether or not that
+                 session was ever scanned, so handing the id straight over
+                 offers a button that lands on Sessions with nothing to open.
+                 Resolve through `findSessionById` — never `GET
+                 /claude-sessions/{id}` merely to decide whether a button is
+                 enabled — and treat a *failed lookup* as its own state, not as
+                 an absence
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
                  and revoking scoped API tokens (#405)
