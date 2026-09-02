@@ -245,7 +245,14 @@ src/
                  `GET /claude-sessions/{id}`, which reads the whole transcript
                  back to learn one boolean; while it is unknown the item is
                  disabled and labelled neutrally, because "unknown" is not
-                 "not a favourite". Carries `styles/sessionlink.css` itself,
+                 "not a favourite". `findSessionById` is that read, and the
+                 hand-off in `SessionsView` resolves through it too — the by-id
+                 route is only the fallback for a session with no list row,
+                 because `SessionDetail` fetches the transcript itself on mount
+                 and taking it first reads every message twice. A caller must
+                 **not** pass `decoded_path` as `projectPath`: analytics ranks
+                 on it and the sessions list keys on `project_path` literally,
+                 so "Copy project path" would copy a string nothing filters on. Carries `styles/sessionlink.css` itself,
                  the `components/charts.tsx` shape, since its consumers are in
                  sections that do not import `styles/sessions.css`
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy

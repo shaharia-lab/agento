@@ -35,6 +35,30 @@ import type { ClaudeSessionSummary, SessionPage } from "../../lib/types";
 import { ContextMenu, type ContextMenuItem } from "../../components/ui";
 import "../../styles/sessionlink.css";
 
+/**
+ * The cheap row read: the **list**, scoped to one id.
+ *
+ * `GET /claude-sessions/{id}` answers a `ClaudeSessionDetail` — the summary
+ * plus every message in the transcript — and `SessionDetail` fetches that for
+ * itself the moment it mounts, so reaching for it merely to *obtain a row*
+ * reads the whole transcript twice. `add_search`'s LIKE half covers
+ * `LOWER(c.session_id)`, so a `q` of the whole id is a cheap summary read
+ * instead.
+ *
+ * A miss is not an error: the session may be outside the indexed config dirs,
+ * or in a hidden project. Callers decide what that means for them.
+ */
+export async function findSessionById(
+  id: string,
+  signal?: AbortSignal
+): Promise<ClaudeSessionSummary | undefined> {
+  const page = await api.get<SessionPage>(
+    `/claude-sessions${qs({ q: id, limit: 5 })}`,
+    signal
+  );
+  return (page.items ?? []).find((s) => s.session_id === id);
+}
+
 export interface SessionMenuSpec {
   sessionId: string;
   /**
@@ -106,18 +130,23 @@ export function sessionMenuItems(spec: SessionMenuSpec): ContextMenuItem[] {
 export function SessionLink({
   sessionId,
   title,
-  project,
+  projectPath,
 }: {
   sessionId: string;
   /** What to show. Falls back to the id, which is what the rankings do. */
   title?: string;
   /**
-   * A *display* path from the calling surface. Analytics ranks on
-   * `decoded_path` while the sessions list keys on `project_path` literally —
-   * a documented divergence — so the hydrated row's own `project_path` wins
-   * for "Copy project path" as soon as it lands.
+   * A genuine `project_path`, where the calling surface has one.
+   *
+   * It must **not** be filled with anything path-shaped: analytics ranks on
+   * `decoded_path`, which is the dash-encoded name for some sessions and a
+   * real path for others — a documented divergence — so "Copy project path"
+   * would copy a string the sessions list does not key on, and *which* string
+   * would depend on whether the hydration round-trip beat the click. A caller
+   * with no true path passes nothing and the item stays disabled until the
+   * row lands.
    */
-  project?: string;
+  projectPath?: string;
 }) {
   const navigate = useNavigate();
   const [at, setAt] = useState<{ x: number; y: number }>();
@@ -131,20 +160,15 @@ export function SessionLink({
   );
 
   /**
-   * Resolve the row lazily, on right-click, purely for the favourite's label.
+   * Resolve the row lazily, on right-click — for the favourite's label, and
+   * for a `project_path` that is actually one (see the prop's own note).
    *
-   * Through the **list** rather than `GET /claude-sessions/{id}`: that route
-   * reads the transcript back and answers with every message in it, which is
-   * megabytes to learn one boolean, while `add_search`'s LIKE half covers
-   * `session_id` so this is a cheap summary read. A miss is not an error — the
-   * session may have left the corpus — and every id-only item still works.
+   * A failure is deliberately silent: every id-only item still works without
+   * it, and the two that need the row are disabled until it lands.
    */
   const hydrate = useCallback(async () => {
     try {
-      const page = await api.get<SessionPage>(
-        `/claude-sessions${qs({ q: sessionId, limit: 5 })}`
-      );
-      const hit = (page.items ?? []).find((s) => s.session_id === sessionId);
+      const hit = await findSessionById(sessionId);
       if (hit) setRow(hit);
     } catch {
       // Deliberately silent: the menu is usable without it.
@@ -198,7 +222,7 @@ export function SessionLink({
     () =>
       sessionMenuItems({
         sessionId,
-        projectPath: row?.project_path || project || undefined,
+        projectPath: row?.project_path || projectPath || undefined,
         isFavorite: row ? !!row.is_favorite : undefined,
         busy,
         onView: open,
@@ -206,7 +230,16 @@ export function SessionLink({
         onContinue: continueInChat,
         onCopy: copyValue,
       }),
-    [sessionId, row, project, busy, open, toggleFavorite, continueInChat, copyValue]
+    [
+      sessionId,
+      row,
+      projectPath,
+      busy,
+      open,
+      toggleFavorite,
+      continueInChat,
+      copyValue,
+    ]
   );
 
   const label = title || sessionId;
@@ -233,8 +266,21 @@ export function SessionLink({
       </button>
       {/* A `span`, not a `div`: this component is used inside phrasing content
           (the Chats banner's `.resumed__id`), where a block element is invalid
-          nesting. `display: block` in the stylesheet does the layout. */}
-      {error && <span className="sess-link__error">{error}</span>}
+          nesting. `display: block` in the stylesheet does the layout.
+          It carries its own dismissal, as both of `SessionsView`'s equivalents
+          do — nothing else clears it, and it renders in dense cells. */}
+      {error && (
+        <span className="sess-link__error">
+          {error}{" "}
+          <button
+            type="button"
+            className="sess-link__dismiss"
+            onClick={() => setError(undefined)}
+          >
+            Dismiss
+          </button>
+        </span>
+      )}
       {at && (
         <ContextMenu at={at} items={items} onClose={() => setAt(undefined)} />
       )}

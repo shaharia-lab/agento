@@ -31,3 +31,8 @@
      its container may be narrow. */
   white-space: normal;
 }
+
+.sess-link__dismiss {
+  color: var(--red);
+  text-decoration: underline;
+}

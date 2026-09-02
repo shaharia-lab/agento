@@ -46,7 +46,7 @@ import {
   Splitter,
 } from "../components/ui";
 import { SessionDetail } from "./sessions/SessionDetail";
-import { sessionMenuItems } from "./sessions/SessionLink";
+import { findSessionById, sessionMenuItems } from "./sessions/SessionLink";
 import "../styles/sessions.css";
 
 /**
@@ -869,9 +869,14 @@ export function SessionsView({
    * navigated away from. `App` clears `navTarget` on any navigation carrying
    * none, so a stale id cannot be re-applied on a later visit.
    *
-   * The row comes from the loaded page when it happens to be there, else from
-   * the by-id route — `ClaudeSessionDetail` **extends** `ClaudeSessionSummary`,
-   * so the answer is a row `SessionDetail` can render.
+   * The row comes from the loaded page when it happens to be there — which on
+   * a real arrival it is not, since this view is mounted conditionally and so
+   * remounts with an empty page — then from `findSessionById`, the same cheap
+   * list read `SessionLink` hydrates through. `GET /claude-sessions/{id}` is
+   * only the **fallback**, for a session with no list row at all (outside the
+   * indexed config dirs, or in a hidden project): it answers the transcript as
+   * well as the row, and `SessionDetail` fetches that for itself on mount, so
+   * taking it first reads every message twice.
    */
   useEffect(() => {
     const id = openSessionId;
@@ -883,9 +888,16 @@ export function SessionsView({
       setOpenId(id);
       return;
     }
+    // Aborted as well as flagged: `StrictMode` runs this twice in development,
+    // and the fallback read is the expensive one.
+    const ctl = new AbortController();
     let cancelled = false;
-    api
-      .get<ClaudeSessionDetail>(`/claude-sessions/${id}`)
+    findSessionById(id, ctl.signal)
+      .then(
+        (hit) =>
+          hit ??
+          api.get<ClaudeSessionDetail>(`/claude-sessions/${id}`, ctl.signal)
+      )
       .then((row) => {
         if (cancelled) return;
         select(row);
@@ -898,6 +910,7 @@ export function SessionsView({
       });
     return () => {
       cancelled = true;
+      ctl.abort();
     };
   }, [openSessionId, openSessionNonce, select]);
 

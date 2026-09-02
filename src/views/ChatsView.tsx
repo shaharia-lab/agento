@@ -892,10 +892,12 @@ function ResumedHistory({
         <span className="truncate" title={projectPath || sessionId}>
           Continued from {projectPath ? tildePath(projectPath) : "a Claude session"}
         </span>
-        {/* No `truncate` here: `SessionLink` truncates itself, and this
-            container clipping would hide the failure line it renders. */}
+        {/* No `truncate` here: `SessionLink` ellipsises the id itself, and
+            this container's `nowrap` would put the failure line it renders on
+            one clipped line. It is still bounded by `.resumed__id`'s
+            `max-width`, so the message wraps rather than escaping the banner. */}
         <span className="resumed__id mono">
-          <SessionLink sessionId={sessionId} project={projectPath} />
+          <SessionLink sessionId={sessionId} projectPath={projectPath} />
         </span>
       </div>
 

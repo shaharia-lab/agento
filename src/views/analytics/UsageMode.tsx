@@ -221,11 +221,11 @@ function TopSessions({
                   {i + 1}
                 </td>
                 <td className="truncate" style={{ maxWidth: 320 }}>
-                  <SessionLink
-                    sessionId={r.session_id}
-                    title={r.title}
-                    project={r.project}
-                  />
+                  {/* No `projectPath`: `SessionRanking.project` is analytics'
+                      `decoded_path`, which is not the sessions list's
+                      `project_path` — so "Copy project path" waits for the
+                      hydrated row rather than copying the wrong string. */}
+                  <SessionLink sessionId={r.session_id} title={r.title} />
                 </td>
                 <td
                   className="truncate"
