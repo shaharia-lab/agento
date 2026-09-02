@@ -8,6 +8,7 @@ import {
   Delta,
   Tile,
   Tokens,
+  alignedTo,
   bucketLabel,
   granularityLabel,
   list,
@@ -33,7 +34,8 @@ export function UsageMode({
   const g = report.granularity;
   const was = previous?.summary;
 
-  const series = trimEmpty(list(report.time_series), (p) => p.sessions);
+  const raw = list(report.time_series);
+  const series = trimEmpty(raw, (p) => p.sessions);
   const activeBuckets = series.filter((p) => p.sessions > 0).length;
 
   const sessionPoints: Point[] = series.map((p) => ({
@@ -46,11 +48,10 @@ export function UsageMode({
 
   // Trimmed on the same rule as the current series, so the two are like for
   // like; `AreaChart` then aligns them from the last bucket backwards.
+  // Windowed by the *current* series' trim bounds, never by its own zeros —
+  // see `alignedTo`, which is where that distinction is argued.
   const compareSeries = previous
-    ? trimEmpty(list(previous.time_series), (p) => p.sessions).map((p) => ({
-        date: p.date,
-        sessions: p.sessions,
-      }))
+    ? alignedTo(raw, list(previous.time_series), (p) => p.sessions)
     : undefined;
   const compareGranularity = previous?.granularity ?? g;
   const comparePoints: Point[] | undefined = compareSeries?.map((p) => ({

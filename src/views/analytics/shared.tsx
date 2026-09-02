@@ -248,17 +248,64 @@ export function granularityLabel(g: Granularity): string {
   return g.charAt(0).toUpperCase() + g.slice(1);
 }
 
+/** The span `trimEmpty` keeps, as `[start, end)` into the original array. */
+function trimBounds<T>(
+  points: T[],
+  value: (p: T) => number
+): { start: number; end: number } {
+  let start = 0;
+  let end = points.length;
+  while (start < end && value(points[start]) <= 0) start++;
+  while (end > start && value(points[end - 1]) <= 0) end--;
+  return { start, end };
+}
+
 /**
  * Trim all-zero buckets from both ends. "All time" asks for a window far wider
  * than the data, and without this the real activity is squeezed into a corner.
  * Interior zeros are kept — a quiet week is signal.
  */
 export function trimEmpty<T>(points: T[], value: (p: T) => number): T[] {
-  let start = 0;
-  let end = points.length;
-  while (start < end && value(points[start]) <= 0) start++;
-  while (end > start && value(points[end - 1]) <= 0) end--;
+  const { start, end } = trimBounds(points, value);
   return start === 0 && end === points.length ? points : points.slice(start, end);
+}
+
+/**
+ * `previous`, windowed to the span `trimEmpty` selects from `current` (#539).
+ *
+ * **Trimming the comparison series on its own rule is the bug this exists to
+ * prevent**, and it is not obvious: the rule really is the same, but the
+ * *result* is data-dependent, and it is the result the overlay's alignment
+ * depends on. `AreaChart` lines the two series up from their last elements, on
+ * the reasoning that the server emits every bucket from `from` to `to`
+ * inclusive so the last element of each is the last bucket of its window. Trim
+ * each independently and that stops being true: a previous window that went
+ * quiet for its last ten days loses ten trailing buckets the current one keeps,
+ * and its busiest stretch is drawn under the current window's most recent days
+ * — with the tooltip stating the pairing as fact.
+ *
+ * So the comparison is windowed by *position within its own window*, never by
+ * its own zeros. Both arrays are first aligned at their ends — equal-duration
+ * windows can still hold different bucket counts across a DST transition or
+ * unequal month lengths — and then the current series' `[start, end)` is applied
+ * to both. Positions with no counterpart can only be a leading run (the shift
+ * is monotonic and the end is aligned), so what comes back is contiguous and
+ * still end-aligned; `AreaChart`'s own truncation stays the residual safety net
+ * it was written to be.
+ */
+export function alignedTo<T, U>(
+  current: T[],
+  previous: U[],
+  value: (p: T) => number
+): U[] {
+  const { start, end } = trimBounds(current, value);
+  const shift = current.length - previous.length;
+  const out: U[] = [];
+  for (let i = start; i < end; i++) {
+    const j = i - shift;
+    if (j >= 0 && j < previous.length) out.push(previous[j]);
+  }
+  return out;
 }
 
 /** Project paths are absolute on the wire; folded/unresolved ones are not. */

@@ -152,6 +152,7 @@ function Scale({
   );
 }
 
+
 /* --- Area chart ---------------------------------------------------------- */
 
 export function AreaChart({
@@ -198,12 +199,17 @@ export function AreaChart({
     : undefined;
   const offset = points.length - (cmp?.length ?? 0);
 
-  const peak = Math.max(
-    points.reduce((m, p) => Math.max(m, p.value), 0),
-    cmp?.reduce((m, p) => Math.max(m, p.value), 0) ?? 0
-  );
+  // Two peaks, and they are for two different things. `peak` is the *current*
+  // window's own, because that is what the caption and the aria-label name —
+  // reporting the combined maximum there would attribute a figure to a period
+  // it never occurred in. `scaleTo` is the combined one, because the two lines
+  // have to share a y-maximum or a smaller series draws above a larger one,
+  // which is a false crossover rather than a comparison.
+  const peak = points.reduce((m, p) => Math.max(m, p.value), 0);
+  const comparePeak = cmp?.reduce((m, p) => Math.max(m, p.value), 0) ?? 0;
+  const scaleTo = Math.max(peak, comparePeak);
   // A flat-zero series still has to draw a baseline rather than divide by zero.
-  const max = peak > 0 ? peak * 1.15 : 1;
+  const max = scaleTo > 0 ? scaleTo * 1.15 : 1;
   const step = points.length > 1 ? W / (points.length - 1) : 0;
   const y = (v: number) => {
     const at = H - (v / max) * H;
@@ -235,7 +241,11 @@ export function AreaChart({
       <Scale
         max={peak}
         format={format}
-        note={cmp ? `dashed = ${compareLabel}` : undefined}
+        note={
+          cmp
+            ? `${compareLabel} peak ${format(comparePeak)}, dashed`
+            : undefined
+        }
       />
       <svg
         className="a-chart__plot"
@@ -245,7 +255,7 @@ export function AreaChart({
         role="img"
         aria-label={
           cmp
-            ? `${points.length} buckets against the ${compareLabel}, peak ${format(peak)}`
+            ? `${points.length} buckets, peak ${format(peak)}, against the ${compareLabel}, peak ${format(comparePeak)}`
             : `${points.length} buckets, peak ${format(peak)}`
         }
       >
