@@ -945,7 +945,9 @@ export function InspGroup({
           chevron is decorative and the accessible name is the title alone. */}
       <button
         type="button"
-        className="insp-group__title insp-group__title--toggle"
+        className={`insp-group__title insp-group__title--toggle${
+          open ? "" : " insp-group__title--closed"
+        }`}
         aria-expanded={open}
         onClick={onToggle}
       >

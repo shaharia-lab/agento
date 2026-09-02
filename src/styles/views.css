@@ -660,6 +660,13 @@
   color: var(--fg-secondary);
 }
 
+/* Open, the header keeps `.insp-group__title`'s 4px gap to the rows below it.
+   Closed there are no rows, so that margin would make the group 4px taller than
+   its own header and widen the gap to the next group past the pane's own. */
+.insp-group__title--closed {
+  margin-bottom: 0;
+}
+
 /* Label/value pairs — right-aligned labels, the inspector convention. */
 .insp-row {
   display: grid;

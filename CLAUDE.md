@@ -666,6 +666,13 @@ show this pane from this code. `views/sessions/sessionMetrics.ts` holds the
 totals and the permission-mode tables that came out with it, because the table's
 Cost column and its row badges call them too and exporting them from the view
 would have made the view and the inspector import each other.
+It carries `styles/sessions.css` itself — `SessionLink.tsx`'s shape, one
+directory over — because the `.sess-heading` / `.sess-preview` / `.sess-pr*`
+rules it renders are declared only there and reached it until #538 only because
+`SessionsView` happened to import that sheet. A caller outside this section
+would have rendered the Session heading and the whole Pull requests list
+unstyled, with nothing to say so; that is the savebar failure above, and a
+component sold as portable has to own its own styling or it is not.
 
 **Destroying a stored record is `Delete`, everywhere, and `Remove` means
 something else** (#518). One gesture had three words — Integrations said

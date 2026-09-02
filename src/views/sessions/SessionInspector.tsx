@@ -19,6 +19,14 @@
  *
  * The `Session` group is deliberately not collapsible: it is the pane's
  * identity, not one of its figures.
+ *
+ * It imports `styles/sessions.css` itself — the `SessionLink.tsx` /
+ * `components/charts.tsx` shape. The `.sess-heading`, `.sess-preview` and
+ * `.sess-pr*` rules it renders are declared only there, and until #538 that
+ * sheet reached them only because `SessionsView` happened to import it. A
+ * second caller outside this section would have rendered the Session heading
+ * and the whole Pull requests list unstyled, with nothing to say so — which is
+ * the savebar failure `CLAUDE.md` records, one directory over.
  */
 import { useCallback, useState } from "react";
 import { CopyButton } from "../../components/CopyButton";
@@ -48,6 +56,7 @@ import {
   totalDuration,
   usageOf,
 } from "./sessionMetrics";
+import "../../styles/sessions.css";
 
 export function SessionInspector({
   session,
@@ -56,13 +65,18 @@ export function SessionInspector({
 }) {
   const [open, setOpen] = useState(loadInspectorPrefs);
 
-  const toggle = useCallback((id: InspectorGroupId) => {
-    setOpen((prev) => {
-      const next = { ...prev, [id]: !prev[id] };
+  // The write is deliberately *outside* the updater: `main.tsx` renders under
+  // `StrictMode`, which double-invokes an updater, and a state updater has to
+  // be pure. Idempotent here, so this is correctness of the shape rather than a
+  // bug — but it is the shape the rest of this view already keeps.
+  const toggle = useCallback(
+    (id: InspectorGroupId) => {
+      const next = { ...open, [id]: !open[id] };
+      setOpen(next);
       saveInspectorPrefs(next);
-      return next;
-    });
-  }, []);
+    },
+    [open],
+  );
 
   const usage = usageOf(session.usage);
   const sub = usageOf(session.subagent_usage);

@@ -1700,6 +1700,8 @@ export function SessionsView({
   );
 }
 
+/* --- Toolbar dropdown ----------------------------------------------------- */
+
 function projectLabel(options: ClaudeProject[], value: string): string {
   const hit = options.find((p) => p.decoded_path === value);
   return hit ? hit.decoded_path : value;
