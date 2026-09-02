@@ -9,7 +9,7 @@ import {
   DeltaNote,
   Tile,
   Tokens,
-  alignedTo,
+  alignedPair,
   bucketLabel,
   granularityLabel,
   list,
@@ -57,8 +57,12 @@ export function TokensMode({
     s.total_cache_read_tokens +
     s.total_cache_creation_tokens;
 
-  const raw = list(report.time_series);
-  const series = trimEmpty(raw, (p) => p.total_tokens);
+  // One call, so the two series cannot be windowed on different predicates.
+  const { series, compare: compareSeries } = alignedPair(
+    list(report.time_series),
+    previous ? list(previous.time_series) : undefined,
+    (p) => p.total_tokens
+  );
   const tokenPoints: Point[] = series.map((p) => ({
     label: bucketLabel(p.date, g),
     value: p.total_tokens,
@@ -67,16 +71,13 @@ export function TokensMode({
     } session${p.sessions === 1 ? "" : "s"}`,
   }));
 
-  // Windowed by the *current* series' trim bounds, never by its own zeros —
-  // see `alignedTo`, which is where that distinction is argued.
-  const comparePoints: Point[] | undefined = previous
-    ? alignedTo(raw, list(previous.time_series), (p) => p.total_tokens).map(
-        (p) => ({
+  const comparePoints: Point[] | undefined =
+    previous && compareSeries
+      ? compareSeries.map((p) => ({
           label: bucketLabel(p.date, previous.granularity),
           value: p.total_tokens,
-        })
-      )
-    : undefined;
+        }))
+      : undefined;
 
   const cache = trimEmpty(
     list(report.cache_efficiency),

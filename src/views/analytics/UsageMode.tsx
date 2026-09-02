@@ -8,13 +8,12 @@ import {
   Delta,
   Tile,
   Tokens,
-  alignedTo,
+  alignedPair,
   bucketLabel,
   granularityLabel,
   list,
   projectLabel,
   share,
-  trimEmpty,
   widthPct,
 } from "./shared";
 
@@ -34,8 +33,12 @@ export function UsageMode({
   const g = report.granularity;
   const was = previous?.summary;
 
-  const raw = list(report.time_series);
-  const series = trimEmpty(raw, (p) => p.sessions);
+  // One call, so the two series cannot be windowed on different predicates.
+  const { series, compare: compareSeries } = alignedPair(
+    list(report.time_series),
+    previous ? list(previous.time_series) : undefined,
+    (p) => p.sessions
+  );
   const activeBuckets = series.filter((p) => p.sessions > 0).length;
 
   const sessionPoints: Point[] = series.map((p) => ({
@@ -48,11 +51,6 @@ export function UsageMode({
 
   // Trimmed on the same rule as the current series, so the two are like for
   // like; `AreaChart` then aligns them from the last bucket backwards.
-  // Windowed by the *current* series' trim bounds, never by its own zeros —
-  // see `alignedTo`, which is where that distinction is argued.
-  const compareSeries = previous
-    ? alignedTo(raw, list(previous.time_series), (p) => p.sessions)
-    : undefined;
   const compareGranularity = previous?.granularity ?? g;
   const comparePoints: Point[] | undefined = compareSeries?.map((p) => ({
     label: bucketLabel(p.date, compareGranularity),
@@ -66,8 +64,16 @@ export function UsageMode({
   // The same figure over the previous window, computed the same way — and only
   // when *both* windows bucket daily, since an average over weekly buckets is
   // not the same quantity and differencing the two would be nonsense.
-  const compareActiveBuckets =
-    compareSeries?.filter((p) => p.sessions > 0).length ?? 0;
+  //
+  // Counted over `previous.time_series` itself, **never over `compareSeries`**:
+  // that one is a positional subset windowed to the current series' span, so
+  // wherever the current window was idle it has dropped active previous buckets
+  // — and `was.total_sessions` is the whole previous window's total, so the two
+  // would be over different spans. `activeBuckets` above has no such problem,
+  // because trimming only ever removes zero buckets.
+  const compareActiveBuckets = previous
+    ? list(previous.time_series).filter((p) => p.sessions > 0).length
+    : 0;
   const comparableAvgPerDay =
     was !== undefined &&
     g === "daily" &&
