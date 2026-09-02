@@ -523,6 +523,13 @@ export function JobsView({
                   {job.chat_session_id && (
                     <InspGroup title="Session">
                       <RunSession
+                        // Remount on a different run rather than re-resolving
+                        // in place: `resolved` is state and its reset lives in
+                        // an effect, which React flushes after paint, so
+                        // without this the group shows the *previous* run's
+                        // answer for one frame — the same staleness `job`
+                        // itself is guarded against above.
+                        key={job.chat_session_id}
                         chatId={job.chat_session_id}
                         runStatus={job.status}
                       />
@@ -698,11 +705,15 @@ function RunSession({
     );
   }
 
+  // An id on every branch, not just the ones that got as far as a session id:
+  // this pane has always shown one, and it is the string somebody debugging a
+  // run copies out of here. Where there is no session id there is still the
+  // chat the run was recorded against, which is what `job_history` stores.
   return (
     <>
-      {resolved.kind === "none" && resolved.id && (
-        <div className="logblock">{resolved.id}</div>
-      )}
+      <div className="logblock">
+        {resolved.kind === "none" && resolved.id ? resolved.id : chatId}
+      </div>
       <div className="runrow">
         {resolved.kind === "pending"
           ? "Looking for this run's session…"
