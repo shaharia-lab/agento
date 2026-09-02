@@ -37,6 +37,7 @@ import { saveNewChatPrefs, type NewChatPrefs } from "../lib/newChatPrefs";
 import { Composer } from "./chat/Composer";
 import { Transcript } from "./chat/Transcript";
 import { useChatStream } from "./chat/useChatStream";
+import { SessionLink } from "./sessions/SessionLink";
 import { SessionTranscript } from "./sessions/SessionTranscript";
 import "../styles/chats.css";
 
@@ -891,7 +892,13 @@ function ResumedHistory({
         <span className="truncate" title={projectPath || sessionId}>
           Continued from {projectPath ? tildePath(projectPath) : "a Claude session"}
         </span>
-        <span className="resumed__id mono truncate">{sessionId}</span>
+        {/* No `truncate` here: `SessionLink` ellipsises the id itself, and
+            this container's `nowrap` would put the failure line it renders on
+            one clipped line. It is still bounded by `.resumed__id`'s
+            `max-width`, so the message wraps rather than escaping the banner. */}
+        <span className="resumed__id mono">
+          <SessionLink sessionId={sessionId} projectPath={projectPath} />
+        </span>
       </div>
 
       {loading ? (

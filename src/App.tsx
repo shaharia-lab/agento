@@ -412,7 +412,13 @@ export default function App() {
             )}
             {view === "tasks" && <TasksView inspectorOpen={inspectorOpen} />}
             {view === "jobs" && <JobsView inspectorOpen={inspectorOpen} />}
-            {view === "sessions" && <SessionsView inspectorOpen={inspectorOpen} />}
+            {view === "sessions" && (
+              <SessionsView
+                inspectorOpen={inspectorOpen}
+                openSessionId={navTarget?.sessionId}
+                openSessionNonce={navNonce}
+              />
+            )}
             {(view === "tokens" || view === "usage" || view === "insights") && (
               <AnalyticsView mode={view} inspectorOpen={inspectorOpen} />
             )}

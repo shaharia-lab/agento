@@ -105,6 +105,8 @@ export const VIEW_TITLES: Record<ViewId, string> = {
 export interface NavTarget {
   /** A chat `chats` should preselect on arrival (#485). */
   chatId?: string;
+  /** A session `sessions` should open the transcript of on arrival (#536). */
+  sessionId?: string;
 }
 
 export type NavigateFn = (id: ViewId, target?: NavTarget) => void;

@@ -1,0 +1,43 @@
+/* A session rendered as a control, wherever one is named (#536).
+   Imported by `views/sessions/SessionLink.tsx` itself — the
+   `components/charts.tsx` / `SaveBar.tsx` shape — because its consumers sit in
+   sections that do not import `styles/sessions.css`. */
+
+.sess-link {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* `base.css` already gives every `button` `cursor: default`,
+     `user-select: none` and `font: inherit`, which is what makes this read like
+     the list's own rows rather than like a web link. */
+  color: inherit;
+}
+
+.sess-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.sess-link__error {
+  display: block;
+  margin-top: var(--sp-2);
+  font-size: var(--text-xs);
+  color: var(--red);
+  /* The link itself is nowrap-and-ellipsis; a failure has to be readable, and
+     both containers it renders in are narrow and clipping — `describeError`
+     can carry an unbreakable token (a project path has no spaces), so it needs
+     the same break `.resumed__note` needed. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sess-link__dismiss {
+  /* `base.css` clears a button's font, colour, background and border, but not
+     its padding — which is why `.sess-link` zeroes it too. */
+  padding: 0;
+  text-decoration: underline;
+}
