@@ -180,19 +180,26 @@ src/
                  hand-off (#485): `NavTarget`, `NavProvider` and `useNavigate`.
                  **Two mechanisms, and which one to use is decided by where the
                  caller is rendered.** A view `App.tsx` renders directly takes
-                 `onNavigate={navigate}` as a prop (the three gateway views);
-                 the context is for a caller several levels down, where the prop
-                 would have to be threaded through every parent — the Sessions
-                 inspector and `SessionDetail`. `NavTarget` is a view id plus
+                 `onNavigate={navigate}` as a prop (the three gateway views
+                 and `TasksView`, #542); the context is for a caller several
+                 levels down, where the prop would have to be threaded through
+                 every parent — the Sessions inspector and `SessionDetail`.
+                 `NavTarget` is a view id plus
                  *one optional row id*, and it must stay that: it is a hand-off,
                  not a router, and query state, filters and scroll positions do
                  not belong in it. `App` clears the target on any navigation
                  that carries none, or a consumed chat id would be re-applied on
-                 every later visit to that section. **There are two destinations
-                 now, and the rule is unchanged**: `chatId` (#485) and
-                 `sessionId` (#536), one optional id each. A second destination
-                 adds one field here and nothing else — the *number* of fields
-                 is not the rule, one-id-per-destination is
+                 every later visit to that section. **There are three
+                 destinations now, and the rule is unchanged**: `chatId` (#485),
+                 `sessionId` (#536) and `jobId` (#542), one optional id each. A
+                 further destination adds one field here and nothing else — the
+                 *number* of fields is not the rule, one-id-per-destination is.
+                 **Consuming one is keyed on the nonce, never on the loaded
+                 list**, and where the destination's list is a *page* its
+                 "always keep something selected" effect has to exempt the
+                 handed-off id, which is legitimately absent from it (Sessions
+                 and Jobs; `GET /api/chats` has no limit, so Chats guards with a
+                 one-shot ref instead)
     icons.tsx    16px / 1.5-stroke icon set
     tauri.ts     window + menu bridge; degrades to a plain browser tab
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
@@ -263,7 +270,27 @@ src/
                  so "Copy project path" would copy a string nothing filters
                  on. Carries `styles/sessionlink.css` itself, the
                  `components/charts.tsx` shape, since its consumers are in
-                 sections that do not import `styles/sessions.css`
+                 sections that do not import `styles/sessions.css`.
+                 **A caller that only has an id must resolve the row before
+                 offering the control** (#542, the Jobs inspector): a
+                 `job_history` row stores a session id whether or not that
+                 session still exists, so handing the id straight over offers a
+                 button that lands on Sessions with nothing to open. Resolve
+                 through `findSessionById` **and fall back to `GET
+                 /claude-sessions/{id}` on a miss** — `SessionsView`'s own
+                 hand-off order, and the *list* is not the authority: it reads
+                 `claude_session_cache`, which a scan only refreshes once it is
+                 an hour old (`scan.rs`'s `CACHE_TTL`), while the by-id route
+                 re-reads the transcript off disk. Concluding "absent" from the
+                 list alone withholds the control for exactly the sessions a run
+                 has *just* produced. Only that route's **404** is an absence; a
+                 failed lookup is its own state. And **`job_history.chat_session_id`
+                 is a `chat_sessions.id`, not a transcript id** — the executor
+                 mints a chat row per run and passes no `custom_session_id`, so
+                 the CLI's own id lands on `chat_sessions.sdk_session_id` and
+                 nowhere else. A run's Claude session is reached *through* the
+                 chat; naming the job's column directly resolves to nothing, for
+                 every run
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
                  and revoking scoped API tokens (#405)

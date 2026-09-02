@@ -1,6 +1,18 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { api, qs } from "../lib/api";
-import type { JobHistory, JobStatus } from "../lib/types";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { ApiError, api, qs } from "../lib/api";
+import type {
+  ChatDetailResponse,
+  ClaudeSessionSummary,
+  JobHistory,
+  JobStatus,
+} from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import {
   compactNumber,
@@ -13,6 +25,7 @@ import {
 import { Icon } from "../lib/icons";
 import { Empty, InspGroup, InspRow, Search, Segmented, Splitter } from "../components/ui";
 import { StatusBadge } from "./TasksView";
+import { SessionLink, findSessionById } from "./sessions/SessionLink";
 import "../styles/tasks.css";
 
 const PAGE = 50;
@@ -44,7 +57,17 @@ function runDuration(j: JobHistory): string {
   return isFinite(started) ? duration(Date.now() - started) : "—";
 }
 
-export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
+export function JobsView({
+  inspectorOpen,
+  openJobId,
+  openJobNonce = 0,
+}: {
+  inspectorOpen: boolean;
+  /** A run handed off from a task's *Recent runs*, to select on arrival (#542). */
+  openJobId?: string;
+  /** `App`'s nav nonce, so the *same* hand-off twice still fires. */
+  openJobNonce?: number;
+}) {
   // The first page is a live resource so polling only ever re-fetches it;
   // later pages are appended once and left alone.
   const head = useResource<JobHistory[] | null>(
@@ -64,6 +87,12 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string>();
+  /**
+   * The handed-off run, once applied — kept so the "keep the inspector pointed
+   * at something that still exists" effect below can tell it apart from a
+   * selection that has genuinely gone stale.
+   */
+  const [openId, setOpenId] = useState<string | null>(null);
 
   const rows = useMemo(() => {
     // A new run arriving shifts the offset window, so the same record can come
@@ -107,6 +136,14 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
   // Keep the inspector pointed at something that still exists.
   useEffect(() => {
+    // ...except a handed-off run, which is *legitimately* absent from the
+    // loaded page: this list pages 50 at a time and the run a user clicks in a
+    // task's Recent runs is usually older than the first page, or excluded by
+    // whatever search and filter were left set. Without this guard the arrival
+    // is silently replaced by `filtered[0]` — the same steal #536 had to fix in
+    // `SessionsView`. `detail` fetches by id, so the inspector renders the run
+    // whether or not a row for it exists.
+    if (focusedId && focusedId === openId) return;
     if (filtered.length === 0) {
       if (focusedId !== null) setFocusedId(null);
       return;
@@ -115,7 +152,7 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
       setFocusedId(filtered[0].id);
       setSelected(new Set([filtered[0].id]));
     }
-  }, [filtered, focusedId]);
+  }, [filtered, focusedId, openId]);
 
   // The list rows already carry the whole record, but the detail endpoint is
   // the authority — and it picks up a running job's output as it lands.
@@ -126,10 +163,68 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   );
 
   const focusedRow = focusedId ? rows.find((j) => j.id === focusedId) ?? null : null;
-  const job = detail.data ?? focusedRow;
+  // `useResource` keeps the previous `data` when a fetch fails, so the detail is
+  // taken only when it is about the run currently focused. Without that check a
+  // run whose detail 404s — which is exactly what a hand-off to a deleted run
+  // does (#542) — renders the *previously* selected run's output under the new
+  // selection, which is worse than reporting nothing.
+  const detailRow =
+    detail.data && detail.data.id === focusedId ? detail.data : null;
+  const job = detailRow ?? focusedRow;
 
   // A running job's output and timing land after the row was first read.
   usePoll(detail.reload, POLL_MS, job?.status === "running");
+
+  /**
+   * A hand-off from a task's *Recent runs* (#542): select that run.
+   *
+   * Keyed on the **nonce**, never on `rows` — this view is mounted
+   * conditionally, so it remounts with an empty page on every arrival and a
+   * "is the row already loaded?" fast path would be dead by construction,
+   * while re-running on each later page load would yank the user back to a run
+   * they had already navigated away from. `App` clears `navTarget` on any
+   * navigation carrying none, so a consumed id is not re-applied on a later
+   * visit.
+   *
+   * Nothing is fetched here: `detail` already reads
+   * `GET /job-history/{id}` for whatever is focused, and that route answers a
+   * real 404 for a run that has been deleted. Paging forward until the run
+   * appears was the alternative and is unbounded — it re-reads the whole table
+   * for a run from last month.
+   */
+  const seenOpenNonce = useRef(0);
+  /** The handed-off row still waiting to be scrolled to, if any. */
+  const scrollTo = useRef<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (openJobNonce === seenOpenNonce.current) return;
+    seenOpenNonce.current = openJobNonce;
+    if (!openJobId) return;
+    setConfirming(false);
+    setOpenId(openJobId);
+    setFocusedId(openJobId);
+    setSelected(new Set([openJobId]));
+    // Cleared once the row has actually been scrolled to, or by the user
+    // picking a different one — a flag that outlived either would jump the
+    // list the next time that row happened to render.
+    scrollTo.current = openJobId;
+  }, [openJobId, openJobNonce]);
+
+  /**
+   * Scroll the handed-off row into view once it exists.
+   *
+   * `data-job-id` + `querySelector` + `{ block: "nearest" }` is the idiom the
+   * shared menus already use (`components/ui.tsx`); a ref per row would have to
+   * be keyed on a value that changes with every page.
+   */
+  useEffect(() => {
+    const id = scrollTo.current;
+    if (!id) return;
+    const row = listRef.current?.querySelector(`[data-job-id="${CSS.escape(id)}"]`);
+    if (!row) return;
+    scrollTo.current = null;
+    row.scrollIntoView({ block: "nearest" });
+  }, [groups]);
 
   async function loadMore() {
     setLoadingMore(true);
@@ -150,6 +245,9 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
   function onRowClick(e: React.MouseEvent, j: JobHistory) {
     setConfirming(false);
+    // The user has chosen where to look; a hand-off still waiting for its row
+    // to appear must not move the list out from under them later.
+    scrollTo.current = null;
     if (e.metaKey || e.ctrlKey) {
       setSelected((prev) => {
         const next = new Set(prev);
@@ -270,7 +368,7 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             }
           />
         ) : (
-          <div className="scroll" style={{ flex: 1, minHeight: 0 }}>
+          <div className="scroll" style={{ flex: 1, minHeight: 0 }} ref={listRef}>
             <table className="table table--striped">
               <thead>
                 <tr>
@@ -297,6 +395,7 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                     {items.map((j) => (
                       <tr
                         key={j.id}
+                        data-job-id={j.id}
                         className={selected.has(j.id) ? "is-selected" : ""}
                         onClick={(e) => onRowClick(e, j)}
                       >
@@ -340,7 +439,17 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             <div className="inspector__head">Run</div>
             <div className="inspector__scroll scroll">
               {!job ? (
-                <div className="statepane">Nothing selected</div>
+                // A handed-off run that no longer exists answers a real 404
+                // from `GET /job-history/{id}` and has no row to fall back on,
+                // so the pane says which of the two it is rather than reading
+                // as "nothing selected" or spinning forever.
+                <div className="statepane">
+                  {focusedId && detail.loading
+                    ? "Loading run…"
+                    : focusedId && detail.error
+                    ? `Couldn't load this run — ${detail.error}`
+                    : "Nothing selected"}
+                </div>
               ) : (
                 <>
                   <InspGroup title="Overview">
@@ -413,7 +522,17 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
                   {job.chat_session_id && (
                     <InspGroup title="Session">
-                      <div className="logblock">{job.chat_session_id}</div>
+                      <RunSession
+                        // Remount on a different run rather than re-resolving
+                        // in place: `resolved` is state and its reset lives in
+                        // an effect, which React flushes after paint, so
+                        // without this the group shows the *previous* run's
+                        // answer for one frame — the same staleness `job`
+                        // itself is guarded against above.
+                        key={job.chat_session_id}
+                        chatId={job.chat_session_id}
+                        runStatus={job.status}
+                      />
                     </InspGroup>
                   )}
                 </>
@@ -423,5 +542,185 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
         </>
       )}
     </div>
+  );
+}
+
+/* --- The run's Claude session --------------------------------------------- */
+
+/**
+ * The Claude session a run produced, as a control rather than a string (#542).
+ *
+ * **`job_history.chat_session_id` is a `chat_sessions.id`, not a transcript
+ * id**, and that is the one thing to know before touching this. The executor
+ * creates a chat row per run (`schedule/executor.rs`'s `create_task_session`,
+ * a fresh v4 uuid) and stores *that* on the job; the run itself passes no
+ * `custom_session_id`, so the CLI mints its own, and `write_session_results`
+ * puts it on `chat_sessions.sdk_session_id` and nowhere else. Handing the job's
+ * column to `SessionLink` therefore names a session that cannot exist — the
+ * issue's own premise, and it misses for **every** run rather than for an
+ * unlucky one. So the chat is read first and its `sdk_session_id` is the
+ * session.
+ *
+ * Then the row is resolved before the control is offered, because an id is not
+ * a promise the transcript is there: `findSessionById` — the cheap list read —
+ * with `GET /claude-sessions/{id}` as the fallback **on a miss only**, which is
+ * `SessionsView`'s own hand-off order. The list reads `claude_session_cache`,
+ * refreshed only once it is an hour old (`scan.rs`'s `CACHE_TTL`), so the
+ * session a run *just* produced is normally not in it, while the by-id route
+ * re-reads the transcript off disk. Concluding "absent" from the list alone
+ * would withhold the control for exactly the freshest runs. The order is what
+ * keeps that affordable: the by-id read answers the summary *plus every
+ * message*, so it is never paid for a session the list can already see.
+ *
+ * Nothing here reports an absence it cannot demonstrate. A 404 is one, an empty
+ * `sdk_session_id` is one, and a failed request is not — reporting a transient
+ * error as "no session" states something untrue about the user's data.
+ */
+function RunSession({
+  chatId,
+  runStatus,
+}: {
+  chatId: string;
+  /**
+   * The run's own status, which is a **dependency and not decoration**.
+   *
+   * `sdk_session_id` is inserted as `''` and written only by
+   * `write_session_results`, after the run finishes — so a run still going has
+   * no session yet, and with `chatId` alone in the deps (it is fixed for the
+   * row's life) the lookup would never re-run when it ends. The pane would go
+   * on denying the session while the Output group beside it, which polls,
+   * showed the finished answer.
+   */
+  runStatus: JobStatus;
+}) {
+  type Resolved =
+    | { kind: "pending" }
+    | { kind: "found"; sessionId: string; row: ClaudeSessionSummary }
+    /** Nothing to open, and `reason` says how that is known. */
+    | { kind: "none"; reason: string; id?: string }
+    | { kind: "failed"; message: string };
+
+  const [resolved, setResolved] = useState<Resolved>({ kind: "pending" });
+
+  useEffect(() => {
+    // Aborted as well as flagged: `StrictMode` runs this twice in development,
+    // and the by-id read is the expensive one.
+    const ctl = new AbortController();
+    let cancelled = false;
+    setResolved({ kind: "pending" });
+
+    void (async () => {
+      try {
+        let chat: ChatDetailResponse;
+        try {
+          chat = await api.get<ChatDetailResponse>(`/chats/${chatId}`, ctl.signal);
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) {
+            if (!cancelled) {
+              setResolved({
+                kind: "none",
+                reason:
+                  "The conversation this run was recorded against has been deleted.",
+              });
+            }
+            return;
+          }
+          throw err;
+        }
+
+        const sessionId = chat.session?.sdk_session_id ?? "";
+        if (cancelled) return;
+        if (!sessionId) {
+          // Written only by `write_session_results`, so it is empty for a run
+          // that failed before the CLI reported a session — and for one still
+          // going, which is why `runStatus` decides the wording and is in the
+          // deps. Re-resolving on completion is also the case the by-id
+          // fallback exists for: a just-finished session is not in
+          // `claude_session_cache` for up to an hour.
+          setResolved({
+            kind: "none",
+            reason:
+              runStatus === "running"
+                ? // *Not yet*, not *never* — the same distinction the Output
+                  // group makes two blocks up with "Still running…".
+                  "This run has not reported a Claude session yet."
+                : "This run never reported a Claude session.",
+          });
+          return;
+        }
+
+        let row: ClaudeSessionSummary;
+        try {
+          row =
+            (await findSessionById(sessionId, ctl.signal)) ??
+            // Typed as the summary because that is all this needs; the route
+            // answers a `ClaudeSessionDetail`, which is that plus the
+            // transcript.
+            (await api.get<ClaudeSessionSummary>(
+              `/claude-sessions/${sessionId}`,
+              ctl.signal
+            ));
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) {
+            if (!cancelled) {
+              setResolved({
+                kind: "none",
+                id: sessionId,
+                // Deliberately two causes rather than one assertion: the by-id
+                // route only looks under the *indexed* config dirs, and an
+                // agent may carry a `claude_config_dir` of its own, so a
+                // transcript outside that set 404s while still being on disk.
+                reason:
+                  "This session is not under any indexed Claude config directory — it may have been deleted, or written somewhere the app does not index.",
+              });
+            }
+            return;
+          }
+          throw err;
+        }
+
+        if (!cancelled) setResolved({ kind: "found", sessionId, row });
+      } catch (err) {
+        if (!cancelled)
+          setResolved({ kind: "failed", message: describeError(err) });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      ctl.abort();
+    };
+  }, [chatId, runStatus]);
+
+  if (resolved.kind === "found") {
+    return (
+      // No `title`: an id is what this pane has always shown, and losing it
+      // would take the one string somebody debugging a run copies out of here.
+      // `project_path` comes from the resolved row — never anything merely
+      // path-shaped, per `SessionLink`'s own note on that prop.
+      <SessionLink
+        sessionId={resolved.sessionId}
+        projectPath={resolved.row.project_path || undefined}
+      />
+    );
+  }
+
+  // An id on every branch, not just the ones that got as far as a session id:
+  // this pane has always shown one, and it is the string somebody debugging a
+  // run copies out of here. Where there is no session id there is still the
+  // chat the run was recorded against, which is what `job_history` stores.
+  return (
+    <>
+      <div className="logblock">
+        {resolved.kind === "none" && resolved.id ? resolved.id : chatId}
+      </div>
+      <div className="runrow">
+        {resolved.kind === "pending"
+          ? "Looking for this run's session…"
+          : resolved.kind === "failed"
+          ? `Couldn't look this run's session up — ${resolved.message}`
+          : resolved.reason}
+      </div>
+    </>
   );
 }

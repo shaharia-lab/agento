@@ -102,6 +102,25 @@
   min-height: 18px;
 }
 
+/* The clickable variant, added by #542. A modifier rather than a rule on
+   `.runrow` itself: JobsView renders the same class as a plain text container
+   for "No output was saved for this run.", which is not a control and must not
+   look like one. `base.css` already resets a button's font, colour,
+   background, border and outline, so this is a box reset and nothing else. */
+.runrow--link {
+  width: 100%;
+  padding: 0;
+  text-align: left;
+}
+
+.runrow--link:hover {
+  color: var(--fg-primary);
+}
+
+.runrow--link:hover .runrow__val {
+  color: var(--fg-secondary);
+}
+
 .runrow__when {
   flex: 1;
   min-width: 0;
