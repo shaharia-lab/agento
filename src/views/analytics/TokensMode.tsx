@@ -5,8 +5,11 @@ import { AreaChart, RateChart, type Point } from "../../components/charts";
 import {
   Card,
   CardEmpty,
+  Delta,
+  DeltaNote,
   Tile,
   Tokens,
+  alignedPair,
   bucketLabel,
   granularityLabel,
   list,
@@ -28,9 +31,23 @@ const COMPOSITION = [
   { key: "Cache write", color: "var(--amber)", field: "total_cache_creation_tokens" },
 ] as const;
 
-export function TokensMode({ report }: { report: AnalyticsReport }) {
+export function TokensMode({
+  report,
+  previous,
+}: {
+  report: AnalyticsReport;
+  /** The preceding window, when the comparison toggle is on and it loaded. */
+  previous?: AnalyticsReport;
+}) {
   const s = report.summary;
   const g = report.granularity;
+  const was = previous?.summary;
+
+  /** A tile's delta slot, or nothing at all when there is no comparison. */
+  const vs = (current: number, before: number | undefined, format = compactNumber) =>
+    before === undefined ? undefined : (
+      <Delta current={current} previous={before} format={format} />
+    );
 
   // `total_tokens` is conversation-only (input + output); the cost is computed
   // over all four classes, so the composition bar needs its own denominator.
@@ -40,7 +57,12 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
     s.total_cache_read_tokens +
     s.total_cache_creation_tokens;
 
-  const series = trimEmpty(list(report.time_series), (p) => p.total_tokens);
+  // One call, so the two series cannot be windowed on different predicates.
+  const { series, compare: compareSeries } = alignedPair(
+    list(report.time_series),
+    previous ? list(previous.time_series) : undefined,
+    (p) => p.total_tokens
+  );
   const tokenPoints: Point[] = series.map((p) => ({
     label: bucketLabel(p.date, g),
     value: p.total_tokens,
@@ -48,6 +70,14 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
       p.sessions
     } session${p.sessions === 1 ? "" : "s"}`,
   }));
+
+  const comparePoints: Point[] | undefined =
+    previous && compareSeries
+      ? compareSeries.map((p) => ({
+          label: bucketLabel(p.date, previous.granularity),
+          value: p.total_tokens,
+        }))
+      : undefined;
 
   const cache = trimEmpty(
     list(report.cache_efficiency),
@@ -65,6 +95,13 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
   const projects = list(report.project_breakdown);
   const unpriced = s.unknown_pricing_tokens > 0;
 
+  // A cost delta is only honest when *both* windows are fully priced: a model
+  // that lost its rate between them makes an unchanged spend read as a fall, and
+  // one that gained a rate makes it read as a rise. Neither is what happened, so
+  // the figure is withheld and the reason is put in its place.
+  const costComparable =
+    was !== undefined && !unpriced && was.unknown_pricing_tokens === 0;
+
   return (
     <>
       <div className="tiles">
@@ -73,12 +110,14 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
           label="Total sessions"
           value={integer(s.total_sessions)}
           note={`${integer(s.unique_projects)} projects`}
+          delta={vs(s.total_sessions, was?.total_sessions, integer)}
         />
         <Tile
           icon="zap"
           label="Conversation tokens"
           value={compactNumber(s.total_tokens)}
           note="input + output"
+          delta={vs(s.total_tokens, was?.total_tokens)}
           title={`${integer(s.total_tokens)} tokens`}
         />
         <Tile
@@ -86,6 +125,7 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
           label="Input"
           value={compactNumber(s.total_input_tokens)}
           note={percent(share(s.total_input_tokens, billable))}
+          delta={vs(s.total_input_tokens, was?.total_input_tokens)}
           title={`${integer(s.total_input_tokens)} tokens`}
         />
         <Tile
@@ -93,6 +133,7 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
           label="Output"
           value={compactNumber(s.total_output_tokens)}
           note={percent(share(s.total_output_tokens, billable))}
+          delta={vs(s.total_output_tokens, was?.total_output_tokens)}
           title={`${integer(s.total_output_tokens)} tokens`}
         />
         <Tile
@@ -100,6 +141,7 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
           label="Cache read"
           value={compactNumber(s.total_cache_read_tokens)}
           note={percent(share(s.total_cache_read_tokens, billable))}
+          delta={vs(s.total_cache_read_tokens, was?.total_cache_read_tokens)}
           title={`${integer(s.total_cache_read_tokens)} tokens`}
         />
         <Tile
@@ -107,6 +149,10 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
           label="Cache write"
           value={compactNumber(s.total_cache_creation_tokens)}
           note={percent(share(s.total_cache_creation_tokens, billable))}
+          delta={vs(
+            s.total_cache_creation_tokens,
+            was?.total_cache_creation_tokens
+          )}
           title={`${integer(s.total_cache_creation_tokens)} tokens`}
         />
         <Tile
@@ -114,6 +160,7 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
           label="Avg / session"
           value={compactNumber(s.avg_tokens_per_session)}
           note="conversation tokens"
+          delta={vs(s.avg_tokens_per_session, was?.avg_tokens_per_session)}
         />
         <Tile
           icon="dollar"
@@ -121,6 +168,20 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
           value={usd(s.estimated_cost_usd)}
           tone="var(--green)"
           note={unpriced ? "excludes unpriced models" : "all token types"}
+          delta={
+            was === undefined ? undefined : costComparable ? (
+              <Delta
+                current={s.estimated_cost_usd}
+                previous={was.estimated_cost_usd}
+                format={usd}
+              />
+            ) : (
+              <DeltaNote
+                text="no cost delta"
+                title="One of the two windows contains tokens with no published rate, so each total is a floor rather than a figure — the difference between two floors is not a change in spend."
+              />
+            )
+          }
         />
       </div>
 
@@ -178,7 +239,11 @@ export function TokensMode({ report }: { report: AnalyticsReport }) {
           title="Tokens over time"
           badge={granularityLabel(report.granularity)}
         >
-          <AreaChart points={tokenPoints} format={compactNumber} />
+          <AreaChart
+            points={tokenPoints}
+            compare={comparePoints}
+            format={compactNumber}
+          />
         </Card>
         <Card
           title="Cache efficiency"

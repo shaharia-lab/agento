@@ -5,14 +5,15 @@ import { SessionLink } from "../sessions/SessionLink";
 import {
   Card,
   CardEmpty,
+  Delta,
   Tile,
   Tokens,
+  alignedPair,
   bucketLabel,
   granularityLabel,
   list,
   projectLabel,
   share,
-  trimEmpty,
   widthPct,
 } from "./shared";
 
@@ -20,11 +21,24 @@ import {
    Usage mode — when the work happened, not what it cost.
    ========================================================================== */
 
-export function UsageMode({ report }: { report: AnalyticsReport }) {
+export function UsageMode({
+  report,
+  previous,
+}: {
+  report: AnalyticsReport;
+  /** The preceding window, when the comparison toggle is on and it loaded. */
+  previous?: AnalyticsReport;
+}) {
   const s = report.summary;
   const g = report.granularity;
+  const was = previous?.summary;
 
-  const series = trimEmpty(list(report.time_series), (p) => p.sessions);
+  // One call, so the two series cannot be windowed on different predicates.
+  const { series, compare: compareSeries } = alignedPair(
+    list(report.time_series),
+    previous ? list(previous.time_series) : undefined,
+    (p) => p.sessions
+  );
   const activeBuckets = series.filter((p) => p.sessions > 0).length;
 
   const sessionPoints: Point[] = series.map((p) => ({
@@ -35,9 +49,38 @@ export function UsageMode({ report }: { report: AnalyticsReport }) {
     } · ${compactNumber(p.total_tokens)} tokens`,
   }));
 
+  // Trimmed on the same rule as the current series, so the two are like for
+  // like; `AreaChart` then aligns them from the last bucket backwards.
+  const compareGranularity = previous?.granularity ?? g;
+  const comparePoints: Point[] | undefined = compareSeries?.map((p) => ({
+    label: bucketLabel(p.date, compareGranularity),
+    value: p.sessions,
+  }));
+
   // Averaging over buckets is only meaningful when the buckets are days.
   const avgPerDay =
     g === "daily" && activeBuckets > 0 ? s.total_sessions / activeBuckets : 0;
+
+  // The same figure over the previous window, computed the same way — and only
+  // when *both* windows bucket daily, since an average over weekly buckets is
+  // not the same quantity and differencing the two would be nonsense.
+  //
+  // Counted over `previous.time_series` itself, **never over `compareSeries`**:
+  // that one is a positional subset windowed to the current series' span, so
+  // wherever the current window was idle it has dropped active previous buckets
+  // — and `was.total_sessions` is the whole previous window's total, so the two
+  // would be over different spans. `activeBuckets` above has no such problem,
+  // because trimming only ever removes zero buckets.
+  const compareActiveBuckets = previous
+    ? list(previous.time_series).filter((p) => p.sessions > 0).length
+    : 0;
+  const comparableAvgPerDay =
+    was !== undefined &&
+    g === "daily" &&
+    compareGranularity === "daily" &&
+    compareActiveBuckets > 0
+      ? was.total_sessions / compareActiveBuckets
+      : undefined;
 
   const perModel = list(report.sessions_per_model);
   const topModel = perModel.reduce<{ model: string; sessions: number } | undefined>(
@@ -75,6 +118,15 @@ export function UsageMode({ report }: { report: AnalyticsReport }) {
           icon="grid"
           label="Total sessions"
           value={integer(s.total_sessions)}
+          delta={
+            was === undefined ? undefined : (
+              <Delta
+                current={s.total_sessions}
+                previous={was.total_sessions}
+                format={integer}
+              />
+            )
+          }
         />
         <Tile
           icon="clock"
@@ -84,6 +136,15 @@ export function UsageMode({ report }: { report: AnalyticsReport }) {
             g === "daily"
               ? `over ${activeBuckets} active day${activeBuckets === 1 ? "" : "s"}`
               : `buckets are ${g}`
+          }
+          delta={
+            comparableAvgPerDay === undefined ? undefined : (
+              <Delta
+                current={avgPerDay}
+                previous={comparableAvgPerDay}
+                format={(n) => n.toFixed(1)}
+              />
+            )
           }
         />
         <Tile
@@ -101,12 +162,25 @@ export function UsageMode({ report }: { report: AnalyticsReport }) {
           icon="folder"
           label="Unique projects"
           value={integer(s.unique_projects)}
+          delta={
+            was === undefined ? undefined : (
+              <Delta
+                current={s.unique_projects}
+                previous={was.unique_projects}
+                format={integer}
+              />
+            )
+          }
         />
       </div>
 
       <div className="a-grid a-grid--wide">
         <Card title="Sessions over time" badge={granularityLabel(g)}>
-          <AreaChart points={sessionPoints} format={integer} />
+          <AreaChart
+            points={sessionPoints}
+            compare={comparePoints}
+            format={integer}
+          />
         </Card>
         <Card title="Sessions by model" table>
           {perModel.length ? (
