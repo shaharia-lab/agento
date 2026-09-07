@@ -98,7 +98,7 @@ async fn a_turn_lists_and_calls_a_tool_through_the_options_a_turn_builds() {
     let spec = spec();
     // `_servers` is the listener's lifetime — dropping it stops the server and
     // cancels every handler's token, so it has to outlive the stream.
-    let (options, _servers) = build_options(&spec, None)
+    let (options, _servers, _hosted) = build_options(&spec, None)
         .await
         .expect("the turn's own option assembly");
 

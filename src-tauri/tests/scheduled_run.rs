@@ -679,3 +679,61 @@ async fn a_contended_write_lock_does_not_stall_the_runtime() {
     assert_eq!(jobs.len(), 1, "the run still recorded a job: {jobs:?}");
     assert_eq!(jobs[0].0, "success", "error was {:?}", jobs[0].1);
 }
+
+/// #556 on the path with nobody watching: a scheduled run whose `init` frame
+/// drops a hosted server's tools **completes normally** and says so on its
+/// `job_history` row.
+///
+/// The row is the only record a scheduled run leaves — nobody is reading the
+/// app log when a cron task fires at 03:00 — and `error_message` is its one
+/// free-text column, so the notice lands there while the status stays
+/// `success`. That pairing is deliberate: the run answered, and a mismatch is
+/// never a refusal.
+#[tokio::test]
+async fn a_run_whose_init_drops_the_tools_still_succeeds_and_records_it() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with(
+        &db,
+        "what time is it?",
+        "clock",
+        30,
+        Some(r#"{"local":["current_time"]}"#),
+    );
+
+    let cli = fake_cli(
+        dir.path(),
+        r#"        say({"type": "system", "subtype": "init", "session_id": "sdk-run-2",
+             "tools": ["Read"],
+             "mcp_servers": [{"name": "local-tools", "status": "connected"}]})
+        raw('{"type":"result","subtype":"success","is_error":false,"result":"the summary","session_id":"sdk-run-2","usage":{"input_tokens":5,"output_tokens":6}}')"#,
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "exactly one run: {jobs:?}");
+    let (status, error, response, ..) = &jobs[0];
+    assert_eq!(status, "success", "a dropped tool list never fails the run");
+    assert_eq!(
+        response, "the summary",
+        "the run produced its normal answer"
+    );
+    assert_eq!(
+        error,
+        "local-tools tools were hosted but the Claude CLI did not offer them to the model; see the app log"
+    );
+
+    let task = agento_lib::native::tasks::get_task(&db, &task_id)
+        .expect("read")
+        .expect("row");
+    assert_eq!(task.last_run_status, "success");
+}

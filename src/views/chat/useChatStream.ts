@@ -20,6 +20,7 @@ import {
   readResult,
   readSystemInit,
   readThinkingTokens,
+  readToolsNotOffered,
   readToolProgress,
   readToolResults,
   type PermissionRequest,
@@ -62,6 +63,12 @@ export interface ChatStream {
   result: TurnResult | null;
   system: SystemInit | null;
   error: string | undefined;
+  /**
+   * A non-fatal warning about the turn — today only #556's dropped tool list.
+   * Separate from `error` because the turn ran and answered: an error bar over
+   * a good answer would misreport it.
+   */
+  notice: string | undefined;
   stopping: boolean;
   start(chatId: string, content: string): void;
   stop(): void;
@@ -69,6 +76,7 @@ export interface ChatStream {
   decide(allow: boolean): Promise<void>;
   reset(): void;
   dismissError(): void;
+  dismissNotice(): void;
 }
 
 export function useChatStream(
@@ -81,6 +89,7 @@ export function useChatStream(
   const [result, setResult] = useState<TurnResult | null>(null);
   const [system, setSystem] = useState<SystemInit | null>(null);
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
   const [stopping, setStopping] = useState(false);
 
   const abortRef = useRef<(() => void) | null>(null);
@@ -109,6 +118,7 @@ export function useChatStream(
       setResult(null);
       setPrompt(null);
       setError(undefined);
+      setNotice(undefined);
       setStopping(false);
       setChatId(id);
 
@@ -210,6 +220,22 @@ export function useChatStream(
             case "permission_request":
               setPrompt({ kind: "permission", request: readPermission(payload) });
               return;
+            case "tools_not_offered": {
+              // Not `setError`: the turn is running and will answer. What the
+              // user needs to know is that the answer was produced without the
+              // tools they configured (#556).
+              const message = readToolsNotOffered(payload);
+              // One frame per dropped server, and #555's own shape was *every*
+              // integration going at once — so these accumulate rather than
+              // replace, joined the way the scheduled path joins them
+              // (`executor::finish`). Replacing would name the last server and
+              // silently lose the rest.
+              if (message)
+                setNotice((prev) =>
+                  prev && prev !== message ? `${prev}; ${message}` : message
+                );
+              return;
+            }
             case "error":
               setError(readError(payload) ?? "The stream failed.");
               return;
@@ -275,6 +301,7 @@ export function useChatStream(
     setResult(null);
     setSystem(null);
     setError(undefined);
+    setNotice(undefined);
   }, []);
 
   return {
@@ -285,6 +312,7 @@ export function useChatStream(
     result,
     system,
     error,
+    notice,
     stopping,
     start,
     stop,
@@ -292,6 +320,7 @@ export function useChatStream(
     decide,
     reset,
     dismissError: useCallback(() => setError(undefined), []),
+    dismissNotice: useCallback(() => setNotice(undefined), []),
   };
 }
 

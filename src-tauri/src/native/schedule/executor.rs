@@ -503,12 +503,17 @@ fn finish(
     } else {
         ""
     };
+    // A tools mismatch is not a failure — the run produced its answer and the
+    // status stays `success` — but a scheduled run has nobody reading the app
+    // log, and `error_message` is the only free-text column on the row. #556's
+    // rule: silence about a broken tool list is the outcome not allowed.
+    let notice = result.tools_not_offered.join("; ");
     finish_job_history(
         &db_path,
         &mut job,
         started_at,
         "success",
-        "",
+        &notice,
         Some(&result),
         response_text,
     );
@@ -1066,6 +1071,7 @@ mod tests {
             output_tokens: 22,
             cache_creation_tokens: 33,
             cache_read_tokens: 44,
+            tools_not_offered: Vec::new(),
         };
         let started_at = Utc::now();
         write_session_results(file.path(), &session_id, &result, "the prompt", started_at)
