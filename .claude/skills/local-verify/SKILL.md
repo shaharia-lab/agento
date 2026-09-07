@@ -297,6 +297,16 @@ model — the CLI had fetched the tool list and **discarded it as invalid**
    mandatory — the CLI negotiates `2026-07-28`, and rmcp advertises it while
    leaving that revision's required result fields to the handler.
 
+**Telegram end to end needs a bot that has been started.** A bot cannot message
+a user who never opened it, so before the agent can `send_message` back,
+open `t.me/<bot>` from the user's own Telegram Web, press **Start**, and send
+one message — that is the update `read_messages` finds and the chat id
+`send_message` needs. The first message typed right after the chat opens can
+be dropped by Telegram Web (verified 2026-09-07: `/start` landed, the message
+sent 2 s later did not), so check the chat shows it before reading. The token
+BotFather prints is the user's to paste into Integrations → Telegram; do not
+type it anywhere yourself.
+
 A control that discriminates "our server" from "the CLI": the same hand-run
 against a stdio server (`npx -y @modelcontextprotocol/server-everything`)
 lists `mcp__ev__*` in `init.tools` and calls `echo`. If that works and ours
