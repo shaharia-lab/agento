@@ -245,6 +245,68 @@ handoff is confirmed on the real desktop. A capability fix is not proven by an
 error disappearing — `openExternal` swallows failures into a `console.warn`
 and returns normally, so "no error" is the *symptom*, not the fix.
 
+## Is a hosted MCP tool actually reaching the model?
+
+Agento's own log cannot answer this. `mcp server started server=… tools=[…]`
+says what *we* hosted, the CLI's `init` event says `"status":"connected"`, and
+both were true on 2026-09-07 while every integration tool was invisible to the
+model — the CLI had fetched the tool list and **discarded it as invalid**
+(SEP-2549 `ttlMs`/`cacheScope`, #555). Four probes, in order, each ~10 s:
+
+1. **Did the model get the tools?** In the turn's SSE capture, the
+   `system`/`init` frame's `tools` array must contain `mcp__<server>__<tool>`
+   names. If it does not, nothing downstream matters — the model answers
+   "no such tool" and `ToolSearch` (which searches only the tools it was
+   given) finds nothing.
+2. **What did the CLI say to itself?** The CLI writes a per-run debug log:
+   `claude -p --debug-file /tmp/cli.debug …`. `grep -i mcp /tmp/cli.debug`
+   shows the transport setup, `Connection established`, and — the line that
+   matters — `tools/list failed (Invalid result for tools/list: …)` with the
+   zod path of the offending field. Nothing in Agento's log carries this.
+3. **Reproduce with the exact options the runner built.** The per-turn MCP
+   server lives only as long as its turn, so start a slow turn (a long essay)
+   and read the CLI's argv off the live process — the `--mcp-config` document
+   carries the server URL and its bearer token:
+
+   ```bash
+   for pid in $(pgrep -f mcpServers); do
+     case "$(readlink /proc/$pid/exe)" in */claude/versions/*) P=$pid;; esac; done
+   tr '\0' '\n' < /proc/$P/cmdline > /tmp/argv.txt
+   CFG=$(grep '"mcpServers"' /tmp/argv.txt)
+   ```
+
+   `pgrep -f` also matches *your own shell* when the pattern appears in its
+   command line, which is why the loop checks `/proc/<pid>/exe`. Then hand-run
+   `claude -p --debug-file … --mcp-config "$CFG" --strict-mcp-config
+   --allowedTools <qualified names> -- "prompt"` — the `--` is required,
+   because `--allowedTools` is variadic and swallows the prompt otherwise.
+4. **Is the server itself right?** With `$CFG` in hand, drive the endpoint
+   directly and validate the bytes against the spec's own schema
+   (`~/Projects/modelcontextprotocol/schema/<revision>/schema.json`,
+   `CacheableResult` / `ListToolsResult`):
+
+   ```bash
+   URL=$(jq -r '.mcpServers[].url' <<<"$CFG"); TOK=$(jq -r '.mcpServers[].headers.Authorization' <<<"$CFG")
+   curl -s "$URL" -H "Authorization: $TOK" -H 'Content-Type: application/json' \
+     -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+   ```
+
+   A response that *looks* fine is the trap: a missing field is invisible
+   without the schema. The client's protocol revision decides which fields are
+   mandatory — the CLI negotiates `2026-07-28`, and rmcp advertises it while
+   leaving that revision's required result fields to the handler.
+
+A control that discriminates "our server" from "the CLI": the same hand-run
+against a stdio server (`npx -y @modelcontextprotocol/server-everything`)
+lists `mcp__ev__*` in `init.tools` and calls `echo`. If that works and ours
+does not, the defect is in what we serve.
+
+`cargo test --test mcp_e2e_probe -j 4 -- --ignored --nocapture` is the
+committed version of probe 1 against the real CLI (one binary, so it is safe
+on this machine); it is `#[ignore]`d and CI never runs it, so a CLI upgrade
+can break every integration with the suite green.
+
 ## Engine-only probe (no app)
 
 `python3-gi` + WebKit2 4.1 is the same library Tauri embeds. An
