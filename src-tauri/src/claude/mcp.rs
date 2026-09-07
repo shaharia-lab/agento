@@ -380,6 +380,57 @@ mod tests {
         assert_eq!(response.status(), 202, "a notification has no reply");
     }
 
+    /// The two fields SEP-2549 made mandatory on a `tools/list` result at
+    /// protocol revision 2026-07-28 (#555). The Claude Code CLI validates the
+    /// result against that schema and drops the entire tool list when either is
+    /// absent, while still reporting the server connected — so the whole of
+    /// Agento's tool hosting is dead and nothing anywhere says why.
+    ///
+    /// Asserted on the **bytes the client receives**, not on the Rust value:
+    /// both fields are `Option` in `rmcp` with `skip_serializing_if`, so a
+    /// value-level assertion passes on a `Some` that never reaches the wire,
+    /// and the wire is what the CLI validates. Driven over the real transport
+    /// because `RequestContext`'s `Peer` cannot be built outside `rmcp`, which
+    /// makes an HTTP round trip the only way to reach `ToolServer::list_tools`
+    /// at all.
+    #[tokio::test]
+    async fn a_tool_list_carries_the_cache_hints_the_cli_requires() {
+        let server = start_in_process_mcp_server("probe", echo_server())
+            .await
+            .unwrap();
+
+        let response = post(&server, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        let result = &body["result"];
+
+        let ttl = result
+            .get("ttlMs")
+            .unwrap_or_else(|| panic!("`ttlMs` is required on a tools/list result: {result}"));
+        assert!(
+            ttl.as_u64().is_some(),
+            "`ttlMs` must be a non-negative number, got {ttl}"
+        );
+        let scope = result
+            .get("cacheScope")
+            .unwrap_or_else(|| panic!("`cacheScope` is required on a tools/list result: {result}"));
+        assert!(
+            matches!(scope.as_str(), Some("public") | Some("private")),
+            "`cacheScope` must be `public` or `private`, got {scope}"
+        );
+
+        // The values Agento chose, pinned so a change to them is deliberate:
+        // the tool set is per turn and per integration row, and every listener
+        // carries its own bearer token.
+        assert_eq!(result["ttlMs"], 0);
+        assert_eq!(result["cacheScope"], "private");
+        assert_eq!(
+            result["tools"][0]["name"], "echo",
+            "the hints travel with a real tool list, not instead of one"
+        );
+    }
+
     #[tokio::test]
     async fn a_tool_call_reaches_the_handler() {
         let server = start_in_process_mcp_server("probe", echo_server())
