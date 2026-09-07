@@ -1342,7 +1342,9 @@ fn validate_rule_settings(req: &TriggerRuleRequest) -> Result<(), WriteError> {
     if !(0..=RULE_MAX_TIMEOUT_MINUTES).contains(&req.timeout_minutes) {
         return Err(WriteError::validation(
             "timeout_minutes",
-            format!("timeout_minutes must be between 0 and {RULE_MAX_TIMEOUT_MINUTES}"),
+            // `tasks.rs`' wording for the same field name under the same
+            // bound, minus its "1" -- 0 is this field's "use the default".
+            format!("timeout must be between 0 and {RULE_MAX_TIMEOUT_MINUTES} minutes"),
         ));
     }
     Ok(())
