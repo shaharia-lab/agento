@@ -158,6 +158,16 @@ export interface TriggerRule {
   filter_prefix: string;
   filter_keywords: string[] | null;
   filter_chat_ids: string[] | null;
+  /* The execution settings a rule may override, migration 39 (#563). Every one
+     is empty/0 for "whatever the dispatcher already does", which is what every
+     rule written before that migration reads back as. */
+  model: string;
+  working_directory: string;
+  settings_profile_id: string;
+  /* "" | "default" | "plan" | "dontAsk" | "bypass" — anything else is a 422. */
+  permission_mode: string;
+  /* 0..240; 0 means the dispatcher's own run timeout. */
+  timeout_minutes: number;
   created_at: string;
   updated_at: string;
 }

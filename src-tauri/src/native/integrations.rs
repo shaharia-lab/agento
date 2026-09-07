@@ -265,6 +265,13 @@ pub struct AvailableTool {
 }
 
 /// One inbound-message rule. Mirrors `config.TriggerRule`.
+///
+/// The five execution settings after the filters are migration 39's (#563).
+/// They sit between `filter_chat_ids` and the timestamps because a Go struct's
+/// declaration order **is** its key order on the wire, and every other type here
+/// carries `created_at`/`updated_at` last. Each spells "the dispatcher's own
+/// default" as the zero value, so a rule written before that migration reads
+/// back with all five empty and behaves exactly as it did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TriggerRule {
     pub id: String,
@@ -275,9 +282,30 @@ pub struct TriggerRule {
     pub filter_prefix: String,
     pub filter_keywords: Option<Vec<String>>,
     pub filter_chat_ids: Option<Vec<String>>,
+    pub model: String,
+    pub working_directory: String,
+    pub settings_profile_id: String,
+    pub permission_mode: String,
+    /// 0 means the dispatcher's `RUN_TIMEOUT`, not "time out immediately".
+    pub timeout_minutes: i64,
     pub created_at: GoTime,
     pub updated_at: GoTime,
 }
+
+/// Every `permission_mode` a trigger rule may carry.
+///
+/// `""` is "whatever the agent already says", which is what every rule written
+/// before migration 39 stores; the other four are the modes
+/// `claude::PermissionMode` accepts. Enumerated rather than free text because
+/// the dispatcher hands the value straight to the CLI, where a typo is a run
+/// that fails at spawn time rather than a 422 at write time.
+const RULE_PERMISSION_MODES: [&str; 5] = ["", "default", "plan", "dontAsk", "bypass"];
+
+/// The inclusive upper bound on a rule's own run timeout, in minutes.
+///
+/// Four hours. High enough that no legitimate run is refused, low enough that a
+/// mistyped value cannot park a subprocess for a week.
+const RULE_MAX_TIMEOUT_MINUTES: i64 = 240;
 
 /// Every `auth_mode` a credential blob may legitimately carry.
 ///
@@ -531,6 +559,8 @@ pub fn list_trigger_rules(
         .prepare(
             "SELECT id, integration_id, name, agent_slug, enabled,
                     filter_prefix, filter_keywords, filter_chat_ids,
+                    model, working_directory, settings_profile_id,
+                    permission_mode, timeout_minutes,
                     created_at, updated_at
              FROM trigger_rules
              WHERE integration_id = ?1
@@ -551,6 +581,8 @@ pub fn list_trigger_rules(
 /// needs cannot drift from the list.
 const TRIGGER_RULE_COLUMNS: &str = "SELECT id, integration_id, name, agent_slug, enabled,
                     filter_prefix, filter_keywords, filter_chat_ids,
+                    model, working_directory, settings_profile_id,
+                    permission_mode, timeout_minutes,
                     created_at, updated_at
              FROM trigger_rules";
 
@@ -558,8 +590,8 @@ fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
     let enabled: i64 = row.get(4)?;
     let keywords: String = row.get(6)?;
     let chat_ids: String = row.get(7)?;
-    let created_at: String = row.get(8)?;
-    let updated_at: String = row.get(9)?;
+    let created_at: String = row.get(13)?;
+    let updated_at: String = row.get(14)?;
     Ok(TriggerRule {
         id: row.get(0)?,
         integration_id: row.get(1)?,
@@ -569,8 +601,13 @@ fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
         filter_prefix: row.get(5)?,
         filter_keywords: super::gojson::decode_string_list(&keywords),
         filter_chat_ids: super::gojson::decode_string_list(&chat_ids),
-        created_at: super::gotime::from_sql_text(&created_at, 8)?,
-        updated_at: super::gotime::from_sql_text(&updated_at, 9)?,
+        model: row.get(8)?,
+        working_directory: row.get(9)?,
+        settings_profile_id: row.get(10)?,
+        permission_mode: row.get(11)?,
+        timeout_minutes: row.get(12)?,
+        created_at: super::gotime::from_sql_text(&created_at, 13)?,
+        updated_at: super::gotime::from_sql_text(&updated_at, 14)?,
     })
 }
 
@@ -1263,6 +1300,13 @@ fn decline_a_type_go_still_hosts(id: &str, integration_type: &str) -> Result<(),
 }
 
 /// `CreateTriggerRuleRequest` / `UpdateTriggerRuleRequest` — identical shapes.
+///
+/// **The `PUT` is replace, not preserve, and that is deliberate** — the same
+/// contract `TaskRequest` states for the five fields #540 restored. A key the
+/// caller omits resets its column, because the Integrations form posts the whole
+/// rule and none of these fields is a write-only secret that cannot be resent.
+/// #515's three-valued `credentials` contract exists *only* because a credential
+/// cannot be read back; do not generalise it here.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct TriggerRuleRequest {
@@ -1277,6 +1321,39 @@ struct TriggerRuleRequest {
     /// A `null` element is `""` to Go, not an error (#295).
     filter_keywords: Option<super::gojson::GoList<String>>,
     filter_chat_ids: Option<super::gojson::GoList<String>>,
+    /// Migration 39's five execution settings (#563).
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    model: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    working_directory: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    settings_profile_id: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    permission_mode: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    timeout_minutes: i64,
+}
+
+/// The checks `create` and `update` share, after `agent_slug`.
+///
+/// Both constrained fields are refused rather than clamped: a rule that silently
+/// ran under a different permission mode than the one asked for is the failure
+/// this is here to prevent, and a 422 naming the field is the only answer that
+/// tells the caller which of the two it got wrong.
+fn validate_rule_settings(req: &TriggerRuleRequest) -> Result<(), WriteError> {
+    if !RULE_PERMISSION_MODES.contains(&req.permission_mode.as_str()) {
+        return Err(WriteError::validation(
+            "permission_mode",
+            "permission_mode must be one of default, plan, dontAsk, bypass",
+        ));
+    }
+    if !(0..=RULE_MAX_TIMEOUT_MINUTES).contains(&req.timeout_minutes) {
+        return Err(WriteError::validation(
+            "timeout_minutes",
+            format!("timeout_minutes must be between 0 and {RULE_MAX_TIMEOUT_MINUTES}"),
+        ));
+    }
+    Ok(())
 }
 
 /// `handleCreateTriggerRule` → `triggerService.CreateRule`.
@@ -1297,6 +1374,7 @@ fn create_trigger_rule(
             "agent_slug is required",
         ));
     }
+    validate_rule_settings(&req)?;
 
     let conn = open_for_write(db_path)?;
     if !integration_exists(&conn, integration_id)? {
@@ -1320,6 +1398,11 @@ fn create_trigger_rule(
         filter_prefix: req.filter_prefix,
         filter_keywords: req.filter_keywords.map(|list| list.0),
         filter_chat_ids: req.filter_chat_ids.map(|list| list.0),
+        model: req.model,
+        working_directory: req.working_directory,
+        settings_profile_id: req.settings_profile_id,
+        permission_mode: req.permission_mode,
+        timeout_minutes: req.timeout_minutes,
         created_at: stamp,
         updated_at: stamp,
     };
@@ -1357,6 +1440,7 @@ fn update_trigger_rule(
             "agent_slug is required",
         ));
     }
+    validate_rule_settings(&req)?;
 
     // `UpdateRule` keeps the stored id, integration and creation time and
     // replaces everything else — a field the caller omitted is cleared, not kept.
@@ -1370,6 +1454,11 @@ fn update_trigger_rule(
         filter_prefix: req.filter_prefix,
         filter_keywords: req.filter_keywords.map(|list| list.0),
         filter_chat_ids: req.filter_chat_ids.map(|list| list.0),
+        model: req.model,
+        working_directory: req.working_directory,
+        settings_profile_id: req.settings_profile_id,
+        permission_mode: req.permission_mode,
+        timeout_minutes: req.timeout_minutes,
         created_at: existing.created_at,
         updated_at: parse_written(&now)?,
     };
@@ -1378,8 +1467,10 @@ fn update_trigger_rule(
         "UPDATE trigger_rules SET
             name = ?1, agent_slug = ?2, enabled = ?3,
             filter_prefix = ?4, filter_keywords = ?5, filter_chat_ids = ?6,
-            updated_at = ?7
-         WHERE id = ?8",
+            model = ?7, working_directory = ?8, settings_profile_id = ?9,
+            permission_mode = ?10, timeout_minutes = ?11,
+            updated_at = ?12
+         WHERE id = ?13",
         rusqlite::params![
             &rule.name,
             &rule.agent_slug,
@@ -1387,6 +1478,11 @@ fn update_trigger_rule(
             &rule.filter_prefix,
             &marshal_list(&rule.filter_keywords)?,
             &marshal_list(&rule.filter_chat_ids)?,
+            &rule.model,
+            &rule.working_directory,
+            &rule.settings_profile_id,
+            &rule.permission_mode,
+            rule.timeout_minutes,
             &now,
             &rule.id,
         ],
@@ -1426,8 +1522,10 @@ fn insert_rule(
     conn.execute(
         "INSERT INTO trigger_rules
             (id, integration_id, name, agent_slug, enabled,
-             filter_prefix, filter_keywords, filter_chat_ids, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             filter_prefix, filter_keywords, filter_chat_ids,
+             model, working_directory, settings_profile_id, permission_mode,
+             timeout_minutes, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             &rule.id,
             &rule.integration_id,
@@ -1437,6 +1535,11 @@ fn insert_rule(
             &rule.filter_prefix,
             &marshal_list(&rule.filter_keywords)?,
             &marshal_list(&rule.filter_chat_ids)?,
+            &rule.model,
+            &rule.working_directory,
+            &rule.settings_profile_id,
+            &rule.permission_mode,
+            rule.timeout_minutes,
             now,
             now,
         ],
@@ -1535,16 +1638,21 @@ mod tests {
             updated_at  DATETIME NOT NULL
         );
         CREATE TABLE trigger_rules (
-            id              TEXT PRIMARY KEY,
-            integration_id  TEXT NOT NULL,
-            name            TEXT NOT NULL DEFAULT '',
-            agent_slug      TEXT NOT NULL,
-            enabled         INTEGER NOT NULL DEFAULT 1,
-            filter_prefix   TEXT NOT NULL DEFAULT '',
-            filter_keywords TEXT NOT NULL DEFAULT '[]',
-            filter_chat_ids TEXT NOT NULL DEFAULT '[]',
-            created_at      DATETIME NOT NULL,
-            updated_at      DATETIME NOT NULL
+            id                  TEXT PRIMARY KEY,
+            integration_id      TEXT NOT NULL,
+            name                TEXT NOT NULL DEFAULT '',
+            agent_slug          TEXT NOT NULL,
+            enabled             INTEGER NOT NULL DEFAULT 1,
+            filter_prefix       TEXT NOT NULL DEFAULT '',
+            filter_keywords     TEXT NOT NULL DEFAULT '[]',
+            filter_chat_ids     TEXT NOT NULL DEFAULT '[]',
+            model               TEXT NOT NULL DEFAULT '',
+            working_directory   TEXT NOT NULL DEFAULT '',
+            settings_profile_id TEXT NOT NULL DEFAULT '',
+            permission_mode     TEXT NOT NULL DEFAULT '',
+            timeout_minutes     INTEGER NOT NULL DEFAULT 0,
+            created_at          DATETIME NOT NULL,
+            updated_at          DATETIME NOT NULL
         );";
 
     /// The secret is a distinctive string so a leak is unmistakable in any
@@ -2948,6 +3056,157 @@ mod tests {
         let deleted = delete_trigger_rule(file.path(), "int-1", &id).expect("delete rule");
         assert_eq!(deleted.status, axum::http::StatusCode::NO_CONTENT);
         assert!(deleted.body.is_none(), "a 204 carries no body at all");
+    }
+
+    /// Migration 39's five execution settings, end to end through the write
+    /// path (#563).
+    ///
+    /// **The second half is the assertion that matters.** The `PUT` is replace,
+    /// not preserve, so a body naming none of the five must clear all five — a
+    /// test that only round-tripped them would pass just as well against a
+    /// handler that quietly kept the stored values, which is the shape #540 had
+    /// to undo on `TaskRequest`.
+    #[test]
+    fn a_rules_execution_settings_round_trip_and_an_omitted_one_is_cleared() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+
+        let created = create_trigger_rule(
+            file.path(),
+            "int-1",
+            br#"{"agent_slug":"a","model":"claude-opus-4-6","working_directory":"/srv/work",
+                 "settings_profile_id":"p-7","permission_mode":"plan","timeout_minutes":45}"#,
+        )
+        .expect("create rule");
+        assert_eq!(created.status, axum::http::StatusCode::CREATED);
+        let body = body_of(&created);
+        // A `TriggerRule` is a Go struct, so declaration order **is** key order:
+        // asserting the run of five as one substring pins their position between
+        // the filters and the timestamps, not merely their presence.
+        assert!(
+            body.contains(
+                r#""filter_chat_ids":null,"model":"claude-opus-4-6","working_directory":"/srv/work","settings_profile_id":"p-7","permission_mode":"plan","timeout_minutes":45,"created_at":"#
+            ),
+            "{body}"
+        );
+
+        // They are read back from the column, not echoed from the request.
+        let listed = list_trigger_rules(file.path(), "int-1").expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].model, "claude-opus-4-6");
+        assert_eq!(listed[0].working_directory, "/srv/work");
+        assert_eq!(listed[0].settings_profile_id, "p-7");
+        assert_eq!(listed[0].permission_mode, "plan");
+        assert_eq!(listed[0].timeout_minutes, 45);
+
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        let updated = update_trigger_rule(file.path(), "int-1", &id, br#"{"agent_slug":"a"}"#)
+            .expect("update rule");
+        let body = body_of(&updated);
+        for cleared in [
+            r#""model":"""#,
+            r#""working_directory":"""#,
+            r#""settings_profile_id":"""#,
+            r#""permission_mode":"""#,
+            r#""timeout_minutes":0"#,
+        ] {
+            assert!(body.contains(cleared), "not cleared: {cleared} in {body}");
+        }
+        let listed = list_trigger_rules(file.path(), "int-1").expect("list");
+        assert_eq!(listed[0].timeout_minutes, 0);
+        assert!(listed[0].model.is_empty());
+    }
+
+    /// A rule written before migration 39 reads back with all five at their
+    /// zero value and nothing else about it moved.
+    ///
+    /// `fixture()` seeds `trigger_rules` through the hand-written test schema
+    /// and names none of the five, which is exactly the row an existing Telegram
+    /// install holds after the migration applies its `NOT NULL DEFAULT`s.
+    #[test]
+    fn a_rule_predating_the_execution_settings_reads_back_empty() {
+        let file = fixture();
+        let rules = list_trigger_rules(file.path(), "zulu-int").expect("rules");
+        assert_eq!(rules.len(), 2);
+        for rule in &rules {
+            assert!(rule.model.is_empty(), "{rule:?}");
+            assert!(rule.working_directory.is_empty(), "{rule:?}");
+            assert!(rule.settings_profile_id.is_empty(), "{rule:?}");
+            assert!(rule.permission_mode.is_empty(), "{rule:?}");
+            assert_eq!(rule.timeout_minutes, 0, "{rule:?}");
+        }
+        // The fields the Telegram half already depended on are untouched.
+        assert_eq!(rules[0].id, "r1");
+        assert_eq!(rules[0].filter_keywords, Some(vec!["a".into(), "b".into()]));
+    }
+
+    /// The two constrained settings, each a 422 that names its own field.
+    ///
+    /// Both `create` and `update` are exercised, because the check is one
+    /// function called from two handlers and deleting either call site is
+    /// invisible to a test that only drives one of them. The assertion is the
+    /// whole `validation error for "<field>"` prefix rather than the field name
+    /// alone: the message repeats the field, so a bare `contains` passes with
+    /// the wrong field hardcoded.
+    #[test]
+    fn an_unknown_permission_mode_or_an_out_of_range_timeout_is_422() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+        create_trigger_rule(file.path(), "int-1", br#"{"agent_slug":"a"}"#).expect("seed rule");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        for (body, field) in [
+            (
+                &br#"{"agent_slug":"a","permission_mode":"yolo"}"#[..],
+                "permission_mode",
+            ),
+            (
+                &br#"{"agent_slug":"a","timeout_minutes":300}"#[..],
+                "timeout_minutes",
+            ),
+            (
+                &br#"{"agent_slug":"a","timeout_minutes":-1}"#[..],
+                "timeout_minutes",
+            ),
+        ] {
+            for err in [
+                create_trigger_rule(file.path(), "int-1", body).expect_err("create"),
+                update_trigger_rule(file.path(), "int-1", &id, body).expect_err("update"),
+            ] {
+                assert_eq!(
+                    err.status(),
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "{field}"
+                );
+                assert!(
+                    err.message()
+                        .starts_with(&format!(r#"validation error for "{field}""#)),
+                    "{}",
+                    err.message()
+                );
+            }
+        }
+    }
+
+    /// The accepted side of the same two rules, derived from the constants
+    /// rather than transcribed — a mode added to [`RULE_PERMISSION_MODES`] and
+    /// not to the check would fail here.
+    #[test]
+    fn every_declared_permission_mode_and_both_timeout_bounds_are_accepted() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+
+        for mode in RULE_PERMISSION_MODES {
+            let body = format!(r#"{{"agent_slug":"a","permission_mode":"{mode}"}}"#);
+            create_trigger_rule(file.path(), "int-1", body.as_bytes())
+                .unwrap_or_else(|e| panic!("permission_mode {mode:?}: {}", e.message()));
+        }
+        // The range is inclusive at both ends.
+        for minutes in [0, RULE_MAX_TIMEOUT_MINUTES] {
+            let body = format!(r#"{{"agent_slug":"a","timeout_minutes":{minutes}}}"#);
+            create_trigger_rule(file.path(), "int-1", body.as_bytes())
+                .unwrap_or_else(|e| panic!("timeout_minutes {minutes}: {}", e.message()));
+        }
     }
 
     /// The ownership check runs before the body is decoded, so a malformed
