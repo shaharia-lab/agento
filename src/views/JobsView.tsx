@@ -522,7 +522,11 @@ export function JobsView({
                     </InspGroup>
                   )}
 
-                  {!job.response_text && !job.error_message && (
+                  {/* Keyed on the status for #556's reason: a `success` row
+                      can carry `error_message` now, and a saved-output-off run
+                      would otherwise lose this line entirely. */}
+                  {!job.response_text &&
+                    (job.status === "success" || !job.error_message) && (
                     <InspGroup title="Output">
                       <div className="runrow">
                         {job.status === "running"

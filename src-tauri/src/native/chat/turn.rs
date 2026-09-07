@@ -600,7 +600,7 @@ async fn handle_event(
                     continue;
                 }
                 let frame = ToolsNotOffered {
-                    message: runner::tools_dropped_message(&dropped.server),
+                    message: runner::tools_dropped_message(&dropped.label),
                     server: dropped.server,
                     tools: dropped.missing,
                 };

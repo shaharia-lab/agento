@@ -1029,7 +1029,19 @@ fn type_of(db_path: &Path, id: &str) -> Result<Option<String>, String> {
 /// another route: they have already read the row for their own purposes, so they
 /// call it directly rather than reading anything a second time.
 pub fn can_host(db_path: &Path, id: &str) -> Result<bool, String> {
-    Ok(type_of(db_path, id)?.is_some_and(|integration_type| hosts_type(&integration_type)))
+    Ok(hostable_type(db_path, id)?.is_some())
+}
+
+/// [`can_host`], answering **which** type it is rather than only whether it is
+/// one — `Some` exactly when `can_host` is true.
+///
+/// The type is the only readable name this process has for an integration: the
+/// id is a v4 UUID (`native/integrations.rs`), the string a user never sees, and
+/// #556 puts a sentence about a broken server in front of them. It is one read
+/// either way, so the caller that needs the word takes this and the two that do
+/// not keep the boolean.
+pub fn hostable_type(db_path: &Path, id: &str) -> Result<Option<String>, String> {
+    Ok(type_of(db_path, id)?.filter(|integration_type| hosts_type(integration_type)))
 }
 
 /// `filterConfigTools`: keep only the requested tools, of only the enabled

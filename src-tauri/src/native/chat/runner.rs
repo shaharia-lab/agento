@@ -475,6 +475,11 @@ struct McpServerSpec {
     /// bare integration id; for an external server it is whatever the user
     /// called it in `mcps.yaml`.
     id: String,
+    /// The readable name for this server, for a sentence a user will read
+    /// (#556). For an external server it is the id — the user chose it. For an
+    /// integration it is the **type** (`github`), because the id is a v4 UUID
+    /// that appears nowhere in the product.
+    label: String,
     tools: Vec<String>,
     source: McpSource,
 }
@@ -534,23 +539,28 @@ fn mcp_plan(
         // `resolveServerConfig` asks the registry first and returns on a hit,
         // so a name in both is the yaml entry and the integrations are never
         // consulted for it.
+        let mut label = id.clone();
         let source = match registry.get(id) {
             Some(config) => McpSource::External(config.clone()),
             None => {
                 let db_path =
                     db_path.ok_or("no home directory to resolve the data dir".to_string())?;
-                if !crate::native::integrations::registry::can_host(db_path, id)? {
+                let Some(integration_type) =
+                    crate::native::integrations::registry::hostable_type(db_path, id)?
+                else {
                     return Err(format!(
                         "agent uses MCP server {id:?}, which is named by no mcps.yaml entry \
                          and is not an integration this build can host (#375)"
                     ));
-                }
+                };
+                label = integration_type;
                 needs_db = true;
                 McpSource::Integration
             }
         };
         servers.push(McpServerSpec {
             id: id.clone(),
+            label,
             tools: capability
                 .tools
                 .iter()
@@ -638,6 +648,7 @@ async fn start_integration_servers(
                         &registered_tools,
                     ),
                     server: spec.id.clone(),
+                    label: spec.label.clone(),
                 });
                 let registered = opts.with_mcp_server(&spec.id, server.config());
                 servers.push(server);
@@ -700,6 +711,8 @@ async fn start_local_tools(
     );
     hosted.push(HostedTools {
         server: crate::native::tools::LOCAL_MCP_SERVER_NAME.to_string(),
+        // Already a readable literal, so the key is the label.
+        label: crate::native::tools::LOCAL_MCP_SERVER_NAME.to_string(),
         tools: crate::native::tools::allowed_tool_names(registered_tools.iter()),
     });
     let opts = opts
@@ -769,6 +782,11 @@ pub struct HostedTools {
     /// this server's tool names — the bare integration id, **not** the MCP
     /// implementation name (`github-<id>`) the server was built under.
     pub server: String,
+    /// What to **call** this server in a sentence a user reads. Usually the
+    /// key; for an integration it is the type (`github`), because the key is a
+    /// v4 UUID that appears nowhere in the product. The log and the frame's
+    /// `server` field keep the key, which is what a grep and a bug report need.
+    pub label: String,
     /// Qualified `mcp__<server>__<tool>` names, in the agent's own order.
     pub tools: Vec<String>,
 }
@@ -778,6 +796,8 @@ pub struct HostedTools {
 pub struct ToolsDropped {
     /// The `mcpServers` key, as [`HostedTools::server`].
     pub server: String,
+    /// What to call it, as [`HostedTools::label`].
+    pub label: String,
     /// The qualified names that are missing from `init.tools`.
     pub missing: Vec<String>,
     /// **Every** hosted tool is missing and the CLI reported this server
@@ -824,6 +844,17 @@ fn narrow_to_command_line(hosted: &mut [HostedTools], opts: &Options) {
 /// Follows `writes::service_log_convention` — `message key=value`, every string
 /// value `{:?}` — at `warn`, as [`report_hosted_tools`]' own mismatch line does.
 pub fn report_tools_offered(hosted: &[HostedTools], init: &SystemMessage) -> Vec<ToolsDropped> {
+    // An `init` that lists **nothing at all** is not a CLI that gave the model
+    // no tools — it is a frame this side could not read. `SystemMessage` is
+    // `#[serde(default)]` with every field `lenient`, so a renamed or moved
+    // `tools` decodes as an empty `Vec` with no `decode_err` to show for it,
+    // and every hosted server would then read as a whole-server miss on every
+    // turn. A real turn always lists the built-ins beside the MCP names, which
+    // is why both of this module's dropped-tools fixtures keep `Read`. The
+    // failure this reports is worth having only while it is rare.
+    if init.tools.is_empty() {
+        return Vec::new();
+    }
     let mut dropped = Vec::new();
     for entry in hosted {
         if entry.tools.is_empty() {
@@ -846,6 +877,7 @@ pub fn report_tools_offered(hosted: &[HostedTools], init: &SystemMessage) -> Vec
             .any(|s| &s.name == server && s.status == "connected");
         dropped.push(ToolsDropped {
             server: entry.server.clone(),
+            label: entry.label.clone(),
             whole_server: missing.len() == entry.tools.len() && connected,
             missing,
         });
@@ -855,8 +887,12 @@ pub fn report_tools_offered(hosted: &[HostedTools], init: &SystemMessage) -> Vec
 
 /// What the user is told when a connected server's whole tool list never
 /// reached the model. The app log carries the names; this carries the fact.
-pub fn tools_dropped_message(server: &str) -> String {
-    format!("{server} tools were hosted but the Claude CLI did not offer them to the model; see the app log")
+///
+/// Takes [`ToolsDropped::label`], never `server`: for the integrations #555
+/// actually killed, the key is a v4 UUID, and a sentence naming one tells the
+/// reader nothing they can act on.
+pub fn tools_dropped_message(label: &str) -> String {
+    format!("{label} tools were hosted but the Claude CLI did not offer them to the model; see the app log")
 }
 
 fn capability_count(list: Option<&crate::native::gojson::GoList<String>>) -> usize {
@@ -2311,6 +2347,7 @@ mod tests {
         crate::native::writes::testlog::install();
         let hosted = [HostedTools {
             server: "556-quiet".to_string(),
+            label: "556-quiet".to_string(),
             tools: vec!["mcp__556-quiet__one".to_string()],
         }];
         let init = init_offering(&["Read", "mcp__556-quiet__one"], &["556-quiet"]);
@@ -2328,6 +2365,7 @@ mod tests {
         crate::native::writes::testlog::install();
         let hosted = [HostedTools {
             server: "556-gone".to_string(),
+            label: "GitHub".to_string(),
             tools: vec![
                 "mcp__556-gone__one".to_string(),
                 "mcp__556-gone__two".to_string(),
@@ -2338,6 +2376,7 @@ mod tests {
             report_tools_offered(&hosted, &init),
             vec![ToolsDropped {
                 server: "556-gone".to_string(),
+                label: "GitHub".to_string(),
                 missing: vec![
                     "mcp__556-gone__one".to_string(),
                     "mcp__556-gone__two".to_string()
@@ -2359,6 +2398,7 @@ mod tests {
         crate::native::writes::testlog::install();
         let hosted = [HostedTools {
             server: "556-partial".to_string(),
+            label: "556-partial".to_string(),
             tools: vec![
                 "mcp__556-partial__kept".to_string(),
                 "mcp__556-partial__lost".to_string(),
@@ -2369,6 +2409,7 @@ mod tests {
             report_tools_offered(&hosted, &init),
             vec![ToolsDropped {
                 server: "556-partial".to_string(),
+                label: "556-partial".to_string(),
                 missing: vec!["mcp__556-partial__lost".to_string()],
                 whole_server: false,
             }]
@@ -2383,6 +2424,7 @@ mod tests {
         crate::native::writes::testlog::install();
         let hosted = [HostedTools {
             server: "556-unconnected".to_string(),
+            label: "556-unconnected".to_string(),
             tools: vec!["mcp__556-unconnected__one".to_string()],
         }];
         let dropped = report_tools_offered(&hosted, &init_offering(&["Read"], &[]));
@@ -2398,6 +2440,7 @@ mod tests {
     fn an_allowlist_that_narrows_is_not_a_mismatch() {
         let mut hosted = vec![HostedTools {
             server: "556-narrow".to_string(),
+            label: "556-narrow".to_string(),
             tools: vec![
                 "mcp__556-narrow__kept".to_string(),
                 "mcp__556-narrow__filtered".to_string(),
@@ -2422,6 +2465,7 @@ mod tests {
     fn a_denylist_narrows_and_an_empty_allowlist_narrows_nothing() {
         let entry = || HostedTools {
             server: "556-deny".to_string(),
+            label: "556-deny".to_string(),
             tools: vec![
                 "mcp__556-deny__kept".to_string(),
                 "mcp__556-deny__denied".to_string(),
@@ -2440,6 +2484,75 @@ mod tests {
         assert_eq!(hosted[0].tools, vec!["mcp__556-deny__kept".to_string()]);
     }
 
+    /// An `init` frame listing **no** tools at all is a frame this side could
+    /// not read, not a CLI that gave the model nothing: `SystemMessage` is
+    /// `#[serde(default)]` with `lenient` fields, so a renamed `tools` key
+    /// decodes as an empty `Vec` with nothing to show for it. Reporting that
+    /// would put the banner on every turn of every agent, which is the one
+    /// failure mode that makes the whole signal worthless.
+    #[test]
+    fn an_init_that_lists_no_tools_at_all_is_not_read_as_a_miss() {
+        let hosted = [HostedTools {
+            server: "556-unreadable".to_string(),
+            label: "556-unreadable".to_string(),
+            tools: vec!["mcp__556-unreadable__one".to_string()],
+        }];
+        assert!(report_tools_offered(&hosted, &init_offering(&[], &["556-unreadable"])).is_empty());
+    }
+
+    /// The sentence a user reads names the **label**, never the key — and for
+    /// an integration the key is a v4 UUID (`native/integrations.rs`), which is
+    /// exactly the class of server #555 killed.
+    ///
+    /// Driven through `mcp_plan` and `start_integration_servers` rather than a
+    /// hand-built `HostedTools`, because the property under test is that the
+    /// label *arrives* — a literal would pass with the plumbing removed.
+    #[tokio::test]
+    async fn the_message_names_the_integration_type_and_never_its_uuid_key() {
+        crate::native::writes::testlog::install();
+        let id = "0c2e6b64-6b2a-4f1e-9f0a-1f2f3a4b5c6d";
+        let file = db_with_integration(id, "github");
+        let caps = caps_naming(id, Some(vec!["get_repo".into()]));
+        let plan = mcp_plan(Some(&caps), Some(file.path()), None)
+            .expect("hostable")
+            .expect("a plan");
+
+        let mut hosted = Vec::new();
+        start_integration_servers(
+            Options::new(),
+            Some(&plan),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut hosted,
+        )
+        .await
+        .expect("started");
+
+        assert_eq!(hosted.len(), 1);
+        assert_eq!(
+            hosted[0].server, id,
+            "the key stays the id the CLI prefixes"
+        );
+        assert_eq!(hosted[0].label, "github");
+
+        let init = init_offering(&["Read"], &[id]);
+        let dropped = report_tools_offered(&hosted, &init);
+        assert_eq!(dropped.len(), 1);
+        assert!(dropped[0].whole_server);
+
+        let message = tools_dropped_message(&dropped[0].label);
+        assert!(message.starts_with("github tools were hosted"), "{message}");
+        assert!(
+            !message.contains("0c2e6b64"),
+            "a user is never shown the key: {message}"
+        );
+        // …while the log line, which a bug report quotes, keeps the key.
+        assert!(!crate::native::writes::testlog::matching(&format!(
+            r#"mcp tools not offered to the model server="{id}""#
+        ))
+        .is_empty());
+    }
+
     /// A server that ended up hosting nothing the agent asked for is already
     /// #501's business, and reporting it here too would double the noise on a
     /// turn that is already logging a warning per name.
@@ -2447,6 +2560,7 @@ mod tests {
     fn a_server_hosting_nothing_the_agent_asked_for_is_not_reported_twice() {
         let hosted = [HostedTools {
             server: "556-empty".to_string(),
+            label: "556-empty".to_string(),
             tools: Vec::new(),
         }];
         assert!(
