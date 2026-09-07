@@ -42,7 +42,7 @@ use crate::claude::permissions::{PermissionContext, PermissionResult};
 use crate::claude::session::Session;
 
 use super::error_json;
-use super::live::{registry, LiveSession};
+use super::live::{registry, LiveSession, CHAT_BUSY};
 use super::runner::{self, RunSpec};
 use super::sse;
 
@@ -133,10 +133,7 @@ pub async fn run(
     // would read a stale sdk_session_id and start a new CLI session instead of
     // resuming the right one.
     if !registry().try_lock(&chat_id) {
-        return Ok(error_json(
-            StatusCode::CONFLICT,
-            "session is busy, wait for the current message to complete",
-        ));
+        return Ok(error_json(StatusCode::CONFLICT, CHAT_BUSY));
     }
     // From here every early return must release the lock, or the chat is
     // wedged until the process restarts.

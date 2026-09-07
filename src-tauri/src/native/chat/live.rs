@@ -77,6 +77,9 @@ impl LiveSessions {
     /// not the end of a scope but the end of the stream, and tying it to a
     /// guard's `Drop` would move it *after* the commit, which is the one thing
     /// this must not do (see the module header).
+    ///
+    /// Every refusal spells itself [`CHAT_BUSY`], so a caller that wants to
+    /// *queue* rather than fail can recognise one.
     pub fn try_lock(&self, id: &str) -> bool {
         let mut inner = self.lock();
         if inner.in_flight.contains(id) {
@@ -124,6 +127,16 @@ impl LiveSessions {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
+
+/// What a refused [`LiveSessions::try_lock`] is answered with — Go's own
+/// `handleSendMessage` string, and the body of the 409 the chat route returns.
+///
+/// It is a constant rather than a literal at each site because it is now the
+/// answer on **two** paths that are not each other's neighbours: the interactive
+/// turn's 409 (`turn.rs`) and the headless resume's `Err`
+/// ([`crate::native::agent_run::run_resumed`]). An inbound worker queues on
+/// exactly this string, so the two must not drift apart.
+pub const CHAT_BUSY: &str = "session is busy, wait for the current message to complete";
 
 /// The one registry. A chat turn is process state, so this is a process global —
 /// the same reason Go hangs it off the single `api.Server`.

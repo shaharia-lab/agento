@@ -16,6 +16,17 @@
   `tools_not_offered`).
 - **`AskUserQuestion` is answered by *denying* the tool** with the user's text
   in `Message` — that is how the answer reaches the model. Not a bug.
+- **The busy lock has two callers, and they answer with one string** (#564).
+  `live::try_lock` was the interactive turn's alone while every headless run
+  minted a fresh chat; `agent_run::run_resumed` runs a turn on an *existing*
+  chat, so a UI send and an inbound one can now collide on one row — two CLI
+  processes each reading the other's stale `sdk_session_id`. Both refuse with
+  `live::CHAT_BUSY`, the chat route's own 409 body, because an inbound worker
+  queues on exactly that string. `run_resumed` also **increments** the four
+  token totals where `schedule/executor.rs` and `trigger/dispatcher.rs` replace
+  them; replacing on a chat the user has also typed into erases the UI turns'
+  usage. Both divergences are stated at `run_resumed` and pinned by
+  `tests/headless_resume.rs` — do not unify that write-back with the executor's.
 - **A continued chat's inherited history is the transcript's, and it is a fixed
   prefix** (#490, migration 37). "Continue in chat" records
   `continued_from_session_id` / `continued_from_project_path` /
