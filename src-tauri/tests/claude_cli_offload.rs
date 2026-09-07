@@ -152,7 +152,7 @@ async fn re_resolving_the_cli_does_not_stall_the_runtime() {
     // revert this fails, and inline-awaited it would not.
     let built = tokio::spawn(async move {
         let spec = spec();
-        let (options, _servers) = build_options(&spec, None)
+        let (options, _servers, _hosted) = build_options(&spec, None)
             .await
             .expect("the turn's own option assembly");
         options.claude_executable

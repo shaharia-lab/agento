@@ -288,6 +288,32 @@ redirect to a local address, allow it and retry.
 Three things have to line up: the integration is connected, the service is
 enabled inside it, and the tool is ticked on the agent.
 
+### "…tools were hosted but the Claude CLI did not offer them to the model"
+
+Agento started the server and registered its tools, and the Claude Code CLI then
+gave the model none of them. The chat shows this as a notice on the turn; a
+scheduled task records it on the run's row in **Tasks → History**, which still
+reads `success` because the run itself completed. Everything else in the app
+reports the server as connected, which is why this message exists at all.
+
+The tools are genuinely unavailable to the model for that turn, so it will say
+the tool does not exist. Nothing on the Agento side can be reconfigured to fix
+it — it is the CLI that dropped the list — but two things narrow it down:
+
+- **The app log names the server and the missing tools**, on a line beginning
+  `mcp tools not offered to the model`. See [Reading the logs](#reading-the-logs).
+- **The reason is in the CLI's own debug log, which Agento never sees.** Run one
+  turn by hand with `--debug-file` and grep it:
+
+  ```bash
+  claude -p --debug-file /tmp/cli.debug "hello"
+  grep -i mcp /tmp/cli.debug
+  ```
+
+  A line like `tools/list failed (Invalid result for tools/list: …)` names the
+  field the CLI rejected. Upgrading the Claude Code CLI, or updating Agento, is
+  usually the fix — this is what a version skew between the two looks like.
+
 ### WhatsApp is listed but unusable
 
 Agento does not support WhatsApp. An integration created by an older version is

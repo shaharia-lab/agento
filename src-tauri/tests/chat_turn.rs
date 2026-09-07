@@ -1607,3 +1607,97 @@ async fn a_contended_write_lock_does_not_stall_the_runtime() {
         HOLD.as_millis()
     );
 }
+
+/// #556, the agreeing case: an `init` frame that lists everything the turn
+/// hosted produces **no** synthetic frame. Silence is the whole point — a
+/// warning that fired on every turn would be worth nothing.
+///
+/// Only the frame is asserted here, not the absence of a log line. The buffer
+/// `testlog` installs is process-wide and its sibling below hosts the same
+/// server under the same name, so a "nothing was logged" assertion would be a
+/// race between two tests rather than a property. `runner`'s own
+/// `an_init_listing_every_hosted_tool_reports_nothing` pins the quiet half
+/// against a server key nothing else produces.
+#[tokio::test]
+async fn an_init_that_lists_the_hosted_tools_adds_no_frame() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        say({"type": "system", "subtype": "init", "session_id": "s-1",
+             "tools": ["Read", "mcp__local-tools__current_time"],
+             "mcp_servers": [{"name": "local-tools", "status": "connected"}]})
+        raw('{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s-1","usage":{"input_tokens":1,"output_tokens":1}}')
+"#,
+    );
+
+    let id = unique_id("toolsok");
+    let file = migrated_with_local_tool_agent(&id);
+    let body = run_turn_on(&cli, &file, &id, "hello", None).await;
+    let frames = frames(&body);
+    let names: Vec<&str> = frames.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(names, vec!["system", "result"], "body was: {body}");
+}
+
+/// #556, #555's own shape: the CLI reports the server `connected` and hands the
+/// model none of its tools. The log warns, the client is told, and the turn
+/// still answers — a mismatch is never a refusal.
+#[tokio::test]
+async fn an_init_that_drops_a_connected_servers_tools_warns_and_says_so() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    testlog::install();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        say({"type": "system", "subtype": "init", "session_id": "s-1",
+             "tools": ["Read"],
+             "mcp_servers": [{"name": "local-tools", "status": "connected"}]})
+        raw('{"type":"result","subtype":"success","is_error":false,"result":"answered anyway","session_id":"s-1","usage":{"input_tokens":1,"output_tokens":1}}')
+"#,
+    );
+
+    let id = unique_id("toolsgone");
+    let file = migrated_with_local_tool_agent(&id);
+    let body = run_turn_on(&cli, &file, &id, "hello", None).await;
+    let frames = frames(&body);
+
+    let names: Vec<&str> = frames.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["system", "tools_not_offered", "result"],
+        "the frame goes out on the `init` that carried the miss: {body}"
+    );
+
+    // Flat, `gojson`-encoded, keys in declaration order — the wire contract
+    // every synthetic frame follows.
+    assert_eq!(
+        frames[1].1,
+        r#"{"server":"local-tools","tools":["mcp__local-tools__current_time"],"message":"local-tools tools were hosted but the Claude CLI did not offer them to the model; see the app log"}"#
+    );
+
+    // Never a refusal: the turn produced its normal result.
+    assert!(frames[2].1.contains("answered anyway"), "{body}");
+
+    let logged = testlog::matching(r#"mcp tools not offered to the model server="local-tools""#);
+    assert!(!logged.is_empty(), "the miss is on the record in the log");
+    for line in &logged {
+        assert!(
+            line.starts_with("WARN "),
+            "a dropped tool list warns: {line}"
+        );
+    }
+}

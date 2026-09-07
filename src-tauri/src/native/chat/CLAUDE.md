@@ -11,8 +11,9 @@
 ## Things that will bite
 
 - **Chat SSE is a POST response**, so `EventSource` cannot be used. Events are
-  the raw Claude CLI JSON lines passed through verbatim, plus two synthetic
-  ones Agento adds (`user_input_required`, `permission_request`).
+  the raw Claude CLI JSON lines passed through verbatim, plus three synthetic
+  ones Agento adds (`user_input_required`, `permission_request`,
+  `tools_not_offered`).
 - **`AskUserQuestion` is answered by *denying* the tool** with the user's text
   in `Message` — that is how the answer reaches the model. Not a bug.
 - **A continued chat's inherited history is the transcript's, and it is a fixed
@@ -88,6 +89,29 @@ Covered with it: `wrap_permission_handler`'s allowlist (a tool the agent does no
 name is denied **without a prompt** — the absence is the assertion), the
 `AskUserQuestion` bypass of that allowlist, and the `permission_request` frame
 with its allow and deny answers.
+
+**The `init` frame is read, not only forwarded (#556).** `handle_event`'s
+`system` arm diffs `SystemMessage::tools` — the list of tools the CLI actually
+gave the model, MCP ones already qualified `mcp__<server>__<tool>` — against
+what this turn hosted, and `runner::report_tools_offered` warns on the
+difference. The two hops disagreeing **is** the defect signal: #501's
+`report_hosted_tools` reads names off the *handle*, so it can say a server hosts
+nothing, and only this frame can say whether what we hosted reached the model.
+#555 is why it exists — every integration was dead for a CLI release while the
+log, `"status":"connected"` and the inspector's tool count all said otherwise.
+
+Three rules on it, each of which makes it worthless if broken. The diff is taken
+against what the runner **asked for after `--allowedTools`/`--disallowedTools`**
+(`runner::narrow_to_command_line`), because a narrowing allowlist that warned on
+every turn is worse than silence. **The agreeing case emits nothing at all** —
+no line, no frame. And a mismatch is a **warning, never a refusal**: the turn
+runs and answers, for `start_local_tools`' own reason. Only a *whole* server's
+tools vanishing from a server the CLI called `connected` reaches the user, as a
+`tools_not_offered` frame here and as text on the `job_history` row for a
+headless run (`agent_run::collect_run_result` → `executor::finish`), because a
+scheduled run has nobody reading the log. The reason behind a miss is in the
+CLI's own `--debug-file` log, which Agento never sees; `docs/troubleshooting.md`
+carries the hand-run that gets it.
 
 - **`result` is not terminal.** With an `AskUserQuestion` pending the same
   subprocess carries on, so one HTTP request spans several turns and several
@@ -183,8 +207,11 @@ sees. Two places that mattered:
   which is exactly why nothing noticed.
 
 **The rule lives on the field, not at the construction site**, at all four of
-them: the two SSE structs in `chat/turn.rs`, plus `chats::MessageBlock::input`
-and `sessions::detail::NormalizedBlock::input`. `MessageBlock` is why — it has
+them: the two SSE structs in `chat/turn.rs` that carry a raw value, plus
+`chats::MessageBlock::input` and `sessions::detail::NormalizedBlock::input`.
+(`ToolsNotOffered` is the third synthetic frame and carries none, so the rule
+does not reach it — it is still encoded through `gojson` like every frame this
+side constructs.) `MessageBlock` is why — it has
 *two* sinks, the column via `persist::append_message` and the wire via
 `GET /api/chats/{id}`, and it had two independent compaction points, one of which
 was simply missing. A third construction path would have been silently wrong the

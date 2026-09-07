@@ -61,6 +61,7 @@
 
 use rusqlite::OptionalExtension;
 
+use crate::claude::messages::SystemMessage;
 use crate::claude::options::{permission_mode, Options};
 use crate::claude::permissions::PermissionHandler;
 use crate::claude::InProcessMcpServer;
@@ -251,14 +252,22 @@ pub struct RunSpec {
 /// that binds a port: a local tools server that failed to start is dropped on
 /// the way out, so a refusal leaves no listener behind.
 ///
-/// The second half of the pair is the **tool listeners** this turn owns: the
-/// local tools server for an agent that named a local tool, plus one per
-/// integration in its `capabilities.mcp`. The caller owns them, and dropping one
-/// stops its server — so they have to outlive the subprocess that dials them.
+/// The second element is the **tool listeners** this turn owns: the local tools
+/// server for an agent that named a local tool, plus one per integration in its
+/// `capabilities.mcp`. The caller owns them, and dropping one stops its server —
+/// so they have to outlive the subprocess that dials them.
+///
+/// The third is what those listeners *host*, per server, as [`HostedTools`] —
+/// the half the caller needs to check the CLI's own `init` frame against
+/// (#556). It is a separate value rather than something read back off the
+/// handles because [`InProcessMcpServer`] does not know the name the CLI
+/// prefixes its tools with: an integration's server is *built* as
+/// `github-<id>` and *registered* as `<id>`, and only the second is the tool
+/// prefix. See [`crate::native::integrations::registry::allowed_tool_names`].
 pub async fn build_options(
     spec: &RunSpec,
     permission_handler: Option<PermissionHandler>,
-) -> Result<(Options, Vec<InProcessMcpServer>), String> {
+) -> Result<(Options, Vec<InProcessMcpServer>, Vec<HostedTools>), String> {
     let caps = spec.agent.as_ref().map(|a| &a.capabilities);
     // Decided **before** anything binds a port. Everything below this line
     // either cannot fail or is dropped on the way out, so a refusal leaves no
@@ -373,11 +382,18 @@ pub async fn build_options(
     // it is part of the command line: built-ins first, then the local server's
     // qualified names.
     let mut allowed = allowed_tools(caps);
+    let mut hosted: Vec<HostedTools> = Vec::new();
     let local_tools;
-    (opts, local_tools) = start_local_tools(opts, caps, &mut allowed).await?;
+    (opts, local_tools) = start_local_tools(opts, caps, &mut allowed, &mut hosted).await?;
     let mut tool_servers: Vec<InProcessMcpServer> = local_tools.into_iter().collect();
-    opts =
-        start_integration_servers(opts, mcp_plan.as_ref(), &mut allowed, &mut tool_servers).await?;
+    opts = start_integration_servers(
+        opts,
+        mcp_plan.as_ref(),
+        &mut allowed,
+        &mut tool_servers,
+        &mut hosted,
+    )
+    .await?;
 
     if !allowed.is_empty() {
         opts = opts.with_allowed_tools(allowed.iter().cloned());
@@ -406,7 +422,11 @@ pub async fn build_options(
     if let Some(handler) = permission_handler {
         opts = opts.with_permission_handler(wrap_permission_handler(handler, allowed));
     }
-    Ok((opts, tool_servers))
+    // Read the narrowing off the command line rather than off the list that
+    // produced it: `--allowedTools` and `--disallowedTools` are what the CLI
+    // obeys, so they are what an absence has to be judged against.
+    narrow_to_command_line(&mut hosted, &opts);
+    Ok((opts, tool_servers, hosted))
 }
 
 /// Where one `capabilities.mcp` name resolved to.
@@ -583,6 +603,7 @@ async fn start_integration_servers(
     plan: Option<&McpPlan>,
     allowed: &mut Vec<String>,
     servers: &mut Vec<InProcessMcpServer>,
+    hosted: &mut Vec<HostedTools>,
 ) -> Result<Options, String> {
     let Some(plan) = plan else {
         return Ok(opts);
@@ -607,7 +628,11 @@ async fn start_integration_servers(
                     &spec.tools,
                 )
                 .await?;
-                report_hosted_tools(&spec.id, server.tool_names(), &spec.tools);
+                hosted.push(report_hosted_tools(
+                    &spec.id,
+                    server.tool_names(),
+                    &spec.tools,
+                ));
                 let registered = opts.with_mcp_server(&spec.id, server.config());
                 servers.push(server);
                 registered
@@ -650,6 +675,7 @@ async fn start_local_tools(
     opts: Options,
     caps: Option<&Capabilities>,
     allowed: &mut Vec<String>,
+    hosted: &mut Vec<HostedTools>,
 ) -> Result<(Options, Option<InProcessMcpServer>), String> {
     let Some(local) = caps.and_then(|c| c.local.as_deref()) else {
         return Ok((opts, None));
@@ -661,11 +687,11 @@ async fn start_local_tools(
     let server = crate::native::tools::start_local_mcp_server()
         .await
         .map_err(|e| format!("starting local MCP server: {e}"))?;
-    report_hosted_tools(
+    hosted.push(report_hosted_tools(
         crate::native::tools::LOCAL_MCP_SERVER_NAME,
         server.tool_names(),
         local,
-    );
+    ));
     let opts = opts
         .with_mcp_server(crate::native::tools::LOCAL_MCP_SERVER_NAME, server.config())
         .map_err(|e| format!("registering the local MCP server: {e}"))?
@@ -696,13 +722,125 @@ async fn start_local_tools(
 /// value `{:?}`, after the effect — with one departure it does not cover:
 /// the mismatch line is at `warn`, because the seam's own split puts failures
 /// there and a tool the model cannot reach is one.
-fn report_hosted_tools(server_key: &str, hosted: &[String], requested: &[String]) {
+fn report_hosted_tools(server_key: &str, hosted: &[String], requested: &[String]) -> HostedTools {
     log::info!("mcp server started server={server_key:?} tools={hosted:?}");
+    let mut tools = Vec::new();
     for tool in requested {
-        if !hosted.iter().any(|name| name == tool) {
+        if hosted.iter().any(|name| name == tool) {
+            tools.push(format!("mcp__{server_key}__{tool}"));
+        } else {
             log::warn!("mcp tool not hosted server={server_key:?} tool={tool:?}");
         }
     }
+    HostedTools {
+        server: server_key.to_string(),
+        tools,
+    }
+}
+
+/// What one MCP server this turn started actually put in front of the model —
+/// the intersection of what it hosts and what the agent asked for, qualified.
+///
+/// The intersection is the point and both halves are load-bearing. The local
+/// tools server hosts *every* local tool whatever the agent named, so "what it
+/// hosts" overstates it; an agent may name a tool the server no longer
+/// registers, so "what it asked for" overstates it the other way (that one
+/// already warns, in [`report_hosted_tools`]). Only the overlap is a name the
+/// CLI can be expected to hand the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedTools {
+    /// The `mcpServers` key, which is the prefix the CLI puts on every one of
+    /// this server's tool names — the bare integration id, **not** the MCP
+    /// implementation name (`github-<id>`) the server was built under.
+    pub server: String,
+    /// Qualified `mcp__<server>__<tool>` names, in the agent's own order.
+    pub tools: Vec<String>,
+}
+
+/// One server whose tools the CLI did not hand the model (#556).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolsDropped {
+    /// The `mcpServers` key, as [`HostedTools::server`].
+    pub server: String,
+    /// The qualified names that are missing from `init.tools`.
+    pub missing: Vec<String>,
+    /// **Every** hosted tool is missing and the CLI reported this server
+    /// `connected` — the shape #555 had, and the only one that is worth
+    /// telling the user about rather than only the log. A partial miss can be
+    /// a filter we do not model; a connected server whose whole tool list
+    /// vanished cannot.
+    pub whole_server: bool,
+}
+
+/// Drop from `hosted` anything `--allowedTools` / `--disallowedTools` already
+/// keeps from the model, so a narrowing filter is never read as a defect.
+///
+/// An empty `allowed_tools` means the flag is not passed at all, which the CLI
+/// reads as "no restriction" — so it narrows nothing.
+fn narrow_to_command_line(hosted: &mut [HostedTools], opts: &Options) {
+    for entry in hosted.iter_mut() {
+        entry.tools.retain(|name| {
+            (opts.allowed_tools.is_empty() || opts.allowed_tools.iter().any(|a| a == name))
+                && !opts.disallowed_tools.iter().any(|d| d == name)
+        });
+    }
+}
+
+/// Compare the CLI's `system`/`init` frame against what this turn hosted, and
+/// say so when they disagree (#556).
+///
+/// [`report_hosted_tools`] closed the hop before this one: it reads the names
+/// off the *handle* rather than off the request, so a server hosting nothing is
+/// logged as hosting nothing. The hop it cannot see is the CLI's — whether the
+/// tools we hosted were **given to the model**. `init.tools` is that fact, on
+/// the wire at the start of every turn, with MCP tools already qualified as
+/// `mcp__<server>__<tool>`. The two disagreeing is the defect signal, and #555
+/// is why it needs one: every integration in the product was dead for at least
+/// one CLI release while the log, the `init` frame's own `"status":"connected"`
+/// and the inspector's tool count all reported success.
+///
+/// **A mismatch is a warning and never a refusal**, for
+/// [`start_local_tools`]' reason: a model that cannot call a tool is the
+/// kinder failure over a turn that will not start. The caller decides what to
+/// do with the returned entries; the `warn` lines are emitted here so the
+/// policy has one home and both callers get the same log.
+///
+/// Follows `writes::service_log_convention` — `message key=value`, every string
+/// value `{:?}` — at `warn`, as [`report_hosted_tools`]' own mismatch line does.
+pub fn report_tools_offered(hosted: &[HostedTools], init: &SystemMessage) -> Vec<ToolsDropped> {
+    let mut dropped = Vec::new();
+    for entry in hosted {
+        if entry.tools.is_empty() {
+            continue;
+        }
+        let missing: Vec<String> = entry
+            .tools
+            .iter()
+            .filter(|name| !init.tools.iter().any(|offered| offered == *name))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        let server = &entry.server;
+        log::warn!("mcp tools not offered to the model server={server:?} tools={missing:?}");
+        let connected = init
+            .mcp_servers
+            .iter()
+            .any(|s| &s.name == server && s.status == "connected");
+        dropped.push(ToolsDropped {
+            server: entry.server.clone(),
+            whole_server: missing.len() == entry.tools.len() && connected,
+            missing,
+        });
+    }
+    dropped
+}
+
+/// What the user is told when a connected server's whole tool list never
+/// reached the model. The app log carries the names; this carries the fact.
+pub fn tools_dropped_message(server: &str) -> String {
+    format!("{server} tools were hosted but the Claude CLI did not offer them to the model; see the app log")
 }
 
 fn capability_count(list: Option<&crate::native::gojson::GoList<String>>) -> usize {
@@ -1045,7 +1183,7 @@ mod tests {
         let mut agent = agent_with(Capabilities::default());
         agent.model = "agent-model".into();
         let (spec, calls) = spec_with(Some(agent));
-        let (opts, servers) = build_options(&spec, no_op_handler())
+        let (opts, servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert!(servers.is_empty(), "no agent named a local tool");
@@ -1069,7 +1207,7 @@ mod tests {
         let mut agent = agent_with(Capabilities::default());
         agent.model = String::new();
         let (spec, calls) = spec_with(Some(agent));
-        let (opts, servers) = build_options(&spec, no_op_handler())
+        let (opts, servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert!(servers.is_empty(), "no agent named a local tool");
@@ -1107,7 +1245,7 @@ mod tests {
         ] {
             let (mut spec, _) = spec_with(Some(agent_with(Capabilities::default())));
             spec.permission_mode = chosen.to_string();
-            let (opts, _servers) = build_options(&spec, no_op_handler())
+            let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
                 .await
                 .expect("options");
             assert_eq!(
@@ -1131,7 +1269,7 @@ mod tests {
         agent.permission_mode = "plan".into();
 
         let (spec, _) = spec_with(Some(agent.clone()));
-        let (opts, _servers) = build_options(&spec, no_op_handler())
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert_eq!(
@@ -1141,7 +1279,7 @@ mod tests {
         );
 
         let (spec, _) = spec_with(Some(agent));
-        let (opts, _servers) = build_options(&spec, None).await.expect("options");
+        let (opts, _servers, _hosted) = build_options(&spec, None).await.expect("options");
         assert_eq!(
             opts.permission_mode,
             permission_mode::PLAN,
@@ -1174,7 +1312,7 @@ mod tests {
         // reads no index at all.
         spec.settings_profile_id = "work".into();
 
-        let (_opts, servers) = build_options(&spec, no_op_handler())
+        let (_opts, servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert!(servers.is_empty(), "no agent named a local tool");
@@ -1209,7 +1347,7 @@ mod tests {
         spec.agent = Some(agent);
         spec.settings = std::sync::Arc::clone(&settings);
 
-        let (_opts, _servers) = build_options(&spec, no_op_handler())
+        let (_opts, _servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
 
@@ -1256,7 +1394,7 @@ mod tests {
     #[tokio::test]
     async fn a_chat_with_no_agent_resolves_its_model_once() {
         let (spec, calls) = spec_with(None);
-        let (opts, servers) = build_options(&spec, no_op_handler())
+        let (opts, servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert!(servers.is_empty(), "no agent named a local tool");
@@ -1590,10 +1728,15 @@ mod tests {
             .expect("a plan");
         let mut allowed = allowed_tools(Some(&caps));
         let mut servers = Vec::new();
-        let opts =
-            start_integration_servers(Options::new(), Some(&plan), &mut allowed, &mut servers)
-                .await
-                .expect("started");
+        let opts = start_integration_servers(
+            Options::new(),
+            Some(&plan),
+            &mut allowed,
+            &mut servers,
+            &mut Vec::new(),
+        )
+        .await
+        .expect("started");
 
         let [server] = &servers[..] else {
             panic!("one integration, one listener");
@@ -1640,9 +1783,15 @@ mod tests {
 
         let mut allowed = Vec::new();
         let mut servers = Vec::new();
-        start_integration_servers(Options::new(), Some(&plan), &mut allowed, &mut servers)
-            .await
-            .expect("started");
+        start_integration_servers(
+            Options::new(),
+            Some(&plan),
+            &mut allowed,
+            &mut servers,
+            &mut Vec::new(),
+        )
+        .await
+        .expect("started");
         assert_eq!(
             allowed,
             vec![
@@ -1704,10 +1853,15 @@ mod tests {
             .expect("a plan");
         let mut allowed = Vec::new();
         let mut servers = Vec::new();
-        let opts =
-            start_integration_servers(Options::new(), Some(&plan), &mut allowed, &mut servers)
-                .await
-                .expect("started");
+        let opts = start_integration_servers(
+            Options::new(),
+            Some(&plan),
+            &mut allowed,
+            &mut servers,
+            &mut Vec::new(),
+        )
+        .await
+        .expect("started");
 
         assert_eq!(
             servers.len(),
@@ -1741,7 +1895,7 @@ mod tests {
             local: Some(vec!["current_time".into()].into()),
             mcp: None,
         });
-        let (opts, servers) = build_options(&spec, no_op_handler())
+        let (opts, servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("a local tool is supplied natively now");
 
@@ -1772,7 +1926,7 @@ mod tests {
             local: Some(vec!["current_time".into()].into()),
             mcp: None,
         });
-        let (opts, _servers) = build_options(&spec, no_op_handler())
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert!(
@@ -1792,7 +1946,7 @@ mod tests {
             local: Some(vec!["current_time".into(), "gone".into()].into()),
             mcp: None,
         });
-        let (opts, _servers) = build_options(&spec, no_op_handler())
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
 
@@ -1828,7 +1982,7 @@ mod tests {
             local: Some(vec!["current_time".into()].into()),
             mcp: None,
         });
-        let (_opts, _servers) = build_options(&spec, no_op_handler())
+        let (_opts, _servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
 
@@ -1858,7 +2012,7 @@ mod tests {
             local: Some(vec!["current_time".into(), "gone".into()].into()),
             mcp: None,
         });
-        let (opts, _servers) = build_options(&spec, no_op_handler())
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
 
@@ -1888,7 +2042,7 @@ mod tests {
     #[tokio::test]
     async fn an_agent_naming_no_local_tools_binds_nothing() {
         let spec = spec_for(Capabilities::default());
-        let (opts, servers) = build_options(&spec, no_op_handler())
+        let (opts, servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert!(servers.is_empty());
@@ -1908,7 +2062,7 @@ mod tests {
             local: Some(vec![].into()),
             mcp: None,
         });
-        let (opts, servers) = build_options(&spec, no_op_handler())
+        let (opts, servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert!(servers.is_empty());
@@ -2081,5 +2235,205 @@ mod tests {
             )],
         );
         assert!(settings_file_from(&path, &path, "gone").is_none());
+    }
+
+    // #556: the CLI's `init` frame is the only account of what the model was
+    // actually given, and the two hops disagreeing is the defect signal. These
+    // pin the set arithmetic directly; `tests/chat_turn.rs` drives the same
+    // rule end to end through a scripted CLI.
+
+    /// The CLI's `init` frame, with the tools it says the model was given and
+    /// the servers it says are connected.
+    ///
+    /// Every test below uses a `556-`-prefixed server key nothing else in this
+    /// binary produces: the buffer `testlog` installs is process-wide and
+    /// `cargo test` runs a binary's tests in parallel, so a "nothing was
+    /// logged" assertion is only about this test when the needle is unique.
+    fn init_offering(tools: &[&str], connected: &[&str]) -> SystemMessage {
+        SystemMessage {
+            message_type: "system".to_string(),
+            subtype: crate::claude::messages::system_subtype::INIT.to_string(),
+            tools: tools.iter().map(|t| (*t).to_string()).collect(),
+            mcp_servers: connected
+                .iter()
+                .map(|name| crate::claude::messages::McpServerInit {
+                    name: (*name).to_string(),
+                    status: "connected".to_string(),
+                })
+                .collect(),
+            ..SystemMessage::default()
+        }
+    }
+
+    /// [`report_hosted_tools`] hands back the **overlap**, not either side of
+    /// it: the local tools server hosts every local tool whatever the agent
+    /// named, and an agent may name one the server does not host.
+    #[test]
+    fn what_a_server_hosts_is_the_overlap_of_registered_and_requested() {
+        crate::native::writes::testlog::install();
+        let hosted = report_hosted_tools(
+            "556-overlap",
+            &["a".to_string(), "b".to_string()],
+            &["b".to_string(), "gone".to_string()],
+        );
+        assert_eq!(
+            hosted,
+            HostedTools {
+                server: "556-overlap".to_string(),
+                // `a` is hosted but never asked for; `gone` was asked for and
+                // is not hosted (and warns, through #501's own line).
+                tools: vec!["mcp__556-overlap__b".to_string()],
+            }
+        );
+    }
+
+    /// The all-present case has to be **completely** silent, or the signal is
+    /// worth nothing: every turn would carry it.
+    #[test]
+    fn an_init_listing_every_hosted_tool_reports_nothing() {
+        crate::native::writes::testlog::install();
+        let hosted = [HostedTools {
+            server: "556-quiet".to_string(),
+            tools: vec!["mcp__556-quiet__one".to_string()],
+        }];
+        let init = init_offering(&["Read", "mcp__556-quiet__one"], &["556-quiet"]);
+        assert!(report_tools_offered(&hosted, &init).is_empty());
+        assert!(
+            crate::native::writes::testlog::matching("556-quiet").is_empty(),
+            "the agreeing case logs nothing at all"
+        );
+    }
+
+    /// #555's shape: the server says `connected`, and not one of its tools
+    /// reached the model.
+    #[test]
+    fn a_connected_server_that_offered_nothing_is_a_whole_server_miss() {
+        crate::native::writes::testlog::install();
+        let hosted = [HostedTools {
+            server: "556-gone".to_string(),
+            tools: vec![
+                "mcp__556-gone__one".to_string(),
+                "mcp__556-gone__two".to_string(),
+            ],
+        }];
+        let init = init_offering(&["Read"], &["556-gone"]);
+        assert_eq!(
+            report_tools_offered(&hosted, &init),
+            vec![ToolsDropped {
+                server: "556-gone".to_string(),
+                missing: vec![
+                    "mcp__556-gone__one".to_string(),
+                    "mcp__556-gone__two".to_string()
+                ],
+                whole_server: true,
+            }]
+        );
+        let logged = crate::native::writes::testlog::matching(
+            r#"mcp tools not offered to the model server="556-gone""#,
+        );
+        assert_eq!(logged.len(), 1, "one line per server: {logged:?}");
+        assert!(logged[0].starts_with("WARN "), "{}", logged[0]);
+    }
+
+    /// A partial miss names exactly the difference, and is **not** a whole
+    /// server miss — so it stays in the log rather than reaching the user.
+    #[test]
+    fn a_partial_miss_names_only_what_is_absent() {
+        crate::native::writes::testlog::install();
+        let hosted = [HostedTools {
+            server: "556-partial".to_string(),
+            tools: vec![
+                "mcp__556-partial__kept".to_string(),
+                "mcp__556-partial__lost".to_string(),
+            ],
+        }];
+        let init = init_offering(&["mcp__556-partial__kept"], &["556-partial"]);
+        assert_eq!(
+            report_tools_offered(&hosted, &init),
+            vec![ToolsDropped {
+                server: "556-partial".to_string(),
+                missing: vec!["mcp__556-partial__lost".to_string()],
+                whole_server: false,
+            }]
+        );
+    }
+
+    /// A server the CLI did **not** report `connected` still warns, but is not
+    /// a whole-server miss: the CLI has already said the server is not there,
+    /// so a second sentence about it would be the noisy half of the signal.
+    #[test]
+    fn a_server_that_never_connected_warns_without_telling_the_user() {
+        crate::native::writes::testlog::install();
+        let hosted = [HostedTools {
+            server: "556-unconnected".to_string(),
+            tools: vec!["mcp__556-unconnected__one".to_string()],
+        }];
+        let dropped = report_tools_offered(&hosted, &init_offering(&["Read"], &[]));
+        assert_eq!(dropped.len(), 1);
+        assert!(!dropped[0].whole_server);
+    }
+
+    /// The detail that decides correctness: `init.tools` reflects
+    /// `--allowedTools` too, so a filter this side asked for must never read as
+    /// the CLI dropping something. Getting this backwards would warn on every
+    /// turn of every narrowed agent, which is worse than silence.
+    #[test]
+    fn an_allowlist_that_narrows_is_not_a_mismatch() {
+        let mut hosted = vec![HostedTools {
+            server: "556-narrow".to_string(),
+            tools: vec![
+                "mcp__556-narrow__kept".to_string(),
+                "mcp__556-narrow__filtered".to_string(),
+            ],
+        }];
+        let opts = Options::new()
+            .with_allowed_tools(["Read".to_string(), "mcp__556-narrow__kept".to_string()]);
+        narrow_to_command_line(&mut hosted, &opts);
+        assert_eq!(hosted[0].tools, vec!["mcp__556-narrow__kept".to_string()]);
+
+        let init = init_offering(&["Read", "mcp__556-narrow__kept"], &["556-narrow"]);
+        assert!(
+            report_tools_offered(&hosted, &init).is_empty(),
+            "the tool we filtered out ourselves is not missing"
+        );
+    }
+
+    /// `--disallowedTools` narrows the same way, and an **empty** allowlist is
+    /// no flag at all — the CLI reads that as no restriction, so it must not
+    /// subtract everything.
+    #[test]
+    fn a_denylist_narrows_and_an_empty_allowlist_narrows_nothing() {
+        let entry = || HostedTools {
+            server: "556-deny".to_string(),
+            tools: vec![
+                "mcp__556-deny__kept".to_string(),
+                "mcp__556-deny__denied".to_string(),
+            ],
+        };
+
+        let mut hosted = vec![entry()];
+        narrow_to_command_line(&mut hosted, &Options::new());
+        assert_eq!(hosted[0], entry(), "no flag, no narrowing");
+
+        let mut hosted = vec![entry()];
+        narrow_to_command_line(
+            &mut hosted,
+            &Options::new().with_disallowed_tools(["mcp__556-deny__denied".to_string()]),
+        );
+        assert_eq!(hosted[0].tools, vec!["mcp__556-deny__kept".to_string()]);
+    }
+
+    /// A server that ended up hosting nothing the agent asked for is already
+    /// #501's business, and reporting it here too would double the noise on a
+    /// turn that is already logging a warning per name.
+    #[test]
+    fn a_server_hosting_nothing_the_agent_asked_for_is_not_reported_twice() {
+        let hosted = [HostedTools {
+            server: "556-empty".to_string(),
+            tools: Vec::new(),
+        }];
+        assert!(
+            report_tools_offered(&hosted, &init_offering(&["Read"], &["556-empty"])).is_empty()
+        );
     }
 }

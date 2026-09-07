@@ -67,6 +67,21 @@ struct UserInputRequired<'a> {
     input: &'a RawValue,
 }
 
+/// The synthetic event announcing that a hosted MCP server's tools never
+/// reached the model (#556).
+///
+/// Flat and self-contained: `server` is the `mcpServers` key, `tools` the
+/// qualified names that are missing, and `message` the sentence a user can act
+/// on without reading either. No embedded raw value, so none of the
+/// compaction/escaping rules the other two carry apply here — but it is still
+/// encoded through `gojson` like every frame this side constructs.
+#[derive(Serialize)]
+struct ToolsNotOffered {
+    server: String,
+    tools: Vec<String>,
+    message: String,
+}
+
 /// The synthetic event announcing a tool permission prompt.
 #[derive(Serialize)]
 struct PermissionRequest {
@@ -192,13 +207,14 @@ pub async fn run(
     // in its `capabilities.mcp` (#311) — and they are **not** an unused
     // binding: dropping one stops its listener, so the whole vector has to be
     // moved into the stream task and released only once the subprocess is gone.
-    let (options, tool_servers) = match runner::build_options(&spec, Some(handler)).await {
-        Ok(built) => built,
-        Err(e) => {
-            log::warn!("chat {chat_id:?}: cannot run this chat: {e}");
-            return Ok(error_json(StatusCode::INTERNAL_SERVER_ERROR, &e));
-        }
-    };
+    let (options, tool_servers, hosted_tools) =
+        match runner::build_options(&spec, Some(handler)).await {
+            Ok(built) => built,
+            Err(e) => {
+                log::warn!("chat {chat_id:?}: cannot run this chat: {e}");
+                return Ok(error_json(StatusCode::INTERNAL_SERVER_ERROR, &e));
+            }
+        };
 
     // The subprocess starts here, and these are the last two pre-stream
     // failures. Both are answered rather than streamed, and both leave nothing
@@ -248,7 +264,15 @@ pub async fn run(
     let is_first_message = row.title == "New Chat";
 
     tokio::spawn(async move {
-        let state = stream_events(&mut session, &chat_id, notify_rx, &body_tx, &answers).await;
+        let state = stream_events(
+            &mut session,
+            &chat_id,
+            notify_rx,
+            &body_tx,
+            &answers,
+            &hosted_tools,
+        )
+        .await;
 
         // Go's defer order: forget the live session — which also releases the
         // busy lock — then close the subprocess.
@@ -454,6 +478,7 @@ async fn stream_events(
     mut notify_rx: mpsc::Receiver<Notify>,
     out: &mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
     answers: &Arc<Answers>,
+    hosted_tools: &[runner::HostedTools],
 ) -> TurnState {
     let mut state = TurnState::default();
     let mut pending_input: Option<Box<RawValue>> = None;
@@ -487,7 +512,7 @@ async fn stream_events(
                     // The client hung up; the commit still runs.
                     return state;
                 }
-                match handle_event(session, chat_id, &event, &mut state, &mut pending_input, out, answers).await {
+                match handle_event(session, chat_id, &event, &mut state, &mut pending_input, out, answers, hosted_tools).await {
                     Flow::Continue => {}
                     Flow::Stop => return state,
                 }
@@ -544,6 +569,7 @@ async fn forward_event(event: &Event, out: &mpsc::Sender<Result<Vec<u8>, std::io
         .is_ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_event(
     session: &Session,
     chat_id: &str,
@@ -552,8 +578,44 @@ async fn handle_event(
     pending_input: &mut Option<Box<RawValue>>,
     out: &mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
     answers: &Arc<Answers>,
+    hosted_tools: &[runner::HostedTools],
 ) -> Flow {
     match event.event_type.as_str() {
+        // The CLI's own account of what the model was given. Read rather than
+        // only forwarded (#556): `report_hosted_tools` can say what this
+        // process hosts, and only this frame can say what reached the model.
+        "system" => {
+            let Some(system) = event.system.as_ref() else {
+                return Flow::Continue;
+            };
+            if system.subtype != crate::claude::messages::system_subtype::INIT {
+                return Flow::Continue;
+            }
+            for dropped in runner::report_tools_offered(hosted_tools, system) {
+                if !dropped.whole_server {
+                    // A partial miss is on the record in the log and no
+                    // further: a filter this side does not model would
+                    // otherwise put a scary sentence in front of a user on
+                    // every turn.
+                    continue;
+                }
+                let frame = ToolsNotOffered {
+                    message: runner::tools_dropped_message(&dropped.server),
+                    server: dropped.server,
+                    tools: dropped.missing,
+                };
+                match sse::json_frame("tools_not_offered", &frame) {
+                    Ok(bytes) => {
+                        if out.send(Ok(bytes)).await.is_err() {
+                            return Flow::Stop;
+                        }
+                    }
+                    Err(e) => log::error!("encoding tools_not_offered: {e}"),
+                }
+            }
+            // Never a refusal: the turn runs and answers as it would have.
+            Flow::Continue
+        }
         "assistant" => {
             if let Some(raw) = event.raw.as_ref() {
                 super::persist::append_assistant_blocks(&mut state.blocks, raw.get().as_bytes());

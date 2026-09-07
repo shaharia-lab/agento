@@ -31,6 +31,12 @@ pub struct RunResult {
     pub output_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cache_read_tokens: i64,
+    /// One sentence per MCP server whose hosted tools the CLI never handed the
+    /// model (#556). A scheduled run has nobody reading the app log, so this
+    /// travels out to `job_history` — see
+    /// [`crate::native::schedule::executor`]. Empty is the normal case, and a
+    /// non-empty one never fails the run.
+    pub tools_not_offered: Vec<String>,
 }
 
 /// `agent.RunAgent`: build the options, spawn the CLI, drain it, answer the
@@ -67,7 +73,7 @@ pub async fn run_headless(
     // The refusal this port has that Go does not — an agent whose tools cannot
     // be hosted here. The caller decides what to do with it; both callers
     // record it rather than dropping it.
-    let (options, tool_servers) =
+    let (options, tool_servers, hosted_tools) =
         tokio::time::timeout_at(deadline, runner::build_options(spec, None))
             .await
             .map_err(|_| DEADLINE_EXCEEDED.to_string())?
@@ -90,9 +96,10 @@ pub async fn run_headless(
         }
     };
 
-    let collected = tokio::time::timeout_at(deadline, collect_run_result(&mut stream))
-        .await
-        .unwrap_or_else(|_| Err(DEADLINE_EXCEEDED.to_string()));
+    let collected =
+        tokio::time::timeout_at(deadline, collect_run_result(&mut stream, &hosted_tools))
+            .await
+            .unwrap_or_else(|_| Err(DEADLINE_EXCEEDED.to_string()));
 
     stream.close();
     // The in-process tool listeners outlive the subprocess and stop when
@@ -140,11 +147,30 @@ pub const DEADLINE_EXCEEDED: &str = "context deadline exceeded";
 /// and returning early would race the scanner against a half-written file.
 async fn collect_run_result(
     stream: &mut crate::claude::client::Stream,
+    hosted_tools: &[crate::native::chat::runner::HostedTools],
 ) -> Result<RunResult, String> {
     let mut result: Option<RunResult> = None;
     let mut result_err: Option<String> = None;
+    let mut tools_not_offered: Vec<String> = Vec::new();
 
     while let Some(event) = stream.next_event().await {
+        // The `init` frame says what the model was actually given, which is the
+        // only place a dropped tool list is visible (#556). A scheduled run has
+        // no stream to put a synthetic frame on, so the finding travels out on
+        // the result and reaches the `job_history` row instead.
+        if let Some(system) = event.system.as_ref() {
+            if system.subtype == crate::claude::messages::system_subtype::INIT {
+                for dropped in
+                    crate::native::chat::runner::report_tools_offered(hosted_tools, system)
+                {
+                    if dropped.whole_server {
+                        tools_not_offered.push(crate::native::chat::runner::tools_dropped_message(
+                            &dropped.server,
+                        ));
+                    }
+                }
+            }
+        }
         let Some(r) = event.result.as_ref() else {
             continue;
         };
@@ -158,6 +184,7 @@ async fn collect_run_result(
                 output_tokens: r.usage.output_tokens,
                 cache_creation_tokens: r.usage.cache_creation_input_tokens,
                 cache_read_tokens: r.usage.cache_read_input_tokens,
+                tools_not_offered: Vec::new(),
             });
         }
     }
@@ -165,7 +192,12 @@ async fn collect_run_result(
     if let Some(err) = result_err {
         return Err(err);
     }
-    result.ok_or_else(|| "agent finished without returning a result".to_string())
+    // Attached after the loop, so it is carried by whichever `result` frame
+    // turned out to be the last one — `init` always precedes them all.
+    let mut result =
+        result.ok_or_else(|| "agent finished without returning a result".to_string())?;
+    result.tools_not_offered = tools_not_offered;
+    Ok(result)
 }
 
 /// `buildResultError`, message for message.
