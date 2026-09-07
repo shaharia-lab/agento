@@ -305,6 +305,12 @@ pub async fn run_resumed(
             // than vanishing. Nothing else is touched: the totals and the
             // `sdk_session_id` stay as they were, which is what lets the next
             // attempt resume the same CLI session.
+            //
+            // A `None` here is a panic inside the section, and it costs the
+            // stored question and nothing else — the run has already failed and
+            // the caller is answered with its error either way. Best-effort in
+            // Go too, so it is ignored, as the dispatcher's two `save_messages`
+            // calls are.
             let (db, id, prompt) = (db_path.to_path_buf(), row.id.clone(), prompt.to_string());
             db::blocking("headless resume failed turn", move || {
                 let conn = match db::open_read_write(&db) {
@@ -321,6 +327,16 @@ pub async fn run_resumed(
         }
     };
 
+    // A `None` here is a panic between [`save_resumed_results`]' three
+    // untransacted writes — `db::blocking` says outright that what a half-done
+    // section left behind is the caller's problem. What it can leave is the
+    // `UPDATE` applied and neither message stored: `sdk_session_id` and the
+    // totals advanced for a turn `chat_messages` has no record of, so the chat
+    // reads as empty while the next `--resume` continues a session that did
+    // happen. It is a panic rather than a rusqlite failure — every statement in
+    // there logs and carries on — and the run itself succeeded, so the caller is
+    // still answered `Ok` and posts the reply it got. `db::blocking` logs it
+    // under the label; there is nothing better to do here than say so.
     {
         let (db, id, prior, run, prompt) = (
             db_path.to_path_buf(),
