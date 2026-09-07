@@ -265,6 +265,18 @@ export function readPermission(payload: unknown): PermissionRequest {
   };
 }
 
+/* --- tools_not_offered --------------------------------------------------- */
+
+/**
+ * The synthetic frame Agento sends when a hosted MCP server's tools never
+ * reached the model (#556). The backend has already composed the sentence a
+ * user can act on; `server` and `tools` are on the frame for the log and the
+ * raw event stream, and are deliberately not repeated in the notice.
+ */
+export function readToolsNotOffered(payload: unknown): string | undefined {
+  return str(pick(payload, "message"));
+}
+
 /* --- error --------------------------------------------------------------- */
 
 export function readError(payload: unknown): string | undefined {

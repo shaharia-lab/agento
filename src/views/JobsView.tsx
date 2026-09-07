@@ -496,9 +496,21 @@ export function JobsView({
                     </InspGroup>
                   )}
 
+                  {/* A successful run can carry text here too since #556 —
+                      a hosted tool list the CLI never offered the model is a
+                      notice, not a failure — so the title and the red follow
+                      the status rather than the column being non-empty. */}
                   {job.error_message && (
-                    <InspGroup title="Error">
-                      <div className="logblock logblock--error">
+                    <InspGroup
+                      title={job.status === "success" ? "Notice" : "Error"}
+                    >
+                      <div
+                        className={
+                          job.status === "success"
+                            ? "logblock"
+                            : "logblock logblock--error"
+                        }
+                      >
                         {job.error_message}
                       </div>
                     </InspGroup>

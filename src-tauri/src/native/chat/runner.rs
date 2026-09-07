@@ -628,11 +628,14 @@ async fn start_integration_servers(
                     &spec.tools,
                 )
                 .await?;
-                hosted.push(report_hosted_tools(
-                    &spec.id,
-                    server.tool_names(),
-                    &spec.tools,
-                ));
+                let registered = report_hosted_tools(&spec.id, server.tool_names(), &spec.tools);
+                hosted.push(HostedTools {
+                    tools: crate::native::integrations::registry::allowed_tool_names(
+                        &spec.id,
+                        &registered,
+                    ),
+                    server: spec.id.clone(),
+                });
                 let registered = opts.with_mcp_server(&spec.id, server.config());
                 servers.push(server);
                 registered
@@ -687,11 +690,15 @@ async fn start_local_tools(
     let server = crate::native::tools::start_local_mcp_server()
         .await
         .map_err(|e| format!("starting local MCP server: {e}"))?;
-    hosted.push(report_hosted_tools(
+    let registered = report_hosted_tools(
         crate::native::tools::LOCAL_MCP_SERVER_NAME,
         server.tool_names(),
         local,
-    ));
+    );
+    hosted.push(HostedTools {
+        server: crate::native::tools::LOCAL_MCP_SERVER_NAME.to_string(),
+        tools: crate::native::tools::allowed_tool_names(registered.iter()),
+    });
     let opts = opts
         .with_mcp_server(crate::native::tools::LOCAL_MCP_SERVER_NAME, server.config())
         .map_err(|e| format!("registering the local MCP server: {e}"))?
@@ -722,20 +729,26 @@ async fn start_local_tools(
 /// value `{:?}`, after the effect — with one departure it does not cover:
 /// the mismatch line is at `warn`, because the seam's own split puts failures
 /// there and a tool the model cannot reach is one.
-fn report_hosted_tools(server_key: &str, hosted: &[String], requested: &[String]) -> HostedTools {
+///
+/// Since #556 it also **returns the overlap** — the requested names this server
+/// really registered — so that the set the log reports and the set the `init`
+/// frame is diffed against are one computation and cannot drift. The names come
+/// back **bare**: each caller qualifies them with its own `allowed_tool_names`,
+/// the function that already owns the `mcp__<key>__<tool>` rule and the one that
+/// built this server's entries in `--allowedTools`. A third copy of that format
+/// string here would desynchronise the two on any change to it, and the symptom
+/// would be a warning on every turn.
+fn report_hosted_tools(server_key: &str, hosted: &[String], requested: &[String]) -> Vec<String> {
     log::info!("mcp server started server={server_key:?} tools={hosted:?}");
-    let mut tools = Vec::new();
+    let mut registered = Vec::new();
     for tool in requested {
         if hosted.iter().any(|name| name == tool) {
-            tools.push(format!("mcp__{server_key}__{tool}"));
+            registered.push(tool.clone());
         } else {
             log::warn!("mcp tool not hosted server={server_key:?} tool={tool:?}");
         }
     }
-    HostedTools {
-        server: server_key.to_string(),
-        tools,
-    }
+    registered
 }
 
 /// What one MCP server this turn started actually put in front of the model —
@@ -2271,19 +2284,20 @@ mod tests {
     #[test]
     fn what_a_server_hosts_is_the_overlap_of_registered_and_requested() {
         crate::native::writes::testlog::install();
-        let hosted = report_hosted_tools(
+        let registered = report_hosted_tools(
             "556-overlap",
             &["a".to_string(), "b".to_string()],
             &["b".to_string(), "gone".to_string()],
         );
+        // `a` is hosted but never asked for; `gone` was asked for and is not
+        // hosted (and warns, through #501's own line).
+        assert_eq!(registered, vec!["b".to_string()]);
+        // Bare, so the caller's own `allowed_tool_names` — the function that
+        // also built `--allowedTools` — stays the only place the prefix is
+        // spelled.
         assert_eq!(
-            hosted,
-            HostedTools {
-                server: "556-overlap".to_string(),
-                // `a` is hosted but never asked for; `gone` was asked for and
-                // is not hosted (and warns, through #501's own line).
-                tools: vec!["mcp__556-overlap__b".to_string()],
-            }
+            crate::native::integrations::registry::allowed_tool_names("556-overlap", &registered),
+            vec!["mcp__556-overlap__b".to_string()]
         );
     }
 

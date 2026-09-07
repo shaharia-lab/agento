@@ -107,9 +107,13 @@ every turn is worse than silence. **The agreeing case emits nothing at all** —
 no line, no frame. And a mismatch is a **warning, never a refusal**: the turn
 runs and answers, for `start_local_tools`' own reason. Only a *whole* server's
 tools vanishing from a server the CLI called `connected` reaches the user, as a
-`tools_not_offered` frame here and as text on the `job_history` row for a
-headless run (`agent_run::collect_run_result` → `executor::finish`), because a
-scheduled run has nobody reading the log. The reason behind a miss is in the
+`tools_not_offered` frame here — rendered by `useChatStream`'s own case as the
+amber `banner`, never the red `banner--error`, because the turn answered — and
+as text on the `job_history` row for a headless run
+(`agent_run::collect_run_result` → `executor::finish`), because a scheduled run
+has nobody reading the log. **That row is the first `success` row that can
+carry `error_message`**, so `JobsView` titles the group off the status rather
+than off the column being non-empty. The reason behind a miss is in the
 CLI's own `--debug-file` log, which Agento never sees; `docs/troubleshooting.md`
 carries the hand-run that gets it.
 

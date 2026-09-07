@@ -716,6 +716,10 @@ export function ChatsView({
               />
             )}
 
+            {stream.notice && (
+              <NoticeBar text={stream.notice} onClose={stream.dismissNotice} />
+            )}
+
             {(stream.error || actionError) && (
               <ErrorBar
                 text={stream.error ?? actionError ?? ""}
@@ -926,6 +930,24 @@ function ResumedHistory({
       <div className="resumed__rule">
         <span>Continued here</span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * A non-fatal warning about the turn in flight — the amber `banner`, not the
+ * red `banner--error`, because the turn is answering and only did so with
+ * fewer tools than were configured (#556).
+ */
+function NoticeBar({ text, onClose }: { text: string; onClose(): void }) {
+  return (
+    <div className="banner">
+      <Icon name="alert" size={13} />
+      <span className="truncate">{text}</span>
+      <div className="spacer" />
+      <button className="iconbtn" title="Dismiss" onClick={onClose}>
+        <Icon name="close" size={12} />
+      </button>
     </div>
   );
 }
