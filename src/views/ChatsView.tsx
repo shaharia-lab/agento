@@ -550,7 +550,13 @@ export function ChatsView({
               />
             </div>
 
-            {actionError && <ErrorBar text={actionError} onClose={() => setActionError(undefined)} />}
+            {actionError && (
+              <Bar
+                tone="error"
+                text={actionError}
+                onClose={() => setActionError(undefined)}
+              />
+            )}
 
             <Composer
               value={draft}
@@ -717,11 +723,12 @@ export function ChatsView({
             )}
 
             {stream.notice && (
-              <NoticeBar text={stream.notice} onClose={stream.dismissNotice} />
+              <Bar text={stream.notice} onClose={stream.dismissNotice} />
             )}
 
             {(stream.error || actionError) && (
-              <ErrorBar
+              <Bar
+                tone="error"
                 text={stream.error ?? actionError ?? ""}
                 onClose={() => {
                   stream.dismissError();
@@ -935,26 +942,26 @@ function ResumedHistory({
 }
 
 /**
- * A non-fatal warning about the turn in flight — the amber `banner`, not the
- * red `banner--error`, because the turn is answering and only did so with
- * fewer tools than were configured (#556).
+ * The dismissible bar above the composer. **One component, two tones** rather
+ * than two near-identical copies: `SaveBar`'s own lesson (#519) is that the
+ * class was shared and the JSX was copied, and the JSX is what drifted.
+ *
+ * The tone is opt-in and defaults to the amber `banner`, because the newer of
+ * the two callers is the non-fatal one — #556's dropped tool list, where the
+ * turn ran and answered and only did so without the tools that were
+ * configured. `banner--error` is for a turn that failed.
  */
-function NoticeBar({ text, onClose }: { text: string; onClose(): void }) {
+function Bar({
+  text,
+  tone,
+  onClose,
+}: {
+  text: string;
+  tone?: "error";
+  onClose(): void;
+}) {
   return (
-    <div className="banner">
-      <Icon name="alert" size={13} />
-      <span className="truncate">{text}</span>
-      <div className="spacer" />
-      <button className="iconbtn" title="Dismiss" onClick={onClose}>
-        <Icon name="close" size={12} />
-      </button>
-    </div>
-  );
-}
-
-function ErrorBar({ text, onClose }: { text: string; onClose(): void }) {
-  return (
-    <div className="banner banner--error">
+    <div className={tone === "error" ? "banner banner--error" : "banner"}>
       <Icon name="alert" size={13} />
       <span className="truncate">{text}</span>
       <div className="spacer" />

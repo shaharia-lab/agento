@@ -292,7 +292,7 @@ enabled inside it, and the tool is ticked on the agent.
 
 Agento started the server and registered its tools, and the Claude Code CLI then
 gave the model none of them. The chat shows this as a notice on the turn; a
-scheduled task records it on the run's row in **Tasks → History**, which still
+scheduled task records it on the run's row in **Job History**, which still
 reads `success` because the run itself completed. Everything else in the app
 reports the server as connected, which is why this message exists at all.
 

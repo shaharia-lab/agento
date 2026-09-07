@@ -628,11 +628,14 @@ async fn start_integration_servers(
                     &spec.tools,
                 )
                 .await?;
-                let registered = report_hosted_tools(&spec.id, server.tool_names(), &spec.tools);
+                // Not `registered` — that name is taken eight lines down by
+                // the registered *options*, and the two would shadow.
+                let registered_tools =
+                    report_hosted_tools(&spec.id, server.tool_names(), &spec.tools);
                 hosted.push(HostedTools {
                     tools: crate::native::integrations::registry::allowed_tool_names(
                         &spec.id,
-                        &registered,
+                        &registered_tools,
                     ),
                     server: spec.id.clone(),
                 });
@@ -690,14 +693,14 @@ async fn start_local_tools(
     let server = crate::native::tools::start_local_mcp_server()
         .await
         .map_err(|e| format!("starting local MCP server: {e}"))?;
-    let registered = report_hosted_tools(
+    let registered_tools = report_hosted_tools(
         crate::native::tools::LOCAL_MCP_SERVER_NAME,
         server.tool_names(),
         local,
     );
     hosted.push(HostedTools {
         server: crate::native::tools::LOCAL_MCP_SERVER_NAME.to_string(),
-        tools: crate::native::tools::allowed_tool_names(registered.iter()),
+        tools: crate::native::tools::allowed_tool_names(registered_tools.iter()),
     });
     let opts = opts
         .with_mcp_server(crate::native::tools::LOCAL_MCP_SERVER_NAME, server.config())

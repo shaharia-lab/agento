@@ -225,7 +225,15 @@ export function useChatStream(
               // user needs to know is that the answer was produced without the
               // tools they configured (#556).
               const message = readToolsNotOffered(payload);
-              if (message) setNotice(message);
+              // One frame per dropped server, and #555's own shape was *every*
+              // integration going at once — so these accumulate rather than
+              // replace, joined the way the scheduled path joins them
+              // (`executor::finish`). Replacing would name the last server and
+              // silently lose the rest.
+              if (message)
+                setNotice((prev) =>
+                  prev && prev !== message ? `${prev}; ${message}` : message
+                );
               return;
             }
             case "error":

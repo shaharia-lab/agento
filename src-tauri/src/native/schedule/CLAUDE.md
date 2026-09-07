@@ -41,6 +41,15 @@ where a chat forwards, a scheduled run records a **failed** row reading
 Silence is the one outcome that is not allowed, because a job history with no row
 is indistinguishable from a task that was not due.
 
+**One consequence of that rule since #556: a `success` row may carry a non-empty
+`error_message`.** A run whose `system`/`init` frame shows the CLI never handed
+the model a hosted server's tools completed and answered — that is a notice, not
+a failure — but nobody reads the app log at 03:00 and that column is the row's
+only free text, so `finish` puts the sentence there and leaves the status alone.
+**Do not re-derive "non-empty `error_message` means failed"**: the failure signal
+is `Recorded::failure`, which `publish` keys on, and `JobsView` titles the block
+off the status for the same reason.
+
 **A chat picks its own permission mode (migration 30).** Everything below about
 `appendPermissionOpts` describes the state before it, and the two-branch rule it
 describes is still exactly what runs — but only when the chat has expressed no
