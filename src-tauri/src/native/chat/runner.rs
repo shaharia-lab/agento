@@ -885,14 +885,23 @@ pub fn report_tools_offered(hosted: &[HostedTools], init: &SystemMessage) -> Vec
     dropped
 }
 
-/// What the user is told when a connected server's whole tool list never
-/// reached the model. The app log carries the names; this carries the fact.
-///
-/// Takes [`ToolsDropped::label`], never `server`: for the integrations #555
-/// actually killed, the key is a v4 UUID, and a sentence naming one tells the
-/// reader nothing they can act on.
-pub fn tools_dropped_message(label: &str) -> String {
-    format!("{label} tools were hosted but the Claude CLI did not offer them to the model; see the app log")
+impl ToolsDropped {
+    /// What the user is told when a connected server's whole tool list never
+    /// reached the model. The app log carries the names; this carries the fact.
+    ///
+    /// **A method rather than a free function taking a name**, because the two
+    /// callers had one each and one of them passed the wrong field: the sentence
+    /// must name [`Self::label`] and never [`Self::server`], since for the
+    /// integrations #555 actually killed the key is a v4 UUID that appears
+    /// nowhere in the product. With the choice made here there is no argument to
+    /// get wrong.
+    pub fn message(&self) -> String {
+        format!(
+            "{} tools were hosted but the Claude CLI did not offer them to the model; \
+             see the app log",
+            self.label
+        )
+    }
 }
 
 fn capability_count(list: Option<&crate::native::gojson::GoList<String>>) -> usize {
@@ -2540,7 +2549,9 @@ mod tests {
         assert_eq!(dropped.len(), 1);
         assert!(dropped[0].whole_server);
 
-        let message = tools_dropped_message(&dropped[0].label);
+        // `message()` is what *both* callers emit — the chat frame and the
+        // `job_history` notice — so this is the sentence, not a rehearsal of it.
+        let message = dropped[0].message();
         assert!(message.starts_with("github tools were hosted"), "{message}");
         assert!(
             !message.contains("0c2e6b64"),

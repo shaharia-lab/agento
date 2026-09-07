@@ -164,9 +164,7 @@ async fn collect_run_result(
                     crate::native::chat::runner::report_tools_offered(hosted_tools, system)
                 {
                     if dropped.whole_server {
-                        tools_not_offered.push(crate::native::chat::runner::tools_dropped_message(
-                            &dropped.server,
-                        ));
+                        tools_not_offered.push(dropped.message());
                     }
                 }
             }

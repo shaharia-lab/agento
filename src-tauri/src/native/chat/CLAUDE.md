@@ -113,7 +113,11 @@ as text on the `job_history` row for a headless run
 (`agent_run::collect_run_result` → `executor::finish`), because a scheduled run
 has nobody reading the log. **That row is the first `success` row that can
 carry `error_message`**, so `JobsView` titles the group off the status rather
-than off the column being non-empty. The reason behind a miss is in the
+than off the column being non-empty. **The sentence names the server's *label*,
+not its `mcpServers` key** — for an integration that key is a v4 UUID the user
+has never seen — which is why it is `ToolsDropped::message()` rather than a
+function taking a name: with two callers and a free function, one of them passed
+the wrong field. The reason behind a miss is in the
 CLI's own `--debug-file` log, which Agento never sees; `docs/troubleshooting.md`
 carries the hand-run that gets it.
 
