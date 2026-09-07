@@ -22,7 +22,12 @@
   chat, so a UI send and an inbound one can now collide on one row — two CLI
   processes each reading the other's stale `sdk_session_id`. Both refuse with
   `live::CHAT_BUSY`, the chat route's own 409 body, because an inbound worker
-  queues on exactly that string. `run_resumed` also **increments** the four
+  queues on exactly that string. It fences the two *runs*, not the two *writes*:
+  the interactive turn still releases when its stream ends, before
+  `persist::commit` lands (Go's ordering, argued in `live.rs`'s header), so a
+  resume starting in that window reads an `sdk_session_id` the UI turn is about
+  to write. Two CLI processes on one chat stay impossible; a resume from one
+  turn earlier does not. `run_resumed` also **increments** the four
   token totals where `schedule/executor.rs` and `trigger/dispatcher.rs` replace
   them; replacing on a chat the user has also typed into erases the UI turns'
   usage. Both divergences are stated at `run_resumed` and pinned by

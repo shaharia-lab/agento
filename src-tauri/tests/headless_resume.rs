@@ -529,6 +529,75 @@ async fn token_totals_are_summed_across_a_ui_turn_and_a_headless_turn() {
     );
 }
 
+/// A run that **spawned** and then failed: the user turn is stored with no
+/// answer, nothing else on the row moves, and the busy lock comes back.
+///
+/// The lock release is the point. The missing-chat test below returns before
+/// `run_headless` is ever called, so it says nothing about the guard surviving a
+/// run that got as far as a subprocess — and a lock leaked here wedges the chat
+/// for the life of the process, which is the risk #564 singles out. The gated
+/// fake CLI parks holding the prompt, so the failure is the run's own deadline
+/// rather than a spawn that never happened.
+#[tokio::test]
+async fn a_run_that_times_out_stores_the_question_alone_and_frees_the_lock() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let chat = unique_id("timeout-chat");
+    migrated_with_chat(&db, &chat, "sdk-prior", [11, 22, 3, 4]);
+
+    let cli = fake_cli(
+        dir.path(),
+        &result_frame("never sent", "sdk-later", [9, 9, 9, 9]),
+        true,
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    // Generous enough that the deadline can only be reached in the drain — every
+    // earlier stage (`build_options`, the spawn) is inside it too, and reaching
+    // it there would leave `gate.started` absent and fail the assertion below.
+    let err = agent_run::run_resumed(
+        &db,
+        &chat,
+        "a question that times out",
+        &ExecutionSettings::default(),
+        std::time::Duration::from_secs(15),
+    )
+    .await
+    .expect_err("the run must time out");
+    assert_eq!(err, agento_lib::native::agent_run::DEADLINE_EXCEEDED);
+    assert!(
+        gate_started(dir.path()).exists(),
+        "the CLI had the prompt: this is a failure after a spawn, not before one"
+    );
+
+    assert_eq!(
+        messages(&db, &chat),
+        vec![("user".to_string(), "a question that times out".to_string())],
+        "the question is visible in the chat; no answer is invented"
+    );
+    assert_eq!(
+        sdk_session_id(&db, &chat),
+        "sdk-prior",
+        "a failed turn leaves the id in place so the next attempt resumes"
+    );
+    assert_eq!(totals(&db, &chat), [11, 22, 3, 4], "no usage was recorded");
+
+    assert!(
+        agento_lib::native::chat::live::registry().try_lock(&chat),
+        "the guard released the lock on the failure path"
+    );
+    agento_lib::native::chat::live::registry().release(&chat);
+
+    // Let the parked subprocess finish rather than leaving it holding the gate.
+    std::fs::write(gate_release(dir.path()), b"go").expect("release the gate");
+}
+
 /// A chat id nothing owns: refused, and the lock it took is given back.
 ///
 /// The second half is the one that matters — a leaked lock wedges the chat for

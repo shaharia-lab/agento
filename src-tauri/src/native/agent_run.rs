@@ -250,6 +250,16 @@ fn pick(overridden: &str, fallback: &str) -> String {
 /// lock wedges the chat for the life of the process and the error, timeout and
 /// panic paths are exactly the ones a paired release is dropped from.
 ///
+/// **It fences the two runs, not the two writes, and the residual window is
+/// deliberate.** The interactive turn releases the lock when its *stream* ends,
+/// before `chat/persist::commit` lands — Go's own ordering, reproduced on
+/// purpose and argued in [`live`]'s module header. So a `run_resumed` starting
+/// in that window loads an `sdk_session_id` the UI turn is still about to write.
+/// Two CLI processes on one chat, which is the outcome this lock exists to
+/// prevent, remains impossible; a resume from one turn earlier does not.
+/// Narrowing it means changing when the interactive turn releases, which is a
+/// divergence from that ordering and belongs to whoever decides to take it.
+///
 /// # Token totals are **incremented**, unlike every other headless write-back
 ///
 /// `schedule/executor.rs` and `trigger/dispatcher.rs` both *replace* the four
@@ -297,16 +307,14 @@ pub async fn run_resumed(
             // attempt resume the same CLI session.
             let (db, id, prompt) = (db_path.to_path_buf(), row.id.clone(), prompt.to_string());
             db::blocking("headless resume failed turn", move || {
-                let conn = match crate::native::db::open_read_write(&db) {
+                let conn = match db::open_read_write(&db) {
                     Ok(conn) => conn,
                     Err(e) => {
                         log::warn!("failed to store user message: {e}");
                         return;
                     }
                 };
-                if let Err(e) = append_message(&conn, &id, "user", &prompt) {
-                    log::warn!("failed to store user message: {e}");
-                }
+                save_messages(&conn, &id, &prompt, "");
             })
             .await;
             return Err(e);
@@ -354,6 +362,13 @@ impl Drop for BusyGuard {
 /// documents: the totals are **incremented**, and `sdk_session_id` is written
 /// only when the run reported one — `prior_sdk_session_id` being what the chat
 /// carried before the run, and what it keeps when the run reported none.
+///
+/// **`title` is not written here.** `chat/persist.rs` derives one from the first
+/// user message because a UI chat is created before anyone has typed; a chat
+/// this function runs against was created by its caller, which knows the origin
+/// and titles the row then (`[Task] <name>` for the scheduler, `[Telegram] …`
+/// for the dispatcher). Deriving one here would rename a chat the caller had
+/// already named.
 fn save_resumed_results(
     db_path: &std::path::Path,
     chat_id: &str,
@@ -361,7 +376,7 @@ fn save_resumed_results(
     result: &RunResult,
     prompt: &str,
 ) {
-    let conn = match crate::native::db::open_read_write(db_path) {
+    let conn = match db::open_read_write(db_path) {
         Ok(conn) => conn,
         Err(e) => {
             log::warn!("failed to update chat session after a resumed run: {e}");
@@ -399,14 +414,31 @@ fn save_resumed_results(
         log::warn!("failed to update chat session after a resumed run: {e}");
     }
 
-    // Each insert logged on its own, as `saveSessionMessages` does: a failed
-    // user insert must not skip the assistant one, because the answer has
-    // already gone out to whoever asked.
-    if let Err(e) = append_message(&conn, chat_id, "user", prompt) {
+    save_messages(&conn, chat_id, prompt, &result.answer);
+}
+
+/// `saveSessionMessages`: the user turn, then the assistant turn when there is
+/// one.
+///
+/// **The user turn is stored even when there is no answer** — the trigger
+/// dispatcher's shape, which #564 asks for by name, and *not*
+/// `chat/persist.rs`'s. That file guards both inserts on a non-empty answer
+/// because "an interrupted stream must not leave an orphaned user message …
+/// the two would diverge on the next resume", and this is the first headless
+/// path where the next resume is real. The dispatcher's shape still wins: an
+/// inbound message the user can see was asked, with no reply, is the outcome
+/// that surface needs, and the CLI reconciles its own transcript on the next
+/// `--resume` rather than being driven from `chat_messages`.
+///
+/// Each insert is logged on its own, as `saveSessionMessages` does: a failed
+/// user insert must not skip the assistant one, because the answer has already
+/// gone out to whoever asked.
+fn save_messages(conn: &rusqlite::Connection, chat_id: &str, prompt: &str, answer: &str) {
+    if let Err(e) = append_message(conn, chat_id, "user", prompt) {
         log::warn!("failed to store user message: {e}");
     }
-    if !result.answer.is_empty() {
-        if let Err(e) = append_message(&conn, chat_id, "assistant", &result.answer) {
+    if !answer.is_empty() {
+        if let Err(e) = append_message(conn, chat_id, "assistant", answer) {
             log::warn!("failed to store assistant message: {e}");
         }
     }
