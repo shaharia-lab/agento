@@ -33,7 +33,8 @@ If no scope is provided, check changes since the last 7 days.
 
 ### Step 2: Read all current documentation
 Read every documentation and context file:
-- `CLAUDE.md` — primary AI agent context
+- `CLAUDE.md` — primary AI agent context (cross-cutting rules only)
+- every nested `CLAUDE.md` (`git ls-files '*CLAUDE.md'`) — one per subsystem, loaded only when code in that directory is read; subsystem detail goes there, never into the root file
 - `README.md` — project overview and setup
 - `docs/*.md` — all documentation files
 - `.claude/skills/*/SKILL.md` — skill definitions (see Step 2a for dedicated review)
@@ -84,6 +85,14 @@ For each documentation gap found:
 
 ### CLAUDE.md
 This is the most critical file — AI agents read it on every interaction.
+
+**It is split (#553).** The root file holds only what every session needs; each
+subsystem has its own `CLAUDE.md` beside its code (the root file's *Where the
+notes live* table is the index). When a change touches one subsystem, update
+*that* file. Every one of them must stay under 40,000 characters —
+`scripts/check-claude-md-size.sh` enforces it and CI fails otherwise — so a note
+that would push a file over the limit means splitting that file, not trimming
+the rule. Write *rule → why → where it is enforced*, not a narrative of the PR.
 - [ ] Commands section — are all build/test/lint commands still accurate?
 - [ ] Architecture section — does the request flow still match?
 - [ ] Backend layers — are all packages listed? Any new ones missing?

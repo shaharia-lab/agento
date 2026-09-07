@@ -134,7 +134,7 @@ src-tauri/
   tests/             integration tests
 parity/              the frozen wire-format spec; see parity/README.md
 docs/                this documentation
-CLAUDE.md            the full working notes
+CLAUDE.md            the working notes; one more per subsystem beside its code
 ```
 
 ---
