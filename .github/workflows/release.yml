@@ -139,7 +139,7 @@ jobs:
           check "src-tauri/Cargo.toml"               "$cargo_toml_version"
 
           if [ "$fail" = 1 ]; then
-            echo "::error::Fix with: npm version ${tag_version} --no-git-tag-version (package.json + lockfile), set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand, then \`cargo update -p agento --offline\` for Cargo.lock. Then re-tag. See docs/releasing.md step 1."
+            echo "::error::Fix with: npm version ${tag_version} --no-git-tag-version (package.json + lockfile), set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand, then \`cargo update -p agento --offline\` for Cargo.lock. Then re-tag. See docs/releasing.md step 2."
             exit 1
           fi
           echo "ok: ${tag_version} in all five places"
@@ -443,7 +443,7 @@ jobs:
       # pointing at draft asset URLs would make every installed app report an
       # update it cannot download. Publishing this draft fires `promote`.
       - name: Publish draft release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             artifacts/*.deb

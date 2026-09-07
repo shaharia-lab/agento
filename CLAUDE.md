@@ -100,7 +100,7 @@ Where a new note goes:
   lockfile is the one with teeth — npm repairs that field on almost any command,
   so every checkout goes dirty on the first `npm run build` with a change nobody
   made, which reads as local work and comes back as soon as it is discarded. See
-  `docs/releasing.md` step 1.
+  `docs/releasing.md` step 2.
 - Tagging builds a **draft** release with `latest.json` staged as an asset.
   Nothing has shipped at that point — draft assets are not publicly
   downloadable. **Publishing the draft is the release act**: the

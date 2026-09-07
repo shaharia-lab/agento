@@ -281,7 +281,10 @@ try {
     });
     const steps = script.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
     for (const line of steps) {
-      const [cmd, ...args] = line.split("|");
+      // Fields split on `|`; a literal pipe is `\|` (a `||` in a wait
+      // predicate would otherwise be cut into three fields and fail with
+      // "Unexpected end of script").
+      const [cmd, ...args] = line.split(/(?<!\\)\|/).map((f) => f.replace(/\\\|/g, "|"));
       const out = await dispatch(cmd.trim(), args);
       console.log(`${cmd.trim()}: ${typeof out === "string" ? out : JSON.stringify(out)}`);
     }

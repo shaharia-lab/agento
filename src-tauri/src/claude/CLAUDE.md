@@ -142,6 +142,26 @@ Consequences, each load-bearing:
   model nothing. The practical cost is that `?` needs a `String`, so every
   fallible call carries `.map_err(|e| format!("…: {e}"))` — the same context
   `fmt.Errorf` supplies, and the same message the model gets.
+- **A hand-written `list` handler owns `ttlMs` and `cacheScope`** (#555).
+  Protocol revision `2026-07-28` (SEP-2549) makes both **required** on the
+  result of `tools/list`, `prompts/list`, `resources/list`, `resources/read` and
+  `resources/templates/list`; the Claude Code CLI validates against that schema
+  and **discards the whole tool list** when either is missing, while still
+  reporting the server `"status":"connected"` — so every integration goes dark
+  and nothing anywhere says why. `rmcp` advertises the revision in
+  `ProtocolVersion::KNOWN_VERSIONS`, so we have promised the contract, but keeps
+  both fields `Option` for older peers and `with_all_items` sets neither; the
+  macro handlers it fixed for this (rust-sdk #1120) are unreachable because the
+  `macros` feature is off. `ToolServer::list_tools` therefore sets `ttlMs: 0`
+  (the spec's "immediately stale" — the tool set is per turn and per integration
+  row) and `cacheScope: private` (nothing is shareable across authorization
+  contexts; every listener has its own bearer token), pinned on the wire by
+  `mcp::tests::a_tool_list_carries_the_cache_hints_the_cli_requires`. Agento
+  serves no prompts or resources; the first one it serves needs the same two
+  fields. The revision's other requirements are `rmcp`'s and already met —
+  `server/discover`, `resultType` on every result (stripped for pre-2026 peers),
+  the `Mcp-Method`/`Mcp-Name` request headers, `subscriptions/listen` in place of
+  the `GET` stream, and no `Mcp-Session-Id` (we are stateless already).
 - **A handler takes the call's `CancellationToken`.** Go threads `ctx` into
   every `http.NewRequestWithContext`, so a cancelled turn aborts the outbound
   call. Rust does not inherit that: `rmcp` spawns a handler detached and
