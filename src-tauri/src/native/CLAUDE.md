@@ -498,6 +498,10 @@ are authored there directly.
   `••• stored` behind an explicit *Replace*, beside **Name** on both the
   connect and the edit screen, and an untouched field sends no `credentials`
   key at all.
+- **That preserve rule is `credentials`', and stops there.** `PUT
+  /integrations/{id}/triggers/{rule}` is **replace**: an omitted key resets its
+  column, including migration 39's five execution settings. See
+  `TriggerRuleRequest`'s doc for why (#563).
 - **Validation errors are 422**, conflicts 409 — not 400.
 - An invalid `sort` on the sessions list is silently accepted (falls back to
   `recent`); only a cursor/sort mismatch 400s.

@@ -513,10 +513,20 @@ pub(super) struct NewSessionParams<'a> {
     pub permission_mode: &'a str,
 }
 
-/// `isValidChatPermissionMode` (`internal/service/chat_service.go`). All four of
-/// Claude Code's modes plus empty; the *agent* validator is narrower on purpose.
+/// The set `isValidChatPermissionMode` accepts
+/// (`internal/service/chat_service.go`). All four of Claude Code's modes plus
+/// empty; the *agent* validator is narrower on purpose.
+///
+/// **A trigger rule's `permission_mode` is held to this same list** (#563), and
+/// deliberately not to a second one: the rule's mode becomes
+/// [`NewSessionParams::permission_mode`] on the chat `trigger::dispatcher`
+/// creates for the run, so two lists would be two spellings of one spec that
+/// agree only for as long as nobody edits one of them.
+pub(super) const CHAT_PERMISSION_MODES: [&str; 5] = ["", "bypass", "default", "plan", "dontAsk"];
+
+/// `isValidChatPermissionMode`.
 pub(super) fn is_valid_permission_mode(mode: &str) -> bool {
-    matches!(mode, "" | "bypass" | "default" | "plan" | "dontAsk")
+    CHAT_PERMISSION_MODES.contains(&mode)
 }
 
 pub(super) fn insert_session(

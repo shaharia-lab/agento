@@ -292,15 +292,6 @@ pub struct TriggerRule {
     pub updated_at: GoTime,
 }
 
-/// Every `permission_mode` a trigger rule may carry.
-///
-/// `""` is "whatever the agent already says", which is what every rule written
-/// before migration 39 stores; the other four are the modes
-/// `claude::PermissionMode` accepts. Enumerated rather than free text because
-/// the dispatcher hands the value straight to the CLI, where a typo is a run
-/// that fails at spawn time rather than a 422 at write time.
-const RULE_PERMISSION_MODES: [&str; 5] = ["", "default", "plan", "dontAsk", "bypass"];
-
 /// The inclusive upper bound on a rule's own run timeout, in minutes.
 ///
 /// Four hours. High enough that no legitimate run is refused, low enough that a
@@ -556,16 +547,9 @@ pub fn list_trigger_rules(
 ) -> Result<Vec<TriggerRule>, String> {
     let conn = super::db::open_read_only(db_path)?;
     let mut stmt = conn
-        .prepare(
-            "SELECT id, integration_id, name, agent_slug, enabled,
-                    filter_prefix, filter_keywords, filter_chat_ids,
-                    model, working_directory, settings_profile_id,
-                    permission_mode, timeout_minutes,
-                    created_at, updated_at
-             FROM trigger_rules
-             WHERE integration_id = ?1
-             ORDER BY created_at ASC",
-        )
+        .prepare(&format!(
+            "{TRIGGER_RULE_COLUMNS} WHERE integration_id = ?1 ORDER BY created_at ASC"
+        ))
         .map_err(|e| format!("preparing trigger rule list: {e}"))?;
     let rows = stmt
         .query_map([integration_id], scan_trigger_rule)
@@ -578,7 +562,8 @@ pub fn list_trigger_rules(
 }
 
 /// The projection both rule reads share, so the by-id lookup the write path
-/// needs cannot drift from the list.
+/// needs cannot drift from the list — and so that `scan_trigger_rule`'s
+/// **positional** `row.get(N)` has exactly one column order to be right about.
 const TRIGGER_RULE_COLUMNS: &str = "SELECT id, integration_id, name, agent_slug, enabled,
                     filter_prefix, filter_keywords, filter_chat_ids,
                     model, working_directory, settings_profile_id,
@@ -1336,15 +1321,22 @@ struct TriggerRuleRequest {
 
 /// The checks `create` and `update` share, after `agent_slug`.
 ///
-/// Both constrained fields are refused rather than clamped: a rule that silently
-/// ran under a different permission mode than the one asked for is the failure
-/// this is here to prevent, and a 422 naming the field is the only answer that
-/// tells the caller which of the two it got wrong.
+/// **An unknown `permission_mode` is not a run that fails, it is a run with no
+/// permissions at all.** `chat/runner.rs` matches `default`, `plan` and
+/// `dontAsk` and routes *everything else* — `bypass`, empty, and any typo alike
+/// — into `with_permission_mode(BYPASS_PERMISSIONS).with_bypass_permissions()`,
+/// so `"yolo"` would silently escalate rather than error. That catch-all is why
+/// the set is checked here, at the write, and why it is
+/// [`chats::CHAT_PERMISSION_MODES`] rather than a list of this module's own.
+///
+/// `timeout_minutes` is refused rather than clamped for the same reason a bad
+/// mode is: a 422 naming the field is the only answer that tells the caller
+/// which of the two they got wrong.
 fn validate_rule_settings(req: &TriggerRuleRequest) -> Result<(), WriteError> {
-    if !RULE_PERMISSION_MODES.contains(&req.permission_mode.as_str()) {
+    if !super::chats::is_valid_permission_mode(&req.permission_mode) {
         return Err(WriteError::validation(
             "permission_mode",
-            "permission_mode must be one of default, plan, dontAsk, bypass",
+            r#"must be one of "bypass", "default", "plan", "dontAsk", or empty"#,
         ));
     }
     if !(0..=RULE_MAX_TIMEOUT_MINUTES).contains(&req.timeout_minutes) {
@@ -3189,14 +3181,15 @@ mod tests {
     }
 
     /// The accepted side of the same two rules, derived from the constants
-    /// rather than transcribed — a mode added to [`RULE_PERMISSION_MODES`] and
-    /// not to the check would fail here.
+    /// rather than transcribed — a mode added to
+    /// [`super::super::chats::CHAT_PERMISSION_MODES`] and not reachable through
+    /// this validator would fail here.
     #[test]
     fn every_declared_permission_mode_and_both_timeout_bounds_are_accepted() {
         let file = migrated();
         seed_integration(&file, "int-1");
 
-        for mode in RULE_PERMISSION_MODES {
+        for mode in super::super::chats::CHAT_PERMISSION_MODES {
             let body = format!(r#"{{"agent_slug":"a","permission_mode":"{mode}"}}"#);
             create_trigger_rule(file.path(), "int-1", body.as_bytes())
                 .unwrap_or_else(|e| panic!("permission_mode {mode:?}: {}", e.message()));
