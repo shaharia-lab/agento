@@ -98,14 +98,27 @@ export function Switch({
 export function Checkbox({
   on,
   onChange,
+  disabled,
 }: {
   on: boolean;
   onChange(v: boolean): void;
+  /**
+   * A box the current state cannot support (#539) — `Switch`'s `disabled`, one
+   * control over. Opt-in and defaulted to `undefined`, so the three call sites
+   * that pass nothing emit exactly the button they always did.
+   *
+   * Note it carries **no `title`**, for `Switch`'s reason: a disabled button
+   * receives no mouse events, so a tooltip on one never shows. Why the box is
+   * shut has to live in something beside it — a wrapping `<label>` still gets
+   * the hover.
+   */
+  disabled?: boolean;
 }) {
   return (
     <button
       role="checkbox"
       aria-checked={on}
+      disabled={disabled}
       className={`checkbox ${on ? "checkbox--on" : ""}`}
       onClick={() => onChange(!on)}
     >

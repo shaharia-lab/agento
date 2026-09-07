@@ -3,12 +3,14 @@ import { api, qs } from "../lib/api";
 import { useResource } from "../lib/hooks";
 import { Icon } from "../lib/icons";
 import { integer, percent, usd } from "../lib/format";
+import { loadAnalyticsPrefs, saveAnalyticsPrefs } from "../lib/analyticsPrefs";
 import type {
   AnalyticsReport,
   ClaudeProject,
   InsightsSummary,
 } from "../lib/types";
 import {
+  Checkbox,
   Dropdown,
   Empty,
   InspGroup,
@@ -22,8 +24,10 @@ import {
   computePeriod,
   granularityLabel,
   list,
+  previousPeriod,
   projectLabel,
   share,
+  type Period,
   type RangeKey,
 } from "./analytics/shared";
 import { TokensMode } from "./analytics/TokensMode";
@@ -32,6 +36,23 @@ import { InsightsMode, insightsInspectorRows } from "./analytics/InsightsMode";
 import "../styles/analytics.css";
 
 type Mode = "tokens" | "usage" | "insights";
+
+/**
+ * A report, tagged with the query string it was fetched for (#539).
+ *
+ * `useResource` never clears `data` on a dependency change — it only calls
+ * `setData` on success — which is deliberate and is what lets a failed refresh
+ * keep showing the last good figures. It also means that while a range or
+ * project change is in flight the two analytics resources resolve
+ * independently, so for a moment whichever landed first would be differenced
+ * against the *other* window's data and every tile would show a percentage
+ * describing neither. Tagging is what makes that detectable: a delta is
+ * rendered only when both halves carry the query they are being read as.
+ */
+interface Keyed {
+  key: string;
+  report: AnalyticsReport;
+}
 
 export function AnalyticsView({
   mode,
@@ -44,10 +65,19 @@ export function AnalyticsView({
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [project, setProject] = useState("");
+  const [compare, setCompare] = useState(() => loadAnalyticsPrefs().compare);
 
   const period = useMemo(
     () => computePeriod(range, customFrom, customTo),
     [range, customFrom, customTo]
+  );
+
+  // The window immediately before this one, of the same length. `undefined`
+  // means there is nothing well-defined to compare against — All time, or a
+  // custom range that is not filled in — and the toggle is shut for it.
+  const previousWindow = useMemo(
+    () => previousPeriod(range, period),
+    [range, period]
   );
 
   // The two analytics endpoints share a query: range, project and — always —
@@ -64,12 +94,37 @@ export function AnalyticsView({
   const ready = range !== "custom" || Boolean(period.from && period.to);
   const wantsReport = mode !== "insights";
 
-  const report = useResource<AnalyticsReport | undefined>(
+  const report = useResource<Keyed | undefined>(
     (signal) =>
       ready && wantsReport
-        ? api.get<AnalyticsReport>(`/claude-analytics${query}`, signal)
+        ? api
+            .get<AnalyticsReport>(`/claude-analytics${query}`, signal)
+            .then((r) => ({ key: query, report: r }))
         : Promise.resolve(undefined),
     [query, ready, wantsReport]
+  );
+
+  // The comparison window, fetched only while the toggle is on and only for the
+  // two modes that render one — so an install that never asks for a comparison
+  // issues exactly the one request it always did. `qs` drops an undefined
+  // `from`/`to`, which the server would answer with its own 31-day default, so
+  // the fetch is gated on `previousWindow` rather than on the query string.
+  const wantsCompare = compare && wantsReport && ready && previousWindow !== undefined;
+  const compareQuery = qs({
+    from: previousWindow?.from,
+    to: previousWindow?.to,
+    project: project || undefined,
+    tz: TZ,
+  });
+
+  const previous = useResource<Keyed | undefined>(
+    (signal) =>
+      wantsCompare
+        ? api
+            .get<AnalyticsReport>(`/claude-analytics${compareQuery}`, signal)
+            .then((r) => ({ key: compareQuery, report: r }))
+        : Promise.resolve(undefined),
+    [compareQuery, wantsCompare]
   );
 
   const insights = useResource<InsightsSummary | undefined>(
@@ -96,7 +151,24 @@ export function AnalyticsView({
   const sessionCount =
     mode === "insights"
       ? insights.data?.total_sessions
-      : report.data?.summary.total_sessions;
+      : report.data?.report.summary.total_sessions;
+
+  // A failed comparison must not take the view down with it: the primary report
+  // is what the section is for, so the deltas are dropped and one banner says
+  // why.
+  //
+  // Both halves are checked against the query they were fetched for, which is
+  // what stops a report from one window being differenced against another's
+  // while a change is in flight or after one of the two failed holding stale
+  // data. A delta is a claim about a *pair*, so it is only made when the pair
+  // is known to be one.
+  const comparison =
+    wantsCompare &&
+    !previous.error &&
+    report.data?.key === query &&
+    previous.data?.key === compareQuery
+      ? previous.data.report
+      : undefined;
 
   return (
     <div className="panes">
@@ -136,6 +208,29 @@ export function AnalyticsView({
             projects={list(projects.data)}
           />
 
+          {wantsReport && (
+            <CompareToggle
+              on={compare}
+              // Disabled rather than silently ignored: "All time" is a floor
+              // chosen by the app, not a duration the user picked, so there is
+              // no preceding window of the same length to shift onto, and a
+              // half-filled custom range has no bounds to shift at all. The
+              // stored preference is left exactly as it is — a gate must never
+              // rewrite the value it gates (#474) — so switching back to 30d
+              // restores the comparison.
+              disabled={previousWindow === undefined}
+              disabledReason={
+                range === "all"
+                  ? "All time is not a window of any particular length, so it has nothing before it to compare against."
+                  : "Pick both dates to compare this range with the one before it."
+              }
+              onChange={(v) => {
+                setCompare(v);
+                saveAnalyticsPrefs({ compare: v });
+              }}
+            />
+          )}
+
           <div className="spacer" />
           <span className="toolbar__sub tnum">
             {sessionCount === undefined
@@ -146,7 +241,15 @@ export function AnalyticsView({
           <button
             className="iconbtn"
             title="Refresh"
-            onClick={() => active.reload()}
+            // Both resources, or Refresh pairs a freshly read current window
+            // against whatever the comparison happened to hold — and the key
+            // check above cannot see it, because neither query moved. A
+            // `/claude-analytics` read is itself what drives `ensure_scan`, so
+            // this is the one action most likely to change both windows.
+            onClick={() => {
+              active.reload();
+              if (wantsCompare) previous.reload();
+            }}
           >
             <Icon name="refresh" size={14} />
           </button>
@@ -156,6 +259,16 @@ export function AnalyticsView({
           <div className="banner a-banner--error">
             <Icon name="alert" size={14} />
             <span>Refresh failed — showing the last good data. {error}</span>
+          </div>
+        )}
+
+        {wantsCompare && previous.error && (
+          <div className="banner a-banner--error">
+            <Icon name="alert" size={14} />
+            <span>
+              Comparison unavailable — showing this period on its own.{" "}
+              {previous.error}
+            </span>
           </div>
         )}
 
@@ -178,7 +291,8 @@ export function AnalyticsView({
           <div className={`dash scroll a-dash ${loading ? "a-dash--stale" : ""}`}>
             <Body
               mode={mode}
-              report={report.data}
+              report={report.data?.report}
+              previous={comparison}
               insights={insights.data}
               project={project}
             />
@@ -198,8 +312,9 @@ export function AnalyticsView({
                 days={period.days}
                 from={period.from}
                 to={period.to}
+                comparedWith={wantsCompare ? previousWindow : undefined}
                 project={project}
-                report={report.data}
+                report={report.data?.report}
                 insights={insights.data}
               />
             </div>
@@ -215,11 +330,14 @@ export function AnalyticsView({
 function Body({
   mode,
   report,
+  previous,
   insights,
   project,
 }: {
   mode: Mode;
   report: AnalyticsReport | undefined;
+  /** The preceding window, when the comparison toggle is on and it loaded. */
+  previous: AnalyticsReport | undefined;
   insights: InsightsSummary | undefined;
   project: string;
 }) {
@@ -241,9 +359,54 @@ function Body({
   }
 
   return mode === "tokens" ? (
-    <TokensMode report={report} />
+    <TokensMode report={report} previous={previous} />
   ) : (
-    <UsageMode report={report} />
+    <UsageMode report={report} previous={previous} />
+  );
+}
+
+/* --- Compare toggle ------------------------------------------------------ */
+
+/**
+ * "Compare with previous period" (#539).
+ *
+ * The explanation lives on the wrapping `<label>` rather than on the box,
+ * because a disabled `<button>` receives no mouse events and a `title` on one
+ * never shows — the trap `Switch` already documents. The label is also the
+ * second hit target, so the word is clickable when the box is not shut.
+ */
+function CompareToggle({
+  on,
+  disabled,
+  disabledReason,
+  onChange,
+}: {
+  on: boolean;
+  disabled: boolean;
+  /** Why the box is shut — there is more than one reason it can be. */
+  disabledReason: string;
+  onChange(v: boolean): void;
+}) {
+  return (
+    <label
+      className="row"
+      style={{ gap: "var(--sp-3)", cursor: "default" }}
+      title={
+        disabled
+          ? disabledReason
+          : "Show each figure against the window immediately before this one."
+      }
+    >
+      <Checkbox
+        on={on}
+        disabled={disabled}
+        onChange={(v) => {
+          if (disabled) return;
+          onChange(v);
+        }}
+      />
+      <span className="toolbar__sub">Compare</span>
+    </label>
   );
 }
 
@@ -299,6 +462,7 @@ function Inspector({
   days,
   from,
   to,
+  comparedWith,
   project,
   report,
   insights,
@@ -308,6 +472,8 @@ function Inspector({
   days: number;
   from?: string;
   to?: string;
+  /** The window the figures are being differenced against, if any. */
+  comparedWith?: Period;
   project: string;
   report: AnalyticsReport | undefined;
   insights: InsightsSummary | undefined;
@@ -333,6 +499,17 @@ function Inspector({
         <InspRow label="Project">
           {project ? projectLabel(project) : "All projects"}
         </InspRow>
+        {comparedWith && (
+          <>
+            <InspRow label="Compared with">{comparedWith.label}</InspRow>
+            <InspRow label="From">
+              <span className="tnum">{isoDay(comparedWith.from)}</span>
+            </InspRow>
+            <InspRow label="To">
+              <span className="tnum">{isoDay(comparedWith.to, -1)}</span>
+            </InspRow>
+          </>
+        )}
       </InspGroup>
 
       {mode !== "insights" && report && (
