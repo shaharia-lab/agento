@@ -4,6 +4,7 @@
   "version": "1.2.0",
   "type": "module",
   "scripts": {
+    "check:claude-md": "scripts/check-claude-md-size.sh",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",

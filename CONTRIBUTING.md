@@ -30,7 +30,8 @@ Before making code changes, read the developer documentation in the [`docs/`](do
 - [Architecture](docs/architecture.md) — stack, process model, the native backend, the Claude SDK
 - [Releasing](docs/releasing.md) — cutting a release, the guards, the update manifest
 
-[`CLAUDE.md`](CLAUDE.md) is the full working notes behind those guides: every
+[`CLAUDE.md`](CLAUDE.md) and the per-subsystem `CLAUDE.md` files beside the
+code are the full working notes behind those guides: every
 decision, with the reasoning and the failures behind it.
 
 ### Prerequisites
