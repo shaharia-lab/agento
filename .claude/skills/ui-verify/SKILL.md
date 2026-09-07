@@ -122,8 +122,12 @@ node ui.mjs type 'input[placeholder="Release Notes Writer"]' 'My Agent'   # Name
 # the two textareas carry no placeholder: [0] is Description, [1] is System prompt
 node ui.mjs eval 'document.querySelectorAll("textarea")[1].id="sysprompt"; 1'
 node ui.mjs type '#sysprompt' 'You are …'
-# tick capabilities by label: each row is .agents-cap with .agents-cap__label
-node ui.mjs eval '[...document.querySelectorAll(".agents-cap")].filter(r=>["list_issues","get_issue"].includes(r.querySelector(".agents-cap__label").textContent.trim())).forEach(r=>r.querySelector("button[role=checkbox]").click()); 1'
+# tick capabilities by label INSIDE one integration group: tool names repeat
+# across integrations (Slack and Telegram both have send_message and
+# read_messages), so a page-wide label match ticks both and the agent gets a
+# second integration nobody asked for. Each group is .agents-group, its name
+# is .agents-group__name, each row is .agents-cap with .agents-cap__label.
+node ui.mjs eval '(()=>{const g=[...document.querySelectorAll(".agents-group")].find(x=>x.querySelector(".agents-group__name")?.textContent.trim()==="GitHub");[...g.querySelectorAll(".agents-cap")].filter(r=>["list_issues","get_issue"].includes(r.querySelector(".agents-cap__label").textContent.trim())).forEach(r=>r.querySelector("button[role=checkbox]").click());return 1})()'
 node ui.mjs click 'text=Create'
 node ui.mjs wait '/State\s*Saved/.test(document.querySelector(".pane-inspector").textContent)' 8000
 ```
@@ -131,6 +135,10 @@ node ui.mjs wait '/State\s*Saved/.test(document.querySelector(".pane-inspector")
 `eval` runs in the page's global scope and the page lives on between calls, so
 a top-level `const t = …` in one `eval` makes the next one throw *"Can't create
 duplicate variable"*. Wrap anything that declares in an IIFE, `(()=>{…})()`.
+
+After Create, read the stored capabilities back (`curl …/api/agents/<slug> |
+jq .capabilities`) before starting a chat on the agent: a wrongly ticked write
+tool is a message sent somewhere real.
 
 The slug is derived from the name (`My Agent` → `my-agent`); confirm the store
 with `curl …/api/agents/<slug>` rather than trusting the inspector alone.
