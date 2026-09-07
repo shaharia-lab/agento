@@ -64,7 +64,25 @@ cannot download.
 
 ## Cutting a release
 
-1. **Bump the version in all five places**, and commit them together on `main`:
+1. **Run the MCP end-to-end probe**, which CI never does.
+
+   ```bash
+   cd src-tauri && cargo test --test mcp_e2e_probe -- --ignored --nocapture
+   ```
+
+   It is `#[ignore]`d because it needs the Claude Code CLI, a signed-in profile
+   and it spends tokens — so nothing runs it unless a human does, and it is the
+   **only** test that sees the model's side of a hosted tool: that the tool is
+   listed in the `init` event, and that a `tool_result` carries the text our
+   handler produced. Run it **before every tag**, and again **whenever the
+   Claude Code CLI version changes**, because the CLI is what negotiates the MCP
+   protocol revision and a revision bump can invalidate our answers without a
+   line of Agento changing. That is exactly how #555 happened: the CLI moved to
+   revision `2026-07-28`, which made `ttlMs`/`cacheScope` mandatory on a
+   `tools/list` result, every integration went dark, and the CLI went on
+   reporting the server `"connected"`. This probe would have caught it that day.
+
+2. **Bump the version in all five places**, and commit them together on `main`:
    `src-tauri/tauri.conf.json`, `package.json`, `package-lock.json` (which
    carries it twice), `src-tauri/Cargo.toml` and `src-tauri/Cargo.lock`.
 
@@ -80,7 +98,7 @@ cannot download.
    alone leaves it behind. `cargo update -p agento --offline` does the same job
    for `Cargo.lock` without touching any dependency.
 
-   **All five are enforced now**, by the guard job in step 2 and by CI on every
+   **All five are enforced now**, by the guard job in step 3 and by CI on every
    PR. `tauri.conf.json` is the one that decides what ships — the bundler bakes
    it into the installer and the updater compares against it — and the rest are
    checked because nothing else ever looks at them. That is not hypothetical:
@@ -91,25 +109,25 @@ cannot download.
    tree dirty with a change nobody made, which reads as local work, invites
    someone to discard it, and comes straight back.
 
-2. **Tag that commit** and push the tag.
+3. **Tag that commit** and push the tag.
 
    ```bash
    git tag v1.1.0
    git push origin v1.1.0
    ```
 
-3. **Wait for the build.** Five runners, one per target: Linux x86_64, Linux
+4. **Wait for the build.** Five runners, one per target: Linux x86_64, Linux
    aarch64, macOS Apple Silicon, macOS Intel, Windows x86_64. Tauri cannot
    cross-compile its bundles, which is why each needs its own runner.
 
-4. **Check the draft release.** Confirm every platform's installer is attached
+5. **Check the draft release.** Confirm every platform's installer is attached
    and `latest.json` is there. Download one and launch it if the change was
    risky.
 
-5. **Write the release notes** into the draft's body, before publishing. See
+6. **Write the release notes** into the draft's body, before publishing. See
    [Release notes](#release-notes) below.
 
-6. **Publish the draft.** That fires `promote`, which copies the staged manifest
+7. **Publish the draft.** That fires `promote`, which copies the staged manifest
    to `desktop-latest`. Installed apps start seeing the update within their next
    check.
 
@@ -165,7 +183,7 @@ exists:
 ## The two guards
 
 **The tag must equal `v` plus the version in `tauri.conf.json`** (and in the four
-other files listed in step 1). A guard job fails the build otherwise, before
+other files listed in step 2). A guard job fails the build otherwise, before
 anything is built.
 
 This is not tidiness. The installed app compares the version baked into it at

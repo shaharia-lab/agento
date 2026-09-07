@@ -111,8 +111,8 @@ use rmcp::handler::server::router::tool::{
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
@@ -402,7 +402,20 @@ impl ServerHandler for ToolServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(self.router.list_all()))
+        // SEP-2549: at protocol revision 2026-07-28 `ttlMs` and `cacheScope`
+        // are REQUIRED on a `tools/list` result, and the Claude Code CLI
+        // discards the **whole tool list** when either is missing — while still
+        // reporting the server `"status":"connected"`. `rmcp` advertises that
+        // revision but leaves both fields `Option`, so a hand-written handler
+        // owns them. `ttlMs: 0` is the spec's "immediately stale" (the tool set
+        // is per turn and per integration row) and `private` is right because
+        // every listener carries its own bearer token. Why in full, including
+        // what `prompts/list` and `resources/*` would need: `CLAUDE.md`,
+        // *Hosting a tool*. Pinned on the wire by
+        // `mcp::tests::a_tool_list_carries_the_cache_hints_the_cli_requires`.
+        Ok(ListToolsResult::with_all_items(self.router.list_all())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(

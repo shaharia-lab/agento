@@ -139,7 +139,7 @@ jobs:
           check "src-tauri/Cargo.toml"               "$cargo_toml_version"
 
           if [ "$fail" = 1 ]; then
-            echo "::error::Fix with: npm version ${tag_version} --no-git-tag-version (package.json + lockfile), set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand, then \`cargo update -p agento --offline\` for Cargo.lock. Then re-tag. See docs/releasing.md step 1."
+            echo "::error::Fix with: npm version ${tag_version} --no-git-tag-version (package.json + lockfile), set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand, then \`cargo update -p agento --offline\` for Cargo.lock. Then re-tag. See docs/releasing.md step 2."
             exit 1
           fi
           echo "ok: ${tag_version} in all five places"
