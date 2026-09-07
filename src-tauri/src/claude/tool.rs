@@ -402,30 +402,17 @@ impl ServerHandler for ToolServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, ErrorData> {
-        // SEP-2549: protocol revision 2026-07-28 makes `ttlMs` and `cacheScope`
-        // REQUIRED on a `tools/list` result, and the Claude Code CLI validates
-        // the result against that schema and discards the **whole tool list**
-        // when either is missing — silently, with the server still reported
-        // `"status":"connected"`, so the model simply answers that no such
-        // tools exist. `rmcp` advertises 2026-07-28 in
-        // `ProtocolVersion::KNOWN_VERSIONS` (so we have promised the contract)
-        // but leaves both fields `Option` for older peers, and
-        // `with_all_items` sets neither: a hand-written handler owns them. The
-        // macro handlers the SDK fixed in rust-sdk #1120 are unreachable here
-        // by design — #282 runs with the `macros` feature off because tools are
-        // chosen at runtime. Sending both to a legacy-revision peer is
-        // harmless, so there is no per-version branch.
-        //
-        // `ttlMs: 0` is the spec's "immediately stale", which is right: the
-        // tool set is per turn and per integration row. `private` is the scope
-        // the TypeScript SDK defaults to, and nothing here is shareable across
-        // authorization contexts anyway — every listener carries its own bearer
-        // token.
-        //
-        // The same two fields are required on `prompts/list`, `resources/list`,
-        // `resources/read` and `resources/templates/list`. Agento serves none of
-        // them; whichever one is served first has to set them here too.
-        // Pinned on the wire by `mcp::tests::a_tool_list_carries_the_cache_hints_the_cli_requires`.
+        // SEP-2549: at protocol revision 2026-07-28 `ttlMs` and `cacheScope`
+        // are REQUIRED on a `tools/list` result, and the Claude Code CLI
+        // discards the **whole tool list** when either is missing — while still
+        // reporting the server `"status":"connected"`. `rmcp` advertises that
+        // revision but leaves both fields `Option`, so a hand-written handler
+        // owns them. `ttlMs: 0` is the spec's "immediately stale" (the tool set
+        // is per turn and per integration row) and `private` is right because
+        // every listener carries its own bearer token. Why in full, including
+        // what `prompts/list` and `resources/*` would need: `CLAUDE.md`,
+        // *Hosting a tool*. Pinned on the wire by
+        // `mcp::tests::a_tool_list_carries_the_cache_hints_the_cli_requires`.
         Ok(ListToolsResult::with_all_items(self.router.list_all())
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private))

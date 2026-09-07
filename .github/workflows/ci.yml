@@ -67,7 +67,7 @@ jobs:
             exit 0
           fi
 
-          echo "::error::version strings disagree — tauri.conf.json=${conf} package.json=${pkg} package-lock.json=${lock} package-lock.json .packages['']=${lock_pkg} src-tauri/Cargo.toml=${cargo_toml}. Fix with: npm version ${conf} --no-git-tag-version (package.json + lockfile), and set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand (then \`cargo update -p agento --offline\` for Cargo.lock). See docs/releasing.md step 1."
+          echo "::error::version strings disagree — tauri.conf.json=${conf} package.json=${pkg} package-lock.json=${lock} package-lock.json .packages['']=${lock_pkg} src-tauri/Cargo.toml=${cargo_toml}. Fix with: npm version ${conf} --no-git-tag-version (package.json + lockfile), and set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand (then \`cargo update -p agento --offline\` for Cargo.lock). See docs/releasing.md step 2."
           exit 1
 
       # Every CLAUDE.md stays under 40k characters. Claude Code truncates a
