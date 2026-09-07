@@ -111,8 +111,8 @@ use rmcp::handler::server::router::tool::{
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
@@ -402,7 +402,33 @@ impl ServerHandler for ToolServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(self.router.list_all()))
+        // SEP-2549: protocol revision 2026-07-28 makes `ttlMs` and `cacheScope`
+        // REQUIRED on a `tools/list` result, and the Claude Code CLI validates
+        // the result against that schema and discards the **whole tool list**
+        // when either is missing — silently, with the server still reported
+        // `"status":"connected"`, so the model simply answers that no such
+        // tools exist. `rmcp` advertises 2026-07-28 in
+        // `ProtocolVersion::KNOWN_VERSIONS` (so we have promised the contract)
+        // but leaves both fields `Option` for older peers, and
+        // `with_all_items` sets neither: a hand-written handler owns them. The
+        // macro handlers the SDK fixed in rust-sdk #1120 are unreachable here
+        // by design — #282 runs with the `macros` feature off because tools are
+        // chosen at runtime. Sending both to a legacy-revision peer is
+        // harmless, so there is no per-version branch.
+        //
+        // `ttlMs: 0` is the spec's "immediately stale", which is right: the
+        // tool set is per turn and per integration row. `private` is the scope
+        // the TypeScript SDK defaults to, and nothing here is shareable across
+        // authorization contexts anyway — every listener carries its own bearer
+        // token.
+        //
+        // The same two fields are required on `prompts/list`, `resources/list`,
+        // `resources/read` and `resources/templates/list`. Agento serves none of
+        // them; whichever one is served first has to set them here too.
+        // Pinned on the wire by `mcp::tests::a_tool_list_carries_the_cache_hints_the_cli_requires`.
+        Ok(ListToolsResult::with_all_items(self.router.list_all())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(
