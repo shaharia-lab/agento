@@ -29,7 +29,12 @@
 //! `chat_sessions.continued_from_*` columns that record what a chat resumes and
 //! where its inherited history ends (#490). Migration **38** is the eighth:
 //! `user_settings.claude_executable_path`, the in-product escape hatch for when
-//! Claude Code CLI detection cannot find an install (#503).
+//! Claude Code CLI detection cannot find an install (#503). Migration **39** is
+//! the ninth: the five execution settings a trigger rule may now carry
+//! (`model`, `working_directory`, `settings_profile_id`, `permission_mode`,
+//! `timeout_minutes`), the `inbound_*` state columns on `integrations`, and the
+//! `inbound_threads` / `slack_processed_events` tables the Slack inbound half
+//! reads and writes (#563, epic #562).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -261,8 +266,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 38, "expected 38 migrations");
-        assert_eq!(expected_version(), 38);
+        assert_eq!(all.len(), 39, "expected 39 migrations");
+        assert_eq!(expected_version(), 39);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -356,7 +361,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 38);
+        assert_eq!(current_version(&conn).expect("version"), 39);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -387,6 +392,134 @@ mod tests {
         assert_eq!(old, 0, "migration 24 renames rather than adding");
     }
 
+    /// **Migration 39's mapping table is a table so that SQL can hold these four
+    /// properties** (#563), and asserting them here is what makes that a
+    /// property rather than a comment in the DDL.
+    ///
+    /// One row per Slack thread and one thread per Agento chat are the two
+    /// uniqueness rules a JSON blob could only enforce in code; the two cascades
+    /// are what stop a deleted chat or a deleted integration leaving a mapping
+    /// that resolves to nothing at request time.
+    ///
+    /// `foreign_keys=ON` is set explicitly because **it is per connection** —
+    /// `db::open_read_write` sets it in production, and without it both cascades
+    /// silently stop firing and this test still passes its first half.
+    #[test]
+    fn the_inbound_thread_mapping_is_unique_both_ways_and_cascades() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        apply(&mut conn).expect("apply");
+        conn.execute_batch("PRAGMA foreign_keys=ON")
+            .expect("pragma");
+
+        conn.execute_batch(
+            "INSERT INTO integrations (id, name, type, enabled, created_at, updated_at)
+                  VALUES ('int-1', 'Slack', 'slack', 1, '', ''),
+                         ('int-2', 'Other', 'slack', 1, '', '');
+             INSERT INTO chat_sessions (id, agent_slug, created_at, updated_at)
+                  VALUES ('chat-1', 'a', '', ''), ('chat-2', 'a', '', '');
+             INSERT INTO inbound_threads
+                     (integration_id, channel_id, thread_ts, chat_id)
+                  VALUES ('int-1', 'C1', '111.0', 'chat-1');",
+        )
+        .expect("seed");
+
+        let insert = |integration: &str, channel: &str, ts: &str, chat: &str| {
+            conn.execute(
+                "INSERT INTO inbound_threads (integration_id, channel_id, thread_ts, chat_id)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![integration, channel, ts, chat],
+            )
+        };
+
+        // The same thread twice, even pointing at a different chat.
+        insert("int-1", "C1", "111.0", "chat-2").expect_err("one row per thread");
+        // The same chat twice, even from a different thread.
+        insert("int-1", "C2", "222.0", "chat-1").expect_err("one thread per chat");
+        // Neither rule is a blanket refusal: a different thread and a different
+        // chat is fine, and so is the same channel and timestamp under another
+        // integration.
+        insert("int-1", "C2", "222.0", "chat-2").expect("a distinct pair");
+        conn.execute("DELETE FROM inbound_threads WHERE chat_id = 'chat-2'", [])
+            .expect("clean up");
+        insert("int-2", "C1", "111.0", "chat-2").expect("scoped to one integration");
+
+        let rows = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM inbound_threads", [], |row| row.get(0))
+                .expect("count")
+        };
+        assert_eq!(rows(&conn), 2);
+
+        // Deleting the chat takes its mapping...
+        conn.execute("DELETE FROM chat_sessions WHERE id = 'chat-1'", [])
+            .expect("delete chat");
+        assert_eq!(rows(&conn), 1);
+        // ...and so does deleting the integration.
+        conn.execute("DELETE FROM integrations WHERE id = 'int-2'", [])
+            .expect("delete integration");
+        assert_eq!(rows(&conn), 0);
+    }
+
+    /// The replay guard: `slack_processed_events` keys on the pair, so Slack
+    /// redelivering an event it believes failed cannot start a second run, while
+    /// the same event id under another integration still can.
+    #[test]
+    fn a_slack_event_is_recorded_once_per_integration() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        apply(&mut conn).expect("apply");
+
+        let record = |integration: &str, event: &str| {
+            conn.execute(
+                "INSERT INTO slack_processed_events (integration_id, event_id, processed_at)
+                 VALUES (?1, ?2, '')",
+                rusqlite::params![integration, event],
+            )
+        };
+        record("int-1", "Ev1").expect("first delivery");
+        record("int-1", "Ev1").expect_err("a redelivery is refused");
+        record("int-2", "Ev1").expect("another integration is a different event");
+    }
+
+    /// Migration 39's five columns land on the existing rules, with the defaults
+    /// that mean "what the dispatcher already does" — so the upgrade changes no
+    /// behaviour for a rule nobody has edited since.
+    #[test]
+    fn the_execution_settings_default_to_the_dispatchers_own_behaviour() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        apply(&mut conn).expect("apply");
+
+        conn.execute_batch(
+            "INSERT INTO integrations (id, name, type, enabled, created_at, updated_at)
+                  VALUES ('int-1', 'Telegram', 'telegram', 1, '', '');
+             INSERT INTO trigger_rules (id, integration_id, agent_slug)
+                  VALUES ('rule-1', 'int-1', 'a');",
+        )
+        .expect("a rule written the way an older build writes one");
+
+        let (model, dir, profile, mode, timeout): (String, String, String, String, i64) = conn
+            .query_row(
+                "SELECT model, working_directory, settings_profile_id, permission_mode,
+                        timeout_minutes
+                   FROM trigger_rules WHERE id = 'rule-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("the new columns");
+        assert_eq!((model.as_str(), dir.as_str()), ("", ""));
+        assert_eq!((profile.as_str(), mode.as_str()), ("", ""));
+        assert_eq!(timeout, 0);
+    }
+
     /// Idempotence, which is what makes a second process safe to run at all.
     #[test]
     fn applying_twice_is_a_no_op() {
@@ -395,7 +528,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 38);
+        assert_eq!(current_version(&conn).expect("version"), 39);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -503,7 +636,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 38);
+        assert_eq!(current_version(&conn).expect("version"), 39);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -512,7 +645,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 38);
+        assert_eq!(recorded, 39);
     }
 
     #[test]
