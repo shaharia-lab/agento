@@ -295,3 +295,23 @@
   height: 1px;
   background: var(--border);
 }
+
+/* The Slack origin row in the inspector (#570). `.insp-row__value` ellipsises a
+   single value on one nowrap line; this row has two children, so the channel id
+   gets the truncation and the action keeps its width — a long channel id must
+   not push "Open in Slack" out of the pane. */
+.chat-inbound {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.chat-inbound > .truncate {
+  min-width: 0;
+}
+
+.chat-inbound__open {
+  flex: none;
+  font-size: var(--text-sm);
+}

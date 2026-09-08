@@ -15,6 +15,7 @@ import { Icon } from "../lib/icons";
 import type {
   Agent,
   ChatDetail,
+  ChatInbound,
   ChatMessage,
   ChatSession,
   ClaudeMessage,
@@ -37,11 +38,24 @@ import { saveNewChatPrefs, type NewChatPrefs } from "../lib/newChatPrefs";
 import { Composer } from "./chat/Composer";
 import { Transcript } from "./chat/Transcript";
 import { useChatStream } from "./chat/useChatStream";
+import { openExternal } from "../lib/tauri";
 import { SessionLink } from "./sessions/SessionLink";
 import { SessionTranscript } from "./sessions/SessionTranscript";
 import "../styles/chats.css";
 
 type Filter = "all" | "favorites" | "running";
+
+/**
+ * The hover text both Slack markers share — the integration's own name, which
+ * is the only human-readable thing the mapping row carries.
+ *
+ * `integration_name` comes from a join and is empty if the integration could
+ * not be read, so it is never rendered bare.
+ */
+function inboundTitle(inbound: ChatInbound): string {
+  const where = `Slack #${inbound.channel_id}`;
+  return inbound.integration_name ? `${where} · ${inbound.integration_name}` : where;
+}
 
 /**
  * The detail endpoint answers `{session, messages}` rather than a flattened
@@ -502,6 +516,19 @@ export function ChatsView({
                           style={{ color: "var(--amber)" }}
                         />
                       )}
+                      {/* Where the chat came from, beside who runs it (#570).
+                          `purple` is Slack's tone in the integrations catalog,
+                          and the whole chip is keyed on the object existing —
+                          the backend omits `inbound` rather than sending an
+                          empty one. */}
+                      {c.inbound && (
+                        <span
+                          className="badge badge--purple"
+                          title={inboundTitle(c.inbound)}
+                        >
+                          Slack
+                        </span>
+                      )}
                       <span>{c.agent_slug || "No agent"}</span>
                       <span>·</span>
                       <span className="tnum">{tokenLabel(c)}</span>
@@ -765,6 +792,7 @@ export function ChatsView({
             <div className="inspector__scroll scroll">
               <InspGroup title="Details">
                 <InspRow label="Agent">{session.agent_slug || "None"}</InspRow>
+                {session.inbound && <InboundRow inbound={session.inbound} />}
                 <InspRow label="Model">
                   {session.model || stream.system?.model || "Default"}
                 </InspRow>
@@ -881,6 +909,44 @@ export function ChatsView({
  * one, because a mismatch renders no messages either and "no longer available"
  * would be the wrong sentence for a session that is available elsewhere.
  */
+/**
+ * Where the conversation started, when it was not this app (#570).
+ *
+ * The `Continued from` shape without the hand-off: `NavTarget` addresses a view
+ * *inside* Agento and this destination is Slack, so the action is
+ * `openExternal` — never `window.open` or a `target="_blank"`, neither of which
+ * leaves a Tauri webview.
+ *
+ * Two honest states. `permalink` is best-effort at the source — Slack's
+ * `chat.getPermalink` can fail and the run is not refused over it — so an empty
+ * one renders the row **without** the action rather than a link that goes
+ * nowhere. The channel is its id, not its name: that is all the mapping row
+ * carries.
+ */
+function InboundRow({ inbound }: { inbound: ChatInbound }) {
+  return (
+    <InspRow label="Started from">
+      <span className="chat-inbound">
+        <span className="truncate" title={inboundTitle(inbound)}>
+          Slack #{inbound.channel_id}
+        </span>
+        {inbound.permalink && (
+          <a
+            className="chat-inbound__open"
+            href={inbound.permalink}
+            onClick={(e) => {
+              e.preventDefault();
+              openExternal(inbound.permalink);
+            }}
+          >
+            Open in Slack
+          </a>
+        )}
+      </span>
+    </InspRow>
+  );
+}
+
 function ResumedHistory({
   sessionId,
   projectPath,

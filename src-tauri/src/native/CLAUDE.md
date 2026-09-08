@@ -455,6 +455,8 @@ are authored there directly.
   and `encoding/json` sorts map keys, so the order it is spelled in is not the
   order it ships in. This file said `{session, messages}` until the port
   measured it (#264).
+- **`inbound` is omitted, not `null`**, and it is the last key — so a chat with
+  no mapping row is byte-identical to pre-#570. Why: `ChatSession::inbound`.
 - **A `json.RawMessage` re-encodes through Go's `compact`**, which strips
   whitespace outside strings and HTML-escapes, but **preserves the stored key
   order and number spelling**. A tool_use `input` of `{"z":1.50,"a":1}` ships
