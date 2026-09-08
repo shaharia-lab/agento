@@ -22,6 +22,13 @@ import {
   Splitter,
 } from "../components/ui";
 import { DirField, useDirPicker } from "../components/DirField";
+import {
+  MODELS,
+  PERMISSION_MODES,
+  permissionLabel,
+  withCurrent,
+  type Option,
+} from "../lib/agentOptions";
 import "../styles/agents.css";
 
 /* --- Vocabulary the backend recognises ------------------------------------ */
@@ -43,36 +50,15 @@ const BUILT_IN_TOOLS = [
 
 const LOCAL_TOOLS = ["current_time"];
 
-interface Option {
-  value: string;
-  label: string;
-}
-
-const MODELS: Option[] = [
-  { value: "sonnet", label: "Sonnet" },
-  { value: "opus", label: "Opus" },
-  { value: "haiku", label: "Haiku" },
-];
-
+/* `Option`, `MODELS`, `PERMISSION_MODES` and `withCurrent` moved to
+   `lib/agentOptions.ts` with #569, so a Slack trigger rule offers the same
+   models and modes this form does. `THINKING` stays here: nothing else edits
+   it. */
 const THINKING: Option[] = [
   { value: "adaptive", label: "Adaptive" },
   { value: "enabled", label: "Always on" },
   { value: "disabled", label: "Disabled" },
 ];
-
-const PERMISSION_MODES: Option[] = [
-  { value: "bypass", label: "Bypass — never ask" },
-  { value: "default", label: "Default — ask before acting" },
-  { value: "plan", label: "Plan — propose, do not act" },
-  { value: "dontAsk", label: "Don't ask" },
-];
-
-const PERMISSION_LABELS: Record<string, string> = {
-  bypass: "Bypass",
-  default: "Default",
-  plan: "Plan",
-  dontAsk: "Don't ask",
-};
 
 const EMPTY_CAPS: AgentCapabilities = { built_in: null, local: null, mcp: null };
 
@@ -954,17 +940,4 @@ function slugify(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-}
-
-function permissionLabel(mode: string): string {
-  return PERMISSION_LABELS[mode] ?? (mode || "Default");
-}
-
-/** Keep a value the server sent but the UI does not enumerate selectable. */
-function withCurrent(options: Option[], value: string): Option[] {
-  if (options.some((o) => o.value === value)) return options;
-  return [
-    { value, label: value === "" ? "Unset — server default" : value },
-    ...options,
-  ];
 }

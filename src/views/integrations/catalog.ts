@@ -53,6 +53,22 @@ export interface ServiceInfo {
   tools: ToolInfo[];
 }
 
+/**
+ * What a trigger rule's `filter_chat_ids` is called on this provider, and how
+ * a row summarises one.
+ *
+ * The wire column is one thing and the user's word for it is another —
+ * Telegram routes by chat, Slack by channel — so the branch lives here rather
+ * than as a `provider.type === "slack"` in the form. `catalog.ts` is where
+ * "what does this app say about an integration?" is answered (#518).
+ */
+export interface TriggerTargets {
+  placeholder: string;
+  help: string;
+  /** The singular noun a row's `N x filter(s)` summary is built from. */
+  noun: string;
+}
+
 export interface Provider {
   type: string;
   label: string;
@@ -63,8 +79,32 @@ export interface Provider {
   hasAuthModeField: boolean;
   modes: AuthMode[];
   services: ServiceInfo[];
-  /** Telegram is the only provider wired to inbound triggers and webhooks. */
+  /**
+   * Whether inbound messages can start an agent here, i.e. whether the trigger
+   * rules list is offered. Telegram and Slack both are — but by different
+   * transports, which is what the two flags below distinguish (#566, #569).
+   */
   supportsTriggers?: boolean;
+  /** Telegram: the webhook Telegram pushes updates to. */
+  supportsWebhook?: boolean;
+  /** Slack: the Socket Mode connection Agento holds open (#569). */
+  supportsInbound?: boolean;
+  /** Only read when `supportsTriggers`. */
+  triggerTargets?: TriggerTargets;
+  /**
+   * A credential field that lives *beside* whichever mode the row uses rather
+   * than inside one (#569).
+   *
+   * Slack's `app_token` is the only instance: Socket Mode needs an app-level
+   * `xapp-…` token as well as whichever of bot-token/OAuth the row already has,
+   * so making it a mode would force a user holding a bot token to give one of
+   * the two up. The backend agrees — `credentials.app_token` is a field, not an
+   * `auth_mode`, and nothing about it reaches the `auth_mode` allowlist.
+   *
+   * It is optional: a row that never sets one is a perfectly valid Slack
+   * integration with no inbound connection.
+   */
+  extraField?: CredField;
   docs?: string;
 }
 
@@ -172,6 +212,20 @@ export const PROVIDERS: Provider[] = [
         ],
       },
     ],
+    supportsTriggers: true,
+    supportsInbound: true,
+    triggerTargets: {
+      placeholder: "C0123ABCDEF, C0456GHIJKL (blank = any channel)",
+      help: "Slack channel ids, comma-separated; empty = every channel the app is in.",
+      noun: "channel",
+    },
+    extraField: {
+      key: "app_token",
+      label: "App token",
+      secret: true,
+      placeholder: "xapp-1-…",
+      help: "An app-level token, needed only for Socket Mode. Create one under Basic Information → App-Level Tokens with the connections:write scope.",
+    },
   },
   {
     type: "github",
@@ -298,6 +352,15 @@ export const PROVIDERS: Provider[] = [
       },
     ],
     supportsTriggers: true,
+    supportsWebhook: true,
+    triggerTargets: {
+      /* The strings this provider already showed, moved here unchanged by
+         #569 so the field's wording is per-provider rather than Telegram's
+         with a Slack special case in the form. */
+      placeholder: "Chat IDs, comma separated (blank = any chat)",
+      help: "Telegram chat ids, comma-separated; empty = every chat the bot is in.",
+      noun: "chat",
+    },
   },
   {
     type: "jira",
@@ -501,6 +564,48 @@ export function connectionState(authenticated: boolean): ConnectionState {
  */
 export type PinConnected = Expect<Eq<typeof CONNECTED, "Connected">>;
 export type PinNotConnected = Expect<Eq<typeof NOT_CONNECTED, "Not connected">>;
+
+/* --- The inbound connection's own vocabulary (#569) ----------------------
+   A second state on the same screen, and therefore a second set of words
+   spelled *here* rather than at the badge — the reason `connectionState`
+   exists at all. `inbound_status` is the Socket Mode worker's column and has
+   nothing to do with `authenticated`, so the two must not read alike: a Slack
+   row shows the Authorisation badge and the Inbound badge inches apart, and
+   `Not connected` under both would name two unrelated failures with one
+   phrase. Only the *connected* word is shared, deliberately — a live socket is
+   connected in the plain sense, and #569 names that word — and the row labels
+   (`Status` / `Socket Mode`) are what separate them.
+
+   An unrecognised status is reported as itself: the worker owns this column
+   (#567) and may learn a word before this module does. Guessing at it would
+   be the one thing worse than showing it. */
+
+/** What a socket that has never run is called — never `Not connected`. */
+export const NOT_RUNNING = "Not running";
+export type PinNotRunning = Expect<Eq<typeof NOT_RUNNING, "Not running">>;
+
+export interface InboundState {
+  label: string;
+  /** A `badge--*` modifier, or "" for the neutral badge. */
+  tone: string;
+}
+
+export function inboundState(status: string): InboundState {
+  switch (status) {
+    case "connected":
+      return { label: CONNECTED, tone: "badge--green" };
+    case "connecting":
+      return { label: "Connecting", tone: "badge--amber" };
+    case "reconnecting":
+      return { label: "Reconnecting", tone: "badge--amber" };
+    case "error":
+      return { label: "Error", tone: "badge--red" };
+    case "":
+      return { label: NOT_RUNNING, tone: "" };
+    default:
+      return { label: status, tone: "" };
+  }
+}
 
 /**
  * The mode a stored integration is using.

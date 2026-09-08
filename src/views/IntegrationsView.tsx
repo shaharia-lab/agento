@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../lib/api";
-import { describeError, useResource } from "../lib/hooks";
+import { describeError, useResource, usePoll } from "../lib/hooks";
 import { dateTime, relativeTime } from "../lib/format";
 import { DESTROY, SUBMIT_CREATE } from "../lib/formVerbs";
 import { SaveBar } from "../components/SaveBar";
@@ -17,9 +17,17 @@ import {
   Splitter,
   Switch,
 } from "../components/ui";
+import { DirField, useDirPicker } from "../components/DirField";
+import {
+  MODELS,
+  PERMISSION_MODES,
+  permissionLabel,
+  withCurrent,
+} from "../lib/agentOptions";
 import type {
   Agent,
   AvailableTool,
+  ClaudeSettingsProfile,
   Integration,
   ServiceConfig,
   TriggerRule,
@@ -27,13 +35,16 @@ import type {
 } from "../lib/types";
 import {
   connectionState,
+  inboundState,
   modeFor,
   NOT_CONNECTED,
   PROVIDERS,
   providerFor,
   unavailableCopy,
   type AuthMode,
+  type CredField,
   type Provider,
+  type TriggerTargets,
 } from "./integrations/catalog";
 import "../styles/integrations.css";
 
@@ -56,9 +67,16 @@ import "../styles/integrations.css";
      spelling one heading twice is exactly how the drift started, so a rename
      here changes both.
    * **Edit-only sections render *after* the shared body** — Authorisation, the
-     trigger rules, the webhook and the *Enabled* switch. Both screens therefore
-     open on the same thing, and the layout a user learns on the way in is the
-     one they meet on the way back.
+     inbound connection, the trigger rules, the webhook and the *Enabled*
+     switch. Both screens therefore open on the same thing, and the layout a
+     user learns on the way in is the one they meet on the way back.
+
+   **Two providers take inbound messages and they take them differently**
+   (#569). `supportsTriggers` buys the trigger-rules list on both; the transport
+   beside it is a second flag — `supportsWebhook` for the URL Telegram pushes
+   to, `supportsInbound` for the Socket Mode connection Agento holds open to
+   Slack. Reading one flag for both is how Slack came to render a Register
+   button for a webhook route it has no handler for.
    ========================================================================== */
 
 /** The heading over Name, the auth method and the credential fields. */
@@ -67,6 +85,8 @@ const CONNECTION_TITLE = "Connection";
 const SERVICES_TITLE = "Services and tools";
 /** The heading over the edit-only *Enabled* switch. */
 const AVAILABILITY_TITLE = "Availability";
+/** The heading over the Socket Mode switch and its status (#569). */
+const INBOUND_TITLE = "Inbound";
 
 const NAME_HELP =
   "How this connection is labelled in Agento. Useful when you connect the same provider twice.";
@@ -74,6 +94,23 @@ const SERVICES_HELP =
   "Only the tools you leave on are exposed to agents. You can change this later.";
 const STORED_SECRET_HELP =
   "Agento cannot show a stored secret back to you, and does not need to — leave this alone and saving keeps it.";
+const INBOUND_HELP =
+  "Socket Mode holds an outbound connection to Slack so mentions reach Agento without a public URL. Turn it off to close the connection; nothing is deleted.";
+const INBOUND_NEEDS_TOKEN =
+  "Store an app-level token above before this can be turned on.";
+/**
+ * Why the app token cannot be set on its own.
+ *
+ * `PUT /api/integrations/{id}` is three-valued and any credentials blob it is
+ * sent **replaces** the stored one whole (#515), so there is no way to add one
+ * key without restating the rest. Saying so is better than a Save that quietly
+ * takes the bot token with it — which is also what the backend assumes, since
+ * a replacing blob with no app token clears `inbound_enabled` on the way past.
+ */
+const REPLACE_BLOB_WARNING =
+  "Credentials are stored as one value, so saving replaces every field below — fill in each one you want kept, not only the one you are changing.";
+const APP_TOKEN_REPLACE_WARNING =
+  "Leaving the app token blank drops the stored one and turns Socket Mode off.";
 
 type Selection =
   | {
@@ -99,6 +136,19 @@ function emptyServices(provider: Provider, on: boolean): Services {
   return out;
 }
 
+/**
+ * The fields the credential block offers: the selected mode's, plus the one
+ * that sits beside every mode (#569 — Slack's `app_token`).
+ *
+ * One function rather than the spread written at each site, for the reason
+ * `hasTypedCredentials` gives: the set that is *rendered*, the set that decides
+ * a blob is being sent and the set that is actually built are only correct
+ * while all three agree.
+ */
+function credentialFields(provider: Provider, mode: AuthMode): CredField[] {
+  return provider.extraField ? [...mode.fields, provider.extraField] : mode.fields;
+}
+
 function buildCredentials(
   provider: Provider,
   mode: AuthMode,
@@ -106,7 +156,9 @@ function buildCredentials(
 ): Record<string, string> {
   const out: Record<string, string> = {};
   if (provider.hasAuthModeField) out.auth_mode = mode.value;
-  for (const f of mode.fields) out[f.key] = (values[f.key] ?? "").trim();
+  for (const f of credentialFields(provider, mode)) {
+    out[f.key] = (values[f.key] ?? "").trim();
+  }
   return out;
 }
 
@@ -131,11 +183,22 @@ function credentialsToSave(
   mode: AuthMode,
   values: Record<string, string>
 ): Record<string, string> | undefined {
-  return hasTypedCredentials(mode, values)
+  return hasTypedCredentials(provider, mode, values)
     ? buildCredentials(provider, mode, values)
     : undefined;
 }
 
+/**
+ * Whether the blob about to be sent is a *whole* credential for the selected
+ * mode.
+ *
+ * `provider.extraField` is deliberately absent from this: Slack's app token is
+ * optional, and a row with no Socket Mode is a perfectly good integration. The
+ * asymmetry with `hasTypedCredentials`, which *does* count it, is the point —
+ * typing an app token alone means a blob is being sent, and a sent blob
+ * replaces the stored one whole (#515), so the mode's own fields have to come
+ * with it or the save would wipe the token it is meant to sit beside.
+ */
 function credentialsComplete(mode: AuthMode, values: Record<string, string>): boolean {
   return mode.fields.every((f) => (values[f.key] ?? "").trim() !== "");
 }
@@ -151,8 +214,12 @@ function credentialsComplete(mode: AuthMode, values: Record<string, string>): bo
  * button that never enables. This is the frontend half of the rule
  * `the_two_has_credentials_rules_agree` pins on the backend.
  */
-function hasTypedCredentials(mode: AuthMode, values: Record<string, string>): boolean {
-  return mode.fields.some((f) => (values[f.key] ?? "").trim() !== "");
+function hasTypedCredentials(
+  provider: Provider,
+  mode: AuthMode,
+  values: Record<string, string>
+): boolean {
+  return credentialFields(provider, mode).some((f) => (values[f.key] ?? "").trim() !== "");
 }
 
 function countTools(services: Services | null | undefined): number {
@@ -607,6 +674,8 @@ function ConnectionFields({
   values,
   onValues,
   stored,
+  appTokenStored,
+  credentialsStored,
   note,
 }: {
   provider: Provider;
@@ -623,6 +692,29 @@ function ConnectionFields({
    * the fields (#515).
    */
   stored?: { onReplace(): void };
+  /**
+   * Edit-only: whether `provider.extraField` currently has a value stored —
+   * `has_app_token` for Slack (#569). It is a *second* stored-secret line
+   * rather than a second `stored` prop because there is only one blob and only
+   * one *Replace*: the extra field rides inside the same credentials object, so
+   * a row can hold a bot token and no app token, and the collapsed view has to
+   * be able to say so.
+   */
+  appTokenStored?: boolean;
+  /**
+   * Edit-only: whether the row holds any credential at all. What it gates is
+   * the warning above the inputs — on a row with nothing stored there is
+   * nothing a save could replace, which is every connect screen and the one
+   * edit case where the fields open by themselves.
+   *
+   * The warning is also gated on the provider having an `extraField`, which
+   * today means Slack alone. #515's replace semantics are every provider's, so
+   * the sentence would be true on all six — but a provider whose blob is one
+   * mode's fields has nothing a user could *forget* to restate, and #569 is a
+   * Slack change. Drop the second gate when a second provider grows a field
+   * that sits outside its mode.
+   */
+  credentialsStored?: boolean;
   /** Anything the screen wants at the foot of the section. */
   note?: ReactNode;
 }) {
@@ -640,6 +732,7 @@ function ConnectionFields({
    * providers carries at least one field — and cheap to keep right.
    */
   const needsCredentials = mode.fields.length > 0;
+  const extra = provider.extraField;
 
   return (
     <div className="formsec">
@@ -660,7 +753,8 @@ function ConnectionFields({
       </div>
 
       {stored ? (
-        needsCredentials && (
+        <>
+          {needsCredentials && (
           /* The label stays generic rather than becoming `mode.label`. The
              stored mode *is* reportable since #513, and the inspector reports
              it — but only when the row records one. A multi-mode row saved
@@ -681,7 +775,29 @@ function ConnectionFields({
               <div className="formrow__help">{STORED_SECRET_HELP}</div>
             </div>
           </div>
-        )
+          )}
+
+          {extra && (
+            /* The same treatment as the blob above, on the one key whose
+               presence the app reports separately. *Replace* opens the whole
+               credential block, because that is the only write there is — see
+               `APP_TOKEN_REPLACE_WARNING`. */
+            <div className="formrow">
+              <div className="formrow__label">{extra.label}</div>
+              <div className="formrow__control">
+                <div className="int-storedsecret">
+                  <span className="mono">
+                    {appTokenStored ? "••••••••••• stored" : "Not set"}
+                  </span>
+                  <button className="btn btn--ghost" onClick={stored.onReplace}>
+                    {appTokenStored ? "Replace" : "Add"}
+                  </button>
+                </div>
+                {extra.help && <div className="formrow__help">{extra.help}</div>}
+              </div>
+            </div>
+          )}
+        </>
       ) : (
         <>
           {provider.modes.length > 1 && (
@@ -697,7 +813,25 @@ function ConnectionFields({
             </div>
           )}
 
-          <CredentialFields mode={mode} values={values} onChange={onValues} />
+          {credentialsStored && extra && (
+            /* Once, above the fields rather than under one of them: the rule is
+               about the blob, not about a key. */
+            <div className="msgline msgline--warn">
+              <span className="msgline__icon">
+                <Icon name="alert" size={13} />
+              </span>
+              <span>
+                {REPLACE_BLOB_WARNING}
+                {extra && appTokenStored ? ` ${APP_TOKEN_REPLACE_WARNING}` : ""}
+              </span>
+            </div>
+          )}
+
+          <CredentialFields
+            fields={credentialFields(provider, mode)}
+            values={values}
+            onChange={onValues}
+          />
         </>
       )}
 
@@ -733,17 +867,18 @@ function ServicesSection({
 /* --- Credentials --------------------------------------------------------- */
 
 function CredentialFields({
-  mode,
+  fields,
   values,
   onChange,
 }: {
-  mode: AuthMode;
+  /** `credentialFields(provider, mode)` — the mode's, plus any extra one. */
+  fields: CredField[];
   values: Record<string, string>;
   onChange(next: Record<string, string>): void;
 }) {
   return (
     <>
-      {mode.fields.map((f) => (
+      {fields.map((f) => (
         <div className="formrow" key={f.key}>
           <div className="formrow__label">{f.label}</div>
           <div className="formrow__control">
@@ -943,7 +1078,7 @@ function IntegrationDetail({
    * leaving the field alone keeps the integration unusable.
    */
   const [replacing, setReplacing] = useState(!item.has_credentials);
-  const typedCredentials = hasTypedCredentials(mode, values);
+  const typedCredentials = hasTypedCredentials(provider, mode, values);
   /** The Auth method control is on a method the row does not record. */
   const modeChanged = modeValue !== modeFor(provider, item.auth_mode).value;
 
@@ -1131,6 +1266,8 @@ function IntegrationDetail({
                `canSave` demands a complete credential whenever the mode
                changed — see the note on it. */
             stored={replacing ? undefined : { onReplace: () => setReplacing(true) }}
+            appTokenStored={item.has_app_token}
+            credentialsStored={item.has_credentials}
           />
 
           <div className="divider" />
@@ -1148,10 +1285,23 @@ function IntegrationDetail({
 
           {provider.supportsTriggers && (
             <>
+              {/* Inbound first: a trigger rule only fires once something is
+                  delivering messages, so the connection that delivers them is
+                  the thing to read before the rules that consume them. */}
+              {provider.supportsInbound && (
+                <>
+                  <div className="divider" />
+                  <InboundPanel item={item} />
+                </>
+              )}
               <div className="divider" />
-              <TriggerRules integrationId={item.id} />
-              <div className="divider" />
-              <WebhookPanel integrationId={item.id} />
+              <TriggerRules integrationId={item.id} provider={provider} />
+              {provider.supportsWebhook && (
+                <>
+                  <div className="divider" />
+                  <WebhookPanel integrationId={item.id} />
+                </>
+              )}
             </>
           )}
 
@@ -1431,8 +1581,23 @@ function AuthSection({
   );
 }
 
-/* --- Telegram trigger rules ---------------------------------------------- */
+/* --- Trigger rules -------------------------------------------------------- */
 
+/** The wording for a provider that declares none. */
+const TRIGGER_TARGETS_FALLBACK: TriggerTargets = {
+  placeholder: "IDs, comma separated (blank = any)",
+  help: "Conversation ids, comma-separated; empty = every conversation.",
+  noun: "chat",
+};
+
+/** The longest run a rule may ask for, matching the write's own bound. */
+const RULE_MAX_TIMEOUT_MINUTES = 240;
+
+/**
+ * Every field the form edits, as strings — `timeout_minutes` included, because
+ * a number input reports `""` mid-edit and a draft that cannot hold that has to
+ * either reject a backspace or invent a zero.
+ */
 interface RuleDraft {
   id?: string;
   name: string;
@@ -1441,6 +1606,12 @@ interface RuleDraft {
   filter_prefix: string;
   filter_keywords: string;
   filter_chat_ids: string;
+  /** Migration 39's five (#563); "" / "0" everywhere means "the dispatcher's". */
+  model: string;
+  working_directory: string;
+  settings_profile_id: string;
+  permission_mode: string;
+  timeout_minutes: string;
 }
 
 const BLANK_RULE: RuleDraft = {
@@ -1450,7 +1621,98 @@ const BLANK_RULE: RuleDraft = {
   filter_prefix: "",
   filter_keywords: "",
   filter_chat_ids: "",
+  model: "",
+  working_directory: "",
+  settings_profile_id: "",
+  permission_mode: "",
+  timeout_minutes: "",
 };
+
+/** A stored rule, as the form edits it. */
+function draftOf(r: TriggerRule): RuleDraft {
+  return {
+    id: r.id,
+    name: r.name,
+    agent_slug: r.agent_slug,
+    enabled: r.enabled,
+    filter_prefix: r.filter_prefix,
+    filter_keywords: (r.filter_keywords ?? []).join(", "),
+    filter_chat_ids: (r.filter_chat_ids ?? []).join(", "),
+    model: r.model,
+    working_directory: r.working_directory,
+    settings_profile_id: r.settings_profile_id,
+    permission_mode: r.permission_mode,
+    timeout_minutes: r.timeout_minutes > 0 ? String(r.timeout_minutes) : "",
+  };
+}
+
+/**
+ * The body every write of a rule sends.
+ *
+ * `POST`/`PUT /integrations/{id}/triggers` is **replace, not preserve**: every
+ * field of the request decodes a missing key as its zero value, so a body that
+ * names ten of the eleven columns resets the eleventh. That is what made the
+ * row's *enabled* switch erase a rule's model, working directory, profile,
+ * permission mode and timeout — it sent six.
+ *
+ * **The type is the shared thing, and the two builders are not one function.**
+ * A form save has to normalise what was typed; the row's toggle must not
+ * normalise anything, because it edits one boolean and the user never opened
+ * the controls the rest of the fields belong to. Passing the stored row through
+ * the form's builder would mean `.trim()` on seven fields and a
+ * join-then-split on two — and `filter_prefix` is stored **untrimmed** and
+ * matched as an exact byte prefix, so a stored `"@bot "` would silently become
+ * `"@bot"` on an unrelated on/off flick and start firing on `"@bothersome"`.
+ * `RuleWrite` is what keeps the two in step: omit a key from either and `tsc`
+ * fails, which is the guard the single function was there to provide.
+ */
+interface RuleWrite {
+  name: string;
+  agent_slug: string;
+  enabled: boolean;
+  filter_prefix: string;
+  filter_keywords: string[] | null;
+  filter_chat_ids: string[] | null;
+  model: string;
+  working_directory: string;
+  settings_profile_id: string;
+  permission_mode: string;
+  timeout_minutes: number;
+}
+
+/** From the form: what was typed, normalised. */
+function ruleBody(d: RuleDraft): RuleWrite {
+  return {
+    name: d.name.trim(),
+    agent_slug: d.agent_slug.trim(),
+    enabled: d.enabled,
+    filter_prefix: d.filter_prefix.trim(),
+    filter_keywords: splitList(d.filter_keywords),
+    filter_chat_ids: splitList(d.filter_chat_ids),
+    model: d.model.trim(),
+    working_directory: d.working_directory.trim(),
+    settings_profile_id: d.settings_profile_id.trim(),
+    permission_mode: d.permission_mode.trim(),
+    timeout_minutes: Number(d.timeout_minutes) || 0,
+  };
+}
+
+/** From the stored row: every field verbatim, and only `enabled` changed. */
+function ruleBodyToggled(r: TriggerRule, enabled: boolean): RuleWrite {
+  return {
+    name: r.name,
+    agent_slug: r.agent_slug,
+    enabled,
+    filter_prefix: r.filter_prefix,
+    filter_keywords: r.filter_keywords,
+    filter_chat_ids: r.filter_chat_ids,
+    model: r.model,
+    working_directory: r.working_directory,
+    settings_profile_id: r.settings_profile_id,
+    permission_mode: r.permission_mode,
+    timeout_minutes: r.timeout_minutes,
+  };
+}
 
 function splitList(v: string): string[] | null {
   const parts = v
@@ -1460,7 +1722,13 @@ function splitList(v: string): string[] | null {
   return parts.length > 0 ? parts : null;
 }
 
-function TriggerRules({ integrationId }: { integrationId: string }) {
+function TriggerRules({
+  integrationId,
+  provider,
+}: {
+  integrationId: string;
+  provider: Provider;
+}) {
   const rules = useResource(
     (signal) =>
       api.get<TriggerRule[] | null>(`/integrations/${integrationId}/triggers`, signal),
@@ -1470,6 +1738,17 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
     (signal) => api.get<Agent[] | null>("/agents", signal),
     []
   );
+  // Profiles are optional — an install with none answers 404 rather than an
+  // empty list, and a rule with no profile is the normal case, so a failed read
+  // hides the picker instead of failing the section. `NewChatBar` does the same.
+  const profiles = useResource(
+    (signal) =>
+      api
+        .get<ClaudeSettingsProfile[] | null>("/claude-settings/profiles", signal)
+        .catch(() => null),
+    []
+  );
+  const picker = useDirPicker();
 
   const [draft, setDraft] = useState<RuleDraft>();
   const [busy, setBusy] = useState(false);
@@ -1478,6 +1757,8 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
 
   const list = rules.data ?? [];
   const agentList = agents.data ?? [];
+  const profileList = profiles.data ?? [];
+  const targets = provider.triggerTargets ?? TRIGGER_TARGETS_FALLBACK;
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -1493,14 +1774,7 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
   }
 
   function save(d: RuleDraft) {
-    const body = {
-      name: d.name.trim(),
-      agent_slug: d.agent_slug.trim(),
-      enabled: d.enabled,
-      filter_prefix: d.filter_prefix.trim(),
-      filter_keywords: splitList(d.filter_keywords),
-      filter_chat_ids: splitList(d.filter_chat_ids),
-    };
+    const body = ruleBody(d);
     return run(async () => {
       if (d.id) {
         await api.put(`/integrations/${integrationId}/triggers/${d.id}`, body);
@@ -1534,6 +1808,9 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
               key={r.id}
               draft={draft}
               agents={agentList}
+              profiles={profileList}
+              targets={targets}
+              browse={picker.browse}
               busy={busy}
               onChange={setDraft}
               onCancel={() => setDraft(undefined)}
@@ -1550,8 +1827,18 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
                     <span>keywords: {r.filter_keywords.join(", ")}</span>
                   )}
                   {r.filter_chat_ids && r.filter_chat_ids.length > 0 && (
-                    <span>{r.filter_chat_ids.length} chat filter(s)</span>
+                    <span>
+                      {r.filter_chat_ids.length} {targets.noun} filter(s)
+                    </span>
                   )}
+                  {/* The execution settings, and only the ones this rule
+                      actually overrides: a chip per default would be five chips
+                      on every row saying nothing. */}
+                  {ruleChips(r, profileList).map((c) => (
+                    <span className="badge" key={c}>
+                      {c}
+                    </span>
+                  ))}
                 </span>
               </div>
               {confirmDelete === r.id ? (
@@ -1577,33 +1864,23 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
                 <>
                   <Switch
                     on={r.enabled}
+                    disabled={busy}
+                    /* The write is replace, so the body carries every column —
+                       and carries it verbatim, because this control edits one
+                       boolean. See `RuleWrite`. */
                     onChange={(on) =>
                       run(() =>
-                        api.put(`/integrations/${integrationId}/triggers/${r.id}`, {
-                          name: r.name,
-                          agent_slug: r.agent_slug,
-                          enabled: on,
-                          filter_prefix: r.filter_prefix,
-                          filter_keywords: r.filter_keywords,
-                          filter_chat_ids: r.filter_chat_ids,
-                        })
+                        api.put(
+                          `/integrations/${integrationId}/triggers/${r.id}`,
+                          ruleBodyToggled(r, on)
+                        )
                       )
                     }
                   />
                   <button
                     className="iconbtn"
                     title="Edit"
-                    onClick={() =>
-                      setDraft({
-                        id: r.id,
-                        name: r.name,
-                        agent_slug: r.agent_slug,
-                        enabled: r.enabled,
-                        filter_prefix: r.filter_prefix,
-                        filter_keywords: (r.filter_keywords ?? []).join(", "),
-                        filter_chat_ids: (r.filter_chat_ids ?? []).join(", "),
-                      })
-                    }
+                    onClick={() => setDraft(draftOf(r))}
                   >
                     <Icon name="edit" size={13} />
                   </button>
@@ -1624,6 +1901,9 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
           <RuleForm
             draft={draft}
             agents={agentList}
+            profiles={profileList}
+            targets={targets}
+            browse={picker.browse}
             busy={busy}
             onChange={setDraft}
             onCancel={() => setDraft(undefined)}
@@ -1644,13 +1924,40 @@ function TriggerRules({ integrationId }: { integrationId: string }) {
       )}
 
       {error && <div className="msgline msgline--error">{error}</div>}
+      {/* The in-app directory browser, for when the native dialog is
+          unavailable — `DirField` renders the input, not this. */}
+      {picker.browser}
     </div>
   );
+}
+
+/**
+ * The non-default execution settings of a rule, as short chips.
+ *
+ * A profile is named rather than shown as its id: the id is a uuid, and a row
+ * that reads `profile: 6f1c…` tells the user nothing they can act on. An id the
+ * profile list does not hold is still reported — the profile may have been
+ * deleted, and hiding the chip would hide the reason the rule behaves oddly.
+ */
+function ruleChips(r: TriggerRule, profiles: ClaudeSettingsProfile[]): string[] {
+  const out: string[] = [];
+  if (r.model) out.push(`model: ${r.model}`);
+  if (r.permission_mode) out.push(`permissions: ${permissionLabel(r.permission_mode)}`);
+  if (r.working_directory) out.push(`dir: ${r.working_directory}`);
+  if (r.settings_profile_id) {
+    const p = profiles.find((x) => x.id === r.settings_profile_id);
+    out.push(`profile: ${p?.name ?? r.settings_profile_id}`);
+  }
+  if (r.timeout_minutes > 0) out.push(`timeout: ${r.timeout_minutes}m`);
+  return out;
 }
 
 function RuleForm({
   draft,
   agents,
+  profiles,
+  targets,
+  browse,
   busy,
   onChange,
   onCancel,
@@ -1658,12 +1965,39 @@ function RuleForm({
 }: {
   draft: RuleDraft;
   agents: Agent[];
+  profiles: ClaudeSettingsProfile[];
+  targets: TriggerTargets;
+  browse: ReturnType<typeof useDirPicker>["browse"];
   busy: boolean;
   onChange(d: RuleDraft): void;
   onCancel(): void;
   onSave(): void;
 }) {
-  const ready = draft.name.trim() !== "" && draft.agent_slug.trim() !== "";
+  const agent = agents.find((a) => a.slug === draft.agent_slug);
+  /**
+   * **A rule's model is not `NewChatBar`'s, and the precedence is inverted.**
+   *
+   * The chat path takes the agent's model and ignores the chat's (#299), which
+   * is why that picker locks itself when the agent names one. A trigger fires a
+   * *headless* run, and `agent_run.rs::headless_spec` says the opposite in as
+   * many words — "The caller's model wins over the agent's own" — writing the
+   * rule's model over the agent's whenever it is set;
+   * `dispatcher.rs::run_inputs_carries_the_rules_settings_and_its_timeout`
+   * pins it by asserting a rule's `opus` on an agent that already carried a
+   * model. So locking here would grey out a setting the backend honours, and
+   * caption it with a model different from the one that would run.
+   *
+   * What survives of "from agent" is the *default* option's wording: with no
+   * model of its own the rule really does run the agent's, and naming it is
+   * the honest half of what the lock was for.
+   */
+  const agentModel = agent?.model ?? "";
+  const timeout = Number(draft.timeout_minutes);
+  const timeoutValid =
+    draft.timeout_minutes === "" ||
+    (Number.isInteger(timeout) && timeout >= 0 && timeout <= RULE_MAX_TIMEOUT_MINUTES);
+  const ready =
+    draft.name.trim() !== "" && draft.agent_slug.trim() !== "" && timeoutValid;
 
   return (
     <div className="rulerow" style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--sp-4)" }}>
@@ -1725,12 +2059,107 @@ function RuleForm({
           <input
             value={draft.filter_chat_ids}
             onChange={(e) => onChange({ ...draft, filter_chat_ids: e.target.value })}
-            placeholder="Chat IDs, comma separated (blank = any chat)"
+            placeholder={targets.placeholder}
             className="mono"
             spellCheck={false}
           />
         </label>
       </div>
+      <div className="formrow__help">{targets.help}</div>
+
+      {/* The execution settings a rule may override (#563). Every one is
+          optional: left alone, the run gets whatever the dispatcher already
+          does, which is what a rule written before migration 39 reads back as.
+
+          `flexWrap`, unlike the rows above it: this row carries four controls
+          whose triggers are as wide as the value they show, so a long model id
+          or profile name pushes the last one out of the pane rather than
+          shrinking. The rows above hold two flexible inputs and cannot. */}
+      <div className="row" style={{ gap: "var(--sp-3)", flexWrap: "wrap" }}>
+        <Dropdown
+          small
+          value={draft.model}
+          onChange={(model) => onChange({ ...draft, model })}
+          ariaLabel="Model"
+          label={`Model: ${draft.model || (agentModel ? `${agentModel} (from agent)` : "default")}`}
+          /* `withCurrent` over a list that *already* carries the empty option,
+             never prepended beside it: its own empty case is worded
+             "Unset — server default", so calling it on a list without one
+             yields two options keyed `""` — duplicate React keys, and two rows
+             both `aria-selected`, on the default state of every new rule. */
+          options={withCurrent(
+            [
+              {
+                value: "",
+                label: agentModel ? `Agent's model (${agentModel})` : "Default model",
+              },
+              ...MODELS,
+            ],
+            draft.model
+          )}
+        />
+        <Dropdown
+          small
+          value={draft.permission_mode}
+          onChange={(permission_mode) => onChange({ ...draft, permission_mode })}
+          ariaLabel="Permission mode"
+          label={`Permissions: ${draft.permission_mode ? permissionLabel(draft.permission_mode) : "default"}`}
+          options={withCurrent(
+            [{ value: "", label: "Default permissions" }, ...PERMISSION_MODES],
+            draft.permission_mode
+          )}
+        />
+        {/* An empty profile list means an install with no profiles, and a
+            picker whose only option is "none" is a control that does nothing.
+            `NewChatBar` hides it on the same terms. */}
+        {profiles.length > 0 && (
+          <Dropdown
+            small
+            value={draft.settings_profile_id}
+            onChange={(settings_profile_id) => onChange({ ...draft, settings_profile_id })}
+            ariaLabel="Claude settings profile"
+            label={`Settings: ${
+              profiles.find((p) => p.id === draft.settings_profile_id)?.name ?? "default"
+            }`}
+            options={[
+              { value: "", label: "Default profile" },
+              ...profiles.map((p) => ({
+                value: p.id,
+                label: p.is_default ? `${p.name} (default)` : p.name,
+              })),
+            ]}
+          />
+        )}
+        <label className="field field--sm" style={{ width: 150 }}>
+          <input
+            type="number"
+            min={0}
+            max={RULE_MAX_TIMEOUT_MINUTES}
+            value={draft.timeout_minutes}
+            onChange={(e) => onChange({ ...draft, timeout_minutes: e.target.value })}
+            placeholder="Timeout (min)"
+            aria-label="Timeout in minutes"
+          />
+        </label>
+      </div>
+
+      <div className="row" style={{ gap: "var(--sp-3)" }}>
+        <DirField
+          compact
+          value={draft.working_directory}
+          onChange={(working_directory) => onChange({ ...draft, working_directory })}
+          title="Choose working directory"
+          placeholder="Working directory (agent default)"
+          browse={browse}
+        />
+      </div>
+
+      {!timeoutValid && (
+        <div className="msgline msgline--error">
+          Timeout must be a whole number of minutes between 0 and{" "}
+          {RULE_MAX_TIMEOUT_MINUTES}.
+        </div>
+      )}
 
       <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
         <Switch on={draft.enabled} onChange={(v) => onChange({ ...draft, enabled: v })} />
@@ -1743,6 +2172,131 @@ function RuleForm({
         <button className="btn btn--primary" onClick={onSave} disabled={!ready || busy}>
           {draft.id ? "Save rule" : "Add rule"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+/* --- Slack inbound (Socket Mode) ----------------------------------------- */
+
+/** How often the row is re-read while the connection is meant to be up. */
+const INBOUND_POLL_MS = 5_000;
+/**
+ * How long to keep reading after a toggle, so the badge follows the worker
+ * coming up or going down.
+ *
+ * A window rather than a predicate over `inbound_status`, and the reason is in
+ * the backend: `update_inbound` deliberately never clears that column — "a
+ * disable that cleared the status would erase the reason the user is looking
+ * at" — and the worker is its only other writer. So "poll while the status is
+ * non-empty" has no false state to reach: a row that errored once and was
+ * turned off would read itself every five seconds for as long as its pane
+ * stayed open, and would start doing it on mount, unprompted.
+ */
+const INBOUND_SETTLE_MS = 20_000;
+
+/**
+ * The Socket Mode switch and what the worker last reported (#566, #569).
+ *
+ * Self-contained, like `TriggerRules` and `WebhookPanel`: it re-reads the one
+ * row it renders rather than asking the detail pane to reload, so a poll for a
+ * reconnect does not re-fetch the whole list — and, more to the point, does not
+ * re-seed the form the user may be typing in.
+ */
+function InboundPanel({ item }: { item: Integration }) {
+  /**
+   * `updated_at` and `has_app_token` are deps, not decoration.
+   *
+   * `IntegrationDetail` is keyed on the integration id, so a save calls
+   * `onChanged()` without remounting this subtree — and `current` prefers
+   * `row.data` once the first fetch lands. Keyed on `item.id` alone, the row a
+   * user has *just stored their first app token on* would keep answering from
+   * the fetch made before it, leaving the switch disabled under "Store an
+   * app-level token above" with no way back but selecting another row. The
+   * poll cannot rescue it either: it is off precisely while inbound is.
+   * `updated_at` moves on every `PUT /api/integrations/{id}`, so it covers a
+   * token added, replaced or dropped.
+   */
+  const row = useResource(
+    (signal) => api.get<Integration>(`/integrations/${item.id}`, signal),
+    [item.id, item.updated_at, item.has_app_token]
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  // The prop is the value the detail pane was rendered with; the resource is
+  // the fresher one once it lands. Falling back to the prop is what keeps the
+  // switch from flicking to "off" for one frame on every mount.
+  const current = row.data ?? item;
+  const on = current.inbound_enabled;
+  const hasToken = current.has_app_token;
+  // Gate the *turning-on*, not the control (#474): a row that is already on
+  // and has since lost its token is exactly the row whose owner wants to turn
+  // it off. The backend agrees — it refuses `enabled: true` without a token and
+  // never refuses a disable on that axis.
+  const canTurnOn = hasToken;
+
+  // While the connection is meant to be up, plus a settle window after either
+  // toggle. Gating on `on` alone stops the poll in the same tick as the switch,
+  // and the one read `toggle` makes is issued before the worker has torn down —
+  // so the badge would sit on "Connected" beside an off switch.
+  const [settleUntil, setSettleUntil] = useState(0);
+  usePoll(row.reload, INBOUND_POLL_MS, on || Date.now() < settleUntil);
+
+  async function toggle(next: boolean) {
+    if (next && !canTurnOn) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await api.put(`/integrations/${item.id}/inbound`, { enabled: next });
+      setSettleUntil(Date.now() + INBOUND_SETTLE_MS);
+      row.reload();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const badge = inboundState(current.inbound_status);
+
+  return (
+    <div className="formsec">
+      <div className="formsec__title">{INBOUND_TITLE}</div>
+      <div className="formrow">
+        <div className="formrow__label">Socket Mode</div>
+        <div className="formrow__control">
+          <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
+            <Switch on={on} disabled={busy || (!canTurnOn && !on)} onChange={toggle} />
+            <span
+              className={badge.tone ? `badge ${badge.tone}` : "badge"}
+              /* The worker's last failure, on the badge that reports it. An
+                 empty title renders no tooltip at all, which is right: there is
+                 nothing to say about a connection that is working. */
+              title={current.inbound_error || undefined}
+            >
+              {badge.label}
+            </span>
+          </div>
+
+          <div className="formrow__help">{INBOUND_HELP}</div>
+
+          {!canTurnOn && (
+            /* A disabled `Switch` receives no mouse events, so it deliberately
+               carries no `title` — the reason it is shut has to live beside it. */
+            <div className="msgline">
+              <span className="msgline__icon">
+                <Icon name="alert" size={13} />
+              </span>
+              <span>{INBOUND_NEEDS_TOKEN}</span>
+            </div>
+          )}
+          {current.inbound_error && (
+            <div className="msgline msgline--error">{current.inbound_error}</div>
+          )}
+          {error && <div className="msgline msgline--error">{error}</div>}
+          {row.error && <div className="msgline msgline--error">{row.error}</div>}
+        </div>
       </div>
     </div>
   );
