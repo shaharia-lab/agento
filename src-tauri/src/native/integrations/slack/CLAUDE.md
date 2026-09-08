@@ -151,11 +151,24 @@ default logs at `debug`.
   last value because a socket that connects and stays connected has no next
   transition. `status_lock` is global and held across the write, so the two
   writes are ordered whichever way they arrive and the stale one is a no-op.
-  The registry's own clear takes the same lock **and bumps the epoch**
-  (`clear_status`), because a worker retiring with no replacement claims no new
-  epoch — so without the bump `is_current` still answers `true` for a write of
-  its own already inside `db::blocking`, and the clear could be overwritten by it.
-  Only the boot clear skips both, and only because no worker exists yet.
+- **The epoch is granted by the registry inside `put_if_current`, never taken by
+  the worker**, and that placement is the whole of its correctness. A worker is
+  *built* before the decision — `start_for_type` is `async` and can be slow — and
+  may then be refused on the generation. A worker that claimed its own epoch at
+  spawn could therefore hold a **later** one than the worker that went on to be
+  accepted; `status_writer` would discard every status the accepted worker posted
+  for the rest of the process, freezing the row on whatever it last held.
+  Granting it in the one critical section that decides acceptance makes epoch
+  order and acceptance order the same order by construction. `NOT_ACCEPTED`
+  matches nothing, so a refused worker is silent. `Registry::stop` and the
+  no-worker arm of `put_if_current` retire the epoch under the same lock and hand
+  it to `clear_status`, which refuses to write if something has been accepted
+  since. Only the boot clear skips all of it, because no worker exists yet.
+  `a_refused_socket_never_takes_the_epoch_from_the_accepted_one` is the guard.
+- **`tests/slack_socket.rs` drives workers with no registry, so it grants the
+  epoch itself** (`accepted_worker`), and **every test uses its own integration
+  id** — the epoch map is keyed by id, which is unique in a shipped build and
+  emphatically not across the tests in one binary.
 - **The backoff is re-anchored on the wall clock**, `schedule::runtime`'s rule
   for gocron's reason: `tokio::time::sleep` measures process time, and on a
   suspended machine that is not elapsed wall-clock time, so one long sleep holds

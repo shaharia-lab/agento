@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agento_lib::native::integrations::registry;
 use agento_lib::native::integrations::slack::socket::{
     self, AppMention, SocketOptions, STATUS_CONNECTED, STATUS_ERROR, STATUS_RECONNECTING,
 };
@@ -296,7 +297,13 @@ fn captured_logs() -> Vec<String> {
 }
 
 /// A migrated database with one Slack integration, inbound on.
-fn fixture_db(dir: &Path) -> PathBuf {
+///
+/// **Every test passes its own id.** `integrations::registry`'s status-epoch map
+/// is keyed by integration id, which is unique in a shipped build and emphatically
+/// not across the tests in one binary — a shared `"s1"` has each test's
+/// `accepted_worker` retiring every other test's worker, and the symptom is a
+/// status column that simply never moves.
+fn fixture_db(dir: &Path, integration_id: &str) -> PathBuf {
     let db_path = dir.join("agento.db");
     let mut conn = db::ensure_database(&db_path).expect("create");
     migrate::apply(&mut conn).expect("migrations");
@@ -304,18 +311,18 @@ fn fixture_db(dir: &Path) -> PathBuf {
         "INSERT INTO integrations
             (id, name, type, enabled, credentials, services, created_at, updated_at,
              inbound_enabled, inbound_status, inbound_error)
-         VALUES ('s1', 'Slack', 'slack', 1, ?1, '{}', 'then', 'then', 1, '', '')",
-        rusqlite::params![format!(r#"{{"app_token":"{APP_TOKEN}"}}"#)],
+         VALUES (?1, 'Slack', 'slack', 1, ?2, '{}', 'then', 'then', 1, '', '')",
+        rusqlite::params![integration_id, format!(r#"{{"app_token":"{APP_TOKEN}"}}"#)],
     )
     .expect("seed the integration");
     db_path
 }
 
-fn inbound_state(db_path: &Path) -> (String, String) {
+fn inbound_state(db_path: &Path, integration_id: &str) -> (String, String) {
     let conn = db::open_read_only(db_path).expect("open");
     conn.query_row(
-        "SELECT inbound_status, inbound_error FROM integrations WHERE id = 's1'",
-        [],
+        "SELECT inbound_status, inbound_error FROM integrations WHERE id = ?1",
+        [integration_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .expect("read the inbound state")
@@ -324,17 +331,41 @@ fn inbound_state(db_path: &Path) -> (String, String) {
 /// Poll the stored status until it is one of `wanted`, or fail naming what it
 /// was. A status is written from a `db::blocking` task, so it lands a moment
 /// after the transition it reports.
-async fn await_status(db_path: &Path, wanted: &[&str], what: &str) -> (String, String) {
+async fn await_status(
+    db_path: &Path,
+    integration_id: &str,
+    wanted: &[&str],
+    what: &str,
+) -> (String, String) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last = (String::new(), String::new());
     while Instant::now() < deadline {
-        last = inbound_state(db_path);
+        last = inbound_state(db_path, integration_id);
         if wanted.contains(&last.0.as_str()) {
             return last;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("{what}: inbound_status never reached {wanted:?}, it is {last:?}");
+}
+
+/// Start a worker **and grant it the epoch**, which is what
+/// `integrations::registry` does for it in production.
+///
+/// A worker the registry never accepted reports nothing — that is the guard
+/// that stops a start which loses the acceptance race from overwriting the
+/// winner's status, and it is deliberately the default. These tests drive
+/// `socket::start` with no registry at all, so they stand in for it:
+/// `retire_socket` answers the epoch that is now current, exactly as
+/// `put_if_current` takes one.
+fn accepted_worker(
+    db_path: &Path,
+    integration_id: &str,
+    options: SocketOptions,
+) -> socket::SocketWorker {
+    let worker = socket::start(db_path, integration_id, APP_TOKEN, options);
+    worker.accept(registry::registry().retire_socket(integration_id));
+    worker
 }
 
 fn options(fake: &FakeSlack, handler: socket::EventHandler) -> SocketOptions {
@@ -394,7 +425,7 @@ fn events_api(envelope_id: &str, event_id: &str) -> String {
 #[tokio::test]
 async fn an_envelope_is_acknowledged_before_its_handler_runs() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "ack-first");
     let fake = fake_slack(
         vec![],
         vec![vec![
@@ -406,7 +437,7 @@ async fn an_envelope_is_acknowledged_before_its_handler_runs() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let handler = recording_handler(&seen, Duration::from_secs(1));
-    let _worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
+    let _worker = accepted_worker(&db_path, "ack-first", options(&fake, handler));
 
     tokio::time::timeout(Duration::from_secs(5), fake.acked.notified())
         .await
@@ -426,9 +457,15 @@ async fn an_envelope_is_acknowledged_before_its_handler_runs() {
     assert_eq!(seen.len(), 1, "the handler ran once");
     assert_eq!(seen[0].event_id, "Ev1");
     assert_eq!(seen[0].channel, "C1");
-    assert_eq!(seen[0].integration_id, "s1");
+    assert_eq!(seen[0].integration_id, "ack-first");
 
-    let (status, error) = await_status(&db_path, &[STATUS_CONNECTED], "after a connect").await;
+    let (status, error) = await_status(
+        &db_path,
+        "ack-first",
+        &[STATUS_CONNECTED],
+        "after a connect",
+    )
+    .await;
     assert_eq!(status, STATUS_CONNECTED);
     assert_eq!(error, "", "a healthy connection carries no error");
 }
@@ -441,7 +478,7 @@ async fn an_envelope_is_acknowledged_before_its_handler_runs() {
 #[tokio::test]
 async fn a_repeated_event_id_is_acknowledged_twice_and_handled_once() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "dedup");
     let fake = fake_slack(
         vec![],
         vec![vec![
@@ -455,7 +492,7 @@ async fn a_repeated_event_id_is_acknowledged_twice_and_handled_once() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let handler = recording_handler(&seen, Duration::ZERO);
-    let _worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
+    let _worker = accepted_worker(&db_path, "dedup", options(&fake, handler));
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while fake.acks().len() < 2 && Instant::now() < deadline {
@@ -489,7 +526,7 @@ async fn a_repeated_event_id_is_acknowledged_twice_and_handled_once() {
 #[tokio::test]
 async fn a_disconnect_and_a_drop_each_reconnect_with_a_growing_wait() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "backoff");
     let fake = fake_slack(
         vec![],
         vec![
@@ -508,7 +545,7 @@ async fn a_disconnect_and_a_drop_each_reconnect_with_a_growing_wait() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let handler = recording_handler(&seen, Duration::ZERO);
-    let _worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
+    let _worker = accepted_worker(&db_path, "backoff", options(&fake, handler));
 
     let deadline = Instant::now() + Duration::from_secs(20);
     while fake.opens().len() < 4 && Instant::now() < deadline {
@@ -542,7 +579,7 @@ async fn a_disconnect_and_a_drop_each_reconnect_with_a_growing_wait() {
 #[tokio::test]
 async fn the_stored_status_walks_connected_reconnecting_and_error() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "status-walk");
     // One good connection, then nothing but refusals: enough to cross the
     // threshold of two and stay there.
     let fake = fake_slack(
@@ -553,10 +590,22 @@ async fn the_stored_status_walks_connected_reconnecting_and_error() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let handler = recording_handler(&seen, Duration::ZERO);
-    let _worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
+    let _worker = accepted_worker(&db_path, "status-walk", options(&fake, handler));
 
-    await_status(&db_path, &[STATUS_CONNECTED], "after the first connect").await;
-    let (_, error) = await_status(&db_path, &[STATUS_RECONNECTING], "after the drop").await;
+    await_status(
+        &db_path,
+        "status-walk",
+        &[STATUS_CONNECTED],
+        "after the first connect",
+    )
+    .await;
+    let (_, error) = await_status(
+        &db_path,
+        "status-walk",
+        &[STATUS_RECONNECTING],
+        "after the drop",
+    )
+    .await;
     assert!(
         !error.is_empty(),
         "a reconnecting status must carry the reason it is reconnecting"
@@ -569,9 +618,15 @@ async fn the_stored_status_walks_connected_reconnecting_and_error() {
     drop(_worker);
     let refusing = fake_slack(vec!["invalid_auth".into(), "invalid_auth".into()], vec![]).await;
     let handler = recording_handler(&seen, Duration::ZERO);
-    let worker = socket::start(&db_path, "s1", APP_TOKEN, options(&refusing, handler));
+    let worker = accepted_worker(&db_path, "status-walk", options(&refusing, handler));
 
-    let (_, error) = await_status(&db_path, &[STATUS_ERROR], "after the failure threshold").await;
+    let (_, error) = await_status(
+        &db_path,
+        "status-walk",
+        &[STATUS_ERROR],
+        "after the failure threshold",
+    )
+    .await;
     assert!(
         error.contains("invalid_auth"),
         "the error column must name what Slack said, got {error:?}"
@@ -603,13 +658,13 @@ async fn the_stored_status_walks_connected_reconnecting_and_error() {
 #[tokio::test]
 async fn dropping_the_handle_closes_the_socket_within_a_second() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "stop");
     let fake = fake_slack(vec![], vec![vec![Step::Hold(Duration::from_secs(30))]]).await;
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let handler = recording_handler(&seen, Duration::ZERO);
-    let worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
-    await_status(&db_path, &[STATUS_CONNECTED], "before the stop").await;
+    let worker = accepted_worker(&db_path, "stop", options(&fake, handler));
+    await_status(&db_path, "stop", &[STATUS_CONNECTED], "before the stop").await;
     assert_eq!(fake.live.load(Ordering::SeqCst), 1);
 
     let closed = fake.closed.notified();
@@ -646,7 +701,7 @@ async fn dropping_the_handle_closes_the_socket_within_a_second() {
 #[tokio::test]
 async fn a_stopped_worker_writes_no_more_status() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "stopped-silent");
 
     // A gateway that refuses, so the old worker has a stream of `reconnecting`
     // transitions queued and in flight at the moment it is stopped.
@@ -660,14 +715,14 @@ async fn a_stopped_worker_writes_no_more_status() {
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let old = socket::start(
+    let old = accepted_worker(
         &db_path,
-        "s1",
-        APP_TOKEN,
+        "stopped-silent",
         options(&refusing, recording_handler(&seen, Duration::ZERO)),
     );
     await_status(
         &db_path,
+        "stopped-silent",
         &[STATUS_RECONNECTING, STATUS_ERROR],
         "the old worker",
     )
@@ -677,19 +732,24 @@ async fn a_stopped_worker_writes_no_more_status() {
     // does.
     drop(old);
     let healthy = fake_slack(vec![], vec![vec![Step::Hold(Duration::from_secs(30))]]).await;
-    let new = socket::start(
+    let new = accepted_worker(
         &db_path,
-        "s1",
-        APP_TOKEN,
+        "stopped-silent",
         options(&healthy, recording_handler(&seen, Duration::ZERO)),
     );
-    await_status(&db_path, &[STATUS_CONNECTED], "the new worker").await;
+    await_status(
+        &db_path,
+        "stopped-silent",
+        &[STATUS_CONNECTED],
+        "the new worker",
+    )
+    .await;
 
     // Long enough for anything the old worker had queued to have been written.
     for _ in 0..10 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
-            inbound_state(&db_path).0,
+            inbound_state(&db_path, "stopped-silent").0,
             STATUS_CONNECTED,
             "a stopped worker overwrote its replacement's status"
         );
@@ -707,18 +767,25 @@ async fn a_stopped_worker_writes_no_more_status() {
 #[tokio::test]
 async fn a_socket_that_goes_silent_is_treated_as_dead() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "idle");
     // Accepts, says nothing, and never closes.
     let fake = fake_slack(vec![], vec![vec![Step::Hold(Duration::from_secs(60))]]).await;
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut opts = options(&fake, recording_handler(&seen, Duration::ZERO));
     opts.idle_timeout = Duration::from_millis(400);
-    let worker = socket::start(&db_path, "s1", APP_TOKEN, opts);
+    let worker = accepted_worker(&db_path, "idle", opts);
 
-    await_status(&db_path, &[STATUS_CONNECTED], "the silent socket connects").await;
+    await_status(
+        &db_path,
+        "idle",
+        &[STATUS_CONNECTED],
+        "the silent socket connects",
+    )
+    .await;
     let (_, error) = await_status(
         &db_path,
+        "idle",
         &[STATUS_RECONNECTING, STATUS_ERROR],
         "the silent socket must not stay `connected`",
     )
@@ -748,7 +815,7 @@ async fn a_socket_that_goes_silent_is_treated_as_dead() {
 #[tokio::test]
 async fn a_stalled_claim_does_not_hold_up_the_next_envelope() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "stalled-claim");
     let fake = fake_slack(
         vec![],
         vec![vec![
@@ -779,10 +846,9 @@ async fn a_stalled_claim_does_not_hold_up_the_next_envelope() {
 
     let started = Instant::now();
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let worker = socket::start(
+    let worker = accepted_worker(
         &db_path,
-        "s1",
-        APP_TOKEN,
+        "stalled-claim",
         options(&fake, recording_handler(&seen, Duration::ZERO)),
     );
 
@@ -816,7 +882,7 @@ async fn a_stalled_claim_does_not_hold_up_the_next_envelope() {
 #[tokio::test]
 async fn a_reload_mid_connect_leaves_exactly_one_live_connection() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "reload");
     let fake = fake_slack(
         vec![],
         vec![
@@ -829,15 +895,21 @@ async fn a_reload_mid_connect_leaves_exactly_one_live_connection() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     for _ in 0..5 {
         let handler = recording_handler(&seen, Duration::ZERO);
-        let worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
+        let worker = accepted_worker(&db_path, "reload", options(&fake, handler));
         // Long enough to be inside `apps.connections.open` or the handshake,
         // short enough that most iterations land mid-connect.
         tokio::time::sleep(Duration::from_millis(5)).await;
         drop(worker);
     }
     let handler = recording_handler(&seen, Duration::ZERO);
-    let worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
-    await_status(&db_path, &[STATUS_CONNECTED], "after the last start").await;
+    let worker = accepted_worker(&db_path, "reload", options(&fake, handler));
+    await_status(
+        &db_path,
+        "reload",
+        &[STATUS_CONNECTED],
+        "after the last start",
+    )
+    .await;
 
     // Sampled rather than checked once, and deliberately **not** as a peak.
     //
@@ -870,7 +942,7 @@ async fn a_reload_mid_connect_leaves_exactly_one_live_connection() {
 #[tokio::test]
 async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "secret");
     let fake = fake_slack(
         vec!["invalid_auth".into()],
         vec![vec![Step::Hold(Duration::from_millis(100)), Step::Drop]],
@@ -880,11 +952,18 @@ async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     capture_logs();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let handler = recording_handler(&seen, Duration::ZERO);
-    let worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
+    let worker = accepted_worker(&db_path, "secret", options(&fake, handler));
 
-    await_status(&db_path, &[STATUS_CONNECTED], "after the retry succeeded").await;
     await_status(
         &db_path,
+        "secret",
+        &[STATUS_CONNECTED],
+        "after the retry succeeded",
+    )
+    .await;
+    await_status(
+        &db_path,
+        "secret",
         &[STATUS_RECONNECTING, STATUS_ERROR],
         "after the drop",
     )
@@ -911,7 +990,7 @@ async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
         );
     }
 
-    let (status, error) = inbound_state(&db_path);
+    let (status, error) = inbound_state(&db_path, "secret");
     for value in [&status, &error] {
         assert!(
             !value.contains("xapp-") && !value.contains(APP_TOKEN),
@@ -924,7 +1003,7 @@ async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     let conn = db::open_read_only(&db_path).expect("open");
     let (name, credentials): (String, String) = conn
         .query_row(
-            "SELECT name, credentials FROM integrations WHERE id = 's1'",
+            "SELECT name, credentials FROM integrations WHERE id = 'secret'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -958,7 +1037,7 @@ async fn a_socket_workers_contended_write_lock_does_not_stall_the_runtime() {
     use std::sync::atomic::AtomicU64;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = fixture_db(dir.path());
+    let db_path = fixture_db(dir.path(), "contended");
     let fake = fake_slack(
         vec![],
         vec![vec![
@@ -1013,7 +1092,7 @@ async fn a_socket_workers_contended_write_lock_does_not_stall_the_runtime() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let handler = recording_handler(&seen, Duration::ZERO);
-    let worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
+    let worker = accepted_worker(&db_path, "contended", options(&fake, handler));
 
     // The envelope has to be acknowledged while the lock is held: the ack is on
     // the socket's own task, and the claim behind it is the write that must not
