@@ -706,6 +706,13 @@ function ConnectionFields({
    * the warning above the inputs — on a row with nothing stored there is
    * nothing a save could replace, which is every connect screen and the one
    * edit case where the fields open by themselves.
+   *
+   * The warning is also gated on the provider having an `extraField`, which
+   * today means Slack alone. #515's replace semantics are every provider's, so
+   * the sentence would be true on all six — but a provider whose blob is one
+   * mode's fields has nothing a user could *forget* to restate, and #569 is a
+   * Slack change. Drop the second gate when a second provider grows a field
+   * that sits outside its mode.
    */
   credentialsStored?: boolean;
   /** Anything the screen wants at the foot of the section. */
@@ -806,7 +813,7 @@ function ConnectionFields({
             </div>
           )}
 
-          {credentialsStored && (
+          {credentialsStored && extra && (
             /* Once, above the fields rather than under one of them: the rule is
                about the blob, not about a key. */
             <div className="msgline msgline--warn">
