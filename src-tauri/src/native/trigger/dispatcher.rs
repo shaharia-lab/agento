@@ -19,8 +19,8 @@
 //!   nothing back cannot tell a broken agent from an ignored message.
 //! - **There is no job history at all.** The run is recorded only as chat
 //!   messages on a `[Telegram] <rule>` session.
-//! - **The timeout is a flat five minutes**, not the task's own — triggers have
-//!   no configurable timeout.
+//! - **The timeout is the matched rule's own**, and five minutes when the rule
+//!   records none (#565) — see [`run_timeout`].
 //! - **Concurrency is bounded to 10**, not the scheduler's 3, and the bound is
 //!   Go's `sem` on the dispatcher rather than a per-run permit.
 
@@ -37,11 +37,13 @@ use crate::native::db;
 /// `maxConcurrentExecutions`, the buffer on `Dispatcher.sem`.
 ///
 /// **Ten, not the scheduler's three.** A busy group chat can fire several rules
-/// at once, and with the flat five-minute run timeout a limit set too low makes
-/// the sixth message wait up to five minutes before its "typing…" even appears.
+/// at once, and a limit set too low makes the sixth message wait a whole run —
+/// five minutes by default, and as much as a rule's own `timeout_minutes` since
+/// #565 — before its "typing…" even appears.
 const MAX_CONCURRENT: usize = 10;
 
-/// `context.WithTimeout(ctx, 5*time.Minute)` in `executeAndReply`.
+/// `context.WithTimeout(ctx, 5*time.Minute)` in `executeAndReply`, and since
+/// #565 the answer only for a rule that records no timeout of its own.
 const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// What Go replies with on every failure path.
@@ -151,7 +153,21 @@ pub struct Rule {
     pub id: String,
     pub name: String,
     pub agent_slug: String,
+    /// Whether the rule is on.
+    ///
+    /// A field rather than a `WHERE` clause because the two selectors disagree
+    /// about disabled rules: [`find_matching_rule`] skips one, and Slack's
+    /// [`super::select_rule::select_rule_for_channel`] has to *see* one, since
+    /// a disabled channel-specific rule is that channel's off switch.
+    pub enabled: bool,
     pub filters: RuleFilters,
+    /// Migration 39's four spec-reachable execution settings (#563), as
+    /// [`load_rules`] read them — with an unusable `permission_mode` already
+    /// dropped, see [`usable_permission_mode`].
+    pub settings: agent_run::ExecutionSettings,
+    /// Migration 39's fifth. `0` is "the dispatcher's own default", **not** a
+    /// run that times out instantly — see [`run_timeout`].
+    pub timeout_minutes: i64,
 }
 
 /// `findMatchingRule`: the first **enabled** rule that matches, in the order the
@@ -172,34 +188,61 @@ fn find_matching_rule(
     let chat_id = msg.chat.id.to_string();
     rules
         .into_iter()
+        // The `enabled` test used to be `load_rules`' SQL. It is here now, and
+        // the answer is the same one: the first enabled rule that matches, in
+        // store order.
+        .filter(|rule| rule.enabled)
         .find_map(|rule| match_rule(&rule.filters, &msg.text, &chat_id).map(|p| (rule, p)))
 }
 
-/// `ListRules`, filtered to the enabled ones as `findMatchingRule` does.
-fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, String> {
+/// `ListRules` for one integration, oldest first — **including disabled rules**.
+///
+/// The `enabled = 1` test used to live in this SQL and now lives in
+/// [`find_matching_rule`], which does not change Telegram's answer and does make
+/// this loader usable by both selectors. Slack's
+/// [`super::select_rule::select_rule_for_channel`] needs the disabled rows: a
+/// disabled channel-specific rule is how a channel is switched off, so a loader
+/// that hid it would silently turn that off switch into a fall-through to the
+/// workspace-wide default.
+///
+/// `ORDER BY created_at ASC` is load-bearing for both: it is what makes "the
+/// first match in store order" and "the earlier `created_at` wins a tie" the
+/// same sentence.
+pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, String> {
     let conn = crate::native::db::open_read_only(db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, agent_slug, filter_prefix, filter_keywords, filter_chat_ids
+            "SELECT id, name, agent_slug, enabled, filter_prefix, filter_keywords,
+                    filter_chat_ids, model, working_directory, settings_profile_id,
+                    permission_mode, timeout_minutes
              FROM trigger_rules
-             WHERE integration_id = ?1 AND enabled = 1
+             WHERE integration_id = ?1
              ORDER BY created_at ASC",
         )
         .map_err(|e| format!("preparing trigger rules query: {e}"))?;
 
     let rows = stmt
         .query_map([integration_id], |row| {
-            let keywords: String = row.get(4)?;
-            let chat_ids: String = row.get(5)?;
+            let keywords: String = row.get(5)?;
+            let chat_ids: String = row.get(6)?;
+            let permission_mode: String = row.get(10)?;
             Ok(Rule {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 agent_slug: row.get(2)?,
+                enabled: row.get(3)?,
                 filters: RuleFilters {
-                    prefix: row.get(3)?,
+                    prefix: row.get(4)?,
                     keywords: decode_list(&keywords),
                     chat_ids: decode_list(&chat_ids),
                 },
+                settings: agent_run::ExecutionSettings {
+                    model: row.get(7)?,
+                    working_directory: row.get(8)?,
+                    settings_profile_id: row.get(9)?,
+                    permission_mode: usable_permission_mode(permission_mode),
+                },
+                timeout_minutes: row.get(11)?,
             })
         })
         .map_err(|e| format!("querying trigger rules: {e}"))?;
@@ -220,6 +263,76 @@ fn decode_list(raw: &str) -> Vec<String> {
         .flatten()
         .map(|list| list.into_iter().map(Option::unwrap_or_default).collect())
         .unwrap_or_default()
+}
+
+/// A stored `permission_mode`, or empty when it is not one Agento knows.
+///
+/// `integrations::validate_rule_settings` rejects anything outside
+/// [`crate::native::chats::CHAT_PERMISSION_MODES`] at the write (#563), but the
+/// dispatcher reads *stored rows* — hand-edited, restored from a backup, or
+/// written before that validation existed. An unknown mode is not inert:
+/// `chat/runner.rs`' `match` routes everything it does not recognise into
+/// `with_bypass_permissions()`, so one typo would run the agent with permissions
+/// fully bypassed. Falling back to empty runs it on the agent's own configured
+/// mode, which is what a rule that sets nothing already does.
+fn usable_permission_mode(stored: String) -> String {
+    if crate::native::chats::is_valid_permission_mode(&stored) {
+        return stored;
+    }
+    log::warn!("ignoring unknown trigger rule permission mode {stored:?}");
+    String::new()
+}
+
+/// How long one run of `rule` may take.
+///
+/// `timeout_minutes = 0` is "no choice recorded" and means [`RUN_TIMEOUT`] — the
+/// flat five minutes every trigger run had before #565 — not a run that times
+/// out instantly.
+///
+/// The write path **refuses** a value above
+/// [`crate::native::integrations::RULE_MAX_TIMEOUT_MINUTES`] with a 422 rather
+/// than clamping it, so a row holding one never came through
+/// `validate_rule_settings`: it was hand-edited, restored, or written before
+/// that validation existed. This clamps rather than refusing, because refusing
+/// here means an inbound message silently going unanswered, and an absurd value
+/// would otherwise hold one of the ten concurrency slots for as long as it says.
+/// It is [`usable_permission_mode`]'s premise with the opposite answer, and for
+/// the same reason both are stated: a clamped timeout is a run that still
+/// happens, where a bad mode is a run that must not.
+fn run_timeout(rule: &Rule) -> std::time::Duration {
+    if rule.timeout_minutes <= 0 {
+        return RUN_TIMEOUT;
+    }
+    let max = crate::native::integrations::RULE_MAX_TIMEOUT_MINUTES;
+    let minutes = rule.timeout_minutes.min(max);
+    if minutes != rule.timeout_minutes {
+        log::warn!(
+            "clamping trigger rule timeout {} to {max} minutes",
+            rule.timeout_minutes
+        );
+    }
+    std::time::Duration::from_secs(u64::try_from(minutes).unwrap_or(0) * 60)
+}
+
+/// Everything a matched rule decides about the run it is about to start: the
+/// spec, and how long it may take.
+///
+/// One function rather than two lines in [`execute_and_reply`] so that the
+/// fake-CLI suite (`tests/trigger_run.rs`) binds to the **shipped** call site.
+/// `execute_and_reply` cannot be driven from `tests/` at all — it sends a
+/// Telegram reply, and the base-URL seam that redirects one is `#[cfg(test)]` on
+/// the library, so an integration-test crate cannot reach it — and a test that
+/// re-spelled these two lines for itself would stay green if the dispatcher
+/// stopped passing the rule's settings, which is the whole of #565.
+pub fn run_inputs(
+    db_path: &Path,
+    agent: Agent,
+    rule: &Rule,
+) -> (crate::native::chat::runner::RunSpec, std::time::Duration) {
+    (
+        agent_run::headless_spec(db_path, agent, &rule.settings),
+        run_timeout(rule),
+    )
 }
 
 /// `executeAndReply`.
@@ -252,8 +365,10 @@ async fn execute_and_reply(
         }
     };
 
-    // Go creates the session with **no** working directory, model or settings
-    // profile — a trigger run is not configurable the way a task is.
+    // The chat is created with the rule's own working directory, model,
+    // settings profile and permission mode (#565). Go created it with none of
+    // them, because a trigger run was not configurable the way a task is;
+    // migration 39 gave the rule those columns and this is the reader.
     let created = {
         let (db, rule) = (db_path.to_path_buf(), rule.clone());
         db::blocking("telegram session", move || {
@@ -271,8 +386,8 @@ async fn execute_and_reply(
         }
     };
 
-    let spec = agent_run::headless_spec(db_path, agent, String::new(), String::new());
-    let result = agent_run::run_headless(&spec, prompt, RUN_TIMEOUT).await;
+    let (spec, timeout) = run_inputs(db_path, agent, rule);
+    let result = agent_run::run_headless(&spec, prompt, timeout).await;
 
     let result = match result {
         Ok(result) => result,
@@ -378,10 +493,10 @@ fn create_trigger_session(db_path: &Path, rule: &Rule) -> Result<String, String>
         &tx,
         crate::native::chats::NewSessionParams {
             agent_slug: &rule.agent_slug,
-            working_directory: "",
-            model: "",
-            settings_profile_id: "",
-            permission_mode: "",
+            working_directory: &rule.settings.working_directory,
+            model: &rule.settings.model,
+            settings_profile_id: &rule.settings.settings_profile_id,
+            permission_mode: &rule.settings.permission_mode,
         },
     )
     .map_err(|e| e.message())?;
@@ -692,5 +807,257 @@ mod tests {
         let db = migrated(dir.path());
         let err = resolve_agent(&db, "nope").unwrap_err();
         assert_eq!(err, r#"agent "nope" not found"#);
+    }
+
+    /// A rule with migration 39's five columns set. Separate from [`add_rule`]
+    /// rather than an extension of it: the tests above pin Telegram's selection
+    /// and must keep seeding exactly the rows they seeded before #565.
+    #[allow(clippy::too_many_arguments)]
+    fn add_configured_rule(
+        db: &Path,
+        id: &str,
+        enabled: bool,
+        chat_ids: &str,
+        model: &str,
+        working_directory: &str,
+        settings_profile_id: &str,
+        permission_mode: &str,
+        timeout_minutes: i64,
+        created_at: &str,
+    ) {
+        let conn = rusqlite::Connection::open(db).expect("open");
+        conn.execute(
+            "INSERT INTO trigger_rules
+                (id, integration_id, name, agent_slug, enabled, filter_prefix,
+                 filter_keywords, filter_chat_ids, model, working_directory,
+                 settings_profile_id, permission_mode, timeout_minutes,
+                 created_at, updated_at)
+             VALUES (?1, 'tg', ?1, 'a', ?2, '', '[]', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            rusqlite::params![
+                id,
+                enabled,
+                chat_ids,
+                model,
+                working_directory,
+                settings_profile_id,
+                permission_mode,
+                timeout_minutes,
+                created_at
+            ],
+        )
+        .expect("seed configured rule");
+    }
+
+    /// The five columns migration 39 added reach the loaded rule. Before #565
+    /// the projection did not name them and every run used the agent's defaults
+    /// in whatever directory the app happened to be started from.
+    #[test]
+    fn the_execution_settings_come_off_the_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_configured_rule(
+            &db,
+            "r",
+            true,
+            "[]",
+            "opus",
+            "/srv/repo",
+            "profile-7",
+            "plan",
+            30,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+
+        let rules = load_rules(&db, "tg").expect("load");
+        let rule = rules.first().expect("one rule");
+        assert_eq!(rule.settings.model, "opus");
+        assert_eq!(rule.settings.working_directory, "/srv/repo");
+        assert_eq!(rule.settings.settings_profile_id, "profile-7");
+        assert_eq!(rule.settings.permission_mode, "plan");
+        assert_eq!(rule.timeout_minutes, 30);
+    }
+
+    /// `load_rules` returns disabled rules now, because Slack's selection is the
+    /// one that has to see them. Telegram's answer is unchanged — the
+    /// `enabled` test moved into `find_matching_rule`, which
+    /// `a_disabled_rule_is_never_considered` still pins.
+    #[test]
+    fn the_loader_returns_disabled_rules_and_the_telegram_selector_skips_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_rule(
+            &db,
+            "off",
+            false,
+            "",
+            "[]",
+            "[]",
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+
+        let rules = load_rules(&db, "tg").expect("load");
+        assert_eq!(rules.len(), 1, "the disabled row is loaded");
+        assert!(!rules[0].enabled);
+        assert!(
+            find_matching_rule(&db, "tg", &msg("hi", 1)).is_none(),
+            "and Telegram still ignores it"
+        );
+    }
+
+    /// An unknown mode is not inert: `build_options`' catch-all would run the
+    /// agent with permissions fully bypassed, so a stored value outside
+    /// `CHAT_PERMISSION_MODES` is dropped rather than forwarded.
+    #[test]
+    fn an_unusable_permission_mode_is_dropped_rather_than_escalating_to_bypass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_configured_rule(
+            &db,
+            "r",
+            true,
+            "[]",
+            "",
+            "",
+            "",
+            "yolo",
+            0,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+
+        let rules = load_rules(&db, "tg").expect("load");
+        assert_eq!(
+            rules[0].settings.permission_mode, "",
+            "\"yolo\" would reach `with_bypass_permissions()`; empty runs the agent's own mode"
+        );
+        for mode in crate::native::chats::CHAT_PERMISSION_MODES {
+            assert_eq!(usable_permission_mode(mode.to_string()), mode);
+        }
+    }
+
+    /// Zero is "no choice recorded", not a run that times out instantly, and a
+    /// stored row is clamped because it never went through the write path's
+    /// validation.
+    #[test]
+    fn the_run_timeout_is_the_rules_own_with_five_minutes_as_the_default() {
+        let rule = |minutes: i64| Rule {
+            id: "r".to_string(),
+            name: "r".to_string(),
+            agent_slug: "a".to_string(),
+            enabled: true,
+            filters: RuleFilters::default(),
+            settings: Default::default(),
+            timeout_minutes: minutes,
+        };
+
+        assert_eq!(run_timeout(&rule(0)), RUN_TIMEOUT);
+        assert_eq!(
+            run_timeout(&rule(-1)),
+            RUN_TIMEOUT,
+            "and so is a broken row"
+        );
+        assert_eq!(
+            run_timeout(&rule(1)),
+            std::time::Duration::from_secs(60),
+            "one minute is one minute"
+        );
+        assert_eq!(
+            run_timeout(&rule(crate::native::integrations::RULE_MAX_TIMEOUT_MINUTES)),
+            std::time::Duration::from_secs(240 * 60)
+        );
+        assert_eq!(
+            run_timeout(&rule(100_000)),
+            std::time::Duration::from_secs(240 * 60),
+            "a stored row is clamped: the write path caps it, this reads what is there"
+        );
+    }
+
+    /// [`run_inputs`] is what the dispatcher calls, so this is where the two
+    /// halves of the wiring are pinned. [`run_timeout`]'s own mapping is tested
+    /// above; what a revert would break here is `run_inputs` *calling* it —
+    /// which no fake-CLI test can see, because the timeout is only observable
+    /// by outliving it and the smallest non-default rule timeout is a minute.
+    #[test]
+    fn run_inputs_carries_the_rules_settings_and_its_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_configured_rule(
+            &db,
+            "r",
+            true,
+            "[]",
+            "opus",
+            "/srv/repo",
+            "profile-7",
+            "plan",
+            1,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+        let agent = resolve_agent(&db, "").expect("a synthesized agent");
+        let rules = load_rules(&db, "tg").expect("load");
+
+        let (spec, timeout) = run_inputs(&db, agent.clone(), &rules[0]);
+        assert_eq!(spec.working_dir, "/srv/repo");
+        assert_eq!(spec.settings_profile_id, "profile-7");
+        assert_eq!(spec.permission_mode, "plan");
+        assert_eq!(spec.agent.as_ref().map(|a| a.model.as_str()), Some("opus"));
+        assert_eq!(
+            timeout,
+            std::time::Duration::from_secs(60),
+            "the rule's one minute, not the flat five"
+        );
+
+        let mut unset = rules[0].clone();
+        unset.timeout_minutes = 0;
+        assert_eq!(
+            run_inputs(&db, agent, &unset).1,
+            RUN_TIMEOUT,
+            "and a rule that records none still gets the flat five"
+        );
+    }
+
+    /// The chat a run is recorded in carries the rule's settings, where it used
+    /// to carry four empty strings.
+    #[test]
+    fn the_chat_row_carries_the_rules_execution_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_configured_rule(
+            &db,
+            "r",
+            true,
+            "[]",
+            "opus",
+            "/srv/repo",
+            "profile-7",
+            "dontAsk",
+            0,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+        let rules = load_rules(&db, "tg").expect("load");
+
+        let id = create_trigger_session(&db, &rules[0]).expect("session");
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        let row: (String, String, String, String, String) = conn
+            .query_row(
+                "SELECT title, working_directory, model, settings_profile_id, permission_mode
+                 FROM chat_sessions WHERE id = ?1",
+                [&id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("the session row");
+
+        assert_eq!(row.0, "[Telegram] r", "the title is unchanged");
+        assert_eq!(row.1, "/srv/repo");
+        assert_eq!(row.2, "opus");
+        assert_eq!(row.3, "profile-7");
+        assert_eq!(row.4, "dontAsk");
     }
 }

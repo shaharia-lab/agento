@@ -91,13 +91,23 @@ git show 07b6212^:desktop/parity/
 git show 07b6212^:desktop/parity/github_parity_test.go
 ```
 
-Five files never had a generator and are hand-written beside the code:
+Six files never had a generator and are hand-written beside the code:
 `desktop_routes.json`, `session_metric_vectors.json`,
-`claude_sessions_search_golden.json`, `session_detail_blocks_golden.json` and
-`journey_golden.json`.
+`claude_sessions_search_golden.json`, `session_detail_blocks_golden.json`,
+`journey_golden.json` and `trigger_select_vectors.json`.
 
-The last three were all authored *after* the Go tree was deleted, because none
-has a Go ancestor left to record from. `claude_sessions_search_golden.json`
+`trigger_select_vectors.json` (#565) is the newest and the only one that pins a
+rule Go never had: which trigger rule owns a Slack channel. Every case is a
+*decision*, not a recording — most importantly that a **disabled**
+channel-specific rule means silence rather than a fall-through to the
+workspace-wide default, which is the clause a future reader will file as a bug.
+It sits here rather than in the test file so that changing the rule is a change
+to a contract, exactly as `trigger_match_vectors.json` makes matching one.
+`select_rule::select_rule_for_channel` is the only reader.
+
+`claude_sessions_search_golden.json`, `session_detail_blocks_golden.json` and
+`journey_golden.json` were all authored *after* the Go tree was deleted, because
+none has a Go ancestor left to record from. `claude_sessions_search_golden.json`
 pins one search response — `match_snippet` and the `relevance` sort (#437) are
 Agento's own — recording where the field sits, that it is omitted where there is
 no index hit, and the ranked order. Two things it deliberately does **not** pin:
@@ -132,7 +142,8 @@ Two mechanisms, and the difference matters when files move:
 
 - **`include_str!` with a relative path** — `gojson.rs`, `gotime.rs`,
   `goquote.rs`, `migrate.rs`, `pricing.rs`, `pricing_seed.rs`,
-  `trigger/match_rule.rs`, `schedule/tests_vectors.rs`,
+  `trigger/match_rule.rs`, `trigger/select_rule.rs`,
+  `schedule/tests_vectors.rs`,
   `integrations/oauth/mod.rs`, `notifications/template.rs`,
   `analytics/tests_golden.rs`, `sessions/tests_db.rs`,
   `sessions/tests_search.rs`. These count directory levels and break if either
