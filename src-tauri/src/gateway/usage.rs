@@ -812,8 +812,9 @@ fn prune_since(db_path: &std::path::Path, days: u32, now: DateTime<Utc>) -> Resu
     // An empty log is the ordinary state of an install that has never switched
     // the gateway on, and the launch sweep runs on **every** boot — so asking a
     // WAL reader (which never waits on a writer) whether there is anything at
-    // all is what keeps `CLAUDE.md`'s "an install that never configures one pays
-    // a single `SELECT` at boot" true, rather than a write-lock acquisition
+    // all is what keeps `docs/internal/gateway.md`'s "an install that never
+    // configures one pays a single `SELECT` at boot" true, rather than a
+    // write-lock acquisition
     // against an empty table. Unreadable is not "empty": fall through and let
     // the write path report the real error.
     if let Ok(conn) = db::open_read_only(db_path) {

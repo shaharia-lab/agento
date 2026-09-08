@@ -18,8 +18,11 @@ Start with [Installation](installation.md).
 | [Development](development.md) | Setup, running locally, tests, parity testing, conventions, debugging |
 | [Releasing](releasing.md) | Cutting a release, release notes, the guards, the update manifest, signing keys |
 
-[`CLAUDE.md`](../CLAUDE.md) is the working notes — the root file holds the
-cross-cutting rules and each subsystem carries its own `CLAUDE.md` beside its
-code (the root file indexes them): every decision,
-with the reasoning and the failures behind it. These guides are the map, that file
-is the territory.
+[`CLAUDE.md`](../CLAUDE.md) is the working notes, and it is the repository's
+only one — the root file holds the cross-cutting rules and indexes the
+per-subsystem notes in `docs/internal/`: every decision, with the reasoning and
+the failures behind it. These guides are the map, that file is the territory.
+
+`docs/internal/` is those subsystem notes, written for maintainers and for AI
+agents working on the code, one file per area. It is deliberately not published
+to the documentation site — the guides above are.

@@ -26,7 +26,7 @@
  * sheet reached them only because `SessionsView` happened to import it. A
  * second caller outside this section would have rendered the Session heading
  * and the whole Pull requests list unstyled, with nothing to say so — which is
- * the savebar failure `CLAUDE.md` records, one directory over.
+ * the savebar failure `docs/internal/frontend.md` records.
  */
 import { useCallback, useState } from "react";
 import { CopyButton } from "../../components/CopyButton";

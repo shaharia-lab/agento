@@ -1073,8 +1073,9 @@ fn profile_file_path_in(config_dir: &str, index_dir: &str, profile_id: &str) -> 
 /// runtime by both the chat turn and the scheduler's executor, so leaving it
 /// inline puts a 3 s stall on a worker — twice the hold
 /// `a_contended_write_lock_does_not_stall_the_runtime` was written to catch,
-/// and it would falsify the "what is still on the worker" list in `CLAUDE.md`,
-/// every entry of which is a non-blocking read. It is bounded (one walk per
+/// and it would falsify the "what is still on the worker" list in
+/// `docs/internal/native-schedule.md`, every entry of which is a non-blocking
+/// read. It is bounded (one walk per
 /// `REFRESH_COOLDOWN`, and only one thread walks) but bounded is not the bar
 /// #366 set.
 ///

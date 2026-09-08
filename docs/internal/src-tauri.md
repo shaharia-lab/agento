@@ -20,9 +20,9 @@ src-tauri/src/
   logs.rs        the app log read back for Settings → Logs — commands, not /api
   proxy.rs       axum server; routes every request into native/'s registry
   menu.rs        native menu → menu://action events
-  claude/        the Claude Agent SDK port — see src/claude/CLAUDE.md
-  gateway/       the embedded LLM gateway — see src/gateway/CLAUDE.md
-  native/        every /api endpoint — see src/native/CLAUDE.md
+  claude/        the Claude Agent SDK port — see docs/internal/claude-sdk.md
+  gateway/       the embedded LLM gateway — see docs/internal/gateway.md
+  native/        every /api endpoint — see docs/internal/native.md
 src-tauri/tests/ integration suites (the live-diff ones went with the Go tree)
                  insights_worker.rs  the worker through the real `worker::start`
                  (#447) — not `#[ignore]`d, and one `start` per binary
@@ -168,7 +168,7 @@ alternative would be asking GitHub for the latest release and comparing — whic
 
 **No handler starts an OTel span, and none will** (#301). A span with no
 provider behind it is a no-op, and the only place emitting them could lead is
-implementing the exporters — the option `native/CLAUDE.md` declines under
+implementing the exporters — the option `docs/internal/native.md` declines under
 *Monitoring is not implemented, on purpose*. Adding spans
 first and deciding later gets that order backwards.
 

@@ -303,7 +303,7 @@ either way is the easy mistake here.
 
 **`AGENTO_CLAUDE_EXECUTABLE`** overrides which binary is spawned, falling back to
 `claude_cli::executable()` and then the bare name — see *The one external
-dependency* in `src-tauri/CLAUDE.md` for the whole order and why a `PATH` scan was never enough. The
+dependency* in `docs/internal/src-tauri.md` for the whole order and why a `PATH` scan was never enough. The
 override is re-read per call rather than taken from the cache, and that is for
 the tests rather than the app: a test binary whose cases each point at a
 *different* scripted CLI would otherwise all run the first one's.

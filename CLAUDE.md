@@ -25,39 +25,50 @@ specification; a sentence about a process is a story.**
 
 ## Where the notes live, and how to add to them
 
-This file is the part every session needs. Everything subsystem-deep lives in a
-`CLAUDE.md` **beside the code it describes**, which Claude Code loads only when
-a file in that directory is read — so its size is not charged to every session.
+**There is exactly one `CLAUDE.md`, and it is this file, at the repository
+root.** Everything subsystem-deep lives in `docs/internal/<area>.md`, indexed by
+the table below — so its size is not charged to every session.
+
+The cost of that, stated plainly: Claude Code auto-loads a nested `CLAUDE.md`
+when a file in its directory is read, and it does **not** auto-load a
+`docs/internal/*.md`. Nothing will hand you the area's note. **Read the row for
+the area you are about to change before you change it** — that reading is
+required, not optional, and this table is the only thing that will prompt it.
 
 | when working in | read |
 |---|---|
-| `src/` (the UI) | `src/CLAUDE.md` — the frontend layout, and every UI convention in full |
-| `src-tauri/` (the shell) | `src-tauri/CLAUDE.md` — ACL and capabilities, window chrome, logging, packaging and updates, the Claude CLI lookup |
-| `src-tauri/src/claude/` | the Agent SDK port, and *Hosting a tool* — read before any integration |
-| `src-tauri/src/gateway/` | the LLM gateway's engine, control plane (`native/gateway_api.rs`) and usage log |
-| `src-tauri/src/native/` | the `/api` registry, the JSON contract in full, the write path, wire-format traps |
-| `native/security/` | the JWT, the three scopes, the guards |
-| `native/chat/` | the SSE turn, permissions, the runner and `mcps.yaml` |
-| `native/sessions/` | the corpus reads: cost, pagination, relevance, the journey |
-| `native/scanner/`, `native/insights/` | the scan, the insight worker, the search index and its numbers |
-| `native/schedule/` | the scheduler, the executor, gocron and cron semantics, manual runs |
-| `native/integrations/` and each provider under it | the registry, credentials, OAuth, and one file per ported integration |
-| `native/claude_settings/`, `native/notifications/` | those two surfaces |
+| `src/` (the UI) | `docs/internal/frontend.md` — the frontend layout, and every UI convention in full |
+| `src-tauri/` (the shell) | `docs/internal/src-tauri.md` — ACL and capabilities, window chrome, logging, packaging and updates, the Claude CLI lookup |
+| `src-tauri/src/claude/` | `docs/internal/claude-sdk.md` — the Agent SDK port, and *Hosting a tool* — read before any integration |
+| `src-tauri/src/gateway/` | `docs/internal/gateway.md` — the LLM gateway's engine, control plane (`native/gateway_api.rs`) and usage log |
+| `src-tauri/src/native/` | `docs/internal/native.md` — the `/api` registry, the JSON contract in full, the write path, wire-format traps |
+| `native/security/` | `docs/internal/native-security.md` — the JWT, the three scopes, the guards |
+| `native/chat/` | `docs/internal/native-chat.md` — the SSE turn, permissions, the runner and `mcps.yaml` |
+| `native/sessions/` | `docs/internal/native-sessions.md` — the corpus reads: cost, pagination, relevance, the journey |
+| `native/scanner/`, `native/insights/` | `docs/internal/native-scanner.md`, `docs/internal/native-insights.md` — the scan, the insight worker, the search index and its numbers |
+| `native/schedule/` | `docs/internal/native-schedule.md` — the scheduler, the executor, gocron and cron semantics, manual runs |
+| `native/integrations/` | `docs/internal/native-integrations.md` — the registry, credentials, OAuth |
+| each provider under `native/integrations/` | `docs/internal/native-integrations-slack.md`, `-telegram.md`, `-github.md`, `-google.md`, `-jira.md`, `-confluence.md` — one file per ported integration |
+| `native/claude_settings/`, `native/notifications/` | `docs/internal/native-claude-settings.md`, `docs/internal/native-notifications.md` |
 | `parity/` | `parity/README.md` — what the goldens are and what freezing them cost |
 
-**Budget: this file and every nested `CLAUDE.md` stay under 40,000 characters.**
-`scripts/check-claude-md-size.sh` enforces it and CI runs it on every PR; the
-limit exists because Claude Code truncates a `CLAUDE.md` past 150k characters
-and this file was 304k when #553 split it, so the bottom third was never read.
+**Budget: this file stays under 40,000 characters, and it is the only
+`CLAUDE.md` the repository may contain.** `scripts/check-claude-md-size.sh`
+enforces both and CI runs it on every PR; the limit exists because Claude Code
+truncates a `CLAUDE.md` past 150k characters and this file was 304k when #553
+split it, so the bottom third was never read. The one-file rule is the
+maintainer's (#580): the subsystem notes total over 320k characters, so they
+live beside the guides in `docs/internal/` rather than beside the code.
 
 Where a new note goes:
 
 - **A rule every session needs unconditionally** — a wire contract, an auth
   rule, a convention that applies to every view — goes here, in a paragraph.
-- **Anything about one subsystem** goes in that subsystem's `CLAUDE.md`. If the
-  directory has none, add one with the header the others carry.
+- **Anything about one subsystem** goes in that area's `docs/internal/<area>.md`.
+  If the area has none, add the file — with the header the others carry — and a
+  row in the table above. **Never add a second `CLAUDE.md` anywhere.**
 - **Why a byte is the way it is** belongs in the module's `//!` doc beside the
-  byte, with the `CLAUDE.md` pointing at it. Prefer *rule → why (one sentence)
+  byte, with the area doc pointing at it. Prefer *rule → why (one sentence)
   → where it is enforced (file or test name)* over a narrative of the PR that
   found it; the PR number is the pointer and git holds the story.
 - **Not here at all**: review findings, what a test caught during a port,
@@ -146,7 +157,7 @@ macOS have no such parameter and read the identifier. Verified with `busctl
 It does **not** let you test anything origin-dependent. A dev build loads the
 configured `devUrl`, which the ACL treats as *local* — so the whole class of bug
 described under *The window's origin has to be in the capability's scope*
-(in *Conventions* here, and in full in `src-tauri/CLAUDE.md`) is invisible in
+(in *Conventions* here, and in full in `docs/internal/src-tauri.md`) is invisible in
 dev by construction. That needs `app:build`.
 
 Tauri's *bundles* cannot cross-compile, which is why the release workflow uses
@@ -194,7 +205,7 @@ instance registered it last.
 
 ## Layout
 
-Paths only; each area's `CLAUDE.md` carries the annotated tree.
+Paths only; each area's `docs/internal/*.md` carries the annotated tree.
 
 ```
 src/
@@ -220,7 +231,7 @@ src-tauri/src/
   gateway/       the embedded LLM gateway — a second listener, not the /api seam
   native/        every /api endpoint: mod.rs (registry), gojson.rs (read first),
                  gotime, gopath, gourl, db.rs, migrate.rs, writes.rs, and one
-                 module or file per surface (see native/CLAUDE.md for the tree)
+                 module or file per surface (see docs/internal/native.md for the tree)
 src-tauri/tests/ integration suites — the scripted fake CLI, the live corpus
                  suites (`--ignored`), the worker harness
 parity/          frozen goldens; see parity/README.md
@@ -275,13 +286,13 @@ works against `:8991`. Four things to know before debugging a refusal:
 - The debug `api-token` file holds a `write` token, so it will not work against
   the gateway — mint an `llm` one via `POST /api/security/tokens`.
 
-The whole of it is `native/security/CLAUDE.md`. **Do not read "Agento ships
+The whole of it is `docs/internal/native-security.md`. **Do not read "Agento ships
 without authentication on purpose" anywhere as current**; #400 revised that.
 
 **Desktop, not web.** Three resizable panes per section, 14px type, 28px rows,
 hairline borders, status bar, focus-aware selection, ⌘K palette, no browser
 affordances. Reuse the existing CSS classes; new CSS goes in a per-view file
-imported by that view. Every rule below is stated in full in `src/CLAUDE.md`;
+imported by that view. Every rule below is stated in full in `docs/internal/frontend.md`;
 the one-line forms are here so nothing is violated by a session that never
 opens it:
 
@@ -317,13 +328,13 @@ a `remote.urls` block naming the loopback origins; keep it in step with what
 (#401): each is named in three places — `generate_handler!`, `APP_COMMANDS` in
 `build.rs`, and the capability — and a test asserts the three agree. Treat
 "works in `npm run app`, not in the installer" as this bug until proven
-otherwise. Details, and the window-chrome rules: `src-tauri/CLAUDE.md`.
+otherwise. Details, and the window-chrome rules: `docs/internal/src-tauri.md`.
 
 ---
 
 ## The backend, in brief
 
-Everything under `src-tauri/src/native/`, stated fully in `native/CLAUDE.md`.
+Everything under `src-tauri/src/native/`, stated fully in `docs/internal/native.md`.
 
 **The registry.** Each module declares `claims` and `serve` as a
 `native::Endpoint` and `ENDPOINTS` in `native/mod.rs` lists them, so claiming a
@@ -364,7 +375,7 @@ raw CLI JSON lines plus two synthetic ones (`user_input_required`,
 `permission_request`); `result` is not terminal, the turn ends on stream close;
 mid-stream failures are a `result` with `is_error: true`; `AskUserQuestion` is
 answered by *denying* the tool with the user's text. Every unbounded wait races
-the client's departure. Full rules: `native/chat/CLAUDE.md`.
+the client's departure. Full rules: `docs/internal/native-chat.md`.
 
 **Hosting a tool has exactly one way** (#282): `rmcp` through
 `start_in_process_mcp_server`, a `ToolServer` built at runtime from the
@@ -381,7 +392,7 @@ reaches stored costs only through a rescan.
 **Only one process may schedule**, and every run path ends in a `job_history`
 row — silence is the one outcome not allowed. The scheduler re-anchors against
 the wall clock after a sleep rather than replaying missed windows. See
-`native/schedule/CLAUDE.md`.
+`docs/internal/native-schedule.md`.
 
 **Not implemented, on purpose.** OpenTelemetry, Prometheus metrics and a
 self-updater of Agento's own are deliberately absent; `PUT /api/monitoring`
