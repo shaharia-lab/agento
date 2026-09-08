@@ -330,10 +330,13 @@ impl Registry {
 
     /// `Stop`: idempotent, and an unknown id is a silent no-op with no error.
     ///
-    /// Dropping the handle is what stops the listener, and it is done **inside**
-    /// the lock: the drop only sends a oneshot, so there is nothing to await and
-    /// nothing to deadlock on, and releasing first would leave a window in which
-    /// the map says the server is gone while the port is still open.
+    /// Removing the handle from the map is what makes the server unreachable and
+    /// it is done **inside** the lock; *dropping* it is what stops the listener,
+    /// and that happens after the guard is released. The drop only sends a
+    /// oneshot, so there is nothing to await and nothing to gain from holding
+    /// the lock across it — and the window it leaves is one in which the
+    /// listener is closing and the map already says it is gone, which is the
+    /// direction that is safe.
     ///
     /// The generation bump is what makes a concurrent start notice. It happens
     /// whether or not anything was removed, because a `DELETE` racing a `reload`
@@ -343,16 +346,12 @@ impl Registry {
         let mut state = self.lock();
         *state.generations.entry(id.to_string()).or_default() += 1;
         let removed = state.servers.remove(id);
-        // Removed under the same lock, for the reason above — after this the
-        // map cannot hand the worker to anyone. *Dropping* it is what closes
-        // the socket, and that happens a line later, outside the guard: the
-        // drop only sends a oneshot, so there is nothing to await and nothing
-        // to gain from holding the lock across it. The window it leaves is one
-        // in which the socket is closing and the map already says so, which is
-        // the direction that is safe.
-        // Retired under the same lock. A stop is the end of that worker's right
-        // to report, whether or not a replacement follows.
+        // The epoch first: a stop ends that worker's right to report, whether or
+        // not a replacement follows, and retiring it under the same lock is what
+        // makes that true for a status write already queued.
         Self::take_socket_epoch(&mut state, id);
+        // The socket worker on exactly the terms the doc comment gives for the
+        // server — out of the map here, dropped below.
         let removed_socket = state.sockets.remove(id);
         drop(state);
         drop(removed_socket);

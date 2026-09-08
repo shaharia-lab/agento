@@ -150,8 +150,15 @@ default logs at `debug`.
   five-second `busy_timeout`, which is ample time for a replacement to write
   `connected` underneath it, and the row would then be stuck on the old worker's
   last value because a socket that connects and stays connected has no next
-  transition. `status_lock` is global and held across the write, so the two
-  writes are ordered whichever way they arrive and the stale one is a no-op.
+  transition. `status_lock` is held across the write, so the two writes are
+  ordered whichever way they arrive and the stale one is a no-op. It is keyed
+  **per integration id**, not one lock for the process: what needs ordering is
+  the writes to one row, and a global lock additionally makes one integration's
+  slow write — `busy_timeout` allows five seconds of slow — delay every other
+  integration's reporting. That is not theoretical; a global lock is what made
+  `tests/slack_socket.rs` flake, because two of its tests hold a write lock for a
+  second and a half on purpose and every other worker's status queued behind
+  them.
 - **The epoch is granted by the registry inside `put_if_current`, never taken by
   the worker**, and that placement is the whole of its correctness. A worker is
   *built* before the decision — `start_for_type` is `async` and can be slow — and
@@ -162,9 +169,13 @@ default logs at `debug`.
   Granting it in the one critical section that decides acceptance makes epoch
   order and acceptance order the same order by construction. `NOT_ACCEPTED`
   matches nothing, so a refused worker is silent. `Registry::stop` and the
-  no-worker arm of `put_if_current` retire the epoch under the same lock and hand
-  it to `clear_status`, which refuses to write if something has been accepted
-  since. Only the boot clear skips all of it, because no worker exists yet.
+  no-worker arm of `put_if_current` retire the epoch under the same lock; the one
+  that *hands* it to `clear_status` is **`retire_socket_if_current`**, and the
+  generation check in its name is load-bearing — a start that fails is still a
+  start that may have lost, so retiring unconditionally there would drop a
+  concurrent reload's live worker and then blank its row. `None` means the caller
+  lost and touches nothing. Only the boot clear skips all of it, because no
+  worker exists yet.
   `a_refused_socket_never_takes_the_epoch_from_the_accepted_one` is the guard.
 - **`tests/slack_socket.rs` drives workers with no registry, so it grants the
   epoch itself** (`accepted_worker`), and **every test uses its own integration

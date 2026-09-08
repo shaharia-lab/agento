@@ -651,11 +651,7 @@ impl Worker {
             // Slack redelivers anything unacknowledged within seconds, and the
             // handler starts an agent run — orders of magnitude longer.
             if let Some(envelope_id) = envelope.envelope_id.as_deref() {
-                let ack = format!(
-                    "{{\"envelope_id\":{}}}",
-                    serde_json::Value::String(envelope_id.to_string())
-                );
-                if let Err(e) = socket.send(Message::text(ack)).await {
+                if let Err(e) = socket.send(Message::text(ack_frame(envelope_id))).await {
                     return SessionEnd::Failed(format!("acknowledging an envelope: {e}"));
                 }
             }
@@ -776,6 +772,20 @@ impl Worker {
             .map(str::to_string)
             .ok_or_else(|| "apps.connections.open returned no url".to_string())
     }
+}
+
+/// The acknowledgement for one envelope.
+///
+/// **JSON-encoded rather than interpolated**, because the id comes off the
+/// network: `format!`ing a quote straight into a document is how a frame Slack
+/// cannot parse gets sent, and an unparsed ack is a redelivery. Its own function
+/// so the test that pins the escaping calls the same code the socket sends —
+/// a test that re-typed the expression would pass against a reverted fix.
+fn ack_frame(envelope_id: &str) -> String {
+    format!(
+        "{{\"envelope_id\":{}}}",
+        serde_json::Value::String(envelope_id.to_string())
+    )
 }
 
 /// The parsed shape of a Socket Mode envelope. Only the fields the transport
@@ -1278,16 +1288,21 @@ mod tests {
 
     /// An envelope id is JSON-encoded rather than interpolated. Slack's ids are
     /// UUIDs, but the ack is a document and building it with `format!` on a
-    /// value from the network is how a quote in it becomes a broken frame.
+    /// value from the network is how a quote in it becomes a broken frame — and
+    /// a frame Slack cannot parse is an unacknowledged envelope, so it comes
+    /// back.
+    ///
+    /// Calls [`ack_frame`] rather than re-typing it, which is the difference
+    /// between a regression guard and a copy that agrees with itself.
     #[test]
     fn an_envelope_id_is_json_encoded_into_the_ack() {
-        let ack = format!(
-            "{{\"envelope_id\":{}}}",
-            serde_json::Value::String("a\"b".to_string())
-        );
+        let ack = ack_frame("a\"b");
         assert_eq!(ack, r#"{"envelope_id":"a\"b"}"#);
         let parsed: serde_json::Value = serde_json::from_str(&ack).expect("valid json");
         assert_eq!(parsed["envelope_id"], "a\"b");
+
+        // And the ordinary case is still exactly what Slack expects.
+        assert_eq!(ack_frame("Env0001"), r#"{"envelope_id":"Env0001"}"#);
     }
 
     /// The default handler is what ships until #568, and the thing it must not
