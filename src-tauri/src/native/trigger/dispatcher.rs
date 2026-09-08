@@ -287,18 +287,30 @@ fn usable_permission_mode(stored: String) -> String {
 ///
 /// `timeout_minutes = 0` is "no choice recorded" and means [`RUN_TIMEOUT`] — the
 /// flat five minutes every trigger run had before #565 — not a run that times
-/// out instantly. The write path already caps the column at
-/// [`crate::native::integrations::RULE_MAX_TIMEOUT_MINUTES`]; this clamps again
-/// because it reads a stored row rather than a validated request, and an absurd
-/// value there would otherwise hold one of the ten concurrency slots for as long
-/// as it says.
+/// out instantly.
+///
+/// The write path **refuses** a value above
+/// [`crate::native::integrations::RULE_MAX_TIMEOUT_MINUTES`] with a 422 rather
+/// than clamping it, so a row holding one never came through
+/// `validate_rule_settings`: it was hand-edited, restored, or written before
+/// that validation existed. This clamps rather than refusing, because refusing
+/// here means an inbound message silently going unanswered, and an absurd value
+/// would otherwise hold one of the ten concurrency slots for as long as it says.
+/// It is [`usable_permission_mode`]'s premise with the opposite answer, and for
+/// the same reason both are stated: a clamped timeout is a run that still
+/// happens, where a bad mode is a run that must not.
 fn run_timeout(rule: &Rule) -> std::time::Duration {
     if rule.timeout_minutes <= 0 {
         return RUN_TIMEOUT;
     }
-    let minutes = rule
-        .timeout_minutes
-        .min(crate::native::integrations::RULE_MAX_TIMEOUT_MINUTES);
+    let max = crate::native::integrations::RULE_MAX_TIMEOUT_MINUTES;
+    let minutes = rule.timeout_minutes.min(max);
+    if minutes != rule.timeout_minutes {
+        log::warn!(
+            "clamping trigger rule timeout {} to {max} minutes",
+            rule.timeout_minutes
+        );
+    }
     std::time::Duration::from_secs(u64::try_from(minutes).unwrap_or(0) * 60)
 }
 
