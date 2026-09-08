@@ -234,11 +234,24 @@ declines to start one.
   This is the one ordering constraint the FIFO exists for, and it is why
   classification is split across `accept` (rule, mention strip) and `turn`
   (mapping, start-or-resume).
-- **The handler future must not return before its turn is over.** #567 holds the
-  dispatcher's ten-slot permit for exactly as long as `handler(mention)` is
-  awaited, so a handler that returned at `enqueue` would leave the global bound
-  counting *queueing* rather than running. Each job therefore carries a
-  `oneshot` the worker fires when the turn ends, however it ended.
+- **The ten-slot bound is taken around the run, not around the handler.** It
+  exists to bound `claude` subprocesses, and a mention waiting for its thread's
+  turn is not one: taken in `socket.rs::dispatch`, as #567 had it, ten queued
+  mentions in a single Slack thread hold every permit while one of them runs —
+  and Telegram, which shares that semaphore, stops with them. `dispatch` no
+  longer acquires anything; `inbound::Inbound::run` does, immediately before
+  `run_resumed`. The handler future still spans the whole turn (each job carries
+  a `oneshot` the worker fires when it ends, however it ended), because a `debug`
+  line saying a mention was seen and a reply appearing minutes later are two
+  different things to anyone reading a log — but that wait now costs a parked
+  task and no permit.
+- **`auth.test` is resolved after the mapping decision, not before it.** It is
+  the one Slack failure the handler cannot work around, and its answer is
+  `ERROR_REPLY` — so resolving it first would post that sentence into a thread
+  Agento never started, which is exactly what the ignore rule exists to prevent.
+  Reading the thread map likewise distinguishes *no row* from *could not read*:
+  `busy_timeout` is five seconds, and a database busy behind the session scanner
+  would otherwise make a resume look like a stranger's thread and answer nothing.
 - **Queue teardown is under the map lock.** A worker that found its channel
   empty, released nothing and then removed its entry would lose a job queued in
   between, so the drain re-checks the channel while holding the lock that hands
@@ -261,14 +274,19 @@ declines to start one.
   not accept `chat.postMessage` either. `conversations.info` (chat title) and
   `chat.getPermalink` are best-effort on the start path only — the channel id and
   an empty permalink are the fallbacks, and neither refuses the run.
-- **`mrkdwn.rs` escapes nothing.** Slack asks a client to send `&`, `<` and `>`
-  escaped; doing it here would be a lossy second pass over the model's own text
-  and cannot be applied inside a fenced block without changing the code the
-  answer is showing. The conversions are exactly #568's and no more, so the
-  consequence to know is that an answer literally containing `<@U123>` mentions
-  that user. The split counts `char`s, prefers a blank line then a line ending
-  then the limit, and passes over a break inside a fenced block while any break
-  outside one remains.
+- **`mrkdwn.rs` escapes `&`, `<` and `>` before it converts anything**, over the
+  whole answer including its fenced blocks. Slack renders those entities back as
+  themselves everywhere, so escaping costs the answer nothing — and not escaping
+  costs it a great deal, because `chat.postMessage` reads `<!channel>`,
+  `<!here>` and `<!everyone>` in `text` as **broadcasts** and `<@U123>` as a
+  mention. This is the first surface where an answer derived from a stranger's
+  words is posted by the app as itself, into a channel it is a member of by
+  construction. The only raw `<`, `>` and `|` in the output are the ones this
+  module writes building a `<url|text>` link; `gojson::to_vec_marshal` is not a
+  substitute, since its `\u003c` is decoded straight back by Slack. The split
+  counts `char`s, prefers a blank line then a line ending then the limit, and
+  passes over a break inside a fenced block while any break outside one remains
+  — a block that must be cut is cut, and the second chunk renders as prose.
 
 **These tests are in the library, and they have to be.** Every assertion about a
 request Agento *sends* to Slack needs `client::API_BASE`, which is `#[cfg(test)]`

@@ -45,11 +45,17 @@ struct Call {
 }
 
 #[derive(Clone, Default)]
-struct FakeSlack(Arc<Mutex<Vec<Call>>>);
+struct FakeSlack {
+    calls: Arc<Mutex<Vec<Call>>>,
+    /// Cleared to make `auth.test` refuse, which is the one Slack failure the
+    /// handler cannot work around: without the bot user id it can neither strip
+    /// the mention nor apply the empty-remainder rule.
+    auth_works: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl FakeSlack {
     fn calls(&self) -> Vec<Call> {
-        self.0.lock().expect("the fake's lock").clone()
+        self.calls.lock().expect("the fake's lock").clone()
     }
 
     /// The `text` of every `chat.postMessage`, in the order Slack received them.
@@ -74,11 +80,14 @@ impl FakeSlack {
 
 async fn serve(State(state): State<FakeSlack>, uri: Uri, body: String) -> axum::response::Response {
     let method = uri.path().trim_start_matches('/').to_string();
-    state.0.lock().expect("the fake's lock").push(Call {
+    state.calls.lock().expect("the fake's lock").push(Call {
         method: method.clone(),
         body,
     });
     let reply = match method.as_str() {
+        "auth.test" if !state.auth_works.load(std::sync::atomic::Ordering::Relaxed) => {
+            serde_json::json!({"ok": false, "error": "invalid_auth"})
+        }
         "auth.test" => serde_json::json!({"ok": true, "user_id": BOT_USER, "team": "T"}),
         "conversations.info" => {
             serde_json::json!({"ok": true, "channel": {"id": CHANNEL, "name": "general"}})
@@ -94,7 +103,10 @@ async fn serve(State(state): State<FakeSlack>, uri: Uri, body: String) -> axum::
 
 /// Points every Slack request at a recording fake for as long as the guard lives.
 async fn fake_slack() -> FakeSlack {
-    let state = FakeSlack::default();
+    let state = FakeSlack {
+        calls: Arc::default(),
+        auth_works: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    };
     let app = axum::Router::new()
         .fallback(serve)
         .with_state(state.clone());
@@ -437,7 +449,10 @@ fn the_prompt_is_logged_at_debug_and_nowhere_else() {
         let tail = &rest[at..];
         let end = tail.find(");").map_or(tail.len(), |offset| offset + 2);
         let call = &tail[..end];
-        if call.contains("job.prompt") || call.contains("mention.text") {
+        // The word, not one binding: the message's own text is carried by
+        // whatever is called `prompt` here and by `mention.text`, and a guard
+        // that named today's binding would go quiet on a rename.
+        if call.contains("prompt") || call.contains("mention.text") {
             carrying.push(call.to_string());
         }
         rest = &tail[end..];
@@ -813,5 +828,86 @@ async fn a_disabled_channel_rule_silences_that_channel_only() {
         slack.posted(),
         vec![("1700000000.000200".to_string(), "answered".to_string())],
         "and every other channel still runs on the workspace default"
+    );
+}
+
+/// Review round 1, finding 4: the one Slack failure the handler cannot work
+/// around must not answer into a thread Agento never started.
+///
+/// `auth.test` is resolved **after** the mapping decision for exactly this
+/// reason. A stranger's thread gets nothing; a thread of Agento's own gets the
+/// failure sentence, because silence there is the outcome that is never allowed.
+#[tokio::test]
+async fn an_auth_failure_answers_only_in_a_thread_agento_started() {
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    slack
+        .auth_works
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-auth");
+    seed_rule(
+        &db,
+        "s-auth",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+    );
+    let handler = super::handler(&db, "s-auth", "xoxb-t");
+
+    finish(handler(mention(
+        "<@U0BOT> hello",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-auth",
+    )))
+    .await;
+    assert!(
+        slack.posted().is_empty(),
+        "a mention in an unmapped thread produces no reply, whatever else failed"
+    );
+
+    finish(handler(mention(
+        "<@U0BOT> hello",
+        "1700000000.000400",
+        "",
+        "s-auth",
+    )))
+    .await;
+    set_api_base(None);
+    assert_eq!(
+        slack.posted(),
+        vec![("1700000000.000400".to_string(), ERROR_REPLY.to_string())],
+        "and a top-level mention, whose thread is Agento's own, is told"
+    );
+    assert!(
+        threads(&db).is_empty(),
+        "no chat is started for a mention that cannot be read"
+    );
+}
+
+/// Review round 1, finding 2: the dispatcher's ten permits bound `claude`
+/// subprocesses, so they are taken around the **run** and not around the
+/// handler.
+///
+/// Structural rather than behavioural on purpose: the semaphore is a process
+/// global shared with every other transport, so a test that drained it to
+/// observe the difference would stall unrelated tests in this binary. What can
+/// be pinned deterministically is *where* it is taken, and moving it back is a
+/// one-line change that nothing else would notice — ten mentions queued in one
+/// Slack thread would silently hold every permit while one of them ran.
+#[test]
+fn the_global_bound_is_taken_around_the_run_and_not_around_the_wait() {
+    assert!(
+        include_str!("../inbound.rs").contains("dispatcher::semaphore().acquire()"),
+        "the run must take the dispatcher's permit"
+    );
+    assert!(
+        !include_str!("../socket.rs").contains("semaphore()"),
+        "and the transport must not: a mention waiting for its thread's turn is \
+         not a `claude` subprocess"
     );
 }

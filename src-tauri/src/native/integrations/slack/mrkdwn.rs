@@ -16,16 +16,23 @@
 //!   a Markdown link keeps saying what it said.
 //! - [`split`] cuts a long answer into consecutive messages at [`MAX_MESSAGE_CHARS`].
 //!
-//! ## What is deliberately *not* done
+//! ## Escaping comes first, and it is not cosmetic
 //!
-//! **Nothing is HTML-escaped.** Slack asks a client to send `&`, `<` and `>` as
-//! `&amp;`, `&lt;` and `&gt;`, and doing so here would be a second, lossy pass
-//! over text the model wrote — it would mangle every `->` in prose, and it
-//! cannot be applied inside a fenced block without changing the code the answer
-//! is showing. The conversions this module performs are exactly the ones #568
-//! specifies and no more, so a byte the model wrote either survives or is one of
-//! those conversions. The consequence to know: an answer that literally contains
-//! `<@U123>` will mention that user.
+//! Slack asks a client to send `&`, `<` and `>` as `&amp;`, `&lt;` and `&gt;`,
+//! and renders them back as themselves — in prose and inside a code block
+//! alike, so escaping costs the answer nothing. Not escaping costs it a great
+//! deal: `chat.postMessage` parses `<!channel>`, `<!here>` and `<!everyone>` in
+//! `text` as **broadcasts**, and `<@U123>` as a mention. This is the first
+//! surface where an agent's answer — derived from text a stranger in a Slack
+//! channel wrote — is posted by the app as itself, into a channel the app is a
+//! member of by construction. An answer talked into saying `<!channel>` would
+//! notify everyone in it.
+//!
+//! So [`to_mrkdwn`] escapes the whole answer **before** converting anything,
+//! and the only raw `<`, `>` and `|` in its output are the ones it writes
+//! itself, building a `<url|text>` link. `gojson::to_vec_marshal` is not this:
+//! it escapes `<` to `\u003c` at the JSON layer and Slack decodes that straight
+//! back to `<`.
 //!
 //! **The limit is counted in `char`s, not bytes and not grapheme clusters.**
 //! Slack's own limit is characters, and [`split`] never cuts inside one —
@@ -40,6 +47,12 @@ pub const MAX_MESSAGE_CHARS: usize = 4000;
 
 /// The answer as Slack mrkdwn.
 pub fn to_mrkdwn(markdown: &str) -> String {
+    // Before anything else, and over the whole answer including its fenced
+    // blocks: what Slack renders from `&lt;` is `<`, so nothing is lost, and
+    // what it renders from an unescaped `<!channel>` is a notification to a
+    // whole channel. See the module header.
+    let escaped = escape(markdown);
+    let markdown = escaped.as_str();
     let mut out = String::with_capacity(markdown.len());
     let mut in_fence = false;
     let mut first = true;
@@ -74,6 +87,14 @@ pub fn to_mrkdwn(markdown: &str) -> String {
         }
     }
     out
+}
+
+/// The three characters Slack reads as markup, as the entities it renders back.
+fn escape(text: &str) -> String {
+    // `&` first, or the `&` of an entity this function just wrote is escaped again.
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// ```` ``` ```` or longer, at the start of a line, opening or closing a block.
@@ -130,8 +151,10 @@ fn inline(line: &str) -> String {
                 i += 2;
             }
             // `![alt](url)` differs from `[alt](url)` only in the `!`, and Slack
-            // has no image syntax, so both become the same link.
-            b'!' if bytes.get(i + 1) == Some(&b'[') => i += 1,
+            // has no image syntax, so both become the same link. Only a `!` in
+            // front of a *well-formed* link is dropped: `![unclosed` is prose,
+            // and silently losing its `!` would be a conversion nobody asked for.
+            b'!' if bytes.get(i + 1) == Some(&b'[') && link_at(line, i + 1).is_some() => i += 1,
             b'[' => match link_at(line, i) {
                 Some((text, url, end)) => {
                     out.push('<');
@@ -270,7 +293,7 @@ mod tests {
             ("[a](b)", "<b|a>"),
             (
                 "see [the docs](https://x/y?a=1&b=2)",
-                "see <https://x/y?a=1&b=2|the docs>",
+                "see <https://x/y?a=1&amp;b=2|the docs>",
             ),
             ("![alt](u)", "<u|alt>"),
             ("[](u)", "<u>"),
@@ -278,6 +301,9 @@ mod tests {
             ("- one\n- two", "- one\n- two"),
             // Malformed links stay text rather than eating the line.
             ("[unclosed", "[unclosed"),
+            // A `!` that is not an image reference is prose, and keeps its `!`.
+            ("![unclosed", "![unclosed"),
+            ("![a] (b)", "![a] (b)"),
             ("[a] (b)", "[a] (b)"),
             ("[a]()", "[a]()"),
             // A code span is its own subject.
@@ -288,6 +314,30 @@ mod tests {
             ("## [a](b)", "*<b|a>*"),
             ("##", ""),
             ("", ""),
+        ] {
+            assert_eq!(to_mrkdwn(markdown), want, "converting {markdown:?}");
+        }
+    }
+
+    /// The reason escaping is not cosmetic: an answer talked into emitting a
+    /// broadcast must not produce one, and the only raw angle brackets in the
+    /// output are the ones this module writes itself.
+    #[test]
+    fn slacks_own_markup_never_survives_the_answer() {
+        for (markdown, want) in [
+            ("<!channel>", "&lt;!channel&gt;"),
+            ("<!here> deploy now", "&lt;!here&gt; deploy now"),
+            ("ping <@U123>", "ping &lt;@U123&gt;"),
+            ("a < b && c > d", "a &lt; b &amp;&amp; c &gt; d"),
+            (
+                "<https://x|already a link>",
+                "&lt;https://x|already a link&gt;",
+            ),
+            // Inside a fence too: Slack renders `&lt;` as `<` in a code block,
+            // so the code still reads as written and cannot notify anybody.
+            ("```\n<!channel>\n```", "```\n&lt;!channel&gt;\n```"),
+            // Escaped once, never twice.
+            ("&amp;", "&amp;amp;"),
         ] {
             assert_eq!(to_mrkdwn(markdown), want, "converting {markdown:?}");
         }

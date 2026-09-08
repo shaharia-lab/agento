@@ -58,7 +58,13 @@
 //!   handler rather than fetched per event. Without it neither the mention strip
 //!   nor the empty-remainder rule can be applied, so a failure to get it is a
 //!   failed turn and answers [`ERROR_REPLY`] — a Slack that will not answer
-//!   `auth.test` will not accept `chat.postMessage` either.
+//!   `auth.test` will not accept `chat.postMessage` either. It is fetched
+//!   **after** the thread has been established as Agento's, because that reply
+//!   would otherwise land in a stranger's thread.
+//! - **The dispatcher's ten-slot semaphore is taken around the run**, not around
+//!   the handler. It bounds `claude` subprocesses, and a mention waiting for its
+//!   thread's turn is not one: taken at the handler, ten queued mentions in one
+//!   Slack thread hold every permit while one runs, and Telegram stops too.
 //! - **No Slack-derived text reaches an `info` line, a path or a shell.** The
 //!   prompt is logged at `debug` and nowhere else; the channel and thread ids
 //!   are Slack's own opaque identifiers.
@@ -94,15 +100,14 @@ struct Job {
     thread_ts: String,
     top_level: bool,
     rule: Rule,
-    /// The message with the bot's own mention removed. Never empty.
-    prompt: String,
     /// Dropped or signalled when this job is finished, however it finished.
     ///
-    /// The handler future must not return before the turn it queued is over:
-    /// #567's dispatcher holds the ten-slot semaphore permit only for as long
-    /// as the handler is awaited, so a handler that returned at `enqueue` would
-    /// leave the global bound counting *queueing* rather than running, and a
-    /// workspace could have any number of `claude` subprocesses in flight.
+    /// The handler future is the whole turn, not the enqueue: a `debug` line
+    /// saying a mention was seen and a reply appearing minutes later are two
+    /// different things for anyone reading a log, and #567's `dispatch` has
+    /// nothing left to do while this runs. It costs a parked task and no
+    /// semaphore permit — the ten-slot bound is taken in [`Inbound::run`],
+    /// around the run itself.
     done: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -135,7 +140,7 @@ pub fn handler(db_path: &Path, integration_id: &str, bot_token: &str) -> EventHa
 }
 
 impl Inbound {
-    /// Classify, select a rule, build the prompt, and queue — or drop.
+    /// Classify, select a rule, and queue — or drop.
     async fn accept(self: Arc<Self>, mention: AppMention) {
         let top_level = mention.thread_ts.is_empty() || mention.thread_ts == mention.ts;
         let thread_ts = if top_level {
@@ -153,25 +158,6 @@ impl Inbound {
             return;
         };
 
-        let bot_user_id = match self.bot_user_id().await {
-            Some(id) => id,
-            None => {
-                // Nothing can be decided about the text without it, and the run
-                // is the thing the user is waiting for.
-                self.post(&mention.channel, &thread_ts, ERROR_REPLY).await;
-                return;
-            }
-        };
-        let prompt = strip_mention(&mention.text, bot_user_id);
-        if prompt.is_empty() {
-            log::debug!(
-                "slack mention ignored, nothing said to the bot integration_id={:?} channel={:?}",
-                self.integration_id,
-                mention.channel
-            );
-            return;
-        }
-
         let (done, finished) = tokio::sync::oneshot::channel();
         enqueue(
             &self,
@@ -180,7 +166,6 @@ impl Inbound {
                 thread_ts,
                 top_level,
                 rule,
-                prompt,
                 done,
             },
         );
@@ -263,20 +248,53 @@ impl Inbound {
     }
 
     async fn turn(&self, job: &Job) {
-        let mapped = self.thread_chat(job).await;
-        let (chat_id, kind) = match mapped {
-            Some(chat_id) => (chat_id, "resume"),
-            None if !job.top_level => {
-                log::debug!(
-                    "slack mention ignored, a thread Agento did not start integration_id={:?} \
-                     channel={:?} thread={:?}",
-                    self.integration_id,
-                    job.mention.channel,
-                    job.thread_ts
-                );
+        // Which thread this is has to be decided before anything is said, so a
+        // failure below cannot answer into a thread Agento did not start.
+        let mapped = match self.thread_chat(job).await {
+            Ok(mapped) => mapped,
+            Err(e) => {
+                // Not the same as "no row": a database this process could not
+                // read is a failed turn, and answering `debug`-and-silence here
+                // would drop a resume the moment the scanner held a write lock.
+                log::error!("reading the slack thread map: {e}");
+                if job.top_level {
+                    self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
+                        .await;
+                }
                 return;
             }
-            None => match self.start_chat(job).await {
+        };
+        if mapped.is_none() && !job.top_level {
+            log::debug!(
+                "slack mention ignored, a thread Agento did not start integration_id={:?} \
+                 channel={:?} thread={:?}",
+                self.integration_id,
+                job.mention.channel,
+                job.thread_ts
+            );
+            return;
+        }
+
+        // Only now, with the thread established as Agento's, is there anywhere
+        // a failure sentence may be posted.
+        let Some(bot_user_id) = self.bot_user_id().await else {
+            self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
+                .await;
+            return;
+        };
+        let prompt = strip_mention(&job.mention.text, bot_user_id);
+        if prompt.is_empty() {
+            log::debug!(
+                "slack mention ignored, nothing said to the bot integration_id={:?} channel={:?}",
+                self.integration_id,
+                job.mention.channel
+            );
+            return;
+        }
+
+        let (chat_id, kind) = match mapped {
+            Some(chat_id) => (chat_id, "resume"),
+            None => match self.start_chat(job, &prompt).await {
                 Some(chat_id) => (chat_id, "start"),
                 None => {
                     self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
@@ -297,15 +315,21 @@ impl Inbound {
         );
         // The one place a Slack message's own words are logged, and it is not
         // `info`: everything above is Slack's opaque identifiers.
-        log::debug!(
-            "slack mention prompt chat_id={chat_id:?} prompt={:?}",
-            job.prompt
-        );
+        log::debug!("slack mention prompt chat_id={chat_id:?} prompt={prompt:?}");
 
+        // **The ten-slot bound is taken here, around the run.** #567 took it
+        // around the handler, which counted a mention *waiting for its thread's
+        // turn* against a limit that is about `claude` subprocesses: ten queued
+        // mentions in one Slack thread would hold every permit while one ran,
+        // stalling Telegram and every other channel for the length of the chain.
+        let Ok(_permit) = dispatcher::semaphore().acquire().await else {
+            log::warn!("dispatcher stopped, dropping a slack turn chat_id={chat_id:?}");
+            return;
+        };
         let result = agent_run::run_resumed(
             &self.db_path,
             &chat_id,
-            &job.prompt,
+            &prompt,
             &job.rule.settings,
             dispatcher::run_timeout(&job.rule),
         )
@@ -317,23 +341,28 @@ impl Inbound {
         self.touch_thread(job).await;
     }
 
-    /// The chat this thread is already mapped to, if any.
-    async fn thread_chat(&self, job: &Job) -> Option<String> {
+    /// The chat this thread is already mapped to.
+    ///
+    /// `Ok(None)` is "no such thread" and `Err` is "the map could not be read",
+    /// and the two must not be confused: `open_read_write` carries a five-second
+    /// `busy_timeout`, so a database busy behind the session scanner would
+    /// otherwise make a resume look like a mention in somebody else's thread.
+    async fn thread_chat(&self, job: &Job) -> Result<Option<String>, String> {
         let (db_path, integration_id) = (self.db_path.clone(), self.integration_id.clone());
         let (channel, thread_ts) = (job.mention.channel.clone(), job.thread_ts.clone());
         db::blocking("slack thread lookup", move || {
             find_thread(&db_path, &integration_id, &channel, &thread_ts)
         })
         .await
-        .flatten()
+        .unwrap_or_else(|| Err("the slack thread lookup task failed".to_string()))
     }
 
     /// Create the chat for a top-level mention and map the thread to it.
-    async fn start_chat(&self, job: &Job) -> Option<String> {
+    async fn start_chat(&self, job: &Job, prompt: &str) -> Option<String> {
         let title = format!(
             "[Slack] #{}: {}",
             self.channel_name(&job.mention.channel).await,
-            truncate_chars(&job.prompt, TITLE_PROMPT_CHARS)
+            truncate_chars(prompt, TITLE_PROMPT_CHARS)
         );
         let (db_path, rule) = (self.db_path.clone(), job.rule.clone());
         let created = db::blocking("slack session", move || {
@@ -534,23 +563,24 @@ fn truncate_chars(text: &str, limit: usize) -> &str {
     }
 }
 
-/// The chat this thread is mapped to.
+/// The chat this thread is mapped to, distinguishing "no row" from "no answer".
 fn find_thread(
     db_path: &Path,
     integration_id: &str,
     channel_id: &str,
     thread_ts: &str,
-) -> Option<String> {
-    let conn = db::open_read_only(db_path)
-        .map_err(|e| log::warn!("reading the slack thread map: {e}"))
-        .ok()?;
-    conn.query_row(
+) -> Result<Option<String>, String> {
+    let conn = db::open_read_only(db_path)?;
+    match conn.query_row(
         "SELECT chat_id FROM inbound_threads
          WHERE integration_id = ?1 AND channel_id = ?2 AND thread_ts = ?3",
         rusqlite::params![integration_id, channel_id, thread_ts],
         |row| row.get::<_, String>(0),
-    )
-    .ok()
+    ) {
+        Ok(chat_id) => Ok(Some(chat_id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("reading the slack thread map: {e}")),
+    }
 }
 
 fn insert_thread(

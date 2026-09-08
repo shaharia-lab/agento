@@ -14,7 +14,8 @@
 //!   within seconds and redelivers the envelope otherwise, so the ack is written
 //!   to the socket before the claim, before the handler, and before any database
 //!   touch. The handler then runs on `tokio::spawn` under the trigger
-//!   dispatcher's semaphore, which is why that semaphore is `pub(crate)` rather
+//!   dispatcher's semaphore — taken by the handler, around the run (#568) —
+//!   which is why that semaphore is `pub(crate)` rather
 //!   than this module opening a second bound on the same agent runs.
 //! - **De-duplicate by `event_id`.** An unacknowledged envelope is redelivered,
 //!   and a reconnect can replay one, so "acknowledged" is not "processed".
@@ -671,8 +672,7 @@ impl Worker {
         }
     }
 
-    /// Claim the event, then run the handler under the trigger dispatcher's
-    /// semaphore.
+    /// Claim the event, then run the handler.
     ///
     /// **Nothing here is awaited by the caller, and the claim is inside the
     /// spawn rather than before it.** The read loop has to go straight back to
@@ -706,16 +706,15 @@ impl Worker {
                 return;
             }
 
-            let Ok(_permit) = crate::native::trigger::dispatcher::semaphore()
-                .acquire()
-                .await
-            else {
-                log::warn!(
-                    "dispatcher stopped, dropping slack app_mention \
-                     integration_id={integration_id:?}"
-                );
-                return;
-            };
+            // **The ten-slot bound is the handler's to take, not this task's**
+            // (#568). `trigger::dispatcher::semaphore` is still the one bound
+            // and it is still where the run happens under it — but it is
+            // acquired in `inbound::Inbound::run`, around the run itself. Taken
+            // here it would count a mention *waiting for its Slack thread's
+            // turn* against a limit that is about `claude` subprocesses, and ten
+            // queued mentions in one thread would hold every permit while one
+            // ran, stalling Telegram and every other channel for the length of
+            // the chain.
             handler(mention).await;
         });
     }
