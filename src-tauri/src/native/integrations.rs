@@ -215,9 +215,13 @@ pub struct ScrubbedIntegration {
     /// The same discipline `has_credentials` states one field below, for the
     /// same reason and by the same means: [`has_app_token_sql`] decides it
     /// inside SQLite, so the `xapp-` bytes never exist in this process to be
-    /// echoed. It reads `false` for every non-Slack row, which is the truth —
-    /// no other provider stores one — and for every Slack row written before
-    /// this field existed.
+    /// echoed. It reads `false` for every row that stores no `app_token` key,
+    /// which is every Slack row written before this field existed and every row
+    /// of every other provider, none of whose forms writes one. The SQL is
+    /// **not** scoped by `type` — no validator rejects an unknown key, so an
+    /// API caller can put an `app_token` in a Telegram blob and see this report
+    /// `true`. Nothing follows from it: the switch that consults it answers 400
+    /// for any type but `slack`.
     ///
     /// Alphabetically `enabled` < `has_app_token` < `has_credentials`, and the
     /// field order **is** the wire order.
@@ -1216,17 +1220,30 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     // is *which columns are assigned*, and a
     // `CASE WHEN ?4 IS NULL THEN credentials ELSE ?4 END` would still bind the
     // blob's parameter slot on the path that must not have one.
-    // **A credential replace that drops the app token turns the switch off.**
-    // `update_inbound` refuses to *enable* a row that stores no app-level
-    // token, on the grounds that the switch would otherwise start a worker
-    // that can only fail to connect — and this write can reach the same state
-    // from the other side, because #515's contract makes a sent blob replace
-    // the stored one wholly and the Slack form emits only its mode's fields.
-    // The refusal is worth nothing if the row can arrive there anyway, so the
-    // column is cleared in the same statement rather than left for the worker
-    // to discover. Only on the replace arm: an omitted blob preserves the
-    // credential, so it preserves the switch too.
-    let clears_inbound = credentials.is_some_and(|blob| !stores_an_app_token(blob));
+    // **This write turns the inbound switch off whenever it invalidates it.**
+    //
+    // `update_inbound` will only *enable* a Slack row that stores an app-level
+    // token, on the grounds that the switch would otherwise start a worker that
+    // can only fail to connect. Its refusal is worth nothing if the row can
+    // arrive in that state from here, and both halves of the condition are
+    // reachable through this one write:
+    //
+    // - **The credential.** #515's contract makes a sent blob replace the
+    //   stored one wholly, and the Slack form emits only its mode's fields, so
+    //   a routine credential rotation can drop `app_token`. Only the replace
+    //   arm: an omitted blob preserves the credential, so it preserves the
+    //   switch too.
+    // - **The type.** `type` is written straight from the request body and this
+    //   write validates nothing, so a row can become `telegram` with the switch
+    //   still on — and there is no way back, because `update_inbound` answers
+    //   400 for a non-Slack row whichever way the switch is being moved. That
+    //   refusal is the one the acceptance criteria pin, so the stranding is
+    //   fixed here, at the write that causes it, rather than by weakening it.
+    //
+    // Cleared in the same statement, on both arms, rather than left for the
+    // worker to discover.
+    let clears_inbound = req.integration_type != "slack"
+        || credentials.is_some_and(|blob| !stores_an_app_token(blob));
     match credentials {
         Some(blob) => conn.execute(
             "UPDATE integrations SET
@@ -1253,6 +1270,7 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
             "UPDATE integrations SET
             name = ?1, type = ?2, enabled = ?3,
             services = ?4, updated_at = ?5,
+            inbound_enabled = CASE WHEN ?7 THEN 0 ELSE inbound_enabled END,
             auth = CASE
                 WHEN auth IS NOT NULL AND auth != '' AND auth != 'null' THEN auth
                 ELSE NULL
@@ -1265,6 +1283,7 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
                 &services_json,
                 &now,
                 id,
+                clears_inbound,
             ],
         ),
     }
@@ -3349,6 +3368,33 @@ mod tests {
                 .expect("get")
                 .expect("a row")
                 .inbound_enabled
+        );
+
+        // A type change strands the switch just as surely: `update_inbound`
+        // answers 400 for a non-Slack row **whichever way** it is being moved,
+        // so a row that leaves `slack` with the switch on could never be turned
+        // off again. Both arms clear it — this `PUT` omits `credentials` on
+        // purpose, because that arm assigns fewer columns and was the one that
+        // missed it.
+        let retyped =
+            update(file.path(), &id, br#"{"name":"R2","type":"telegram"}"#).expect("update");
+        assert!(
+            body_of(&retyped).contains(r#""inbound_enabled":false"#),
+            "{}",
+            body_of(&retyped)
+        );
+        assert!(
+            !get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+        assert_eq!(
+            update_inbound(file.path(), &id, br#"{"enabled":false}"#)
+                .expect_err("400")
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "the 400 is unconditional, which is why the write above has to clear the column"
         );
     }
 

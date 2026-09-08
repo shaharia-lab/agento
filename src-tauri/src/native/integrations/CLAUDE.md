@@ -281,10 +281,23 @@ flow that actually errored.
   Go and its three-valued `credentials` contract (#515) would otherwise have to
   be resent to flip a boolean. It refuses before it writes — 404 unknown id, 400
   for any type but `slack`, 422 naming `credentials.app_token` when *enabling* a
-  row that stores none — and disabling is always allowed, so a row whose
-  credentials were scrubbed cannot get stuck on. It writes `inbound_enabled`
-  alone and ends in `registry::reload_blocking`, which is what starts and stops
-  the socket worker. It is desktop-only, so it is recorded in
+  row that stores none. It writes `inbound_enabled` alone and ends in
+  `registry::reload_blocking`, which is what starts and stops the socket worker.
+- **The 422 and the 400 are only worth something because `update` clears the
+  column.** `PUT /api/integrations/{id}` can invalidate the switch on either
+  axis — a replacing blob that drops `app_token` (#515 makes a sent blob replace
+  wholly, and the Slack form emits only its mode's fields), or a `type` written
+  straight from the request body, which this write validates not at all. The
+  second is the sharper one: `update_inbound` answers 400 for a non-Slack row
+  *whichever way* the switch is being moved, so a row that left `slack` with the
+  switch on could never be turned off again. `clears_inbound` is therefore
+  `type != "slack" || a replacing blob with no app token`, and it is applied on
+  **both** arms of the `UPDATE` — the credentials-omitted arm assigns fewer
+  columns and is the one that misses it.
+- `has_app_token_sql` is **not** scoped by `type`. No validator rejects an
+  unknown key, so an API caller can put an `app_token` into a Telegram blob and
+  see the read report `true`; nothing follows from it, because the switch that
+  consults it refuses any type but `slack`. It is desktop-only, so it is recorded in
   `parity/desktop_routes.json` through `integrations::ROUTES` — the **fourth**
   owner of that file, and the union in
   `the_desktop_only_routes_are_recorded_in_both_directions` has to name it or
