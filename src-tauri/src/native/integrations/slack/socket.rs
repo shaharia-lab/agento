@@ -331,12 +331,14 @@ fn status_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(Default::default)
 }
 
-/// Take the next epoch for this integration. The caller is now the current
-/// worker, and every earlier one is stale.
+/// The map key: a NUL between the two parts, which no path and no integration
+/// id contains, so no pair can spell another pair's key.
 fn epoch_key(db_path: &Path, integration_id: &str) -> String {
     format!("{}\u{0}{integration_id}", db_path.display())
 }
 
+/// Take the next epoch for this row. The caller is now the current worker, and
+/// every earlier one is stale.
 fn claim_epoch(db_path: &Path, integration_id: &str) -> u64 {
     let mut epochs = epochs().lock().unwrap_or_else(|e| e.into_inner());
     let epoch = epochs
@@ -906,18 +908,39 @@ pub fn write_status_blocking(db_path: &Path, integration_id: &str, status: &str,
 /// the one place that knows whether a socket is going away or being replaced —
 /// it is the code that decides — so it owns the clear, ordered against the start
 /// rather than racing it.
+/// **Callers other than [`clear_status`] must already hold [`status_lock`].**
+/// The one exception is boot, where no worker exists to order against.
 pub fn clear_status_blocking(db_path: &Path, integration_id: &str) {
-    // Deliberately **not** behind [`status_lock`]. The registry clears only
-    // where it has already decided no worker will run — `start_one` and `reload`
-    // do it before the start that might follow — so there is no concurrent
-    // writer to order against, and taking an async lock from a `_blocking`
-    // helper would mean this could not be called from `db::blocking` at all.
     run_status_write(
         db_path,
         "UPDATE integrations SET inbound_status = '', inbound_error = '' WHERE id = ?1",
         rusqlite::params![integration_id],
         integration_id,
     );
+}
+
+/// Clear one row's inbound state, ordered against any status write already in
+/// flight.
+///
+/// **Both halves are load-bearing, and the epoch is the half that is easy to
+/// miss.** A `status_writer` that has already passed its `stopped` and
+/// `is_current` checks is sitting inside `db::blocking` for as long as the
+/// five-second `busy_timeout` allows — and a worker that retires *without a
+/// replacement* claims no new epoch, so `is_current` still answers `true` for
+/// it. Bumping the epoch here is what retires that writer; holding the lock
+/// across the bump and the clear is what makes a writer that got there first
+/// finish before the clear rather than after it. Either one alone leaves the row
+/// able to end up reading `connected` with no worker running, which nothing
+/// would ever correct — a socket that connects and stays connected has no next
+/// transition.
+pub async fn clear_status(db_path: &Path, integration_id: &str) {
+    let _guard = status_lock().lock().await;
+    claim_epoch(db_path, integration_id);
+    let (path, id) = (db_path.to_path_buf(), integration_id.to_string());
+    db::blocking("slack inbound clear", move || {
+        clear_status_blocking(&path, &id);
+    })
+    .await;
 }
 
 /// Clear the inbound state of **every** Slack row. Boot only.

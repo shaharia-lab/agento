@@ -151,8 +151,11 @@ default logs at `debug`.
   last value because a socket that connects and stays connected has no next
   transition. `status_lock` is global and held across the write, so the two
   writes are ordered whichever way they arrive and the stale one is a no-op.
-  `clear_status_blocking` deliberately does not take it: the registry clears only
-  where it has already decided no worker will run.
+  The registry's own clear takes the same lock **and bumps the epoch**
+  (`clear_status`), because a worker retiring with no replacement claims no new
+  epoch — so without the bump `is_current` still answers `true` for a write of
+  its own already inside `db::blocking`, and the clear could be overwritten by it.
+  Only the boot clear skips both, and only because no worker exists yet.
 - **The backoff is re-anchored on the wall clock**, `schedule::runtime`'s rule
   for gocron's reason: `tokio::time::sleep` measures process time, and on a
   suspended machine that is not elapsed wall-clock time, so one long sleep holds

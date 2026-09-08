@@ -475,11 +475,7 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
         // same reason as in `start_one`, the status it left behind is the
         // registry's to clear.
         if row.integration_type == "slack" {
-            let (path, id) = (db_path.to_path_buf(), row.id.clone());
-            crate::native::db::blocking("slack inbound clear", move || {
-                super::slack::socket::clear_status_blocking(&path, &id);
-            })
-            .await;
+            super::slack::socket::clear_status(db_path, &row.id).await;
         }
         return Ok(());
     }
@@ -504,11 +500,7 @@ async fn start_one(db_path: &Path, row: &HostingRow, generation: u64) -> Result<
     // compare-and-swap cannot break the tie, because both write the identical
     // `"connected"`. Here the clear is simply ordered before the start.
     if row.integration_type == "slack" && !hosted_socket {
-        let (path, id) = (db_path.to_path_buf(), row.id.clone());
-        crate::native::db::blocking("slack inbound clear", move || {
-            super::slack::socket::clear_status_blocking(&path, &id);
-        })
-        .await;
+        super::slack::socket::clear_status(db_path, &row.id).await;
     }
     if !registry().put_if_current(&row.id, generation, server, socket) {
         log::info!(
