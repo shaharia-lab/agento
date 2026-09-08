@@ -1640,42 +1640,70 @@ function draftOf(r: TriggerRule): RuleDraft {
 }
 
 /**
- * The body every write of a rule sends — **one builder, two call sites**.
+ * The body every write of a rule sends.
  *
  * `POST`/`PUT /integrations/{id}/triggers` is **replace, not preserve**: every
  * field of the request decodes a missing key as its zero value, so a body that
- * names ten of the eleven columns resets the eleventh. That is why the row's
- * *enabled* switch goes through here too rather than re-sending the fields it
- * happens to have to hand: a partial body there is how flicking a rule off and
- * on silently erased its model, working directory, profile, permission mode and
- * timeout.
+ * names ten of the eleven columns resets the eleventh. That is what made the
+ * row's *enabled* switch erase a rule's model, working directory, profile,
+ * permission mode and timeout — it sent six.
  *
- * `lists` is the second call site's, and only its. `draftOf` joins each filter
- * with `", "` for a text input and `splitList` splits it back on `,` — lossless
- * for anything typed in the form, and *not* for a keyword the API stored with a
- * comma or with surrounding space in it. The row's toggle edits neither list,
- * so it hands over the stored arrays verbatim rather than round-tripping them
- * through a control the user never opened. Same rule as the settings above, one
- * field further out.
+ * **The type is the shared thing, and the two builders are not one function.**
+ * A form save has to normalise what was typed; the row's toggle must not
+ * normalise anything, because it edits one boolean and the user never opened
+ * the controls the rest of the fields belong to. Passing the stored row through
+ * the form's builder would mean `.trim()` on seven fields and a
+ * join-then-split on two — and `filter_prefix` is stored **untrimmed** and
+ * matched as an exact byte prefix, so a stored `"@bot "` would silently become
+ * `"@bot"` on an unrelated on/off flick and start firing on `"@bothersome"`.
+ * `RuleWrite` is what keeps the two in step: omit a key from either and `tsc`
+ * fails, which is the guard the single function was there to provide.
  */
-interface RuleLists {
+interface RuleWrite {
+  name: string;
+  agent_slug: string;
+  enabled: boolean;
+  filter_prefix: string;
   filter_keywords: string[] | null;
   filter_chat_ids: string[] | null;
+  model: string;
+  working_directory: string;
+  settings_profile_id: string;
+  permission_mode: string;
+  timeout_minutes: number;
 }
 
-function ruleBody(d: RuleDraft, lists?: RuleLists) {
+/** From the form: what was typed, normalised. */
+function ruleBody(d: RuleDraft): RuleWrite {
   return {
     name: d.name.trim(),
     agent_slug: d.agent_slug.trim(),
     enabled: d.enabled,
     filter_prefix: d.filter_prefix.trim(),
-    filter_keywords: lists ? lists.filter_keywords : splitList(d.filter_keywords),
-    filter_chat_ids: lists ? lists.filter_chat_ids : splitList(d.filter_chat_ids),
+    filter_keywords: splitList(d.filter_keywords),
+    filter_chat_ids: splitList(d.filter_chat_ids),
     model: d.model.trim(),
     working_directory: d.working_directory.trim(),
     settings_profile_id: d.settings_profile_id.trim(),
     permission_mode: d.permission_mode.trim(),
     timeout_minutes: Number(d.timeout_minutes) || 0,
+  };
+}
+
+/** From the stored row: every field verbatim, and only `enabled` changed. */
+function ruleBodyToggled(r: TriggerRule, enabled: boolean): RuleWrite {
+  return {
+    name: r.name,
+    agent_slug: r.agent_slug,
+    enabled,
+    filter_prefix: r.filter_prefix,
+    filter_keywords: r.filter_keywords,
+    filter_chat_ids: r.filter_chat_ids,
+    model: r.model,
+    working_directory: r.working_directory,
+    settings_profile_id: r.settings_profile_id,
+    permission_mode: r.permission_mode,
+    timeout_minutes: r.timeout_minutes,
   };
 }
 
@@ -1830,13 +1858,14 @@ function TriggerRules({
                   <Switch
                     on={r.enabled}
                     disabled={busy}
-                    /* Through `ruleBody` like the form's own save: the write is
-                       replace, so anything this body omits is reset. */
+                    /* The write is replace, so the body carries every column —
+                       and carries it verbatim, because this control edits one
+                       boolean. See `RuleWrite`. */
                     onChange={(on) =>
                       run(() =>
                         api.put(
                           `/integrations/${integrationId}/triggers/${r.id}`,
-                          ruleBody({ ...draftOf(r), enabled: on }, r)
+                          ruleBodyToggled(r, on)
                         )
                       )
                     }
@@ -2145,6 +2174,19 @@ function RuleForm({
 
 /** How often the row is re-read while the connection is meant to be up. */
 const INBOUND_POLL_MS = 5_000;
+/**
+ * How long to keep reading after a toggle, so the badge follows the worker
+ * coming up or going down.
+ *
+ * A window rather than a predicate over `inbound_status`, and the reason is in
+ * the backend: `update_inbound` deliberately never clears that column — "a
+ * disable that cleared the status would erase the reason the user is looking
+ * at" — and the worker is its only other writer. So "poll while the status is
+ * non-empty" has no false state to reach: a row that errored once and was
+ * turned off would read itself every five seconds for as long as its pane
+ * stayed open, and would start doing it on mount, unprompted.
+ */
+const INBOUND_SETTLE_MS = 20_000;
 
 /**
  * The Socket Mode switch and what the worker last reported (#566, #569).
@@ -2187,12 +2229,12 @@ function InboundPanel({ item }: { item: Integration }) {
   // never refuses a disable on that axis.
   const canTurnOn = hasToken;
 
-  // While the connection is meant to be up, and for as long after a disable as
-  // the worker is still reporting something. Gating on `on` alone stops the
-  // poll in the same tick as the switch, and the one read `toggle` makes is
-  // issued before the worker has torn down — so the badge would sit on
-  // "Connected" beside an off switch until the pane was reopened.
-  usePoll(row.reload, INBOUND_POLL_MS, on || current.inbound_status !== "");
+  // While the connection is meant to be up, plus a settle window after either
+  // toggle. Gating on `on` alone stops the poll in the same tick as the switch,
+  // and the one read `toggle` makes is issued before the worker has torn down —
+  // so the badge would sit on "Connected" beside an off switch.
+  const [settleUntil, setSettleUntil] = useState(0);
+  usePoll(row.reload, INBOUND_POLL_MS, on || Date.now() < settleUntil);
 
   async function toggle(next: boolean) {
     if (next && !canTurnOn) return;
@@ -2200,6 +2242,7 @@ function InboundPanel({ item }: { item: Integration }) {
     setError(undefined);
     try {
       await api.put(`/integrations/${item.id}/inbound`, { enabled: next });
+      setSettleUntil(Date.now() + INBOUND_SETTLE_MS);
       row.reload();
     } catch (err) {
       setError(describeError(err));

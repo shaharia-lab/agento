@@ -580,6 +580,10 @@ export type PinNotConnected = Expect<Eq<typeof NOT_CONNECTED, "Not connected">>;
    (#567) and may learn a word before this module does. Guessing at it would
    be the one thing worse than showing it. */
 
+/** What a socket that has never run is called — never `Not connected`. */
+export const NOT_RUNNING = "Not running";
+export type PinNotRunning = Expect<Eq<typeof NOT_RUNNING, "Not running">>;
+
 export interface InboundState {
   label: string;
   /** A `badge--*` modifier, or "" for the neutral badge. */
@@ -602,10 +606,6 @@ export function inboundState(status: string): InboundState {
       return { label: status, tone: "" };
   }
 }
-
-/** What a socket that has never run is called — never `Not connected`. */
-export const NOT_RUNNING = "Not running";
-export type PinNotRunning = Expect<Eq<typeof NOT_RUNNING, "Not running">>;
 
 /**
  * The mode a stored integration is using.
