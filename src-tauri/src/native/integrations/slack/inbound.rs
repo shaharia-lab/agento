@@ -351,7 +351,7 @@ impl Inbound {
     /// The chat this thread is already mapped to.
     ///
     /// `Ok(None)` is "no such thread" and `Err` is "the map could not be read",
-    /// and the two must not be confused: `open_read_write` carries a five-second
+    /// and the two must not be confused: `open_read_only` carries a five-second
     /// `busy_timeout`, so a database busy behind the session scanner would
     /// otherwise make a resume look like a mention in somebody else's thread.
     async fn thread_chat(&self, job: &Job) -> Result<Option<String>, String> {

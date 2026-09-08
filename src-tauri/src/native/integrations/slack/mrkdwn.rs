@@ -29,14 +29,20 @@
 //! notify everyone in it.
 //!
 //! So [`to_mrkdwn`] escapes the whole answer **before** converting anything, and
-//! the only raw `<` and `|` in its output — and the only raw `>` outside a
-//! restored blockquote marker, below — are the ones it writes itself around a
-//! link whose target it has checked is an `http`, `https` or `mailto` URL. That check is not decoration: `<…>` is Slack's markup for *everything*,
-//! so a link target it did not vet is a hole straight back through the escape —
-//! `[](!channel)` would otherwise become `<!channel>`, and a channel member can
-//! ask for that in one sentence. A target that is not such a URL keeps its
-//! Markdown spelling and is posted as prose, which is also what a reader wants
-//! for the `[guide](./setup.md)` Slack could not link to anyway.
+//! the only raw `<` it then writes — and the only raw `>` outside a restored
+//! blockquote marker, below — is the pair it puts around a link whose target it
+//! has checked is an `http`, `https` or `mailto` URL. That check is not
+//! decoration: `<…>` is Slack's markup for *everything*, so a link target it did
+//! not vet is a hole straight back through the escape — `[](!channel)` would
+//! otherwise become `<!channel>`, and a channel member can ask for that in one
+//! sentence. A target that is not such a URL keeps its Markdown spelling and is
+//! posted as prose, which is also what a reader wants for the
+//! `[guide](./setup.md)` Slack could not link to anyway.
+//!
+//! `|` is **not** escaped, and does not need to be: outside `<…>` it is an
+//! ordinary character to Slack. Inside is where it separates a link's target
+//! from its label, and [`is_postable_url`] is what keeps it out of there,
+//! refusing a `|` in either half rather than escaping one.
 //! `gojson::to_vec_marshal` is not a substitute for any of this: it escapes `<`
 //! to `\u003c` at the JSON layer and Slack decodes that straight back to `<`.
 //!

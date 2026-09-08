@@ -286,10 +286,11 @@ declines to start one.
   `<!here>` and `<!everyone>` in `text` as **broadcasts** and `<@U123>` as a
   mention. This is the first surface where an answer derived from a stranger's
   words is posted by the app as itself, into a channel it is a member of by
-  construction. The only raw `<`, `>` and `|` in the output are the ones this
-  module writes around a link whose target it has checked is an `http`, `https`
-  or `mailto` URL — plus a restored blockquote marker, which is the one other
-  raw `>` it emits. That check is the escape's second half, not tidiness: `<…>` is
+  construction. The only raw `<` in the output — and the only raw `>` other than
+  a restored blockquote marker — is the pair this module writes around a link
+  whose target it has checked is an `http`, `https` or `mailto` URL. `|` is not
+  escaped and need not be: it is markup only inside `<…>`, and `is_postable_url`
+  refuses a `|` in either half of a link rather than escaping one. That check is the escape's second half, not tidiness: `<…>` is
   Slack's markup for everything, so an unvetted link target is a hole straight
   back through the escape — `[](!channel)` would otherwise become `<!channel>`,
   and a channel member can ask for that in one sentence. Any other target keeps
