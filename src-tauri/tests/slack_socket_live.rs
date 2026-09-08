@@ -27,14 +27,25 @@
 //! of the things this suite documents, so the driver cannot be the bot — the
 //! mention has to come from a human, which means a user token (`xoxp-`).
 //!
-//! It is a happy accident that this keeps the app's own scopes honest: the bot
-//! app needs exactly the three scopes the guide's manifest lists, and every call
-//! that would otherwise need a fourth — `chat.postMessage` into the channel and
-//! `conversations.replies` to read the thread back — goes out on the user token
-//! instead. So a manifest missing something fails here rather than being papered
-//! over by a scope the test added. The bot token is used only for `auth.test`,
-//! which needs no scope, and for deleting the app's own messages in the
-//! tear-down, which needs the `chat:write` the manifest already has.
+//! It is a happy accident that this keeps the app's own scopes honest. The
+//! *driver* — this file's own calls — needs `chat.postMessage` to post the
+//! mention and `conversations.replies` to read the thread back, and both go out
+//! on the user token, so neither can paper over a scope the manifest forgot. The
+//! driver touches the bot token only for `auth.test`, which needs no scope, and
+//! for deleting the app's own messages in the tear-down, which needs the
+//! `chat:write` the manifest already has. Everything else the bot token does
+//! here is the **handler under test** spending it exactly as the app does.
+//!
+//! # Which manifest scopes a run actually pins
+//!
+//! All three, but only because of the last assertion. `chat:write` and
+//! `app_mentions:read` are load-bearing by construction — without them there is
+//! no event and no reply, and the test times out. **`channels:read` is not**:
+//! `Inbound::channel_name` swallows a failed `conversations.info` and falls back
+//! to the raw channel id, so a two-scope app would otherwise pass green. The
+//! chat's stored title is what closes that hole — `[Slack] #<name>: …` holds the
+//! channel's *name* when the call worked and its *id* when it did not, and they
+//! are never the same string.
 //!
 //! # What has to be true of the machine
 //!
@@ -474,6 +485,27 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
     if threads != 1 {
         return Err(carry(format!("{threads} inbound_threads rows, expected 1")));
     }
+    // **The only assertion that pins `channels:read`** — see the header. The
+    // title is `[Slack] #<name>: <prompt>`, and `channel_name` falls back to the
+    // channel *id* when `conversations.info` is refused, so a title carrying the
+    // id is a manifest missing that scope rather than a broken test.
+    let title: String = {
+        let conn = db::open_read_only(db_path).expect("open");
+        conn.query_row(
+            "SELECT title FROM chat_sessions WHERE id = ?1",
+            [&mapped.1],
+            |row| row.get(0),
+        )
+        .expect("read the chat title")
+    };
+    if title.contains(&env.channel) {
+        return Err(carry(format!(
+            "the chat is titled {title:?}, which carries the channel id rather \
+             than its name — `conversations.info` was refused, so the app is \
+             missing the `channels:read` scope the guide's manifest lists"
+        )));
+    }
+
     let same: i64 = {
         let conn = db::open_read_only(db_path).expect("open");
         conn.query_row(

@@ -370,10 +370,11 @@ Three things that look like this and are not:
 
 ### Socket Mode says Connected but a mention does nothing
 
-Every one of these is silent by design. Two say nothing in the log at all, and
-the rest are at **`debug`** level — so raise the level before you go looking.
-Three of them can also be logged at `warn` or `error`, and each says so below.
-Work down the list:
+Every one of these is silent by design. Of the nine, two say nothing in the log
+at all, six are at **`debug`** level — so raise the level before you go looking
+— and one is at `error`. Two of the six have a second, database cause that logs
+at `warn` or `error` just above them, and each says so below. Work down the
+list:
 
 - **The app is not in the channel.** Slack never sent the event at all — nothing
   appears in the log. `/invite @Agento` in that channel.

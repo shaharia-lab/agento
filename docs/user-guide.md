@@ -312,10 +312,10 @@ oauth_config:
 ```
 
 **That is the minimum for Socket Mode, and only for Socket Mode.** The same
-integration also gives your agents Slack *tools*, and two of them need more:
-`read_messages` needs `channels:history` and `list_users` needs `users:read`, so
-add those to the manifest if you want them. `search_messages` needs `search:read`,
-which Slack grants only to a user token — a bot app cannot have it.
+integration also gives your agents seven Slack *tools*, and three of them need
+scopes this manifest does not grant. Two you can add: `read_messages` needs
+`channels:history` and `list_users` needs `users:read`. The third you cannot —
+`search_messages` needs `search:read`, which Slack grants only to a user token.
 
 Then:
 
