@@ -202,8 +202,8 @@ fn is_false(value: &bool) -> bool {
 /// joins rather than a per-row lookup so the list stays **one query** however
 /// many chats there are. Neither can multiply a row: `inbound_threads` is
 /// `UNIQUE (chat_id)` and `integrations.id` is the primary key. Every
-/// `chat_sessions` column is qualified because `id` and `created_at` exist on
-/// all three tables.
+/// `chat_sessions` column is qualified because `created_at` exists on all three
+/// tables and `id` on two of them.
 const SESSION_COLUMNS: &str =
     "SELECT cs.id, cs.title, cs.agent_slug, cs.sdk_session_id, cs.working_directory, cs.model,
        cs.settings_profile_id, cs.total_input_tokens, cs.total_output_tokens,
