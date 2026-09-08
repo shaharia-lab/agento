@@ -57,7 +57,9 @@
 //! every hosted type.
 
 pub mod client;
+pub mod inbound;
 pub mod messaging;
+pub mod mrkdwn;
 pub mod socket;
 pub mod validate;
 

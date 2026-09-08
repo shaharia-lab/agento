@@ -688,11 +688,29 @@ fn start_socket_worker(db_path: &Path, row: &HostingRow) -> Option<SocketWorker>
         );
         return None;
     };
+    // The bot token, not the app token: `xapp-` opens the socket and the
+    // workspace token posts the reply, and #568's handler needs both. Resolved
+    // through the same `resolve_slack_token` the hosted tools use, so the
+    // `auth` column's OAuth arm works on the inbound path too.
+    let bot_token = match resolve_slack_token(&row.id, &row.credentials, &row.auth) {
+        Ok(token) => token,
+        Err(e) => {
+            // A worker that cannot reply is silence with a live connection,
+            // which is worse than not starting: `inbound_status` is cleared by
+            // the caller on every branch that declines to start one, so the UI
+            // reports the same "not connected" it does for a missing app token.
+            log::warn!("not starting the slack socket worker, no usable bot token: {e}");
+            return None;
+        }
+    };
     Some(super::slack::socket::start(
         db_path,
         &row.id,
         &app_token,
-        super::slack::socket::SocketOptions::default(),
+        super::slack::socket::SocketOptions {
+            handler: super::slack::inbound::handler(db_path, &row.id, &bot_token),
+            ..super::slack::socket::SocketOptions::default()
+        },
     ))
 }
 

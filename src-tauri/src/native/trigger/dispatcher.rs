@@ -47,7 +47,18 @@ const MAX_CONCURRENT: usize = 10;
 const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// What Go replies with on every failure path.
-const ERROR_REPLY: &str = "Sorry, something went wrong.";
+///
+/// `pub(crate)` since #568: Slack's inbound handler answers with **this** string
+/// rather than one of its own. Two inbound transports spelling the same failure
+/// differently is drift a reader would take for a difference in what failed.
+pub(crate) const ERROR_REPLY: &str = "Sorry, something went wrong.";
+
+/// What a run that finished with nothing to say replies with.
+///
+/// An empty answer still gets a reply — silence would be indistinguishable from
+/// the bot being broken — and, like [`ERROR_REPLY`], it is one string for every
+/// inbound transport.
+pub(crate) const NO_RESPONSE_REPLY: &str = "No response generated.";
 
 /// `pub(crate)` rather than module-private since #567: Slack's Socket Mode
 /// worker runs its handler under **this** bound, not a second one. Two
@@ -305,7 +316,7 @@ fn usable_permission_mode(stored: String) -> String {
 /// It is [`usable_permission_mode`]'s premise with the opposite answer, and for
 /// the same reason both are stated: a clamped timeout is a run that still
 /// happens, where a bad mode is a run that must not.
-fn run_timeout(rule: &Rule) -> std::time::Duration {
+pub(crate) fn run_timeout(rule: &Rule) -> std::time::Duration {
     if rule.timeout_minutes <= 0 {
         return RUN_TIMEOUT;
     }
@@ -377,8 +388,9 @@ async fn execute_and_reply(
     // migration 39 gave the rule those columns and this is the reader.
     let created = {
         let (db, rule) = (db_path.to_path_buf(), rule.clone());
+        let title = format!("[Telegram] {}", rule.name);
         db::blocking("telegram session", move || {
-            create_trigger_session(&db, &rule)
+            create_trigger_session(&db, &rule, &title)
         })
         .await
         .unwrap_or_else(|| Err("the session task failed".to_string()))
@@ -432,10 +444,8 @@ async fn execute_and_reply(
         .await;
     }
 
-    // An empty answer still gets a reply — silence would be indistinguishable
-    // from the bot being broken.
     let reply = if result.answer.is_empty() {
-        "No response generated."
+        NO_RESPONSE_REPLY
     } else {
         &result.answer
     };
@@ -489,8 +499,18 @@ fn resolve_agent(db_path: &Path, agent_slug: &str) -> Result<Agent, String> {
     })
 }
 
-/// The `[Telegram] <rule>` chat a trigger run is recorded in.
-fn create_trigger_session(db_path: &Path, rule: &Rule) -> Result<String, String> {
+/// The chat a trigger run is recorded in, titled `title`.
+///
+/// The title is the caller's since #568: Telegram's is `[Telegram] <rule>` and
+/// Slack's is `[Slack] #channel: <the first 60 characters of the prompt>`, and
+/// everything else about creating the chat — the rule's five execution settings
+/// on the row, the immediate transaction, the title being a second write whose
+/// failure is a warning rather than a failed run — is the same for both.
+pub(crate) fn create_trigger_session(
+    db_path: &Path,
+    rule: &Rule,
+    title: &str,
+) -> Result<String, String> {
     let mut conn = crate::native::db::open_read_write(db_path)?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -511,7 +531,6 @@ fn create_trigger_session(db_path: &Path, rule: &Rule) -> Result<String, String>
 
     // Two writes, as Go has them: a failed title update is a warning, not a
     // failed run.
-    let title = format!("[Telegram] {}", rule.name);
     if let Err(e) = conn.execute(
         "UPDATE chat_sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
         rusqlite::params![title, crate::native::gotime::now_go_text(), session.id],
@@ -1041,7 +1060,7 @@ mod tests {
         );
         let rules = load_rules(&db, "tg").expect("load");
 
-        let id = create_trigger_session(&db, &rules[0]).expect("session");
+        let id = create_trigger_session(&db, &rules[0], "[Telegram] r").expect("session");
         let conn = rusqlite::Connection::open(&db).expect("open");
         let row: (String, String, String, String, String) = conn
             .query_row(

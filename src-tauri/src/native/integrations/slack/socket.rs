@@ -844,6 +844,19 @@ impl Envelope {
                 .unwrap_or_default()
                 .to_string()
         };
+        // A bot's own message is not work, and the app's own reply is a bot's
+        // own message: Slack delivers an `app_mention` for a mention inside a
+        // message the app itself posted, so without this a reply that quotes the
+        // bot answers itself, in the thread, forever. `bot_id` names the poster
+        // and `subtype` covers `bot_message` and the joins/leaves/edits that
+        // carry no author at all. Dropped here rather than at the ack, like
+        // every other event this transport does not act on.
+        if !text_field(event, "bot_id").is_empty() || !text_field(event, "subtype").is_empty() {
+            log::debug!(
+                "slack socket: ignoring an app_mention from a bot integration_id={integration_id:?}"
+            );
+            return None;
+        }
         let event_id = self
             .payload
             .get("event_id")
@@ -1268,6 +1281,33 @@ mod tests {
                     .app_mention("int-1")
                     .is_none(),
                 "{text} must not become work"
+            );
+        }
+    }
+
+    /// The app's own reply is a bot's own message, and a bot's own message is
+    /// not work (#568).
+    ///
+    /// This is the loop guard: Slack delivers an `app_mention` for a mention
+    /// inside a message the app itself posted, so an answer that quotes the
+    /// question would otherwise answer itself in the same thread, forever, one
+    /// `claude` subprocess at a time.
+    #[test]
+    fn a_bot_authored_app_mention_is_not_work() {
+        for text in [
+            r#"{"type":"events_api","envelope_id":"e1","payload":{"event_id":"Ev1",
+                "event":{"type":"app_mention","channel":"C1","bot_id":"B1",
+                         "text":"<@B1> hi","ts":"1.1"}}}"#,
+            r#"{"type":"events_api","envelope_id":"e1","payload":{"event_id":"Ev1",
+                "event":{"type":"app_mention","channel":"C1","subtype":"bot_message",
+                         "text":"<@B1> hi","ts":"1.1"}}}"#,
+        ] {
+            assert!(
+                Envelope::parse(text)
+                    .expect("parse")
+                    .app_mention("int-1")
+                    .is_none(),
+                "a bot's own app_mention must not become work: {text}"
             );
         }
     }

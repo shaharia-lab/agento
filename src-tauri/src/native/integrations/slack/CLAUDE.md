@@ -209,3 +209,72 @@ default logs at `debug`.
   library is invisible to it. `SocketOptions::default` reads
   `client::api_base()`, so an in-crate `registry` test still drives the whole
   start path through the existing seam.
+
+## The `app_mention` handler: event → run → threaded reply (#568)
+
+`slack/inbound.rs` is what `SocketOptions::handler` now points at, built per row
+by `registry::start_socket_worker` — which resolves the **bot** token there too,
+through the same `resolve_slack_token` the hosted tools use, because `xapp-`
+opens the socket and only the workspace token can post the answer. A row with no
+usable bot token does not get a worker: a live connection that cannot reply is
+silence, and the caller already clears `inbound_status` on every branch that
+declines to start one.
+
+- **A bot's own `app_mention` is dropped in `socket.rs`, at the decode.** Slack
+  delivers an `app_mention` for a mention inside a message the app itself
+  posted, so an answer that quotes the question answers itself in the same
+  thread, forever, one `claude` subprocess at a time. `bot_id` names the poster
+  and `subtype` covers `bot_message` and every authorless variant.
+  `a_bot_authored_app_mention_is_not_work` is the guard, and it lives beside the
+  decode rather than in the handler so nothing downstream has to remember.
+- **The thread mapping is read inside the per-thread worker, never at arrival.**
+  The second mention in a thread whose first mention is still running would
+  otherwise find no `inbound_threads` row — the row is written by the run it is
+  queued behind — and be dropped as a mention in a thread Agento did not start.
+  This is the one ordering constraint the FIFO exists for, and it is why
+  classification is split across `accept` (rule, mention strip) and `turn`
+  (mapping, start-or-resume).
+- **The handler future must not return before its turn is over.** #567 holds the
+  dispatcher's ten-slot permit for exactly as long as `handler(mention)` is
+  awaited, so a handler that returned at `enqueue` would leave the global bound
+  counting *queueing* rather than running. Each job therefore carries a
+  `oneshot` the worker fires when the turn ends, however it ended.
+- **Queue teardown is under the map lock.** A worker that found its channel
+  empty, released nothing and then removed its entry would lose a job queued in
+  between, so the drain re-checks the channel while holding the lock that hands
+  out senders and only removes the entry when it is still empty.
+- **Both start and resume go through `agent_run::run_resumed`.** A start creates
+  the chat first and then resumes it — no `sdk_session_id` yet, so `resume_spec`
+  passes no `--resume` — which makes the busy lock, the session-id write-back and
+  the *additive* usage accounting one implementation from the first turn on.
+- **The two failure sentences are `trigger::dispatcher`'s constants**, now
+  `pub(crate)`: `ERROR_REPLY` for a failed run and for a timeout (which arrives
+  as an `Err`, indistinguishable to a reader in Slack), `NO_RESPONSE_REPLY` for
+  an answer with no text. Two inbound transports spelling one failure differently
+  reads as a difference in what failed. `create_trigger_session` takes the title
+  for the same reason — `[Telegram] <rule>` and `[Slack] #channel: <60 chars>` are
+  the only difference between the two call sites.
+- **`auth.test` is called once per handler, not per event and not per
+  connection.** The bot user id is what the `<@Uxxx>` strip and the
+  empty-remainder rule both need; a failure to get it is a failed turn and
+  answers `ERROR_REPLY`, because a Slack that will not answer `auth.test` will
+  not accept `chat.postMessage` either. `conversations.info` (chat title) and
+  `chat.getPermalink` are best-effort on the start path only — the channel id and
+  an empty permalink are the fallbacks, and neither refuses the run.
+- **`mrkdwn.rs` escapes nothing.** Slack asks a client to send `&`, `<` and `>`
+  escaped; doing it here would be a lossy second pass over the model's own text
+  and cannot be applied inside a fenced block without changing the code the
+  answer is showing. The conversions are exactly #568's and no more, so the
+  consequence to know is that an answer literally containing `<@U123>` mentions
+  that user. The split counts `char`s, prefers a blank line then a line ending
+  then the limit, and passes over a break inside a fenced block while any break
+  outside one remains.
+
+**These tests are in the library, and they have to be.** Every assertion about a
+request Agento *sends* to Slack needs `client::API_BASE`, which is `#[cfg(test)]`
+on this crate so it cannot exist in a shipped binary — an integration-test crate
+cannot reach it, which is the same wall `trigger/dispatcher.rs` records and the
+reason `tests/trigger_run.rs` stops one function short of Telegram's reply. So
+`slack/inbound/tests.rs` carries `tests/slack_socket.rs`'s fake-server half and
+`tests/headless_resume.rs`'s fake-CLI half together, and inherits the fake CLI's
+trap — **no exit after the result** — with a named deadline on every await.
