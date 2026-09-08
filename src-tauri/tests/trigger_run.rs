@@ -180,8 +180,11 @@ fn agent() -> agento_lib::native::agents::Agent {
 async fn run_the_rule(db: &Path) -> Result<agento_lib::native::agent_run::RunResult, String> {
     let rules = dispatcher::load_rules(db, "tg").expect("load rules");
     let rule = rules.first().expect("one rule");
-    let spec = agento_lib::native::agent_run::headless_spec(db, agent(), &rule.settings);
-    agento_lib::native::agent_run::run_headless(&spec, "hello", dispatcher::run_timeout(rule)).await
+    // `dispatcher::run_inputs`, not a re-spelling of it: this is the function
+    // `execute_and_reply` calls, so a dispatcher that stopped passing the rule's
+    // settings fails here rather than staying green.
+    let (spec, timeout) = dispatcher::run_inputs(db, agent(), rule);
+    agento_lib::native::agent_run::run_headless(&spec, "hello", timeout).await
 }
 
 /// A rule's working directory, model and permission mode reach the process.

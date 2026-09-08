@@ -302,6 +302,27 @@ pub fn run_timeout(rule: &Rule) -> std::time::Duration {
     std::time::Duration::from_secs(u64::try_from(minutes).unwrap_or(0) * 60)
 }
 
+/// Everything a matched rule decides about the run it is about to start: the
+/// spec, and how long it may take.
+///
+/// One function rather than two lines in [`execute_and_reply`] so that the
+/// fake-CLI suite (`tests/trigger_run.rs`) binds to the **shipped** call site.
+/// `execute_and_reply` cannot be driven from `tests/` at all — it sends a
+/// Telegram reply, and the base-URL seam that redirects one is `#[cfg(test)]` on
+/// the library, so an integration-test crate cannot reach it — and a test that
+/// re-spelled these two lines for itself would stay green if the dispatcher
+/// stopped passing the rule's settings, which is the whole of #565.
+pub fn run_inputs(
+    db_path: &Path,
+    agent: Agent,
+    rule: &Rule,
+) -> (crate::native::chat::runner::RunSpec, std::time::Duration) {
+    (
+        agent_run::headless_spec(db_path, agent, &rule.settings),
+        run_timeout(rule),
+    )
+}
+
 /// `executeAndReply`.
 async fn execute_and_reply(
     db_path: &Path,
@@ -353,8 +374,8 @@ async fn execute_and_reply(
         }
     };
 
-    let spec = agent_run::headless_spec(db_path, agent, &rule.settings);
-    let result = agent_run::run_headless(&spec, prompt, run_timeout(rule)).await;
+    let (spec, timeout) = run_inputs(db_path, agent, rule);
+    let result = agent_run::run_headless(&spec, prompt, timeout).await;
 
     let result = match result {
         Ok(result) => result,

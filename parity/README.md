@@ -105,8 +105,9 @@ It sits here rather than in the test file so that changing the rule is a change
 to a contract, exactly as `trigger_match_vectors.json` makes matching one.
 `select_rule::select_rule_for_channel` is the only reader.
 
-The last three were all authored *after* the Go tree was deleted, because none
-has a Go ancestor left to record from. `claude_sessions_search_golden.json`
+`claude_sessions_search_golden.json`, `session_detail_blocks_golden.json` and
+`journey_golden.json` were all authored *after* the Go tree was deleted, because
+none has a Go ancestor left to record from. `claude_sessions_search_golden.json`
 pins one search response — `match_snippet` and the `relevance` sort (#437) are
 Agento's own — recording where the field sits, that it is omitted where there is
 no index hit, and the ranked order. Two things it deliberately does **not** pin:
