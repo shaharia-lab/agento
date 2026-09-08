@@ -128,7 +128,6 @@ fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
 
 /// A migrated database with a Telegram integration and one rule carrying the
 /// five execution settings.
-#[allow(clippy::too_many_arguments)]
 fn migrated_with_rule(
     path: &Path,
     model: &str,

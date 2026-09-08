@@ -292,7 +292,7 @@ fn usable_permission_mode(stored: String) -> String {
 /// because it reads a stored row rather than a validated request, and an absurd
 /// value there would otherwise hold one of the ten concurrency slots for as long
 /// as it says.
-pub fn run_timeout(rule: &Rule) -> std::time::Duration {
+fn run_timeout(rule: &Rule) -> std::time::Duration {
     if rule.timeout_minutes <= 0 {
         return RUN_TIMEOUT;
     }
@@ -956,6 +956,50 @@ mod tests {
             run_timeout(&rule(100_000)),
             std::time::Duration::from_secs(240 * 60),
             "a stored row is clamped: the write path caps it, this reads what is there"
+        );
+    }
+
+    /// [`run_inputs`] is what the dispatcher calls, so this is where the two
+    /// halves of the wiring are pinned. [`run_timeout`]'s own mapping is tested
+    /// above; what a revert would break here is `run_inputs` *calling* it —
+    /// which no fake-CLI test can see, because the timeout is only observable
+    /// by outliving it and the smallest non-default rule timeout is a minute.
+    #[test]
+    fn run_inputs_carries_the_rules_settings_and_its_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_configured_rule(
+            &db,
+            "r",
+            true,
+            "[]",
+            "opus",
+            "/srv/repo",
+            "profile-7",
+            "plan",
+            1,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+        let agent = resolve_agent(&db, "").expect("a synthesized agent");
+        let rules = load_rules(&db, "tg").expect("load");
+
+        let (spec, timeout) = run_inputs(&db, agent.clone(), &rules[0]);
+        assert_eq!(spec.working_dir, "/srv/repo");
+        assert_eq!(spec.settings_profile_id, "profile-7");
+        assert_eq!(spec.permission_mode, "plan");
+        assert_eq!(spec.agent.as_ref().map(|a| a.model.as_str()), Some("opus"));
+        assert_eq!(
+            timeout,
+            std::time::Duration::from_secs(60),
+            "the rule's one minute, not the flat five"
+        );
+
+        let mut unset = rules[0].clone();
+        unset.timeout_minutes = 0;
+        assert_eq!(
+            run_inputs(&db, agent, &unset).1,
+            RUN_TIMEOUT,
+            "and a rule that records none still gets the flat five"
         );
     }
 
