@@ -70,8 +70,8 @@
                  auth is a bool made in SQL, and the credentials column is
                  reduced in SQL too — to `has_credentials` (#515) and, through
                  an allowlist, `auth_mode` (#513); plus POST
-                 /api/integrations, the trigger-rule writes (#277) and
-                 PUT/DELETE /{id} (#311)
+                 /api/integrations, the trigger-rule writes (#277),
+                 PUT/DELETE /{id} (#311) and PUT /{id}/inbound (#566)
     integrations/registry.rs
                  Start/Reload/Stop for the MCP servers of HOSTED_TYPES. The one
                  place a credential is read, behind its own projection

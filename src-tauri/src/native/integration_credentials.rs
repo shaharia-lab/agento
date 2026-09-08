@@ -307,6 +307,10 @@ fn validate_github(credentials: Option<&RawValue>) -> Result<(), WriteError> {
 struct SlackCredentials {
     #[serde(deserialize_with = "null_is_zero_value")]
     auth_mode: String,
+    /// Slack's **app-level** token (`xapp-…`), which Socket Mode needs and
+    /// which neither of the two `auth_mode`s implies (#566).
+    #[serde(deserialize_with = "null_is_zero_value")]
+    app_token: String,
     #[serde(deserialize_with = "null_is_zero_value")]
     bot_token: String,
     #[serde(deserialize_with = "null_is_zero_value")]
@@ -321,6 +325,17 @@ struct SlackCredentials {
 /// Integrations editor reopens such a row on the provider's *first* mode, which
 /// is #513 all over again for the new one. There is no enumeration of these
 /// arms to derive it from, so this note is the guard.
+///
+/// **`app_token` is deliberately not one of them.** It is a *field* both modes
+/// may carry, not a third way of authenticating: Socket Mode needs an
+/// app-level token **beside** whichever of `bot_token`/`oauth` the row already
+/// uses, so making it a mode would force a user holding a bot token to give
+/// one of the two up. Nothing about it therefore reaches `AUTH_MODES`, the
+/// `auth_mode_sql` allowlist, or #513's reopen behaviour. It is optional on
+/// both modes — an install that never turns Slack inbound on sends none — and
+/// the only thing checked here is its prefix, so a bot token pasted into the
+/// app-token field is refused at the form rather than at the first connection
+/// attempt (#566).
 fn validate_slack(credentials: Option<&RawValue>) -> Result<(), WriteError> {
     let creds: SlackCredentials = parse("slack", credentials)?;
     match creds.auth_mode.as_str() {
@@ -353,6 +368,14 @@ fn validate_slack(credentials: Option<&RawValue>) -> Result<(), WriteError> {
                 "auth_mode must be 'bot_token' or 'oauth'",
             ))
         }
+    }
+    // After the mode match, so a request naming no mode reports *that* rather
+    // than a field of a mode it never picked. Absent is valid on both modes.
+    if !creds.app_token.is_empty() && !creds.app_token.starts_with("xapp-") {
+        return Err(WriteError::validation(
+            "credentials.app_token",
+            "app_token must be a Slack app-level token starting with 'xapp-'",
+        ));
     }
     Ok(())
 }
@@ -553,6 +576,52 @@ mod tests {
 
     fn message(integration_type: &str, creds: &str) -> String {
         err(integration_type, creds).message()
+    }
+
+    /// The Slack app-level token is checked **only when present**, on both
+    /// modes, and only for its prefix (#566).
+    ///
+    /// The absent cases are the point of the test: an install that never turns
+    /// inbound on sends no `app_token` at all, and every Slack row written
+    /// before #566 has none — neither may start failing to save.
+    #[test]
+    fn a_slack_app_token_is_checked_only_for_its_prefix_and_only_when_present() {
+        let bot = r#""auth_mode":"bot_token","bot_token":"xoxb-1""#;
+        let oauth = r#""auth_mode":"oauth","client_id":"c","client_secret":"s""#;
+
+        for mode in [bot, oauth] {
+            // Absent, and explicitly null/empty: all three are "not given".
+            for blob in [
+                format!("{{{mode}}}"),
+                format!(r#"{{{mode},"app_token":null}}"#),
+                format!(r#"{{{mode},"app_token":""}}"#),
+                format!(r#"{{{mode},"app_token":"xapp-1-A-B-c"}}"#),
+            ] {
+                validate("slack", Some(&raw(&blob))).unwrap_or_else(|e| {
+                    panic!("{blob} should validate: {}", e.message());
+                });
+            }
+            // A bot token pasted into the app-token field is the mistake this
+            // catches, and it is a 422 naming the field.
+            let wrong = err("slack", &format!(r#"{{{mode},"app_token":"xoxb-1"}}"#));
+            assert_eq!(wrong.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                wrong.message().contains("credentials.app_token"),
+                "{}",
+                wrong.message()
+            );
+        }
+
+        // The mode is still reported first: a request naming no mode must not
+        // report a field of a mode it never picked.
+        assert!(message("slack", r#"{"app_token":"nope"}"#)
+            .contains("auth_mode must be 'bot_token' or 'oauth'"));
+
+        // `app_token` is a field, never a mode.
+        assert!(
+            message("slack", r#"{"auth_mode":"app_token","app_token":"xapp-1"}"#)
+                .contains("auth_mode must be 'bot_token' or 'oauth'")
+        );
     }
 
     /// An **absent** blob is "credentials are empty"; a literal `null` is four

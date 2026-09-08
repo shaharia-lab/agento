@@ -828,8 +828,8 @@ mod tests {
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
         //
-        // The file has **three owners** since #541, so the claimed set is the
-        // union of all three modules' consts. A fourth owner appends here;
+        // The file has **four owners** since #566, so the claimed set is the
+        // union of all four modules' consts. A fifth owner appends here;
         // leaving it out would silently weaken the assertion from set equality
         // to "the owners I remembered", which is the one-directional property
         // this test exists to escape.
@@ -837,6 +837,7 @@ mod tests {
             .iter()
             .chain(gateway_api::ROUTES.iter())
             .chain(tasks::ROUTES.iter())
+            .chain(integrations::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(

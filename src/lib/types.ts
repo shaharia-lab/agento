@@ -136,6 +136,20 @@ export interface Integration {
    * stored one" rather than demanding a re-typed token on every save.
    */
   has_credentials: boolean;
+  /**
+   * Whether a Slack app-level token (`xapp-…`) is stored — never the token
+   * (#566). `has_credentials`'s rule applied to one key, computed in SQL for
+   * the same reason, and the thing that decides whether the inbound switch may
+   * be turned on at all: `PUT /api/integrations/{id}/inbound {"enabled":true}`
+   * answers 422 without one.
+   */
+  has_app_token: boolean;
+  /** Whether the Slack inbound worker should be running for this row (#566). */
+  inbound_enabled: boolean;
+  /** What that worker is doing, or `""` when it has never run (#566). */
+  inbound_status: string;
+  /** The last failure it recorded, or `""` (#566). */
+  inbound_error: string;
   services: Record<string, ServiceConfig>;
   created_at: string;
   updated_at: string;

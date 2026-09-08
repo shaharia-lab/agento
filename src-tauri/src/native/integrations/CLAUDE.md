@@ -256,3 +256,55 @@ flow that actually errored.
   per launch, which is the accepted price of offline verification. Do not
   introduce a UI that echoes them back; the API scrubs them and the UI must not
   reintroduce them.
+
+## Slack inbound: the app token and the switch (#566)
+
+- **`credentials.app_token` is a field, not an `auth_mode`.** Socket Mode needs
+  a Slack app-level token (`xapp-…`) *beside* whichever of `bot_token`/`oauth`
+  the row already uses, so making it a mode would force a user holding a bot
+  token to give one of the two up. Nothing about it reaches `AUTH_MODES` or
+  `auth_mode_sql`'s allowlist, and #513's reopen behaviour is unaffected. It is
+  optional on both modes; `validate_slack` checks only its prefix, and only when
+  present, so no existing row starts failing to save.
+- **What leaves SQLite is `has_app_token`, never the token.** `has_app_token_sql`
+  is `has_credentials_sql`'s discipline applied to one key: a nested `CASE`
+  (because `json_extract` raises on a column that is not JSON), narrowed by
+  `json_type(...) = 'text'`, trimming the same four ASCII bytes. Its in-process
+  twin is `stores_an_app_token`, and `the_two_has_app_token_rules_agree` holds
+  them to each other. `registry::HostingRow::app_token` is the **third**
+  spelling, the only one that yields the value, and
+  `an_app_token_is_read_exactly_when_the_scrubbed_read_reports_one` pins it to
+  the other two — the wire promising a token the worker then cannot find is the
+  one disagreement that matters.
+- **`PUT /api/integrations/{id}/inbound` is the on/off switch**, deliberately
+  not a field on `PUT /api/integrations/{id}`: that write is byte-exact against
+  Go and its three-valued `credentials` contract (#515) would otherwise have to
+  be resent to flip a boolean. It refuses before it writes — 404 unknown id, 400
+  for any type but `slack`, 422 naming `credentials.app_token` when *enabling* a
+  row that stores none. Disabling is never refused on the credential axis, so a
+  row whose credentials were scrubbed cannot get stuck on. It writes
+  `inbound_enabled` alone and ends in `registry::reload_blocking`, which is what
+  starts and stops the socket worker. **The route is desktop-only**, so it is
+  recorded in `parity/desktop_routes.json` through `integrations::ROUTES` — the
+  **fourth** owner of that file, and the union in
+  `the_desktop_only_routes_are_recorded_in_both_directions` has to name it or
+  the set-equality assertion silently weakens.
+- **The 422 and the 400 are only worth something because `update` clears the
+  column.** `PUT /api/integrations/{id}` can invalidate the switch on either
+  axis — a replacing blob that drops `app_token` (#515 makes a sent blob replace
+  wholly, and the Slack form emits only its mode's fields), or a `type` written
+  straight from the request body, which this write validates not at all. The
+  second is the sharper one: `update_inbound` answers 400 for a non-Slack row
+  *whichever way* the switch is being moved, so a row that left `slack` with the
+  switch on could never be turned off again. `clears_inbound` is therefore
+  `type != "slack" || a replacing blob with no app token`, and it is applied on
+  **both** arms of the `UPDATE` — the credentials-omitted arm assigns fewer
+  columns and is the one that misses it.
+- `has_app_token_sql` is **not** scoped by `type`. No validator rejects an
+  unknown key, so an API caller can put an `app_token` into a Telegram blob and
+  see the read report `true`; nothing follows from it, because the switch that
+  consults it refuses any type but `slack`.
+- **`inbound_status` and `inbound_error` are the worker's to write** (#567), and
+  so is `updated_at` left alone: a disable that cleared the status would erase
+  the reason the user is looking at, and a worker rewriting its state on every
+  reconnection must not keep bumping the record's timestamp.

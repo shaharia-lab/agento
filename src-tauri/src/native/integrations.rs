@@ -210,6 +210,22 @@ pub struct ScrubbedIntegration {
     pub authenticated: bool,
     pub created_at: GoTime,
     pub enabled: bool,
+    /// Whether a Slack **app-level** token is stored — never the token (#566).
+    ///
+    /// The same discipline `has_credentials` states one field below, for the
+    /// same reason and by the same means: [`has_app_token_sql`] decides it
+    /// inside SQLite, so the `xapp-` bytes never exist in this process to be
+    /// echoed. It reads `false` for every row that stores no `app_token` key,
+    /// which is every Slack row written before this field existed and every row
+    /// of every other provider, none of whose forms writes one. The SQL is
+    /// **not** scoped by `type` — no validator rejects an unknown key, so an
+    /// API caller can put an `app_token` in a Telegram blob and see this report
+    /// `true`. Nothing follows from it: the switch that consults it answers 400
+    /// for any type but `slack`.
+    ///
+    /// Alphabetically `enabled` < `has_app_token` < `has_credentials`, and the
+    /// field order **is** the wire order.
+    pub has_app_token: bool,
     /// Whether a credential is stored — **not** the credential (#515).
     ///
     /// A wire addition with no Go ancestor, and the only way an edit form can
@@ -221,9 +237,28 @@ pub struct ScrubbedIntegration {
     ///
     /// It sits here because the field order **is** the wire order and this one
     /// is alphabetical (Go built the object from a map): `enabled` <
-    /// `has_credentials` < `id`.
+    /// `has_app_token` < `has_credentials` < `id`.
     pub has_credentials: bool,
     pub id: String,
+    /// Whether the Slack inbound worker should be running for this row (#566).
+    ///
+    /// A plain column of migration 39's, not a computed one: the switch
+    /// `PUT /api/integrations/{id}/inbound` writes. `false` for every row that
+    /// predates it and for every provider that has no inbound half.
+    ///
+    /// The three `inbound_*` fields sit between `id` and `name` because the
+    /// order here is alphabetical, not logical — see this type's own header.
+    pub inbound_enabled: bool,
+    /// The last failure the inbound worker recorded, or empty (#566).
+    ///
+    /// Written by the worker (#567), never by the switch: a disable leaves the
+    /// last error where it was rather than editing history, and the worker
+    /// clears it on its next successful connection.
+    pub inbound_error: String,
+    /// What the inbound worker is doing, or empty when it has never run (#566).
+    ///
+    /// Also the worker's to write (#567); this release only reads it back.
+    pub inbound_status: String,
     pub name: String,
     /// A nil Go map is `null` and an empty one is `{}`, and the stored column
     /// decides which — so this is an `Option`, and the inner map is a
@@ -376,10 +411,13 @@ fn integration_columns() -> String {
             (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
             {} AS has_credentials,
             services, created_at, updated_at,
-            {} AS auth_mode
+            {} AS auth_mode,
+            {} AS has_app_token,
+            inbound_enabled, inbound_status, inbound_error
      FROM integrations",
         has_credentials_sql(),
-        auth_mode_sql()
+        auth_mode_sql(),
+        has_app_token_sql()
     )
 }
 
@@ -423,6 +461,52 @@ fn has_credentials_sql() -> String {
     )
 }
 
+/// "This row stores a Slack app-level token", decided in SQL so the token is
+/// never selected (#566).
+///
+/// [`has_credentials_sql`]'s discipline applied to one key rather than to the
+/// whole blob, and the reasons are that function's: what leaves SQLite is a
+/// boolean, and the trim set is spelled out because SQLite's `TRIM(X, Y)`
+/// removes exactly the bytes of `Y` where Rust's `str::trim` removes every
+/// Unicode whitespace character — the two spellings have to agree, and
+/// [`tests::the_two_has_app_token_rules_agree`] is what holds them to it.
+///
+/// The `CASE` is nested rather than `AND`-ed for [`auth_mode_sql`]'s reason:
+/// `json_extract` raises on a column that is not JSON, and `''` is what a `PUT`
+/// omitting `credentials` used to leave behind. `json_type` narrows it further
+/// to a **text** value, so a stored `"app_token": 7` reports `false` here and
+/// in [`stores_an_app_token`] alike rather than each guessing.
+///
+/// Note what this is not: it is not an allowlist like [`auth_mode_sql`]'s,
+/// because nothing of the value crosses the boundary — only whether there is
+/// one.
+fn has_app_token_sql() -> String {
+    // The same four bytes `has_credentials_sql` trims.
+    const WS: &str = "char(32) || char(9) || char(10) || char(13)";
+    format!(
+        "CASE WHEN json_valid(credentials) THEN
+                CASE WHEN json_type(credentials, '$.app_token') = 'text'
+                     THEN TRIM(json_extract(credentials, '$.app_token'), {WS}) != ''
+                     ELSE 0 END
+              ELSE 0 END"
+    )
+}
+
+/// [`has_app_token_sql`] over bytes this process already holds, for the writes
+/// that build their response by hand instead of re-reading the row.
+///
+/// Kept in step with the SQL by [`tests::the_two_has_app_token_rules_agree`],
+/// exactly as [`stores_a_credential`] is with [`has_credentials_sql`].
+pub(crate) fn stores_an_app_token(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("app_token"))
+        .and_then(|v| v.as_str())
+        // `str::trim`, deliberately not — see `stores_a_credential`.
+        .is_some_and(|token| !token.trim_matches([' ', '\t', '\n', '\r']).is_empty())
+}
+
 /// [`has_credentials_sql`] over bytes this process already holds, for the two
 /// writes that know what they just stored and must not re-read it.
 ///
@@ -443,6 +527,8 @@ fn scan_integration(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScrubbedIntegra
     let services: String = row.get(6)?;
     let created_at: String = row.get(7)?;
     let updated_at: String = row.get(8)?;
+    let has_app_token: i64 = row.get(10)?;
+    let inbound_enabled: i64 = row.get(11)?;
     Ok(ScrubbedIntegration {
         // Index 9, appended last: the columns are positional, and `auth_mode`
         // is deliberately not in wire order here — the struct decides that.
@@ -450,8 +536,12 @@ fn scan_integration(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScrubbedIntegra
         authenticated: authenticated != 0,
         created_at: super::gotime::from_sql_text(&created_at, 7)?,
         enabled: enabled != 0,
+        has_app_token: has_app_token != 0,
         has_credentials: has_credentials != 0,
         id: row.get(0)?,
+        inbound_enabled: inbound_enabled != 0,
+        inbound_error: row.get(13)?,
+        inbound_status: row.get(12)?,
         name: row.get(1)?,
         services: decode_services(&services),
         integration_type: row.get(2)?,
@@ -634,6 +724,16 @@ fn start_oauth(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 
 // ─── The seam ─────────────────────────────────────────────────────────────────
 
+/// The routes here that exist **only** in the desktop build (#566).
+///
+/// The fourth owner of `parity/desktop_routes.json`, whose assertion is set
+/// equality over the union of every owner's const — so this list and that file
+/// move together or `the_desktop_only_routes_are_recorded_in_both_directions`
+/// fails. Everything else this module claims came from Go and is recorded in
+/// `read_routes.json` / `write_routes.json`, which are frozen records of Go's
+/// surface and cannot carry a route Go never had.
+pub const ROUTES: &[(&str, &str)] = &[("PUT", "/api/integrations/{id}/inbound")];
+
 /// This module's entry in `native::ENDPOINTS`.
 pub const ENDPOINT: super::Endpoint = super::Endpoint {
     name: "integrations",
@@ -661,6 +761,8 @@ enum Route<'a> {
     WebhookRegister(&'a str),
     /// `{id}/webhook/regenerate-secret` — rotate and re-register.
     WebhookRegenerate(&'a str),
+    /// `{id}/inbound` — the Slack inbound on/off switch (#566).
+    Inbound(&'a str),
 }
 
 /// Match the reads, plus the write routes that share their paths.
@@ -697,6 +799,9 @@ fn route_of(path: &str) -> Option<Route<'_>> {
     }
     if let Some(id) = rest.strip_suffix("/webhook/regenerate-secret") {
         return segment(id).map(Route::WebhookRegenerate);
+    }
+    if let Some(id) = rest.strip_suffix("/inbound") {
+        return segment(id).map(Route::Inbound);
     }
     if let Some((id, tail)) = rest.split_once("/triggers/") {
         return match (segment(id), segment(tail)) {
@@ -768,6 +873,10 @@ fn claims(method: &Method, path: &str) -> bool {
         // under a new secret. See `trigger::registration`.
         Some(Route::WebhookRegister(_)) => method == Method::POST || method == Method::DELETE,
         Some(Route::WebhookRegenerate(_)) => method == Method::POST,
+        // #566. A desktop-only route with no Go ancestor, so it is recorded in
+        // `parity/desktop_routes.json` through [`ROUTES`] rather than in
+        // `write_routes.json`, which is a frozen record of Go's surface.
+        Some(Route::Inbound(_)) => method == Method::PUT,
         None => false,
     }
 }
@@ -791,6 +900,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
             }
             Some(Route::WebhookRegister(id)) => finish(super::trigger::serve_register(db, id)),
             Some(Route::WebhookRegenerate(id)) => finish(super::trigger::serve_regenerate(db, id)),
+            Some(Route::Inbound(id)) => finish(update_inbound(db, id, req.body)),
             _ => Err(format!(
                 "{} {} is not an integration write",
                 req.method, req.path
@@ -849,6 +959,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         | Some(Route::WebhookRegister(_))
         | Some(Route::WebhookRegenerate(_))
         | Some(Route::Trigger(..))
+        | Some(Route::Inbound(_))
         | None => return Err(format!("{} is not an integration read", req.path)),
     };
     Ok(super::Answer::json(body))
@@ -969,8 +1080,15 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         enabled: req.enabled,
         // From the bytes just stored rather than a re-read: this is the one
         // path that legitimately holds the blob, because the caller supplied it.
+        has_app_token: stores_an_app_token(&credentials),
         has_credentials: stores_a_credential(&credentials),
         id,
+        // The three columns' own defaults. A create never enables inbound —
+        // that is `PUT /api/integrations/{id}/inbound`, and it refuses a row
+        // with no app token, which is a row this one may well be.
+        inbound_enabled: false,
+        inbound_error: String::new(),
+        inbound_status: String::new(),
         name: req.name,
         services: Some(services),
         integration_type: req.integration_type,
@@ -1102,11 +1220,36 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     // is *which columns are assigned*, and a
     // `CASE WHEN ?4 IS NULL THEN credentials ELSE ?4 END` would still bind the
     // blob's parameter slot on the path that must not have one.
+    // **This write turns the inbound switch off whenever it invalidates it.**
+    //
+    // `update_inbound` will only *enable* a Slack row that stores an app-level
+    // token, on the grounds that the switch would otherwise start a worker that
+    // can only fail to connect. Its refusal is worth nothing if the row can
+    // arrive in that state from here, and both halves of the condition are
+    // reachable through this one write:
+    //
+    // - **The credential.** #515's contract makes a sent blob replace the
+    //   stored one wholly, and the Slack form emits only its mode's fields, so
+    //   a routine credential rotation can drop `app_token`. Only the replace
+    //   arm: an omitted blob preserves the credential, so it preserves the
+    //   switch too.
+    // - **The type.** `type` is written straight from the request body and this
+    //   write validates nothing, so a row can become `telegram` with the switch
+    //   still on — and there is no way back, because `update_inbound` answers
+    //   400 for a non-Slack row whichever way the switch is being moved. That
+    //   refusal is the one the acceptance criteria pin, so the stranding is
+    //   fixed here, at the write that causes it, rather than by weakening it.
+    //
+    // Cleared in the same statement, on both arms, rather than left for the
+    // worker to discover.
+    let clears_inbound = req.integration_type != "slack"
+        || credentials.is_some_and(|blob| !stores_an_app_token(blob));
     match credentials {
         Some(blob) => conn.execute(
             "UPDATE integrations SET
             name = ?1, type = ?2, enabled = ?3,
             credentials = ?4, services = ?5, updated_at = ?6,
+            inbound_enabled = CASE WHEN ?8 THEN 0 ELSE inbound_enabled END,
             auth = CASE
                 WHEN auth IS NOT NULL AND auth != '' AND auth != 'null' THEN auth
                 ELSE NULL
@@ -1120,12 +1263,14 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
                 &services_json,
                 &now,
                 id,
+                clears_inbound,
             ],
         ),
         None => conn.execute(
             "UPDATE integrations SET
             name = ?1, type = ?2, enabled = ?3,
             services = ?4, updated_at = ?5,
+            inbound_enabled = CASE WHEN ?7 THEN 0 ELSE inbound_enabled END,
             auth = CASE
                 WHEN auth IS NOT NULL AND auth != '' AND auth != 'null' THEN auth
                 ELSE NULL
@@ -1138,6 +1283,7 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
                 &services_json,
                 &now,
                 id,
+                clears_inbound,
             ],
         ),
     }
@@ -1166,11 +1312,27 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
         enabled: req.enabled,
         // What the row holds *now*: the blob just written when the caller sent
         // one, and whatever was already there when it did not.
+        // `app_token` rides inside `credentials`, so it follows the same
+        // three-valued rule the column does (#515) — the request's blob when
+        // one was sent, the stored answer when the key was absent and the blob
+        // therefore survived. A `PUT` that omits `credentials` must not report
+        // the app token gone, or the Integrations switch would read as
+        // unusable after any unrelated rename.
+        has_app_token: match credentials {
+            Some(blob) => stores_an_app_token(blob),
+            None => existing.has_app_token,
+        },
         has_credentials: match credentials {
             Some(blob) => stores_a_credential(blob),
             None => existing.has_credentials,
         },
         id: id.to_string(),
+        // `inbound_status` and `inbound_error` are the worker's, so the
+        // response reports what the row already holds. `inbound_enabled` is
+        // reported the way it was just written — see `clears_inbound` above.
+        inbound_enabled: existing.inbound_enabled && !clears_inbound,
+        inbound_error: existing.inbound_error,
+        inbound_status: existing.inbound_status,
         name: req.name,
         services: req.services.map(unwrap_services),
         integration_type: req.integration_type,
@@ -1209,6 +1371,138 @@ fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     Ok(super::Answer::no_content())
 }
 
+/// `PUT /api/integrations/{id}/inbound` — the Slack inbound on/off switch
+/// (#566).
+///
+/// **A route of its own rather than a field on `PUT /api/integrations/{id}`**,
+/// and that is the decision worth reading. The integration write is byte-exact
+/// against Go and its request body has no ancestor for this; adding one would
+/// mean the UI's inbound switch posting the whole record — name, type, services
+/// and the three-valued `credentials` contract from #515 — to flip a boolean.
+/// One route, one column, one call.
+///
+/// The order of the three refusals is the write-path rule, not taste: every one
+/// of them happens **before** the `UPDATE`, so no answer here describes a row
+/// that was half changed.
+///
+/// - **404** when no row has that id.
+/// - **400** for any type but `slack`. There is one inbound implementation and
+///   it is Socket Mode; a Telegram row's inbound half is a webhook, and it has
+///   its own routes.
+/// - **422**, naming `credentials.app_token`, when enabling a row that stores
+///   no app-level token — the switch would otherwise turn on a worker that can
+///   only fail to connect. Disabling is always allowed, so a row whose
+///   credentials were later scrubbed can still be turned off.
+///
+/// `inbound_status` and `inbound_error` are **not** touched. They are the
+/// worker's to write (#567), and a disable that cleared them would erase the
+/// reason the user is looking at. Neither is `updated_at`: it tracks the
+/// integration record that `PUT /api/integrations/{id}` writes, and the two
+/// state columns beside this one will be written by the worker on every
+/// reconnection, which must not keep bumping it either.
+fn update_inbound(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<InboundRequest>(body)?;
+
+    let conn = open_for_write(db_path)?;
+    let Some(target) = inbound_target(&conn, id)? else {
+        return Err(WriteError::NotFound {
+            resource: "integration".to_string(),
+            id: id.to_string(),
+        });
+    };
+    if target.integration_type != "slack" {
+        return Err(WriteError::BadRequest(format!(
+            "integration {id:?} is of type {:?}, which has no inbound connection",
+            target.integration_type
+        )));
+    }
+    if req.enabled && !target.has_app_token {
+        return Err(WriteError::validation(
+            "credentials.app_token",
+            "an app-level token is required before inbound can be enabled",
+        ));
+    }
+
+    // Encoded **before** the mutation, per the invariant in `writes.rs`: a
+    // `Fallback` after the `UPDATE` would answer 500 for a write that landed.
+    let body = super::gojson::to_vec(&InboundState {
+        inbound_enabled: req.enabled,
+    })
+    .map_err(|e| WriteError::Fallback(format!("encoding inbound state: {e}")))?;
+
+    conn.execute(
+        "UPDATE integrations SET inbound_enabled = ?1 WHERE id = ?2",
+        rusqlite::params![i64::from(req.enabled), id],
+    )
+    .map_err(|e| WriteError::Fallback(format!("saving inbound state: {e}")))?;
+    drop(conn);
+
+    // Nothing below this line may return Fallback.
+    //
+    // The reload **is** the effect: starting and stopping the socket worker is
+    // the registry's job (#567), so this write ends the way `update` does, and
+    // its failure is swallowed for the same reason — the column is already
+    // written, and a 500 here would invite a retry of a write that landed.
+    registry::reload_blocking(db_path, id);
+    log::info!(
+        "integration inbound updated id={id:?} enabled={}",
+        req.enabled
+    );
+    Ok(super::Answer::json(body))
+}
+
+/// The body of `PUT /api/integrations/{id}/inbound`.
+///
+/// One key, and `null_is_zero_value` on it like every other defaulted scalar in
+/// the port: `{"enabled": null}` and `{}` alike mean `false`, which is what Go
+/// decoding into a `bool` does.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct InboundRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    enabled: bool,
+}
+
+/// The 200 body: the column as it now stands, under the name the integration
+/// read spells it with, so a caller holding a [`ScrubbedIntegration`] can patch
+/// the one field rather than re-read the row.
+#[derive(Serialize)]
+struct InboundState {
+    inbound_enabled: bool,
+}
+
+/// What [`update_inbound`] needs before it may write, and nothing else.
+///
+/// `has_app_token` is computed by [`has_app_token_sql`], so this stays a read
+/// that cannot hold the token — the module header's rule, kept on the one write
+/// whose decision depends on a credential.
+struct InboundTarget {
+    integration_type: String,
+    has_app_token: bool,
+}
+
+fn inbound_target(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<InboundTarget>, WriteError> {
+    conn.query_row(
+        &format!(
+            "SELECT type, {} AS has_app_token FROM integrations WHERE id = ?1",
+            has_app_token_sql()
+        ),
+        [id],
+        |row| {
+            let has_app_token: i64 = row.get(1)?;
+            Ok(InboundTarget {
+                integration_type: row.get(0)?,
+                has_app_token: has_app_token != 0,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
+}
+
 /// What a `PUT` needs from the row it is replacing, and nothing else.
 ///
 /// `created_at` because the response carries it and the column keeps it;
@@ -1221,6 +1515,16 @@ struct ExistingIntegration {
     created_at: String,
     authenticated: bool,
     has_credentials: bool,
+    /// The same, for the Slack app-level token, and for the same reason: the
+    /// blob a `PUT` omits survives, so the response has to report what is
+    /// already stored (#566). Computed in SQL, so this read still cannot hold
+    /// the token.
+    has_app_token: bool,
+    /// The three inbound columns, which this write never sets and the response
+    /// still carries (#566).
+    inbound_enabled: bool,
+    inbound_status: String,
+    inbound_error: String,
     /// The stored discriminator, for the same reason as `has_credentials`: a
     /// `PUT` that omits `credentials` preserves the column, so the response has
     /// to report what is already there rather than what the request implies.
@@ -1238,19 +1542,28 @@ fn existing_for_update(
                 (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
                 {} AS has_credentials,
                 type,
-                {} AS auth_mode
+                {} AS auth_mode,
+                {} AS has_app_token,
+                inbound_enabled, inbound_status, inbound_error
          FROM integrations WHERE id = ?1",
             has_credentials_sql(),
-            auth_mode_sql()
+            auth_mode_sql(),
+            has_app_token_sql()
         ),
         [id],
         |row| {
             let authenticated: i64 = row.get(1)?;
             let has_credentials: i64 = row.get(2)?;
+            let has_app_token: i64 = row.get(5)?;
+            let inbound_enabled: i64 = row.get(6)?;
             Ok(ExistingIntegration {
                 created_at: row.get(0)?,
                 authenticated: authenticated != 0,
                 has_credentials: has_credentials != 0,
+                has_app_token: has_app_token != 0,
+                inbound_enabled: inbound_enabled != 0,
+                inbound_status: row.get(7)?,
+                inbound_error: row.get(8)?,
                 auth_mode: row.get(4)?,
                 integration_type: row.get(3)?,
             })
@@ -1629,7 +1942,10 @@ mod tests {
             auth        TEXT,
             services    TEXT NOT NULL DEFAULT '{}',
             created_at  DATETIME NOT NULL,
-            updated_at  DATETIME NOT NULL
+            updated_at  DATETIME NOT NULL,
+            inbound_enabled INTEGER NOT NULL DEFAULT 0,
+            inbound_status  TEXT NOT NULL DEFAULT '',
+            inbound_error   TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE trigger_rules (
             id                  TEXT PRIMARY KEY,
@@ -2004,14 +2320,21 @@ mod tests {
                 // is single-mode, so it is empty.
                 r#"{"auth_mode":"","authenticated":true,"#,
                 r#""created_at":"2026-08-01T10:00:00Z","enabled":true,"#,
-                // #515's addition, and its **position** is the assertion: it
-                // sorts between `enabled` and `id`, which is where the field
-                // sits in the struct. Declared anywhere else it would move a
-                // byte on a response whose key order is the contract.
-                r#""has_credentials":true,"#,
+                // #515's and #566's additions, and their **position** is the
+                // assertion: `enabled` < `has_app_token` < `has_credentials` <
+                // `id`, which is where the fields sit in the struct. Declared
+                // anywhere else they would move a byte on a response whose key
+                // order is the contract. This row is telegram, which stores no
+                // app-level token and never will.
+                r#""has_app_token":false,"has_credentials":true,"#,
                 // `<` and `>` arrive escaped: `writeJSON` uses `json.Encoder`,
                 // which HTML-escapes by default.
-                r#""id":"zulu-int","name":"Zulu \u003cwork\u003e","services":{"messaging":"#,
+                r#""id":"zulu-int","#,
+                // #566's three plain columns, between `id` and `name` for the
+                // same alphabetical reason, and empty on every row written
+                // before the switch existed.
+                r#""inbound_enabled":false,"inbound_error":"","inbound_status":"","#,
+                r#""name":"Zulu \u003cwork\u003e","services":{"messaging":"#,
                 r#"{"enabled":true,"tools":["send_message","read_chat"]}},"type":"telegram","#,
                 r#""updated_at":"2026-08-02T11:00:00Z"}"#,
                 "\n"
@@ -2139,6 +2462,15 @@ mod tests {
         // #318: the whole auth surface is the shell's — the OAuth flow, and
         // since this issue's second half the token validation too.
         assert!(claims(&Method::GET, "/api/integrations/abc/auth/status"));
+        // #566's switch: PUT and nothing else.
+        assert!(claims(&Method::PUT, "/api/integrations/abc/inbound"));
+        assert!(!claims(&Method::GET, "/api/integrations/abc/inbound"));
+        assert!(!claims(&Method::POST, "/api/integrations/abc/inbound"));
+        assert!(!claims(&Method::DELETE, "/api/integrations/abc/inbound"));
+        assert!(!claims(&Method::PUT, "/api/integrations//inbound"));
+        assert!(!claims(&Method::PUT, "/api/integrations/a/b/inbound"));
+        assert!(!claims(&Method::PUT, "/api/integrations/abc/inbound/x"));
+
         assert!(claims(&Method::POST, "/api/integrations/abc/auth/start"));
         assert!(claims(&Method::POST, "/api/integrations/abc/auth/validate"));
         // …and only for their own methods. There is no GET on `validate`.
@@ -2722,6 +3054,347 @@ mod tests {
         assert!(
             between.contains("drop(conn);"),
             "the reload sits after the write completes, outside the match"
+        );
+    }
+
+    /// [`has_app_token_sql`] and [`stores_an_app_token`] are one rule in two
+    /// languages, so they are held to each other over the shapes a stored blob
+    /// really takes — the same guarantee, and the same trap, as
+    /// [`the_two_has_credentials_rules_agree`] one test below.
+    ///
+    /// The interesting rows are the ones each side could get wrong alone: a
+    /// blob that is not JSON at all (SQLite's `json_extract` **raises** rather
+    /// than answering `NULL`, which is why the `CASE` is nested), a JSON `null`
+    /// under the key, a non-string value, and a token that is only whitespace.
+    #[test]
+    fn the_two_has_app_token_rules_agree() {
+        let file = migrated();
+        let conn = Connection::open(file.path()).expect("open");
+        let shapes = [
+            "",
+            "null",
+            "{}",
+            "not json at all",
+            r#"{"app_token":null}"#,
+            r#"{"app_token":""}"#,
+            r#"{"app_token":"   "}"#,
+            r#"{"app_token":"\t\n"}"#,
+            // Not a string: both sides must say "no token" rather than each
+            // guessing what a number means.
+            r#"{"app_token":7}"#,
+            r#"{"app_token":["xapp-1"]}"#,
+            r#"{"app_token":"xapp-1"}"#,
+            r#"{"app_token":" xapp-1 "}"#,
+            // The prefix is `validate_slack`'s business, not this rule's: a row
+            // stored before that check existed still has a token.
+            r#"{"app_token":"xoxb-not-an-app-token"}"#,
+            r#"{"auth_mode":"bot_token","bot_token":"xoxb-1"}"#,
+            "[]",
+            "0",
+        ];
+        for (n, shape) in shapes.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                           created_at, updated_at)
+                 VALUES (?1, 'n', 'slack', 1, ?2, NULL, '{}',
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                rusqlite::params![format!("app-row-{n}"), shape],
+            )
+            .expect("seed");
+            let in_sql: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM integrations WHERE id = ?1",
+                        has_app_token_sql()
+                    ),
+                    [format!("app-row-{n}")],
+                    |row| row.get(0),
+                )
+                .expect("query");
+            assert_eq!(
+                in_sql != 0,
+                stores_an_app_token(shape),
+                "the two rules disagree about {shape:?}"
+            );
+        }
+    }
+
+    /// The token itself never reaches the wire, asserted over the **response
+    /// bytes** of both reads rather than over a struct field — a field-level
+    /// check only proves the fields the test already knows about, which is the
+    /// same reason `no_write_response_carries_a_credential_either` reads bytes.
+    #[test]
+    fn a_scrubbed_read_never_carries_the_app_token() {
+        const APP_TOKEN: &str = "xapp-1-SUPER-SECRET-APP-TOKEN";
+        let file = migrated();
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                           created_at, updated_at)
+                 VALUES ('s', 'S', 'slack', 1, ?1, NULL, '{}',
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                [format!(
+                    r#"{{"auth_mode":"bot_token","bot_token":"xoxb-1","app_token":"{APP_TOKEN}"}}"#
+                )],
+            )
+            .expect("seed");
+
+        let one = get(file.path(), "s").expect("get").expect("a row");
+        assert!(one.has_app_token, "the boolean is what leaves SQLite");
+        for encoded in [
+            String::from_utf8(super::super::gojson::to_vec(&one).expect("encode")).expect("utf8"),
+            String::from_utf8(
+                super::super::gojson::to_vec(&list(file.path()).expect("list")).expect("encode"),
+            )
+            .expect("utf8"),
+        ] {
+            assert!(
+                !encoded.contains(APP_TOKEN),
+                "the app token reached the wire: {encoded}"
+            );
+            assert!(!encoded.contains("xapp-"), "{encoded}");
+            assert!(!encoded.contains(r#""app_token""#), "{encoded}");
+        }
+    }
+
+    /// A row that predates #566 reads back with the four new keys at their zero
+    /// values — the migration backfills nothing, and nothing here invents a
+    /// default that would make an old row look configured.
+    #[test]
+    fn a_row_written_before_the_inbound_columns_reads_back_empty() {
+        let file = fixture();
+        let row = get(file.path(), "zulu-int").expect("get").expect("a row");
+        assert!(!row.has_app_token);
+        assert!(!row.inbound_enabled);
+        assert_eq!(row.inbound_status, "");
+        assert_eq!(row.inbound_error, "");
+    }
+
+    /// Every refusal happens **before** the `UPDATE`, so none of them describes
+    /// a row that was half changed — the write-path rule in `writes.rs`.
+    #[test]
+    fn the_inbound_switch_refuses_before_it_writes() {
+        let file = migrated();
+        let conn = Connection::open(file.path()).expect("open");
+        for (id, integration_type, credentials) in [
+            (
+                "no-token",
+                "slack",
+                r#"{"auth_mode":"bot_token","bot_token":"xoxb-1"}"#,
+            ),
+            ("telegram", "telegram", r#"{"bot_token":"123:abc"}"#),
+        ] {
+            conn.execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                           created_at, updated_at)
+                 VALUES (?1, ?1, ?2, 1, ?3, NULL, '{}',
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                rusqlite::params![id, integration_type, credentials],
+            )
+            .expect("seed");
+        }
+
+        let unknown = update_inbound(file.path(), "nope", br#"{"enabled":true}"#).expect_err("404");
+        assert_eq!(unknown.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let wrong_type =
+            update_inbound(file.path(), "telegram", br#"{"enabled":true}"#).expect_err("400");
+        assert_eq!(wrong_type.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let no_token =
+            update_inbound(file.path(), "no-token", br#"{"enabled":true}"#).expect_err("422");
+        assert_eq!(
+            no_token.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert!(
+            no_token.message().contains("app_token"),
+            "the 422 must name the field: {}",
+            no_token.message()
+        );
+
+        // Nothing was written by any of the three.
+        assert!(
+            !get(file.path(), "no-token")
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+
+        // Disabling a row with no app token is still allowed: a credential that
+        // was later scrubbed must not leave the switch stuck on.
+        update_inbound(file.path(), "no-token", br#"{"enabled":false}"#).expect("disable");
+    }
+
+    /// The whole round trip: enable, and the next read says so.
+    #[test]
+    fn enabling_inbound_shows_on_the_next_read() {
+        super::super::writes::testlog::install();
+        let file = migrated();
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                           created_at, updated_at)
+                 VALUES ('s', 'S', 'slack', 1, ?1, NULL, '{}',
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                [r#"{"auth_mode":"bot_token","bot_token":"xoxb-1","app_token":"xapp-1-abc"}"#],
+            )
+            .expect("seed");
+
+        let answer = update_inbound(file.path(), "s", br#"{"enabled":true}"#).expect("enable");
+        assert_eq!(body_of(&answer), "{\"inbound_enabled\":true}\n");
+        let row = get(file.path(), "s").expect("get").expect("a row");
+        assert!(row.inbound_enabled);
+        assert!(row.has_app_token);
+        // The switch owns one column. `updated_at` belongs to the integration
+        // write, and the two state columns beside it belong to the worker.
+        assert_eq!(
+            String::from_utf8(super::super::gojson::to_vec(&row.updated_at).expect("encode"))
+                .expect("utf8"),
+            "\"2026-01-01T00:00:00Z\"\n"
+        );
+        assert_eq!(row.inbound_status, "");
+        assert_eq!(row.inbound_error, "");
+
+        // `service_log_convention`'s shape, and the line the UI's own log view
+        // is read for.
+        super::super::writes::testlog::assert_info_once(
+            r#"integration inbound updated id="s" enabled=true"#,
+        );
+
+        update_inbound(file.path(), "s", br#"{"enabled":false}"#).expect("disable");
+        assert!(
+            !get(file.path(), "s")
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+    }
+
+    /// #515's three-valued `credentials` contract covers `app_token` too: a
+    /// `PUT` that omits the blob preserves it, and the response must say so or
+    /// the Integrations switch reads as unusable after any unrelated rename.
+    #[test]
+    fn a_put_that_omits_credentials_preserves_the_app_token() {
+        let file = migrated();
+        let created = create(
+            file.path(),
+            br#"{"name":"S","type":"slack","credentials":{"auth_mode":"bot_token",
+                 "bot_token":"xoxb-1","app_token":"xapp-1-abc"}}"#,
+        )
+        .expect("create");
+        let id = serde_json::from_str::<serde_json::Value>(&body_of(&created)).expect("json")["id"]
+            .as_str()
+            .expect("an id")
+            .to_string();
+        assert!(
+            body_of(&created).contains(r#""has_app_token":true"#),
+            "{}",
+            body_of(&created)
+        );
+
+        let renamed = update(file.path(), &id, br#"{"name":"R","type":"slack"}"#).expect("update");
+        assert!(
+            body_of(&renamed).contains(r#""has_app_token":true"#),
+            "{}",
+            body_of(&renamed)
+        );
+        assert!(
+            get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .has_app_token
+        );
+
+        // …and a blob that *is* sent replaces it, app token included — which
+        // is the transition that has to take the switch with it.
+        update_inbound(file.path(), &id, br#"{"enabled":true}"#).expect("enable");
+        assert!(
+            get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+
+        let replaced = update(
+            file.path(),
+            &id,
+            br#"{"name":"R","type":"slack",
+                 "credentials":{"auth_mode":"bot_token","bot_token":"xoxb-2"}}"#,
+        )
+        .expect("update");
+        assert!(
+            body_of(&replaced).contains(r#""has_app_token":false"#),
+            "{}",
+            body_of(&replaced)
+        );
+        // The 422 on `update_inbound` is worth nothing if this write can reach
+        // the state it refuses, so the replace clears the switch — and the
+        // response says so rather than echoing the old value.
+        assert!(
+            body_of(&replaced).contains(r#""inbound_enabled":false"#),
+            "{}",
+            body_of(&replaced)
+        );
+        assert!(
+            !get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+
+        // A blob that keeps the token leaves the switch where it was, and so
+        // does a `PUT` that omits `credentials` entirely.
+        update(
+            file.path(),
+            &id,
+            br#"{"name":"R","type":"slack",
+                 "credentials":{"auth_mode":"bot_token","bot_token":"xoxb-3",
+                                "app_token":"xapp-1-abc"}}"#,
+        )
+        .expect("update");
+        update_inbound(file.path(), &id, br#"{"enabled":true}"#).expect("enable");
+        let renamed_again =
+            update(file.path(), &id, br#"{"name":"R2","type":"slack"}"#).expect("update");
+        assert!(
+            body_of(&renamed_again).contains(r#""inbound_enabled":true"#),
+            "{}",
+            body_of(&renamed_again)
+        );
+        assert!(
+            get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+
+        // A type change strands the switch just as surely: `update_inbound`
+        // answers 400 for a non-Slack row **whichever way** it is being moved,
+        // so a row that leaves `slack` with the switch on could never be turned
+        // off again. Both arms clear it — this `PUT` omits `credentials` on
+        // purpose, because that arm assigns fewer columns and was the one that
+        // missed it.
+        let retyped =
+            update(file.path(), &id, br#"{"name":"R2","type":"telegram"}"#).expect("update");
+        assert!(
+            body_of(&retyped).contains(r#""inbound_enabled":false"#),
+            "{}",
+            body_of(&retyped)
+        );
+        assert!(
+            !get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+        assert_eq!(
+            update_inbound(file.path(), &id, br#"{"enabled":false}"#)
+                .expect_err("400")
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "the 400 is unconditional, which is why the write above has to clear the column"
         );
     }
 
