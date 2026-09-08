@@ -42,6 +42,16 @@ src/
                  handed-off id, which is legitimately absent from it (Sessions
                  and Jobs; `GET /api/chats` has no limit, so Chats guards with a
                  one-shot ref instead)
+    agentOptions.ts  MODELS / PERMISSION_MODES / PERMISSION_LABELS /
+                 permissionLabel / withCurrent — the **agent-shaped** run
+                 options, lifted out of views/AgentsView.tsx by #569 for its
+                 second consumer (the Slack trigger-rule form). The four
+                 permission values are pinned through typeAssert.ts, because an
+                 unrecognised mode is not a 422 on the chat runner — it routes
+                 everything it does not recognise into bypass.
+                 **views/chat/NewChatBar.tsx deliberately keeps its own list**:
+                 a chat is chat-shaped (an explicit "agent default" entry,
+                 "Permissions: …" labels) and a trigger run is unattended
     icons.tsx    16px / 1.5-stroke icon set
     tauri.ts     window + menu bridge; degrades to a plain browser tab
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
