@@ -161,6 +161,23 @@ pub(crate) struct HostingRow {
     /// to this module, and only a `&str` ever leaves it.
     auth: String,
     services: Option<BTreeMap<String, ServiceConfig>>,
+    /// Migration 39's switch, as `PUT /api/integrations/{id}/inbound` leaves it
+    /// (#566).
+    ///
+    /// Read here and nowhere else in the process: the inbound worker (#567)
+    /// starts and stops off this projection, because the reload that write ends
+    /// with is the only thing that tells it the switch moved. Not a secret, and
+    /// on this struct anyway — a second projection over the same row would be a
+    /// second `SELECT` naming `credentials`, which the module header exists to
+    /// prevent.
+    ///
+    /// `allow(dead_code)` because the worker that reads it lands in #567 and
+    /// the projection has to carry the column first — the same standing
+    /// exemption `WhatsAppCredentials::phone` carries, and for the same reason:
+    /// deleting the field to silence the lint is what makes the next change
+    /// reintroduce it wrongly.
+    #[allow(dead_code)]
+    pub(crate) inbound_enabled: bool,
 }
 
 impl HostingRow {
@@ -178,6 +195,43 @@ impl HostingRow {
     /// needs to know whether there is an authorisation to clear (#521).
     pub(crate) fn is_authenticated(&self) -> bool {
         self.authenticated
+    }
+
+    /// Slack's app-level token (`xapp-…`), or `None` when the blob holds none
+    /// (#566).
+    ///
+    /// An accessor rather than a field, because [`Self::credentials`] is
+    /// already selected and already a secret: adding `app_token` as its own
+    /// column would widen the leak surface the module header argues against for
+    /// nothing. What leaves is a `&str`, the same thing every tool constructor
+    /// gets — never the blob, and never a `Debug` of this struct, which does
+    /// not exist.
+    ///
+    /// The rule is the one `has_app_token_sql` decides in SQLite and
+    /// `stores_an_app_token` decides in this process: a **text** value,
+    /// non-empty once the four ASCII whitespace bytes are trimmed.
+    /// `an_app_token_is_read_exactly_when_the_scrubbed_read_reports_one` holds
+    /// this third spelling to the other two — the wire says a token is stored
+    /// and the worker then finds none is the one disagreement that matters.
+    /// It is deliberately *not* the `xapp-` prefix check `validate_slack`
+    /// makes: that guards the write, and a row stored before it existed must
+    /// still be readable here.
+    ///
+    /// An owned `String` rather than a `&str` into [`Self::credentials`]: a
+    /// JSON string is escaped in the blob, so the decoded token is not always a
+    /// slice of it, and every other credential accessor in this module hands
+    /// back an owned value for the same reason.
+    /// `allow(dead_code)` for [`Self::inbound_enabled`]'s reason: #567's worker
+    /// is the caller, and the accessor is what that change reads rather than
+    /// reaching into the blob itself.
+    #[allow(dead_code)]
+    pub(crate) fn app_token(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(&self.credentials)
+            .ok()?
+            .get("app_token")?
+            .as_str()
+            .map(|token| token.trim_matches([' ', '\t', '\n', '\r']).to_string())
+            .filter(|token| !token.is_empty())
     }
 
     /// The services map a starter sees. A stored `null` is a nil Go map, which
@@ -1161,13 +1215,14 @@ fn service_tool_table(
 /// promised in a comment. This one selects the column itself.
 const HOSTING_COLUMNS: &str = "SELECT id, type, enabled,
             (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
-            credentials, services, COALESCE(auth, '')
+            credentials, services, COALESCE(auth, ''), inbound_enabled
      FROM integrations";
 
 fn scan_hosting_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostingRow> {
     let enabled: i64 = row.get(2)?;
     let authenticated: i64 = row.get(3)?;
     let services: String = row.get(5)?;
+    let inbound_enabled: i64 = row.get(7)?;
     Ok(HostingRow {
         id: row.get(0)?,
         integration_type: row.get(1)?,
@@ -1176,6 +1231,7 @@ fn scan_hosting_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostingRow> {
         credentials: row.get(4)?,
         services: decode_services(&services),
         auth: row.get(6)?,
+        inbound_enabled: inbound_enabled != 0,
     })
 }
 
@@ -1403,6 +1459,55 @@ mod tests {
 
     /// The columns land in the right parameters — the failure that would
     /// otherwise surface only at refresh time.
+    #[test]
+    fn an_app_token_is_read_exactly_when_the_scrubbed_read_reports_one() {
+        let file = db();
+        // The blobs the two spellings could disagree about: an absent key, a
+        // JSON null, an empty and a whitespace-only string, a non-string value,
+        // and one that has to be trimmed before it counts.
+        let shapes = [
+            (
+                "none",
+                r#"{"auth_mode":"bot_token","bot_token":"xoxb-1"}"#,
+                None,
+            ),
+            ("null", r#"{"app_token":null}"#, None),
+            ("empty", r#"{"app_token":""}"#, None),
+            ("blank", r#"{"app_token":"  \t "}"#, None),
+            ("number", r#"{"app_token":7}"#, None),
+            ("broken", "not json at all", None),
+            ("plain", r#"{"app_token":"xapp-1-abc"}"#, Some("xapp-1-abc")),
+            (
+                "padded",
+                r#"{"app_token":" xapp-1-abc\n"}"#,
+                Some("xapp-1-abc"),
+            ),
+            // Escaped in the blob, so the decoded token is not a slice of it —
+            // which is why the accessor hands back an owned `String`.
+            (
+                "escaped",
+                r#"{"app_token":"xapp-\u0031-abc"}"#,
+                Some("xapp-1-abc"),
+            ),
+        ];
+        for (id, credentials, want) in shapes {
+            insert(&file, id, "slack", true, None, credentials, "{}");
+            let row = get_for_hosting(file.path(), id)
+                .expect("read")
+                .expect("a row");
+            assert_eq!(row.app_token().as_deref(), want, "{id}: {credentials}");
+            // The third spelling of one rule: the wire says whether a token is
+            // stored, and the worker then has to find one. They must not
+            // disagree — a switch that enables and a worker that cannot
+            // connect is the failure this pins.
+            assert_eq!(
+                row.app_token().is_some(),
+                crate::native::integrations::stores_an_app_token(credentials),
+                "{id}: the accessor and the scrubbed read disagree"
+            );
+        }
+    }
+
     #[test]
     fn the_credential_columns_are_not_swapped() {
         let (client_id, client_secret, token) = google_start_inputs(
