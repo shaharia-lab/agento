@@ -230,6 +230,58 @@ rmcp = { version = "3.1.2", default-features = false, features = [
 # rather than reached through `rmcp`, which does not re-export it. Already in
 # the tree via `tokio-stream` and `rmcp`; adds no package.
 tokio-util = { version = "0.7", default-features = false }
+
+# Slack Socket Mode's transport (#567). A desktop app has no public URL, so the
+# only way a Slack event reaches Agento is a websocket Agento itself opens —
+# and there was no websocket client anywhere in the tree, `reqwest` having no
+# such feature enabled and none of the six integrations needing one.
+#
+# **`default-features = false` with `rustls-tls-native-roots`, for `reqwest`'s
+# reason above and not a new one.** The default feature set turns on
+# `native-tls`, which links the platform's OpenSSL/Schannel — the release
+# workflow builds five target triples with no C toolchain arranged, which is
+# why `rusqlite` is `bundled` and why `reqwest` is rustls. `rustls-tls-native-
+# roots` also keeps the **platform** trust store rather than a compiled-in
+# Mozilla snapshot, so a TLS-inspecting corporate proxy whose CA exists only in
+# the system store intercepts `wss://wss-primary.slack.com` the way it already
+# intercepts `https://slack.com/api`: bundled roots would give a user whose
+# Slack tools work an inbound worker that answers `connect failed` with nothing
+# to point at the cause. It resolves to `ring`, which rustls, `lettre` and
+# `jsonwebtoken` already pull, so no second crypto provider enters the tree.
+#
+# **That covers a *transparent* proxy and not a configured one.** `reqwest`
+# reads `HTTPS_PROXY` and the system proxy settings; `connect_async` does no
+# proxy handling at all, so behind an explicit proxy `apps.connections.open`
+# succeeds and the socket does not — the asymmetry above, pointing the other
+# way. Reported on #567's PR rather than fixed there; `socket.rs` says so at the
+# connect.
+#
+# `connect` is what `connect_async` needs and is the only client entry point
+# used; the `stream` feature it implies is what carries a TLS stream. The
+# transitive cost is small because the TLS half is already here: **four** crates
+# enter the lockfile, 596 -> 600 packages — `tokio-tungstenite`, `tungstenite`,
+# and the two `tungstenite` needs for the RFC 6455 handshake, `sha1` and
+# `data-encoding`. `rustls`, `rustls-pki-types`, `rustls-native-certs`,
+# `tokio-rustls`, `ring`, `http`, `bytes`, `futures-core`, `utf8` and `log` were
+# all in the tree already, every one of them by way of `reqwest`.
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
+    "connect",
+    "rustls-tls-native-roots",
+] }
+# `SinkExt::send`, for writing the Socket Mode acknowledgement frame. The
+# websocket is a `Sink` as well as a `Stream`, and `tokio_stream::StreamExt`
+# covers only the reading half. Already in the tree via `rmcp` and
+# `tokio-tungstenite`; adds no package.
+#
+# **`sink` is named explicitly and it is load-bearing.** `SinkExt` is gated on
+# it, and `sink` is in neither `default` nor `std` — so with features left off
+# this compiles only because `tokio-tungstenite` happens to ask for `sink` too
+# and Cargo unifies the two. That is a build that breaks on somebody else's
+# dependency bump, with nothing at this declaration to explain why.
+futures-util = { version = "0.3", default-features = false, features = [
+    "sink",
+    "std",
+] }
 # Not used directly — declared so the feature is. `rmcp` instruments itself with
 # `tracing`, this app logs through `tauri-plugin-log` over the `log` crate, and
 # nothing installs a `tracing` subscriber, so every protocol-layer event was

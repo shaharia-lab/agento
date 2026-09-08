@@ -131,6 +131,7 @@ use rusqlite::OptionalExtension;
 
 use crate::claude::InProcessMcpServer;
 
+use super::slack::socket::SocketWorker;
 use super::{decode_services, ServiceConfig};
 
 /// One integration row, **credentials included**.
@@ -171,12 +172,8 @@ pub(crate) struct HostingRow {
     /// second `SELECT` naming `credentials`, which the module header exists to
     /// prevent.
     ///
-    /// `allow(dead_code)` because the worker that reads it lands in #567 and
-    /// the projection has to carry the column first — the same standing
-    /// exemption `WhatsAppCredentials::phone` carries, and for the same reason:
-    /// deleting the field to silence the lint is what makes the next change
-    /// reintroduce it wrongly.
-    #[allow(dead_code)]
+    /// Read by [`start_socket_worker`] since #567, which is what took the
+    /// standing `allow(dead_code)` off it.
     pub(crate) inbound_enabled: bool,
 }
 
@@ -221,10 +218,9 @@ impl HostingRow {
     /// JSON string is escaped in the blob, so the decoded token is not always a
     /// slice of it, and every other credential accessor in this module hands
     /// back an owned value for the same reason.
-    /// `allow(dead_code)` for [`Self::inbound_enabled`]'s reason: #567's worker
-    /// is the caller, and the accessor is what that change reads rather than
+    /// #567's socket worker is the caller, through
+    /// [`start_socket_worker`], and this accessor is what it reads rather than
     /// reaching into the blob itself.
-    #[allow(dead_code)]
     pub(crate) fn app_token(&self) -> Option<String> {
         serde_json::from_str::<serde_json::Value>(&self.credentials)
             .ok()?
@@ -271,6 +267,26 @@ pub struct Registry {
 #[derive(Default)]
 struct State {
     servers: HashMap<String, InProcessMcpServer>,
+    /// The Slack Socket Mode workers, keyed the same way (#567).
+    ///
+    /// A second map rather than a second field on the value, because the two
+    /// handles are independent: every hosted type has a server, and only a
+    /// Slack row with `inbound_enabled` and an `xapp-` token has a worker. They
+    /// share one generation, so [`Registry::stop`] and
+    /// [`Registry::put_if_current`] move both at once and a stop racing a
+    /// reload can no more leave a socket holding a credential than it can leave
+    /// a bound port.
+    sockets: HashMap<String, SocketWorker>,
+    /// Which worker's status writes still count, per integration (#567).
+    ///
+    /// Separate from [`Self::generations`] and not merged into it: the
+    /// generation is bumped by every `stop`, including one for a row that has no
+    /// socket at all, and it is read *before* a start to be quoted back
+    /// afterwards. This is the opposite shape — taken at the moment a handle is
+    /// accepted or retired, and never read speculatively. See
+    /// `slack::socket::status_writer` for why the grant has to happen exactly
+    /// here.
+    socket_epochs: HashMap<String, u64>,
     /// Bumped by every [`Registry::stop`], and never reset.
     ///
     /// This is what closes the window `reload` opens by design: a start records
@@ -295,6 +311,18 @@ pub fn registry() -> &'static Registry {
     })
 }
 
+/// What [`Registry::put_if_current`] did with a start.
+enum Recorded {
+    /// The integration was stopped while the server was being built; both
+    /// handles were dropped rather than recorded.
+    Refused,
+    /// Recorded, with a socket worker that is now the current one.
+    WithSocket,
+    /// Recorded, with no socket worker — so any previous one has been retired,
+    /// and `epoch` is what the caller quotes to `slack::socket::clear_status`.
+    WithoutSocket { epoch: u64 },
+}
+
 impl Registry {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
@@ -302,10 +330,13 @@ impl Registry {
 
     /// `Stop`: idempotent, and an unknown id is a silent no-op with no error.
     ///
-    /// Dropping the handle is what stops the listener, and it is done **inside**
-    /// the lock: the drop only sends a oneshot, so there is nothing to await and
-    /// nothing to deadlock on, and releasing first would leave a window in which
-    /// the map says the server is gone while the port is still open.
+    /// Removing the handle from the map is what makes the server unreachable and
+    /// it is done **inside** the lock; *dropping* it is what stops the listener,
+    /// and that happens after the guard is released. The drop only sends a
+    /// oneshot, so there is nothing to await and nothing to gain from holding
+    /// the lock across it — and the window it leaves is one in which the
+    /// listener is closing and the map already says it is gone, which is the
+    /// direction that is safe.
     ///
     /// The generation bump is what makes a concurrent start notice. It happens
     /// whether or not anything was removed, because a `DELETE` racing a `reload`
@@ -315,7 +346,15 @@ impl Registry {
         let mut state = self.lock();
         *state.generations.entry(id.to_string()).or_default() += 1;
         let removed = state.servers.remove(id);
+        // The epoch first: a stop ends that worker's right to report, whether or
+        // not a replacement follows, and retiring it under the same lock is what
+        // makes that true for a status write already queued.
+        Self::take_socket_epoch(&mut state, id);
+        // The socket worker on exactly the terms the doc comment gives for the
+        // server — out of the map here, dropped below.
+        let removed_socket = state.sockets.remove(id);
         drop(state);
+        drop(removed_socket);
         if removed.is_some() {
             log::info!("integration MCP server stopped: id={id:?}");
         }
@@ -341,19 +380,136 @@ impl Registry {
     /// Returns whether the handle was kept. A refused handle is dropped here,
     /// which fires its shutdown oneshot — so the listener the caller started
     /// goes away rather than outliving the row it was built from.
-    fn put_if_current(&self, id: &str, generation: u64, server: InProcessMcpServer) -> bool {
+    ///
+    /// The socket worker is recorded in the **same** critical section as the
+    /// server, so the pair a `start_one` built is kept or dropped together. Two
+    /// calls would leave a `stop` landing between them able to keep one half.
+    fn put_if_current(
+        &self,
+        id: &str,
+        generation: u64,
+        server: InProcessMcpServer,
+        socket: Option<SocketWorker>,
+    ) -> Recorded {
         let mut state = self.lock();
         if state.generations.get(id).copied().unwrap_or_default() != generation {
-            return false;
+            // The refused socket is dropped with `socket` at the end of this
+            // arm, still holding `NOT_ACCEPTED`, so it never writes a status.
+            return Recorded::Refused;
         }
         state.servers.insert(id.to_string(), server);
-        true
+        match socket {
+            Some(socket) => {
+                // **Granted here and nowhere else.** This is the one critical
+                // section that decides which worker won, so taking the epoch in
+                // it is what makes epoch order and acceptance order the same
+                // order — see `slack::socket::status_writer`.
+                let epoch = Self::take_socket_epoch(&mut state, id);
+                socket.accept(epoch);
+                // Displaced under the lock, dropped outside it — the discipline
+                // `stop` and the arm below already follow. Two concurrent
+                // reloads were always safe here because `insert` returns the
+                // old handle, but dropping it *inside* the guard is a shutdown
+                // fired while holding a lock the shutdown path may want.
+                let displaced = state.sockets.insert(id.to_string(), socket);
+                drop(state);
+                drop(displaced);
+                Recorded::WithSocket
+            }
+            // A Slack row whose inbound switch was turned off still reloads, and
+            // the reload must retire the previous worker rather than leave it
+            // running against a row that no longer wants it. Removed under the
+            // lock and dropped outside it, exactly as [`Registry::stop`] does
+            // and for the same reason.
+            None => {
+                let epoch = Self::take_socket_epoch(&mut state, id);
+                let stale = state.sockets.remove(id);
+                drop(state);
+                drop(stale);
+                Recorded::WithoutSocket { epoch }
+            }
+        }
+    }
+
+    /// Take the next status epoch for `id`, retiring whatever held the last one.
+    /// Callers must already hold the state lock.
+    fn take_socket_epoch(state: &mut State, id: &str) -> u64 {
+        let epoch = state.socket_epochs.entry(id.to_string()).or_default();
+        *epoch += 1;
+        *epoch
+    }
+
+    /// Retire whatever socket worker is recorded for `id`, **unless the caller's
+    /// start has been superseded**, answering the epoch that is now current.
+    ///
+    /// `generation` is the value the caller read before the row read that
+    /// justified its start — the same value [`Registry::put_if_current`] checks,
+    /// and it has to be checked here for the same reason. A start that fails is
+    /// still a start that may have lost: a user saving a bad Slack blob and then
+    /// a good one gives two overlapping reloads, and the first one's *failure*
+    /// arrives after the second one's worker has been accepted. Retiring
+    /// unconditionally there would drop a live worker and hand its caller an
+    /// epoch with which to blank the row — leaving Slack inbound silently dead
+    /// with an empty status, which is the outage the column exists to prevent.
+    ///
+    /// `None` means the caller lost and must touch nothing. `Some(epoch)` is
+    /// quoted to `slack::socket::clear_status`, which re-checks it once more
+    /// across its own await.
+    pub fn retire_socket_if_current(&self, id: &str, generation: u64) -> Option<u64> {
+        let mut state = self.lock();
+        if state.generations.get(id).copied().unwrap_or_default() != generation {
+            return None;
+        }
+        let epoch = Self::take_socket_epoch(&mut state, id);
+        let stale = state.sockets.remove(id);
+        drop(state);
+        drop(stale);
+        Some(epoch)
+    }
+
+    /// [`Registry::retire_socket_if_current`] with no generation to check.
+    ///
+    /// **No production caller, and there should not be one**: every start in
+    /// this module has a generation, and skipping it is finding #3 of #567's
+    /// review. It exists for `tests/slack_socket.rs`, which drives workers with
+    /// no registry lifecycle at all and needs a current epoch to grant.
+    pub fn retire_socket(&self, id: &str) -> u64 {
+        let mut state = self.lock();
+        let epoch = Self::take_socket_epoch(&mut state, id);
+        let stale = state.sockets.remove(id);
+        drop(state);
+        drop(stale);
+        epoch
+    }
+
+    /// Whether `epoch` is the one currently granted for `id`.
+    ///
+    /// [`slack::socket::NOT_ACCEPTED`](super::slack::socket::NOT_ACCEPTED) never
+    /// matches, because epochs are handed out from one upwards — so a worker
+    /// that was built and then refused writes nothing, ever.
+    pub fn socket_epoch_is_current(&self, id: &str, epoch: u64) -> bool {
+        epoch != super::slack::socket::NOT_ACCEPTED
+            && self
+                .lock()
+                .socket_epochs
+                .get(id)
+                .copied()
+                .unwrap_or_default()
+                == epoch
     }
 
     /// Whether an integration is hosted right now. Nothing on the wire reads
     /// this; it exists so the lifecycle can be asserted.
     pub fn is_hosted(&self, id: &str) -> bool {
         self.lock().servers.contains_key(id)
+    }
+
+    /// Whether a Slack Socket Mode worker is running for this integration.
+    /// Nothing on the wire reads this either — `inbound_status` is what the UI
+    /// sees, and it is the worker's to write. This exists so the lifecycle can
+    /// be asserted (#567).
+    pub fn is_socket_running(&self, id: &str) -> bool {
+        self.lock().sockets.contains_key(id)
     }
 }
 
@@ -370,13 +526,30 @@ pub async fn start_all(db_path: &Path) -> Result<(), String> {
     // recorded here, so the start that follows is refused instead of orphaning
     // a listener for a row that has just gone.
     let generations = registry().generations();
+    // **Before any worker exists**, so nothing races it. A fresh process hosts
+    // no sockets, so every `inbound_status` in the database is about a
+    // connection that no longer exists — including the `connected` a crash left
+    // behind, which nothing else would ever correct. Each worker writes
+    // `connecting` a moment later; a row that gets no worker is left saying
+    // nothing, which is what the column's default means. See
+    // `slack::socket::clear_all_inbound_status_blocking`.
+    // Through `db::blocking` like every other database touch in this module:
+    // `start_all` is spawned onto the runtime at boot, and this is a *write*
+    // against a five-second `busy_timeout` at the one moment the scanner's batch
+    // writer is most likely to hold the lock. The read below is a WAL read and
+    // never waits on a writer, which is why it is not the same question.
+    let clear_db = db_path.to_path_buf();
+    crate::native::db::blocking("slack inbound clear at boot", move || {
+        super::slack::socket::clear_all_inbound_status_blocking(&clear_db);
+    })
+    .await;
     let rows = list_for_hosting(db_path)?;
     for row in rows {
         if !row.is_startable() {
             continue;
         }
         let generation = generations.get(&row.id).copied().unwrap_or_default();
-        if let Err(e) = start_one(&row, generation).await {
+        if let Err(e) = start_one(db_path, &row, generation).await {
             log::warn!(
                 "failed to start integration server: id={:?} type={:?} error={e}",
                 row.id,
@@ -403,12 +576,20 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
     let generation = registry().generation(id);
 
     let Some(row) = get_for_hosting(db_path, id)? else {
-        return Ok(()); // deleted — nothing to start
+        return Ok(()); // deleted — the row is gone, and its status with it
     };
     if !row.is_startable() {
-        return Ok(()); // disabled or not authenticated
+        // Disabled or not authenticated, so no worker will run — and for the
+        // same reason as in `start_one`, the status it left behind is the
+        // registry's to clear.
+        if row.integration_type == "slack" {
+            if let Some(epoch) = registry().retire_socket_if_current(&row.id, generation) {
+                super::slack::socket::clear_status(db_path, &row.id, epoch).await;
+            }
+        }
+        return Ok(());
     }
-    start_one(&row, generation).await
+    start_one(db_path, &row, generation).await
 }
 
 /// `startOne`: resolve the type's starter, run it, record the handle.
@@ -417,24 +598,102 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
 /// decided to start: a mismatch means the integration was stopped or deleted
 /// while the server was being built, and the handle is dropped rather than
 /// recorded — which stops the listener it just bound.
-async fn start_one(row: &HostingRow, generation: u64) -> Result<(), String> {
-    let server = start_for_type(row).await?;
+async fn start_one(db_path: &Path, row: &HostingRow, generation: u64) -> Result<(), String> {
+    // **The error arm clears too, and that is not symmetry for its own sake.**
+    // `reload` has already stopped the previous worker by the time this runs, so
+    // a start that fails here — `resolve_slack_token` refusing a blob whose
+    // usable token has gone, an in-process server failing to bind — leaves a row
+    // with no worker. Returning the `Err` without clearing would leave the dead
+    // worker's `connected` standing until the next boot, which is the same lie
+    // every other no-worker path in this function is careful to avoid.
+    let server = match start_for_type(row).await {
+        Ok(server) => server,
+        Err(e) => {
+            if row.integration_type == "slack" {
+                // Only if this start is still the current one — a failure that
+                // arrives after a concurrent reload's worker was accepted must
+                // not drop it. See `retire_socket_if_current`.
+                if let Some(epoch) = registry().retire_socket_if_current(&row.id, generation) {
+                    super::slack::socket::clear_status(db_path, &row.id, epoch).await;
+                }
+            }
+            return Err(e);
+        }
+    };
     let url = server.url().to_string();
-    if !registry().put_if_current(&row.id, generation, server) {
-        log::info!(
-            "integration MCP server discarded before it was recorded, \
-             the integration was stopped while it started: id={:?} type={:?}",
-            row.id,
-            row.integration_type
-        );
-        return Ok(());
+    let socket = start_socket_worker(db_path, row);
+    let hosted_socket = socket.is_some();
+    match registry().put_if_current(&row.id, generation, server, socket) {
+        Recorded::Refused => {
+            log::info!(
+                "integration MCP server discarded before it was recorded, \
+                 the integration was stopped while it started: id={:?} type={:?}",
+                row.id,
+                row.integration_type
+            );
+            return Ok(());
+        }
+        // A Slack row that is not getting a worker must not keep the previous
+        // worker's status. **This is the registry's to do and not the
+        // worker's**: a `reload` is a stop followed immediately by a start, so a
+        // retiring worker clearing its own row would race the replacement's
+        // `connecting` — and a compare-and-swap cannot break the tie, because
+        // both write the identical `"connected"`. Here the clear is ordered
+        // after the decision, and quotes the epoch that decision took.
+        Recorded::WithoutSocket { epoch } if row.integration_type == "slack" => {
+            super::slack::socket::clear_status(db_path, &row.id, epoch).await;
+        }
+        Recorded::WithoutSocket { .. } | Recorded::WithSocket => {}
     }
     log::info!(
         "integration MCP server started: id={:?} type={:?} url={url}",
         row.id,
         row.integration_type
     );
+    // A separate statement rather than a field on the line above, and that is
+    // not style. CodeQL reads `url` there as tainted by a stored credential —
+    // an alert that has been open against `main` for as long as the line has
+    // existed — and *editing* the line re-reports it as introduced by whatever
+    // change touched it. #567 has no business either fixing or inheriting that,
+    // so the line is left byte-for-byte as it was.
+    if hosted_socket {
+        log::info!("slack socket mode worker hosted: id={:?}", row.id);
+    }
     Ok(())
+}
+
+/// The Slack Socket Mode worker for this row, when the row asks for one (#567).
+///
+/// Three conditions, and each is a different absence: the type must be `slack`,
+/// migration 39's switch must be on, and the credentials blob must actually hold
+/// an `xapp-` token. The last is not redundant with the 422 on `PUT
+/// /api/integrations/{id}/inbound` — a later `PUT /api/integrations/{id}` can
+/// replace the blob with one that has no `app_token`, which is exactly why that
+/// write clears `inbound_enabled`; this is the second line, because a row stored
+/// before that clearing existed still has to start cleanly rather than open a
+/// socket with an empty bearer.
+///
+/// **Started here rather than in `start_for_type`**, which returns one
+/// `InProcessMcpServer` and is the starter table for the six hosted types. The
+/// worker is not a seventh type — it is a second handle on one of them.
+fn start_socket_worker(db_path: &Path, row: &HostingRow) -> Option<SocketWorker> {
+    if row.integration_type != "slack" || !row.inbound_enabled {
+        return None;
+    }
+    let Some(app_token) = row.app_token() else {
+        log::warn!(
+            "slack inbound is enabled but no app token is stored, \
+             not starting the socket worker: id={:?}",
+            row.id
+        );
+        return None;
+    };
+    Some(super::slack::socket::start(
+        db_path,
+        &row.id,
+        &app_token,
+        super::slack::socket::SocketOptions::default(),
+    ))
 }
 
 /// The starter table. Go builds a `map[string]ServerStarter` at wiring time;
@@ -1387,6 +1646,182 @@ mod tests {
 
     const GITHUB_SERVICES: &str = r#"{"repos":{"enabled":true,"tools":["list_repos","get_repo"]}}"#;
 
+    const SLACK_SERVICES: &str =
+        r#"{"messaging":{"enabled":true,"tools":["send_message","list_channels"]}}"#;
+    const SLACK_APP_TOKEN: &str = "xapp-1-A000-1111-secret";
+
+    fn slack_credentials(app_token: Option<&str>) -> String {
+        match app_token {
+            Some(token) => format!(
+                r#"{{"auth_mode":"bot_token","bot_token":"xoxb-test","app_token":"{token}"}}"#
+            ),
+            None => r#"{"auth_mode":"bot_token","bot_token":"xoxb-test"}"#.to_string(),
+        }
+    }
+
+    fn set_inbound(file: &tempfile::NamedTempFile, id: &str, enabled: bool) {
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE integrations SET inbound_enabled = ?1 WHERE id = ?2",
+                rusqlite::params![i64::from(enabled), id],
+            )
+            .expect("set the switch");
+    }
+
+    /// A Slack row carries **two** handles or one, and the switch plus the
+    /// stored token is what decides which — over the same `start_all` / `reload`
+    /// / `stop` path the MCP server already travels (#567).
+    ///
+    /// The three negative cases are the point. A socket started for a row with
+    /// the switch off would ignore `PUT /api/integrations/{id}/inbound`
+    /// entirely; one started for a row with no `app_token` would open a
+    /// connection with an empty bearer and report `error` forever; and a socket
+    /// left running by a reload that turned the switch off is a socket holding a
+    /// credential for a state the user has just left — the same failure the
+    /// generation counter exists to prevent for listeners.
+    #[tokio::test]
+    async fn a_slack_socket_worker_follows_the_switch_and_the_stored_token() {
+        // Pointed at a local fake, never at slack.com: the worker's first act is
+        // an `apps.connections.open`, and a test that reached the real one would
+        // pass offline for the wrong reason.
+        let _guard = super::super::slack::client::api_base_lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let app = axum::Router::new().fallback(|| async {
+                // What Slack answers for a token it will not accept.
+                (
+                    axum::http::StatusCode::OK,
+                    r#"{"ok":false,"error":"invalid_auth"}"#,
+                )
+            });
+            let _ = axum::serve(listener, app).await;
+        });
+        super::super::slack::client::set_api_base(Some(format!("http://{addr}")));
+
+        let file = db();
+        // Inbound on, token stored: both handles.
+        insert(
+            &file,
+            "sl-on",
+            "slack",
+            true,
+            Some(r#"{"validated":true}"#),
+            &slack_credentials(Some(SLACK_APP_TOKEN)),
+            SLACK_SERVICES,
+        );
+        // Inbound off: server only.
+        insert(
+            &file,
+            "sl-off",
+            "slack",
+            true,
+            Some(r#"{"validated":true}"#),
+            &slack_credentials(Some(SLACK_APP_TOKEN)),
+            SLACK_SERVICES,
+        );
+        // Inbound on but nothing to authenticate with: server only.
+        insert(
+            &file,
+            "sl-tokenless",
+            "slack",
+            true,
+            Some(r#"{"validated":true}"#),
+            &slack_credentials(None),
+            SLACK_SERVICES,
+        );
+        set_inbound(&file, "sl-on", true);
+        set_inbound(&file, "sl-tokenless", true);
+
+        start_all(file.path()).await.expect("start_all");
+        for id in ["sl-on", "sl-off", "sl-tokenless"] {
+            assert!(registry().is_hosted(id), "{id} must be hosted");
+        }
+        assert!(registry().is_socket_running("sl-on"));
+        assert!(!registry().is_socket_running("sl-off"));
+        assert!(!registry().is_socket_running("sl-tokenless"));
+
+        // A status left behind by a worker that is no longer running is the
+        // registry's to clear, because it is the only thing that can tell a stop
+        // from a replacement — see `slack::socket::clear_status_blocking`.
+        let status_of = |id: &str| -> (String, String) {
+            Connection::open(file.path())
+                .expect("open")
+                .query_row(
+                    "SELECT inbound_status, inbound_error FROM integrations WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read the inbound state")
+        };
+        assert_eq!(
+            status_of("sl-off"),
+            (String::new(), String::new()),
+            "a row with the switch off must not carry an inbound status"
+        );
+
+        // Turning the switch off and reloading retires the worker without
+        // touching the hosted server, and takes the status with it.
+        crate::native::integrations::slack::socket::write_status_blocking(
+            file.path(),
+            "sl-on",
+            crate::native::integrations::slack::socket::STATUS_CONNECTED,
+            "",
+        );
+        set_inbound(&file, "sl-on", false);
+        reload(file.path(), "sl-on").await.expect("reload");
+        assert!(registry().is_hosted("sl-on"));
+        assert!(
+            !registry().is_socket_running("sl-on"),
+            "a reload with the switch off must retire the worker"
+        );
+        assert_eq!(
+            status_of("sl-on"),
+            (String::new(), String::new()),
+            "and must not leave `connected` in a row whose worker is gone"
+        );
+
+        // The same for a row that stops being startable at all: disabling the
+        // integration is a second way to end up with no worker.
+        set_inbound(&file, "sl-off", true);
+        reload(file.path(), "sl-off").await.expect("reload");
+        assert!(registry().is_socket_running("sl-off"));
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE integrations SET enabled = 0 WHERE id = 'sl-off'",
+                [],
+            )
+            .expect("disable");
+        crate::native::integrations::slack::socket::write_status_blocking(
+            file.path(),
+            "sl-off",
+            crate::native::integrations::slack::socket::STATUS_CONNECTED,
+            "",
+        );
+        reload(file.path(), "sl-off").await.expect("reload");
+        assert_eq!(
+            status_of("sl-off"),
+            (String::new(), String::new()),
+            "a disabled integration must not keep reporting `connected`"
+        );
+
+        // And back on again.
+        set_inbound(&file, "sl-on", true);
+        reload(file.path(), "sl-on").await.expect("reload");
+        assert!(registry().is_socket_running("sl-on"));
+
+        for id in ["sl-on", "sl-off", "sl-tokenless"] {
+            registry().stop(id);
+            assert!(!registry().is_hosted(id));
+            assert!(!registry().is_socket_running(id));
+        }
+        super::super::slack::client::set_api_base(None);
+    }
+
     fn github_credentials() -> String {
         format!(r#"{{"auth_mode":"pat","personal_access_token":"{PAT}"}}"#)
     }
@@ -1646,10 +2081,163 @@ mod tests {
         }
     }
 
+    /// A start that *fails* still clears the status of the worker it replaced.
+    ///
+    /// `reload` stops the previous worker before it tries to start the next one,
+    /// so a start that then fails leaves a row with no worker — and returning
+    /// the `Err` without clearing would leave the dead worker's `connected`
+    /// standing until the next boot. That path is the one every other no-worker
+    /// branch of `start_one` is careful about, and it is the one reached by an
+    /// `Err`, so it is easy to write and easy to forget.
+    ///
+    /// The row here is *startable* — enabled and authenticated — but its blob
+    /// carries no usable token, which is what `resolve_slack_token` refuses.
+    #[tokio::test]
+    async fn a_start_that_fails_still_clears_the_status_it_replaced() {
+        let file = db();
+        insert(
+            &file,
+            "sl-broken",
+            "slack",
+            true,
+            Some(r#"{"validated":true}"#),
+            // `auth_mode` says bot token and there is none: startable by the
+            // registry's test, refused by the Slack starter.
+            r#"{"auth_mode":"bot_token","bot_token":"","app_token":"xapp-1-A000-1111-secret"}"#,
+            SLACK_SERVICES,
+        );
+        set_inbound(&file, "sl-broken", true);
+        crate::native::integrations::slack::socket::write_status_blocking(
+            file.path(),
+            "sl-broken",
+            crate::native::integrations::slack::socket::STATUS_CONNECTED,
+            "",
+        );
+
+        reload(file.path(), "sl-broken")
+            .await
+            .expect_err("the start must fail");
+
+        let (status, error): (String, String) = Connection::open(file.path())
+            .expect("open")
+            .query_row(
+                "SELECT inbound_status, inbound_error FROM integrations WHERE id = 'sl-broken'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read the inbound state");
+        assert_eq!(
+            (status, error),
+            (String::new(), String::new()),
+            "a failed start must not leave the previous worker's `connected` standing"
+        );
+        assert!(!registry().is_socket_running("sl-broken"));
+        registry().stop("sl-broken");
+    }
+
+    /// A socket worker the registry **refused** never takes the epoch from the
+    /// one it accepted.
+    ///
+    /// This is the failure that made the epoch the registry's rather than the
+    /// worker's. A worker is built before the decision — `start_for_type` is
+    /// `async` and can be slow — so with the epoch claimed at spawn, two
+    /// overlapping `reload`s whose starts finish out of order would have the
+    /// *refused* worker holding the later epoch. `status_writer` would then
+    /// discard every status the accepted worker ever posted, freezing the row on
+    /// whatever it last held — a `connected` with nothing connected, which is
+    /// the exact outage the column exists to make visible. Granting the epoch
+    /// inside `put_if_current` is what makes epoch order and acceptance order
+    /// the same order.
+    #[tokio::test]
+    async fn a_refused_socket_never_takes_the_epoch_from_the_accepted_one() {
+        let file = db();
+        insert(
+            &file,
+            "gh-epoch",
+            "github",
+            true,
+            Some(r#"{"ok":true}"#),
+            &github_credentials(),
+            GITHUB_SERVICES,
+        );
+
+        let worker = |id: &str| {
+            crate::native::integrations::slack::socket::start(
+                file.path(),
+                id,
+                SLACK_APP_TOKEN,
+                // Pointed at a port nothing is listening on: this test is about
+                // the epoch, and the worker must not reach the network for it.
+                crate::native::integrations::slack::socket::SocketOptions {
+                    api_base: "http://127.0.0.1:1".to_string(),
+                    ..Default::default()
+                },
+            )
+        };
+
+        // The accepted start: it reads the generation, then records.
+        let accepted_generation = registry().generation("gh-epoch");
+        let accepted = worker("gh-epoch");
+        let server = start_filtered_server(file.path(), "gh-epoch", &[])
+            .await
+            .expect("a server for the accepted start");
+        assert!(matches!(
+            registry().put_if_current("gh-epoch", accepted_generation, server, Some(accepted)),
+            Recorded::WithSocket
+        ));
+        assert!(registry().is_socket_running("gh-epoch"));
+
+        // The slower start, which read an older generation and is refused. It
+        // was *built* after the accepted one, so a spawn-time claim would have
+        // given it the newer epoch.
+        let stale_generation = accepted_generation.wrapping_sub(1);
+        let refused = worker("gh-epoch");
+        let server = start_filtered_server(file.path(), "gh-epoch", &[])
+            .await
+            .expect("a server for the refused start");
+        assert!(matches!(
+            registry().put_if_current("gh-epoch", stale_generation, server, Some(refused)),
+            Recorded::Refused
+        ));
+
+        // The accepted worker is still the one that may report. Asserting it
+        // through `socket_epoch_is_current` rather than the map, because being
+        // *recorded* was never the thing at risk — being *heard* was.
+        assert!(
+            registry().is_socket_running("gh-epoch"),
+            "the refused start must not have displaced the accepted worker"
+        );
+        let epoch_now = {
+            let state = registry().lock();
+            state.socket_epochs.get("gh-epoch").copied().unwrap_or(0)
+        };
+        assert_eq!(
+            epoch_now, 1,
+            "exactly one epoch was granted, to the accepted worker"
+        );
+        assert!(registry().socket_epoch_is_current("gh-epoch", 1));
+        assert!(
+            !registry().socket_epoch_is_current(
+                "gh-epoch",
+                crate::native::integrations::slack::socket::NOT_ACCEPTED
+            ),
+            "a worker that was never accepted matches nothing"
+        );
+
+        // And a retire moves it on, which is what a clear quotes.
+        let retired = registry().retire_socket("gh-epoch");
+        assert_eq!(retired, 2);
+        assert!(!registry().socket_epoch_is_current("gh-epoch", 1));
+        assert!(registry().socket_epoch_is_current("gh-epoch", 2));
+        assert!(!registry().is_socket_running("gh-epoch"));
+        registry().stop("gh-epoch");
+    }
+
     /// The race `reload` opens by design, and the guard that closes it: a
     /// `DELETE` between the row read and the handle being recorded must not
     /// leave a bound port holding the credential of a row that is gone.
     #[tokio::test]
+
     async fn a_stop_between_the_read_and_the_put_discards_the_server() {
         let file = db();
         insert(
@@ -1673,7 +2261,10 @@ mod tests {
             .await
             .expect("a server to race with");
         assert!(
-            !registry().put_if_current("gh-race", generation, server),
+            matches!(
+                registry().put_if_current("gh-race", generation, server, None),
+                Recorded::Refused
+            ),
             "a handle whose generation has moved must be refused"
         );
         assert!(!registry().is_hosted("gh-race"));
@@ -1683,7 +2274,10 @@ mod tests {
         let server = start_filtered_server(file.path(), "gh-race", &[])
             .await
             .expect("server");
-        assert!(registry().put_if_current("gh-race", generation, server));
+        assert!(!matches!(
+            registry().put_if_current("gh-race", generation, server, None),
+            Recorded::Refused
+        ));
         assert!(registry().is_hosted("gh-race"));
         registry().stop("gh-race");
     }

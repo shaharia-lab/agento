@@ -58,6 +58,7 @@
 
 pub mod client;
 pub mod messaging;
+pub mod socket;
 pub mod validate;
 
 #[cfg(test)]
