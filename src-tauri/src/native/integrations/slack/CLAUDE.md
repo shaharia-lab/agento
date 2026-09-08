@@ -209,3 +209,105 @@ default logs at `debug`.
   library is invisible to it. `SocketOptions::default` reads
   `client::api_base()`, so an in-crate `registry` test still drives the whole
   start path through the existing seam.
+
+## The `app_mention` handler: event → run → threaded reply (#568)
+
+`slack/inbound.rs` is what `SocketOptions::handler` now points at, built per row
+by `registry::start_socket_worker` — which resolves the **bot** token there too,
+through the same `resolve_slack_token` the hosted tools use, because `xapp-`
+opens the socket and only the workspace token can post the answer. A row with no
+usable bot token does not get a worker: a live connection that cannot reply is
+silence, and the caller already clears `inbound_status` on every branch that
+declines to start one.
+
+- **A bot's own `app_mention` is dropped in `socket.rs`, at the decode.** Slack
+  delivers an `app_mention` for a mention inside a message the app itself
+  posted, so an answer that quotes the question answers itself in the same
+  thread, forever, one `claude` subprocess at a time. `bot_id` names the poster
+  and `subtype` covers `bot_message` and every authorless variant.
+  `a_bot_authored_app_mention_is_not_work` is the guard, and it lives beside the
+  decode rather than in the handler so nothing downstream has to remember.
+- **The thread mapping is read inside the per-thread worker, never at arrival.**
+  The second mention in a thread whose first mention is still running would
+  otherwise find no `inbound_threads` row — the row is written by the run it is
+  queued behind — and be dropped as a mention in a thread Agento did not start.
+  This is the one ordering constraint the FIFO exists for, and it is why
+  classification is split across `accept` (the rule) and `turn` (the mapping, the
+  bot-id strip, start-or-resume). The order the queue preserves is **enqueue**
+  order, not arrival order: `socket.rs::dispatch` spawns a task per envelope and
+  each awaits its dedup claim before a handler runs, so two mentions posted a
+  millisecond apart can reach the queue either way round and nothing downstream
+  could put that back. What it guarantees is first-queued-first-answered, and no
+  overlap.
+- **The ten-slot bound is taken around the run, not around the handler.** It
+  exists to bound `claude` subprocesses, and a mention waiting for its thread's
+  turn is not one: taken in `socket.rs::dispatch`, as #567 had it, ten queued
+  mentions in a single Slack thread hold every permit while one of them runs —
+  and Telegram, which shares that semaphore, stops with them. `dispatch` no
+  longer acquires anything; `inbound::Inbound::turn` does, immediately before
+  `run_resumed`. The handler future still spans the whole turn (each job carries
+  a `oneshot` the worker fires when it ends, however it ended), because a `debug`
+  line saying a mention was seen and a reply appearing minutes later are two
+  different things to anyone reading a log — but that wait now costs a parked
+  task and no permit.
+- **`auth.test` is resolved after the mapping decision, not before it.** It is
+  the one Slack failure the handler cannot work around, and its answer is
+  `ERROR_REPLY` — so resolving it first would post that sentence into a thread
+  Agento never started, which is exactly what the ignore rule exists to prevent.
+  Reading the thread map likewise distinguishes *no row* from *could not read*:
+  `busy_timeout` is five seconds, and a database busy behind the session scanner
+  would otherwise make a resume look like a stranger's thread and answer nothing.
+- **Queue teardown is under the map lock.** A worker that found its channel
+  empty, released nothing and then removed its entry would lose a job queued in
+  between, so the drain re-checks the channel while holding the lock that hands
+  out senders and only removes the entry when it is still empty.
+- **Both start and resume go through `agent_run::run_resumed`.** A start creates
+  the chat first and then resumes it — no `sdk_session_id` yet, so `resume_spec`
+  passes no `--resume` — which makes the busy lock, the session-id write-back and
+  the *additive* usage accounting one implementation from the first turn on.
+- **The two failure sentences are `trigger::dispatcher`'s constants**, now
+  `pub(crate)`: `ERROR_REPLY` for a failed run and for a timeout (which arrives
+  as an `Err`, indistinguishable to a reader in Slack), `NO_RESPONSE_REPLY` for
+  an answer with no text. Two inbound transports spelling one failure differently
+  reads as a difference in what failed. `create_trigger_session` takes the title
+  for the same reason — `[Telegram] <rule>` and `[Slack] #channel: <60 chars>` are
+  the only difference between the two call sites.
+- **`auth.test` is called once per handler, not per event and not per
+  connection.** The bot user id is what the `<@Uxxx>` strip and the
+  empty-remainder rule both need; a failure to get it is a failed turn and
+  answers `ERROR_REPLY`, because a Slack that will not answer `auth.test` will
+  not accept `chat.postMessage` either. `conversations.info` (chat title) and
+  `chat.getPermalink` are best-effort on the start path only — the channel id and
+  an empty permalink are the fallbacks, and neither refuses the run.
+- **`mrkdwn.rs` escapes `&`, `<` and `>` before it converts anything**, over the
+  whole answer including its fenced blocks. Slack renders those entities back as
+  themselves everywhere, so escaping costs the answer nothing — and not escaping
+  costs it a great deal, because `chat.postMessage` reads `<!channel>`,
+  `<!here>` and `<!everyone>` in `text` as **broadcasts** and `<@U123>` as a
+  mention. This is the first surface where an answer derived from a stranger's
+  words is posted by the app as itself, into a channel it is a member of by
+  construction. The only raw `<` in the output — and the only raw `>` other than
+  a restored blockquote marker — is the pair this module writes around a link
+  whose target it has checked is an `http`, `https` or `mailto` URL. `|` is not
+  escaped and need not be: it is markup only inside `<…>`, and `is_postable_url`
+  refuses a `|` in either half of a link rather than escaping one. That check is the escape's second half, not tidiness: `<…>` is
+  Slack's markup for everything, so an unvetted link target is a hole straight
+  back through the escape — `[](!channel)` would otherwise become `<!channel>`,
+  and a channel member can ask for that in one sentence. Any other target keeps
+  its Markdown spelling and is posted as prose, which is what a reader wants for
+  the `[guide](./setup.md)` Slack could not link to anyway. A leading `&gt;` run
+  is put back to `>`, because Slack's blockquote is Markdown's and escaping is
+  the only thing that broke it. `gojson::to_vec_marshal` is not a
+  substitute, since its `\u003c` is decoded straight back by Slack. The split
+  counts `char`s, prefers a blank line then a line ending then the limit, and
+  passes over a break inside a fenced block while any break outside one remains
+  — a block that must be cut is cut, and the second chunk renders as prose.
+
+**These tests are in the library, and they have to be.** Every assertion about a
+request Agento *sends* to Slack needs `client::API_BASE`, which is `#[cfg(test)]`
+on this crate so it cannot exist in a shipped binary — an integration-test crate
+cannot reach it, which is the same wall `trigger/dispatcher.rs` records and the
+reason `tests/trigger_run.rs` stops one function short of Telegram's reply. So
+`slack/inbound/tests.rs` carries `tests/slack_socket.rs`'s fake-server half and
+`tests/headless_resume.rs`'s fake-CLI half together, and inherits the fake CLI's
+trap — **no exit after the result** — with a named deadline on every await.
