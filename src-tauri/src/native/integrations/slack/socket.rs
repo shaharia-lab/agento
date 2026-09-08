@@ -29,6 +29,10 @@
 //!   after the machine is back.
 //! - **A fresh `apps.connections.open` on every attempt.** The `wss://` URL it
 //!   returns is single-use; reconnecting to the previous one fails.
+//! - **A read has a deadline.** A half-open connection delivers no FIN and no
+//!   RST, so a read without one parks the worker forever with the row still
+//!   reading `connected` — the silent outage the stored status exists to
+//!   prevent. [`SocketOptions::idle_timeout`] turns it into a reconnect.
 //! - **The status is a stored value, not a log line.** `inbound_status` walks
 //!   `connecting` → `connected` → `reconnecting` → `error`, with
 //!   `inbound_error` carrying the last reason, so the UI can show an outage
@@ -41,9 +45,19 @@
 //!   401 from `apps.connections.open` is reported and **never** clears the
 //!   stored credential — that is `token_validate::clear_auth`'s decision to
 //!   make, on a route a person asked for.
-//! - **Nothing blocking on the runtime.** Every database touch goes through
-//!   [`db::blocking`]; `a_socket_workers_contended_write_lock_does_not_stall_the_runtime`
-//!   in `tests/slack_socket.rs` is the copy of that rule for this task.
+//! - **Nothing blocking on the runtime, and nothing blocking on the socket
+//!   either.** Every database touch goes through [`db::blocking`], which keeps
+//!   it off a runtime worker — and no write is ever *awaited* on the task that
+//!   reads the socket, which is a second rule with a second reason: the
+//!   five-second `busy_timeout` that makes an inline write a stalled runtime
+//!   also makes it an unacknowledged envelope. The claim is inside
+//!   [`Worker::dispatch`]'s spawn and the status goes through
+//!   [`status_writer`]. `a_socket_workers_contended_write_lock_does_not_stall_the_runtime`
+//!   and `a_stalled_claim_does_not_hold_up_the_next_envelope` in
+//!   `tests/slack_socket.rs` are the two halves.
+//! - **Clearing the status belongs to `integrations::registry`, not here.** A
+//!   worker cannot tell a stop from a replacement; see
+//!   [`clear_status_blocking`].
 //! - **The `xapp-` token is read once and captured into the task.** It is never
 //!   logged, never formatted into an error, and this module derives no `Debug`
 //!   that could carry it.
@@ -77,6 +91,15 @@ const DEFAULT_BASE_BACKOFF: Duration = Duration::from_secs(1);
 const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Consecutive failed attempts before the status is reported as `error`.
 const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
+/// How long a live socket may deliver nothing before it is treated as dead.
+///
+/// Slack's gateway pings a Socket Mode connection well inside this, and
+/// `tungstenite` answers a ping itself while the frame still arrives here as
+/// traffic — so a healthy connection never approaches it. Generous rather than
+/// tight because the cost of being wrong is asymmetric: a reconnect too early
+/// is a fresh `apps.connections.open`, a reconnect too late is an integration
+/// that looks connected and answers nothing.
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long `apps.connections.open` may take. Shorter than the Slack client's
 /// sixty seconds: this call is on the reconnect path, and a request that hangs
 /// is a worker that is not backing off.
@@ -134,6 +157,9 @@ pub struct SocketOptions {
     pub max_backoff: Duration,
     /// Consecutive failures before the status is reported as `error`.
     pub failure_threshold: u32,
+    /// How long a live socket may deliver nothing at all before it is treated
+    /// as dead. Slack's own pings count as traffic.
+    pub idle_timeout: Duration,
     /// What an `app_mention` does. The default logs at `debug` and returns.
     pub handler: EventHandler,
 }
@@ -145,6 +171,7 @@ impl Default for SocketOptions {
             base_backoff: DEFAULT_BASE_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
             failure_threshold: DEFAULT_FAILURE_THRESHOLD,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
             handler: default_handler(),
         }
     }
@@ -184,11 +211,18 @@ fn default_handler() -> EventHandler {
 pub struct SocketWorker {
     /// `Option` only so `Drop` can take it; always `Some` while alive.
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Set before the shutdown is sent, and read by [`status_writer`] — see
+    /// there for why a stopped worker must write nothing more.
+    stopped: Arc<std::sync::atomic::AtomicBool>,
     integration_id: String,
 }
 
 impl Drop for SocketWorker {
     fn drop(&mut self) {
+        // **Before** the oneshot, so there is no instant in which the worker
+        // knows it is stopping and the writer does not.
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
@@ -213,18 +247,28 @@ pub fn start(
     options: SocketOptions,
 ) -> SocketWorker {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<StatusMsg>();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let task = Worker {
         db_path: db_path.to_path_buf(),
         integration_id: integration_id.to_string(),
         // Read once from `HostingRow` and captured here. It does not leave.
         app_token: app_token.to_string(),
         options,
+        status: status_tx,
     };
     let id = integration_id.to_string();
+    tokio::spawn(status_writer(
+        db_path.to_path_buf(),
+        id.clone(),
+        Arc::clone(&stopped),
+        status_rx,
+    ));
     tokio::spawn(async move { task.run(shutdown_rx).await });
     log::info!("slack socket worker started: integration_id={id:?}");
     SocketWorker {
         shutdown: Some(shutdown_tx),
+        stopped,
         integration_id: id,
     }
 }
@@ -237,25 +281,102 @@ struct Worker {
     integration_id: String,
     app_token: String,
     options: SocketOptions,
+    /// Where every status transition is *posted*. See [`status_writer`] — the
+    /// worker never awaits a database write, because the thread that would wait
+    /// is the one reading the socket.
+    status: tokio::sync::mpsc::UnboundedSender<StatusMsg>,
+}
+
+/// One thing to record about the connection.
+struct StatusMsg {
+    status: &'static str,
+    error: String,
+}
+
+/// The one place `inbound_status` is written, and the reason the worker posts
+/// rather than writes.
+///
+/// **Every database touch this module makes would otherwise be on the task that
+/// reads the socket**, and `db::open_read_write` carries a five-second
+/// `busy_timeout` — so awaiting one under a lock held by the session scanner's
+/// batch writer leaves the next envelope unread and unacknowledged for that
+/// whole window, past the seconds Slack waits before redelivering. Posting to a
+/// channel takes the wait off that task; `db::blocking` here keeps it off a
+/// runtime worker as well.
+///
+/// One consumer, so the writes stay **ordered**: a `connected` overtaking the
+/// `reconnecting` that followed it would leave the row lying about a socket that
+/// is down, which is the failure this column exists to prevent. The channel is
+/// unbounded because a transition is rare and dropping one is worse than
+/// queueing it, and the loop ends by draining when the worker drops its sender.
+///
+/// **`stopped` is checked per message, not once.** A `reload` is a stop followed
+/// immediately by a start, and a transition posted just before the stop is still
+/// in this queue; writing it would overwrite the *new* worker's status with the
+/// old worker's last words, and nothing would rewrite it until the next
+/// transition — which on a socket that connects and stays connected is never.
+async fn status_writer(
+    db_path: PathBuf,
+    integration_id: String,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<StatusMsg>,
+) {
+    while let Some(StatusMsg { status, error }) = rx.recv().await {
+        if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            continue;
+        }
+        let (path, id) = (db_path.clone(), integration_id.clone());
+        db::blocking("slack inbound status", move || {
+            write_status_blocking(&path, &id, status, &error);
+        })
+        .await;
+    }
 }
 
 /// Why an inner session ended. Both reconnect; they differ only in what the
 /// status says while the next attempt runs.
 enum SessionEnd {
-    /// Slack asked us to reconnect (a `disconnect` envelope), or the socket
-    /// closed cleanly. Not a failure — the consecutive counter resets.
+    /// Slack asked us to reconnect (a `disconnect` envelope, or a close frame).
+    /// Not a failure — the consecutive counter resets.
     Requested,
     /// The socket died. The reason is user-visible.
     Failed(String),
 }
 
+/// One attempt's result: how it ended, and how long it was actually connected.
+struct SessionOutcome {
+    end: SessionEnd,
+    /// `None` when the attempt never reached an open socket at all — an
+    /// `apps.connections.open` refusal, or a handshake that failed.
+    connected_for: Option<Duration>,
+}
+
+impl SessionOutcome {
+    fn failed(reason: impl Into<String>) -> Self {
+        Self {
+            end: SessionEnd::Failed(reason.into()),
+            connected_for: None,
+        }
+    }
+}
+
+/// Whether the worker's handle has been dropped, without waiting for it.
+///
+/// `Err(Empty)` is the only "still running" answer: the sender is dropped only
+/// by [`SocketWorker::drop`], which always sends first, so both `Ok` and
+/// `Err(Closed)` mean the handle is gone.
+fn is_stopped(shutdown: &mut tokio::sync::oneshot::Receiver<()>) -> bool {
+    !matches!(
+        shutdown.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    )
+}
+
 impl Worker {
     async fn run(self, mut shutdown: tokio::sync::oneshot::Receiver<()>) {
-        // Consecutive *failed* attempts. Reset by any established connection,
-        // which is what makes a nightly `disconnect` — Slack rotates its
-        // gateways — cost one base wait rather than an ever-growing one.
+        // Consecutive *failed* attempts, and what was last written about them.
         let mut failures: u32 = 0;
-        self.write_status(STATUS_CONNECTING, "").await;
+        self.post_status(STATUS_CONNECTING, String::new());
 
         loop {
             let outcome = tokio::select! {
@@ -264,13 +385,34 @@ impl Worker {
                 outcome = self.session() => outcome,
             };
 
-            match outcome {
-                Ok(SessionEnd::Requested) => {
+            // **A session that stayed up is not evidence of a problem.** The
+            // counter is about a gateway that will not have us, not about a
+            // laptop lid: without this a socket that runs for hours and dies on
+            // a suspend adds one to a counter that never comes back down, so an
+            // integration that has worked all week reads `error` on its fifth
+            // lifetime drop and reconnects only once a minute thereafter.
+            //
+            // `max_backoff` is the bar, and it is the one value that cannot
+            // produce a hot loop: an attempt that outlived the longest wait this
+            // schedule would ever impose costs at most one base wait to retry,
+            // whatever it does next. A gateway that accepts and closes
+            // immediately keeps escalating, which is the case the counter is
+            // for.
+            let healthy = outcome
+                .connected_for
+                .is_some_and(|held| held >= self.options.max_backoff);
+
+            let (status, reason) = match outcome.end {
+                SessionEnd::Requested => {
                     failures = 0;
-                    self.write_status(STATUS_RECONNECTING, "").await;
+                    (STATUS_RECONNECTING, String::new())
                 }
-                Ok(SessionEnd::Failed(reason)) | Err(reason) => {
-                    failures = failures.saturating_add(1);
+                SessionEnd::Failed(reason) => {
+                    failures = if healthy {
+                        0
+                    } else {
+                        failures.saturating_add(1)
+                    };
                     let status = if failures >= self.options.failure_threshold {
                         STATUS_ERROR
                     } else {
@@ -280,9 +422,19 @@ impl Worker {
                         "slack socket: integration_id={:?} attempt={failures} status={status}: {reason}",
                         self.integration_id
                     );
-                    self.write_status(status, &reason).await;
+                    (status, reason)
                 }
+            };
+
+            // **Do not report anything once stopped.** A `reload` is a stop
+            // followed by a start, so a retiring worker writing here would
+            // overwrite the new worker's `connecting`/`connected` with its own
+            // last words, and nothing would rewrite it until the next
+            // transition — which on a healthy socket is never.
+            if is_stopped(&mut shutdown) {
+                return;
             }
+            self.post_status(status, reason);
 
             let wait = backoff_for(
                 failures,
@@ -297,29 +449,93 @@ impl Worker {
         }
     }
 
+    /// Record a transition. **Never awaited** — see [`status_writer`].
+    fn post_status(&self, status: &'static str, error: String) {
+        let _ = self.status.send(StatusMsg { status, error });
+    }
+
     /// One attempt: open a connection and pump it until it ends.
-    async fn session(&self) -> Result<SessionEnd, String> {
-        let url = self.open_connection().await?;
-        let (mut socket, _) =
-            tokio::time::timeout(OPEN_TIMEOUT, tokio_tungstenite::connect_async(url.as_str()))
-                .await
-                .map_err(|_| "opening the socket mode connection timed out".to_string())?
-                .map_err(|e| format!("opening the socket mode connection: {e}"))?;
+    async fn session(&self) -> SessionOutcome {
+        let url = match self.open_connection().await {
+            Ok(url) => url,
+            Err(e) => return SessionOutcome::failed(e),
+        };
+        // `connect_async` does **no** proxy handling, where `reqwest` reads
+        // `HTTPS_PROXY` and the system settings — so behind an explicitly
+        // configured proxy the call above succeeds and this does not. Reported
+        // on #567's PR rather than widened into it; the `tokio-tungstenite`
+        // paragraph in `Cargo.toml` says the same thing.
+        let opened = match tokio::time::timeout(
+            OPEN_TIMEOUT,
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await
+        {
+            Err(_) => {
+                return SessionOutcome::failed("opening the socket mode connection timed out")
+            }
+            Ok(Err(e)) => {
+                return SessionOutcome::failed(format!("opening the socket mode connection: {e}"))
+            }
+            Ok(Ok((socket, _))) => socket,
+        };
+        let mut socket = opened;
+        let opened_at = std::time::Instant::now();
 
-        self.write_status(STATUS_CONNECTED, "").await;
+        self.post_status(STATUS_CONNECTED, String::new());
 
-        while let Some(frame) = socket.next().await {
-            let frame = match frame {
-                Ok(frame) => frame,
-                Err(e) => return Ok(SessionEnd::Failed(format!("reading the socket: {e}"))),
+        let end = self.pump(&mut socket).await;
+        SessionOutcome {
+            end,
+            connected_for: Some(opened_at.elapsed()),
+        }
+    }
+
+    /// Read the socket until it ends, acknowledging and dispatching as it goes.
+    async fn pump<S>(&self, socket: &mut S) -> SessionEnd
+    where
+        S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+            + tokio_stream::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin,
+    {
+        loop {
+            // **A read with no deadline is how an outage becomes invisible.**
+            // A half-open connection — a suspended laptop, a NAT rebinding, an
+            // address change — delivers no FIN and no RST, so `next()` simply
+            // never completes and the worker parks with `inbound_status` still
+            // reading `connected`. That is exactly the silent failure the
+            // stored status exists to prevent. Slack's own pings are traffic and
+            // reset this, so a healthy connection never reaches it.
+            let frame = match tokio::time::timeout(self.options.idle_timeout, socket.next()).await {
+                Err(_) => {
+                    return SessionEnd::Failed(format!(
+                        "no traffic from slack for {:?}",
+                        self.options.idle_timeout
+                    ))
+                }
+                // **The stream ending without a close frame is a failure, not a
+                // polite reconnect.** It is what a dropped TCP connection looks
+                // like from here, and calling it `Requested` would reset the
+                // consecutive-failure counter — so a gateway that keeps dropping
+                // us would be retried every base wait forever, with
+                // `inbound_status` never reaching `error`.
+                Ok(None) => {
+                    return SessionEnd::Failed(
+                        "the connection closed without a disconnect".to_string(),
+                    )
+                }
+                Ok(Some(Err(e))) => return SessionEnd::Failed(format!("reading the socket: {e}")),
+                Ok(Some(Ok(frame))) => frame,
             };
+
             let text = match frame {
                 Message::Text(text) => text.to_string(),
-                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
                 // Slack sends no binary frames; one is not a reason to drop the
                 // connection, only to say nothing was understood.
-                Message::Binary(_) => continue,
-                Message::Close(_) => return Ok(SessionEnd::Requested),
+                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) | Message::Binary(_) => {
+                    continue
+                }
+                Message::Close(_) => return SessionEnd::Requested,
             };
 
             let Some(envelope) = Envelope::parse(&text) else {
@@ -339,9 +555,7 @@ impl Worker {
                     serde_json::Value::String(envelope_id.to_string())
                 );
                 if let Err(e) = socket.send(Message::text(ack)).await {
-                    return Ok(SessionEnd::Failed(format!(
-                        "acknowledging an envelope: {e}"
-                    )));
+                    return SessionEnd::Failed(format!("acknowledging an envelope: {e}"));
                 }
             }
 
@@ -351,57 +565,57 @@ impl Worker {
                     self.integration_id,
                     envelope.reason
                 );
-                return Ok(SessionEnd::Requested);
+                return SessionEnd::Requested;
             }
 
             if let Some(mention) = envelope.app_mention(&self.integration_id) {
-                self.dispatch(mention).await;
+                self.dispatch(mention);
             }
         }
-
-        // **The stream ending without a close frame is a failure, not a polite
-        // reconnect.** It is what a dropped TCP connection looks like from
-        // here, and calling it `Requested` would reset the consecutive-failure
-        // counter — so a gateway that keeps dropping us would be retried every
-        // second forever, with `inbound_status` never reaching `error` and
-        // nothing telling the user anything is wrong.
-        Ok(SessionEnd::Failed(
-            "the connection closed without a disconnect".to_string(),
-        ))
     }
 
     /// Claim the event, then run the handler under the trigger dispatcher's
     /// semaphore.
     ///
-    /// Spawned rather than awaited: the socket has to go back to reading, or the
-    /// next envelope waits out an agent run and Slack redelivers it.
-    async fn dispatch(&self, mention: AppMention) {
+    /// **Nothing here is awaited by the caller, and the claim is inside the
+    /// spawn rather than before it.** The read loop has to go straight back to
+    /// `next()`: `db::open_read_write` carries a five-second `busy_timeout`, so
+    /// a claim awaited on the loop would, under a lock held by the session
+    /// scanner's batch writer, leave the *next* envelope unread and
+    /// unacknowledged for that whole window — which is precisely the window the
+    /// ack-first rule exists to stay inside. The claim itself is unaffected:
+    /// `INSERT OR IGNORE` decides who won whenever it runs.
+    fn dispatch(&self, mention: AppMention) {
         let db_path = self.db_path.clone();
         let integration_id = self.integration_id.clone();
-        let event_id = mention.event_id.clone();
-        let claimed = db::blocking("slack event claim", move || {
-            claim_event(&db_path, &integration_id, &event_id)
-        })
-        .await
-        .unwrap_or(false);
-        if !claimed {
-            log::debug!(
-                "slack socket: integration_id={:?}: event_id={:?} already processed",
-                self.integration_id,
-                mention.event_id
-            );
-            return;
-        }
-
         let handler = Arc::clone(&self.options.handler);
-        let integration_id = self.integration_id.clone();
         tokio::spawn(async move {
+            let (claim_db, claim_id, event_id) = (
+                db_path.clone(),
+                integration_id.clone(),
+                mention.event_id.clone(),
+            );
+            let claimed = db::blocking("slack event claim", move || {
+                claim_event(&claim_db, &claim_id, &event_id)
+            })
+            .await
+            .unwrap_or(false);
+            if !claimed {
+                log::debug!(
+                    "slack socket: integration_id={integration_id:?}: event_id={:?} \
+                     already processed",
+                    mention.event_id
+                );
+                return;
+            }
+
             let Ok(_permit) = crate::native::trigger::dispatcher::semaphore()
                 .acquire()
                 .await
             else {
                 log::warn!(
-                    "dispatcher stopped, dropping slack app_mention integration_id={integration_id:?}"
+                    "dispatcher stopped, dropping slack app_mention \
+                     integration_id={integration_id:?}"
                 );
                 return;
             };
@@ -460,22 +674,6 @@ impl Worker {
             .filter(|url| !url.is_empty())
             .map(str::to_string)
             .ok_or_else(|| "apps.connections.open returned no url".to_string())
-    }
-
-    /// Write `inbound_status`/`inbound_error`, and **nothing else**.
-    ///
-    /// `updated_at` is deliberately not bumped: a worker rewriting its state on
-    /// every reconnection would keep moving the record's timestamp for something
-    /// the user did not do. `integrations/CLAUDE.md` states that as the contract
-    /// #566 left for this worker.
-    async fn write_status(&self, status: &'static str, error: &str) {
-        let db_path = self.db_path.clone();
-        let id = self.integration_id.clone();
-        let error = error.to_string();
-        db::blocking("slack inbound status", move || {
-            write_status_blocking(&db_path, &id, status, &error);
-        })
-        .await;
     }
 }
 
@@ -606,23 +804,72 @@ pub fn claim_event(db_path: &Path, integration_id: &str, event_id: &str) -> bool
     }
 }
 
-/// `UPDATE integrations SET inbound_status, inbound_error`. Public so a test can
-/// read the contract back; nothing on the wire calls it.
+/// `UPDATE integrations SET inbound_status, inbound_error`, and **nothing else**.
+///
+/// `updated_at` is deliberately not bumped: a worker rewriting its state on
+/// every reconnection would keep moving the record's timestamp for something the
+/// user did not do. `integrations/CLAUDE.md` states that as the contract #566
+/// left for this worker.
 pub fn write_status_blocking(db_path: &Path, integration_id: &str, status: &str, error: &str) {
+    run_status_write(
+        db_path,
+        "UPDATE integrations SET inbound_status = ?1, inbound_error = ?2 WHERE id = ?3",
+        rusqlite::params![status, error, integration_id],
+        integration_id,
+    );
+}
+
+/// Clear `inbound_status`/`inbound_error` for one integration.
+///
+/// **The registry calls this, not the worker, and that is the whole point.** A
+/// worker cannot tell a stop from a replacement: a `reload` is a stop followed
+/// immediately by a start, so a retiring worker clearing its own row would race
+/// the new worker's `connecting`, and a compare-and-swap on the value cannot
+/// help because both workers write the identical `"connected"`. The registry is
+/// the one place that knows whether a socket is going away or being replaced —
+/// it is the code that decides — so it owns the clear, ordered against the start
+/// rather than racing it.
+pub fn clear_status_blocking(db_path: &Path, integration_id: &str) {
+    run_status_write(
+        db_path,
+        "UPDATE integrations SET inbound_status = '', inbound_error = '' WHERE id = ?1",
+        rusqlite::params![integration_id],
+        integration_id,
+    );
+}
+
+/// Clear the inbound state of **every** Slack row. Boot only.
+///
+/// A fresh process has no workers, so any status left in the database is about a
+/// connection that no longer exists — including one a crash left reading
+/// `connected`, which nothing else would ever correct. Run once at the top of
+/// `start_all`, before any worker exists to race it; each worker then writes
+/// `connecting` as it starts.
+///
+/// This does erase a stored `error` across a restart, where #566's rule is not
+/// to erase the reason the user is looking at. The difference is that something
+/// is about to re-report it: a row whose token is still bad is answered by its
+/// own worker within a second or two, and a row that gets no worker genuinely
+/// has nothing to say.
+pub fn clear_all_inbound_status_blocking(db_path: &Path) {
+    run_status_write(
+        db_path,
+        "UPDATE integrations SET inbound_status = '', inbound_error = ''
+         WHERE type = 'slack' AND (inbound_status != '' OR inbound_error != '')",
+        rusqlite::params![],
+        "*",
+    );
+}
+
+fn run_status_write(db_path: &Path, sql: &str, params: impl rusqlite::Params, what: &str) {
     let write = || -> Result<(), String> {
         let conn = db::open_read_write(db_path)?;
-        conn.execute(
-            "UPDATE integrations SET inbound_status = ?1, inbound_error = ?2 WHERE id = ?3",
-            rusqlite::params![status, error, integration_id],
-        )
-        .map_err(|e| format!("saving the inbound status: {e}"))?;
+        conn.execute(sql, params)
+            .map_err(|e| format!("writing the inbound status: {e}"))?;
         Ok(())
     };
     if let Err(e) = write() {
-        log::error!(
-            "failed to record the slack inbound status integration_id={integration_id:?} \
-             status={status:?} error={e}"
-        );
+        log::error!("failed to write the slack inbound status integration_id={what:?} error={e}");
     }
 }
 
@@ -727,6 +974,59 @@ mod tests {
                 "the cap plus its jitter is the ceiling: {waits:?}"
             );
         }
+    }
+
+    /// A boot clears every Slack row's inbound state and nothing else's.
+    ///
+    /// A fresh process hosts no sockets, so a `connected` left by a crash is
+    /// about a connection that does not exist and nothing else would ever
+    /// correct it. The `type` scope is the part worth pinning: an `app_token`
+    /// can be stored on any row (no validator rejects an unknown key), so a
+    /// clear that forgot to scope by type would blank a column another
+    /// integration's own inbound half might one day own.
+    #[test]
+    fn a_boot_clears_every_slack_rows_inbound_state_and_no_others() {
+        let file = db();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        for (id, kind) in [("s1", "slack"), ("s2", "slack"), ("t1", "telegram")] {
+            conn.execute(
+                "INSERT INTO integrations
+                    (id, name, type, enabled, credentials, services, created_at, updated_at,
+                     inbound_enabled, inbound_status, inbound_error)
+                 VALUES (?1, ?1, ?2, 1, '{}', '{}', 'then', 'then', 1, 'connected', 'boom')",
+                rusqlite::params![id, kind],
+            )
+            .expect("seed");
+        }
+        drop(conn);
+
+        clear_all_inbound_status_blocking(file.path());
+
+        let conn = rusqlite::Connection::open(file.path()).expect("reopen");
+        let read = |id: &str| -> (String, String, String) {
+            conn.query_row(
+                "SELECT inbound_status, inbound_error, updated_at FROM integrations WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read back")
+        };
+        for id in ["s1", "s2"] {
+            assert_eq!(
+                read(id),
+                (String::new(), String::new(), "then".to_string()),
+                "{id} must be cleared, and its updated_at left alone"
+            );
+        }
+        assert_eq!(
+            read("t1"),
+            (
+                "connected".to_string(),
+                "boom".to_string(),
+                "then".to_string()
+            ),
+            "a non-slack row is not this clear's business"
+        );
     }
 
     /// The cap is a cap: a very large failure count must neither overflow nor

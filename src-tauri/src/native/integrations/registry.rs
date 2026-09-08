@@ -172,12 +172,8 @@ pub(crate) struct HostingRow {
     /// second `SELECT` naming `credentials`, which the module header exists to
     /// prevent.
     ///
-    /// `allow(dead_code)` because the worker that reads it lands in #567 and
-    /// the projection has to carry the column first — the same standing
-    /// exemption `WhatsAppCredentials::phone` carries, and for the same reason:
-    /// deleting the field to silence the lint is what makes the next change
-    /// reintroduce it wrongly.
-    #[allow(dead_code)]
+    /// Read by [`start_socket_worker`] since #567, which is what took the
+    /// standing `allow(dead_code)` off it.
     pub(crate) inbound_enabled: bool,
 }
 
@@ -325,11 +321,13 @@ impl Registry {
         let mut state = self.lock();
         *state.generations.entry(id.to_string()).or_default() += 1;
         let removed = state.servers.remove(id);
-        // Removed inside the same lock and dropped with it, for the reason
-        // above: dropping a [`SocketWorker`] only sends a oneshot, so there is
-        // nothing to await, and releasing first would leave a window in which
-        // the map says the worker is gone while the socket is still open
-        // holding the app token.
+        // Removed under the same lock, for the reason above — after this the
+        // map cannot hand the worker to anyone. *Dropping* it is what closes
+        // the socket, and that happens a line later, outside the guard: the
+        // drop only sends a oneshot, so there is nothing to await and nothing
+        // to gain from holding the lock across it. The window it leaves is one
+        // in which the socket is closing and the map already says so, which is
+        // the direction that is safe.
         let removed_socket = state.sockets.remove(id);
         drop(state);
         drop(removed_socket);
@@ -380,7 +378,9 @@ impl Registry {
             }
             // A Slack row whose inbound switch was turned off still reloads, and
             // the reload must retire the previous worker rather than leave it
-            // running against a row that no longer wants it.
+            // running against a row that no longer wants it. Removed under the
+            // lock and dropped outside it, exactly as [`Registry::stop`] does
+            // and for the same reason.
             None => {
                 let stale = state.sockets.remove(id);
                 drop(state);
@@ -418,6 +418,14 @@ pub async fn start_all(db_path: &Path) -> Result<(), String> {
     // recorded here, so the start that follows is refused instead of orphaning
     // a listener for a row that has just gone.
     let generations = registry().generations();
+    // **Before any worker exists**, so nothing races it. A fresh process hosts
+    // no sockets, so every `inbound_status` in the database is about a
+    // connection that no longer exists — including the `connected` a crash left
+    // behind, which nothing else would ever correct. Each worker writes
+    // `connecting` a moment later; a row that gets no worker is left saying
+    // nothing, which is what the column's default means. See
+    // `slack::socket::clear_all_inbound_status_blocking`.
+    super::slack::socket::clear_all_inbound_status_blocking(db_path);
     let rows = list_for_hosting(db_path)?;
     for row in rows {
         if !row.is_startable() {
@@ -451,10 +459,20 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
     let generation = registry().generation(id);
 
     let Some(row) = get_for_hosting(db_path, id)? else {
-        return Ok(()); // deleted — nothing to start
+        return Ok(()); // deleted — the row is gone, and its status with it
     };
     if !row.is_startable() {
-        return Ok(()); // disabled or not authenticated
+        // Disabled or not authenticated, so no worker will run — and for the
+        // same reason as in `start_one`, the status it left behind is the
+        // registry's to clear.
+        if row.integration_type == "slack" {
+            let (path, id) = (db_path.to_path_buf(), row.id.clone());
+            crate::native::db::blocking("slack inbound clear", move || {
+                super::slack::socket::clear_status_blocking(&path, &id);
+            })
+            .await;
+        }
+        return Ok(());
     }
     start_one(db_path, &row, generation).await
 }
@@ -470,6 +488,19 @@ async fn start_one(db_path: &Path, row: &HostingRow, generation: u64) -> Result<
     let url = server.url().to_string();
     let socket = start_socket_worker(db_path, row);
     let hosted_socket = socket.is_some();
+    // A Slack row that is not getting a worker must not keep the previous
+    // worker's status. **This is the registry's to do and not the worker's**:
+    // a `reload` is a stop followed immediately by a start, so a retiring worker
+    // clearing its own row would race the replacement's `connecting` — and a
+    // compare-and-swap cannot break the tie, because both write the identical
+    // `"connected"`. Here the clear is simply ordered before the start.
+    if row.integration_type == "slack" && !hosted_socket {
+        let (path, id) = (db_path.to_path_buf(), row.id.clone());
+        crate::native::db::blocking("slack inbound clear", move || {
+            super::slack::socket::clear_status_blocking(&path, &id);
+        })
+        .await;
+    }
     if !registry().put_if_current(&row.id, generation, server, socket) {
         log::info!(
             "integration MCP server discarded before it was recorded, \
@@ -1569,14 +1600,69 @@ mod tests {
         assert!(!registry().is_socket_running("sl-off"));
         assert!(!registry().is_socket_running("sl-tokenless"));
 
+        // A status left behind by a worker that is no longer running is the
+        // registry's to clear, because it is the only thing that can tell a stop
+        // from a replacement — see `slack::socket::clear_status_blocking`.
+        let status_of = |id: &str| -> (String, String) {
+            Connection::open(file.path())
+                .expect("open")
+                .query_row(
+                    "SELECT inbound_status, inbound_error FROM integrations WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read the inbound state")
+        };
+        assert_eq!(
+            status_of("sl-off"),
+            (String::new(), String::new()),
+            "a row with the switch off must not carry an inbound status"
+        );
+
         // Turning the switch off and reloading retires the worker without
-        // touching the hosted server.
+        // touching the hosted server, and takes the status with it.
+        crate::native::integrations::slack::socket::write_status_blocking(
+            file.path(),
+            "sl-on",
+            crate::native::integrations::slack::socket::STATUS_CONNECTED,
+            "",
+        );
         set_inbound(&file, "sl-on", false);
         reload(file.path(), "sl-on").await.expect("reload");
         assert!(registry().is_hosted("sl-on"));
         assert!(
             !registry().is_socket_running("sl-on"),
             "a reload with the switch off must retire the worker"
+        );
+        assert_eq!(
+            status_of("sl-on"),
+            (String::new(), String::new()),
+            "and must not leave `connected` in a row whose worker is gone"
+        );
+
+        // The same for a row that stops being startable at all: disabling the
+        // integration is a second way to end up with no worker.
+        set_inbound(&file, "sl-off", true);
+        reload(file.path(), "sl-off").await.expect("reload");
+        assert!(registry().is_socket_running("sl-off"));
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE integrations SET enabled = 0 WHERE id = 'sl-off'",
+                [],
+            )
+            .expect("disable");
+        crate::native::integrations::slack::socket::write_status_blocking(
+            file.path(),
+            "sl-off",
+            crate::native::integrations::slack::socket::STATUS_CONNECTED,
+            "",
+        );
+        reload(file.path(), "sl-off").await.expect("reload");
+        assert_eq!(
+            status_of("sl-off"),
+            (String::new(), String::new()),
+            "a disabled integration must not keep reporting `connected`"
         );
 
         // And back on again.

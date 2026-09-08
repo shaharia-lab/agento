@@ -63,10 +63,8 @@ struct FakeSlack {
     acks: Arc<Mutex<Vec<String>>>,
     /// Fires on every ack, so a test can wait for one instead of sleeping.
     acked: Arc<tokio::sync::Notify>,
-    /// Websocket connections currently open. `max_live` is what proves a reload
-    /// left exactly one.
+    /// Websocket connections currently open.
     live: Arc<AtomicUsize>,
-    max_live: Arc<AtomicUsize>,
     /// Fires whenever a websocket connection ends, however it ended.
     closed: Arc<tokio::sync::Notify>,
     _shutdown: tokio::sync::oneshot::Sender<()>,
@@ -94,7 +92,6 @@ async fn fake_slack(refusals: Vec<String>, sessions: Vec<Session>) -> FakeSlack 
     let acked = Arc::new(tokio::sync::Notify::new());
     let closed = Arc::new(tokio::sync::Notify::new());
     let live = Arc::new(AtomicUsize::new(0));
-    let max_live = Arc::new(AtomicUsize::new(0));
     let script: Arc<Mutex<VecDeque<Session>>> = Arc::new(Mutex::new(sessions.into()));
     let refusals: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(refusals.into()));
 
@@ -105,12 +102,11 @@ async fn fake_slack(refusals: Vec<String>, sessions: Vec<Session>) -> FakeSlack 
     let ws_addr = ws_listener.local_addr().expect("ws addr");
     let (ws_tx, mut ws_rx) = tokio::sync::oneshot::channel::<()>();
     {
-        let (acks, acked, closed, live, max_live, script) = (
+        let (acks, acked, closed, live, script) = (
             Arc::clone(&acks),
             Arc::clone(&acked),
             Arc::clone(&closed),
             Arc::clone(&live),
-            Arc::clone(&max_live),
             Arc::clone(&script),
         );
         tokio::spawn(async move {
@@ -123,16 +119,14 @@ async fn fake_slack(refusals: Vec<String>, sessions: Vec<Session>) -> FakeSlack 
                     },
                 };
                 let session = script.lock().expect("script lock").pop_front();
-                let (acks, acked, closed, live, max_live) = (
+                let (acks, acked, closed, live) = (
                     Arc::clone(&acks),
                     Arc::clone(&acked),
                     Arc::clone(&closed),
                     Arc::clone(&live),
-                    Arc::clone(&max_live),
                 );
                 tokio::spawn(async move {
-                    let now = live.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_live.fetch_max(now, Ordering::SeqCst);
+                    live.fetch_add(1, Ordering::SeqCst);
                     serve_session(stream, session.unwrap_or_default(), &acks, &acked).await;
                     live.fetch_sub(1, Ordering::SeqCst);
                     closed.notify_waiters();
@@ -184,7 +178,6 @@ async fn fake_slack(refusals: Vec<String>, sessions: Vec<Session>) -> FakeSlack 
         acks,
         acked,
         live,
-        max_live,
         closed,
         _shutdown: tx,
         _ws_shutdown: ws_tx,
@@ -264,6 +257,44 @@ async fn serve_session(
     }
 }
 
+/// Every log record this binary has produced, so the token can be searched for
+/// where it is most likely to end up.
+///
+/// A collecting `log::Log` rather than a `grep` over a file: #567 asks for
+/// `grep -r 'xapp-'` over a captured log, and the only capture available to a
+/// test binary is the logger itself. Installed once — `set_boxed_logger` is
+/// process-wide and refuses a second call — and at `Trace`, because a token in
+/// a `debug!` is the same leak as one in an `error!`.
+static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+struct Collector;
+
+impl log::Log for Collector {
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        RECORDS.lock().expect("records lock").push(format!(
+            "{} {}",
+            record.target(),
+            record.args()
+        ));
+    }
+    fn flush(&self) {}
+}
+
+fn capture_logs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = log::set_boxed_logger(Box::new(Collector));
+        log::set_max_level(log::LevelFilter::Trace);
+    });
+}
+
+fn captured_logs() -> Vec<String> {
+    RECORDS.lock().expect("records lock").clone()
+}
+
 /// A migrated database with one Slack integration, inbound on.
 fn fixture_db(dir: &Path) -> PathBuf {
     let db_path = dir.join("agento.db");
@@ -312,6 +343,9 @@ fn options(fake: &FakeSlack, handler: socket::EventHandler) -> SocketOptions {
         base_backoff: BASE_BACKOFF,
         max_backoff: Duration::from_secs(5),
         failure_threshold: 2,
+        // Long enough that no other test in this file can trip it; the one that
+        // is about the idle timeout sets its own.
+        idle_timeout: Duration::from_secs(60),
         handler,
     }
 }
@@ -599,6 +633,179 @@ async fn dropping_the_handle_closes_the_socket_within_a_second() {
     );
 }
 
+/// A stopped worker writes nothing more, so a replacement's status stands.
+///
+/// A `reload` is a stop followed immediately by a start, and the retiring
+/// worker's queue can still hold a transition posted a moment before the stop.
+/// Writing it would overwrite the *new* worker's status with the old worker's
+/// last words, and nothing would rewrite it until the next transition — which on
+/// a socket that connects and stays connected is never. Clearing the row on a
+/// genuine stop is the registry's, not the worker's, and
+/// `a_slack_socket_worker_follows_the_switch_and_the_stored_token` covers it
+/// there; this covers the half the worker owns.
+#[tokio::test]
+async fn a_stopped_worker_writes_no_more_status() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = fixture_db(dir.path());
+
+    // A gateway that refuses, so the old worker has a stream of `reconnecting`
+    // transitions queued and in flight at the moment it is stopped.
+    let refusing = fake_slack(
+        vec![
+            "invalid_auth".into(),
+            "invalid_auth".into(),
+            "invalid_auth".into(),
+        ],
+        vec![],
+    )
+    .await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let old = socket::start(
+        &db_path,
+        "s1",
+        APP_TOKEN,
+        options(&refusing, recording_handler(&seen, Duration::ZERO)),
+    );
+    await_status(
+        &db_path,
+        &[STATUS_RECONNECTING, STATUS_ERROR],
+        "the old worker",
+    )
+    .await;
+
+    // Stop it and stand a healthy worker up in its place, exactly as a reload
+    // does.
+    drop(old);
+    let healthy = fake_slack(vec![], vec![vec![Step::Hold(Duration::from_secs(30))]]).await;
+    let new = socket::start(
+        &db_path,
+        "s1",
+        APP_TOKEN,
+        options(&healthy, recording_handler(&seen, Duration::ZERO)),
+    );
+    await_status(&db_path, &[STATUS_CONNECTED], "the new worker").await;
+
+    // Long enough for anything the old worker had queued to have been written.
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            inbound_state(&db_path).0,
+            STATUS_CONNECTED,
+            "a stopped worker overwrote its replacement's status"
+        );
+    }
+    drop(new);
+}
+
+/// A socket that goes silent is treated as dead rather than reported as
+/// `connected` forever.
+///
+/// This is the failure the whole stored-status design exists to make visible: a
+/// half-open connection — a suspended laptop, a rebinding NAT — delivers no FIN
+/// and no RST, so a read with no deadline simply never returns. Nothing else in
+/// this file can see it, because every other fake either speaks or closes.
+#[tokio::test]
+async fn a_socket_that_goes_silent_is_treated_as_dead() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = fixture_db(dir.path());
+    // Accepts, says nothing, and never closes.
+    let fake = fake_slack(vec![], vec![vec![Step::Hold(Duration::from_secs(60))]]).await;
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut opts = options(&fake, recording_handler(&seen, Duration::ZERO));
+    opts.idle_timeout = Duration::from_millis(400);
+    let worker = socket::start(&db_path, "s1", APP_TOKEN, opts);
+
+    await_status(&db_path, &[STATUS_CONNECTED], "the silent socket connects").await;
+    let (_, error) = await_status(
+        &db_path,
+        &[STATUS_RECONNECTING, STATUS_ERROR],
+        "the silent socket must not stay `connected`",
+    )
+    .await;
+    assert!(
+        error.contains("no traffic"),
+        "the stored reason must say why: {error:?}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fake.opens().len() < 2 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        fake.opens().len() >= 2,
+        "and the worker must reconnect rather than merely report"
+    );
+    drop(worker);
+}
+
+/// A stalled database does not stall the socket: a second envelope is read and
+/// acknowledged while the first one's dedup claim is still waiting on a lock.
+///
+/// The claim is a `db::open_read_write` with a five-second `busy_timeout`, so
+/// awaiting it on the read loop would leave envelope two unacknowledged for that
+/// whole window — past the seconds Slack waits before redelivering. A test that
+/// sends one envelope cannot see this, which is why this one sends two.
+#[tokio::test]
+async fn a_stalled_claim_does_not_hold_up_the_next_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = fixture_db(dir.path());
+    let fake = fake_slack(
+        vec![],
+        vec![vec![
+            Step::Send(events_api("env-1", "Ev1")),
+            Step::Send(events_api("env-2", "Ev2")),
+            Step::Hold(Duration::from_secs(10)),
+        ]],
+    )
+    .await;
+
+    /// Well inside the 5 s `busy_timeout`, so the claims still succeed, and far
+    /// outside the fraction of a second two acks should take.
+    const HOLD: Duration = Duration::from_millis(1_500);
+
+    db::open_read_write(&db_path).expect("convert to WAL");
+    let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+    let lock_db = db_path.clone();
+    let holder = std::thread::spawn(move || {
+        let mut conn = rusqlite::Connection::open(&lock_db).expect("open");
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("begin immediate");
+        holding_tx.send(()).expect("signal");
+        std::thread::sleep(HOLD);
+        tx.rollback().expect("rollback");
+    });
+    holding_rx.recv().expect("the writer took the lock");
+
+    let started = Instant::now();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let worker = socket::start(
+        &db_path,
+        "s1",
+        APP_TOKEN,
+        options(&fake, recording_handler(&seen, Duration::ZERO)),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fake.acks().len() < 2 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let took = started.elapsed();
+    assert_eq!(
+        fake.acks(),
+        vec!["env-1".to_string(), "env-2".to_string()],
+        "both envelopes must be acknowledged while the database is locked"
+    );
+    assert!(
+        took < HOLD,
+        "the second ack waited {took:?}, which is the length of the lock hold \
+         ({HOLD:?}) — the claim is being awaited on the read loop"
+    );
+
+    holder.join().expect("the writer finished");
+    drop(worker);
+}
+
 /// A stop landing while a worker is connecting, immediately followed by a
 /// start — what `Registry::reload` does — leaves **one** live connection, never
 /// two.
@@ -632,18 +839,22 @@ async fn a_reload_mid_connect_leaves_exactly_one_live_connection() {
     let worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
     await_status(&db_path, &[STATUS_CONNECTED], "after the last start").await;
 
-    // Give any abandoned attempt every chance to finish its handshake.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        fake.live.load(Ordering::SeqCst),
-        1,
-        "exactly one connection may be live after a run of reloads"
-    );
-    assert_eq!(
-        fake.max_live.load(Ordering::SeqCst),
-        1,
-        "two connections were live at once, so a stop left a socket behind"
-    );
+    // Sampled rather than checked once, and deliberately **not** as a peak.
+    //
+    // A worker dropped mid-handshake can legitimately show up at the fake a
+    // moment later and close immediately, so a `max_live == 1` assertion is a
+    // race by construction. What is not a race, and is the actual bug, is a
+    // connection that a stop left running: that one never goes away, so it is
+    // visible in every sample of the settled state.
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            fake.live.load(Ordering::SeqCst),
+            1,
+            "exactly one connection may be live after a run of reloads — \
+             more means a stop left a socket behind"
+        );
+    }
     drop(worker);
 }
 
@@ -654,8 +865,8 @@ async fn a_reload_mid_connect_leaves_exactly_one_live_connection() {
 /// paths that would leak it are the ones a happy-path test never walks: an error
 /// message built by `format!` from a failing request, or a `Debug` of a struct
 /// that happens to hold it. So the cycle here is deliberately the failing one,
-/// and both the stored `inbound_error` and every message the worker produced are
-/// searched.
+/// and every log record this binary produced is searched alongside the row the
+/// worker writes to.
 #[tokio::test]
 async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -666,6 +877,7 @@ async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     )
     .await;
 
+    capture_logs();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let handler = recording_handler(&seen, Duration::ZERO);
     let worker = socket::start(&db_path, "s1", APP_TOKEN, options(&fake, handler));
@@ -678,6 +890,17 @@ async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     )
     .await;
     drop(worker);
+
+    // The `grep -r 'xapp-'` half of the acceptance criteria, over the log this
+    // binary actually produced. The refusal scripted above is what walks the
+    // `format!`-an-error path, which is where the token would surface; the two
+    // database columns below cannot see that class of leak at all.
+    for record in captured_logs() {
+        assert!(
+            !record.contains("xapp-") && !record.contains(APP_TOKEN),
+            "a log record names the app token: {record:?}"
+        );
+    }
 
     let (status, error) = inbound_state(&db_path);
     for value in [&status, &error] {

@@ -109,10 +109,42 @@ default logs at `debug`.
   deciding who won, plus the same best-effort 48-hour sweep. A failed claim is
   `false` — never run the agent against a database that could not record it.
 - **A stream that ends without a close frame is a failure, not a polite
-  reconnect.** Only an explicit `disconnect` envelope or a `Close` frame resets
-  the consecutive-failure counter. Calling a dropped TCP connection `Requested`
-  would retry a flapping gateway every second forever, with `inbound_status`
-  never reaching `error` and nothing telling the user anything is wrong.
+  reconnect.** Only an explicit `disconnect` envelope or a `Close` frame is
+  `Requested`. Calling a dropped TCP connection polite would reset the
+  consecutive-failure counter, so a flapping gateway would be retried every base
+  wait forever, with `inbound_status` never reaching `error` and nothing telling
+  the user anything is wrong.
+- **A session that stayed up resets the counter even though it failed.** The
+  counter is about a gateway that will not have us, not about a laptop lid:
+  without this a socket that runs for hours and dies on a suspend adds one to a
+  number that never comes back down, so an integration that has worked all week
+  reads `error` on its fifth lifetime drop and reconnects only once a minute
+  after. The bar is `max_backoff`, which is the one value that cannot produce a
+  hot loop — an attempt that outlived the longest wait the schedule would ever
+  impose costs at most one base wait to retry, whatever it does next.
+- **A read with no deadline is how an outage becomes invisible.** A half-open
+  connection — a suspended laptop, a rebinding NAT — delivers no FIN and no RST,
+  so `next()` never completes and the worker parks with the row still reading
+  `connected`. `idle_timeout` is what turns that into a reconnect. Slack's own
+  pings are traffic, so a healthy connection never approaches it.
+- **No database write is ever awaited on the task that reads the socket.**
+  `db::open_read_write` carries a five-second `busy_timeout`, so one write meeting
+  the session scanner's batch writer would leave the *next* envelope unread and
+  unacknowledged for that whole window — past the seconds Slack waits before
+  redelivering. The dedup claim lives inside `dispatch`'s `tokio::spawn`, and
+  every status transition is *posted* to `status_writer`, a single consumer so
+  the writes stay ordered: a `connected` overtaking the `reconnecting` that
+  followed it would leave the row lying about a socket that is down.
+- **Clearing the status is the registry's, and writing it is the worker's.** A
+  worker cannot tell a stop from a replacement — a `reload` is a stop followed
+  immediately by a start — and a compare-and-swap cannot break that tie, because
+  both workers write the identical `connected`. So `start_one` and `reload` clear
+  the row when they decline to start a worker, ordered before the start rather
+  than racing it, and `start_all` clears every Slack row once at boot, before any
+  worker exists, which is what corrects a `connected` a crash left behind. The
+  worker's own half is `stopped`: once its handle is dropped, `status_writer`
+  writes nothing more, so a transition queued just before a reload cannot
+  overwrite the replacement's.
 - **The backoff is re-anchored on the wall clock**, `schedule::runtime`'s rule
   for gocron's reason: `tokio::time::sleep` measures process time, and on a
   suspended machine that is not elapsed wall-clock time, so one long sleep holds
