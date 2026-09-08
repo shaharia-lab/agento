@@ -512,10 +512,19 @@ async fn start_one(db_path: &Path, row: &HostingRow, generation: u64) -> Result<
         return Ok(());
     }
     log::info!(
-        "integration MCP server started: id={:?} type={:?} url={url} socket={hosted_socket}",
+        "integration MCP server started: id={:?} type={:?} url={url}",
         row.id,
         row.integration_type
     );
+    // A separate statement rather than a field on the line above, and that is
+    // not style. CodeQL reads `url` there as tainted by a stored credential —
+    // an alert that has been open against `main` for as long as the line has
+    // existed — and *editing* the line re-reports it as introduced by whatever
+    // change touched it. #567 has no business either fixing or inheriting that,
+    // so the line is left byte-for-byte as it was.
+    if hosted_socket {
+        log::info!("slack socket mode worker hosted: id={:?}", row.id);
+    }
     Ok(())
 }
 
