@@ -327,7 +327,9 @@ Then:
    connection without it.
 3. In Agento, open **Integrations → Slack**, choose the **Bot token** auth mode,
    paste the `xoxb-` token into **Bot token** and the `xapp-` token into **App
-   token**, and save.
+   token**, and save. It has to be the **Bot token** mode: Agento's OAuth
+   install never asks for `app_mentions:read`, so an OAuth row connects
+   perfectly happily and is then sent nothing.
 4. Turn on **Inbound → Socket Mode**. The badge beside it reads *Connecting* and
    then *Connected*.
 5. In Slack, **invite the app to the channel** — `/invite @Agento`. Slack does

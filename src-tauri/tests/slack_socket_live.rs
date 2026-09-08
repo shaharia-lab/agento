@@ -184,8 +184,12 @@ fn scalar(db_path: &Path, sql: &str) -> i64 {
     conn.query_row(sql, [], |row| row.get(0)).expect("scalar")
 }
 
+/// Built through `native::http::client_builder`, as every HTTP client in this
+/// repository is (#514) — not because a test is bound by that rule, but because
+/// the point of this suite is the bytes that actually go to Slack, and the
+/// builder is where the user agent and the proxy handling come from.
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
+    agento_lib::native::http::client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .expect("build a client")

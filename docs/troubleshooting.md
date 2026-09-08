@@ -362,16 +362,17 @@ Three things that look like this and are not:
 - `apps.connections.open answered 401 Unauthorized, not JSON` — something
   between Agento and Slack answered instead of Slack, usually a proxy or a
   captive portal. Slack's own refusals are always JSON, so this is never Slack.
-- `opening the socket mode connection: …` — the token was accepted and the
-  websocket itself would not open. **Agento's websocket does not use your system
+- `opening the socket mode connection` — the token was accepted and the
+  websocket itself would not open (the line ends either `: <reason>` or
+  ` timed out`). **Agento's websocket does not use your system
   proxy settings**, unlike every other call it makes, so a network that requires
   a proxy fails here and nowhere else.
 
 ### Socket Mode says Connected but a mention does nothing
 
-Every one of these is silent by design. All but the first say why in the log,
-and every one of those lines is at **`debug`** level — so raise the level before
-you go looking. Work down the list:
+Every one of these is silent by design. Two say nothing in the log at all, and
+of the rest all but one are at **`debug`** level — so raise the level before you
+go looking. Work down the list:
 
 - **The app is not in the channel.** Slack never sent the event at all — nothing
   appears in the log. `/invite @Agento` in that channel.
@@ -396,20 +397,37 @@ you go looking. Work down the list:
 - **Slack redelivered an event already handled.** Log:
   `already processed`. The first delivery is the one that ran, and the reply is
   in the thread.
+- **The integration is in OAuth mode.** Nothing is logged, because Slack sends
+  nothing: Agento's OAuth install does not request `app_mentions:read`, so the
+  socket opens, the badge goes green and no mention is ever delivered. Socket
+  Mode needs the **Bot token** mode and an app installed from the guide's
+  manifest.
+- **The thread map could not be read** on a mention inside an existing thread.
+  Log: `reading the slack thread map`, and **this one is at `error`, not
+  `debug`** — the only line in this list that is. A mention that *starts* a
+  thread gets the error sentence instead; one inside a thread is dropped
+  silently, because Agento cannot tell whether the thread was its own.
 
 ### The reply is "Sorry, something went wrong."
 
 That one sentence covers every failure of the run itself, so the log is the only
-place the reason exists. Grep for the chat id on the line
-`slack mention matched`, then look for one of:
+place the reason exists.
+
+**One of the four is logged after the mention was matched, and three are logged
+instead of it.** So look for a `slack mention matched` line first: if there is
+one, take its `chat_id` and grep for
 
 - `agent execution failed for slack chat_id=…` — the run failed or timed out.
   Timeouts are indistinguishable from failures in Slack; the rule's **Timeout**
   is what bounds them.
-- `failed to create chat session for a slack mention` — the database write
-  failed.
+
+and if there is not, the mention failed before it got that far and there is no
+chat id to grep for. One of these three is the reason:
+
 - `slack inbound cannot identify itself` — Slack refused `auth.test`, so the
   bot token is wrong or revoked. Replace it under **Bot token**.
+- `failed to create chat session for a slack mention` — the database write
+  failed.
 - `reading the slack thread map` — the database could not be read.
 
 A reply of "No response generated." is different: the run succeeded and produced
@@ -694,8 +712,10 @@ data is untouched by a reinstall.
 The live file plus three dated archives are kept, roughly 20 MB in total.
 
 The log records one line per API request, plus what each write did. It does
-**not** record message bodies, prompts, credentials or search terms. It does
-record agent slugs and file paths, so treat it as mildly sensitive when sharing.
+**not** record message bodies, prompts, credentials or search terms — with one
+exception, at `debug` level only: the text of a Slack mention, on the line
+`slack mention prompt` (see [Slack](#slack)). It does record agent slugs and file
+paths, so treat it as mildly sensitive when sharing.
 
 ---
 
