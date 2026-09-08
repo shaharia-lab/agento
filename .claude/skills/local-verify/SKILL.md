@@ -317,6 +317,60 @@ committed version of probe 1 against the real CLI (one binary, so it is safe
 on this machine); it is `#[ignore]`d and CI never runs it, so a CLI upgrade
 can break every integration with the suite green.
 
+## Does Slack Socket Mode actually reach a real workspace?
+
+`tests/slack_socket.rs` proves the worker against an in-process fake, and a fake
+answers whatever this repository believes Slack answers — which is the one thing
+it cannot check. `tests/slack_socket_live.rs` opens a real Socket Mode connection
+instead, has a *person* mention the app, and waits for the agent's threaded
+reply. Run it after any change to `slack/socket.rs`, `slack/inbound.rs` or the
+manifest in `docs/user-guide.md`.
+
+It needs **four** tokens, and the fourth is not a mistake — a mention posted with
+the bot token carries `bot_id` and is dropped before the handler sees it, so the
+driver has to be a human:
+
+```bash
+export AGENTO_SLACK_TEST_BOT_TOKEN=xoxb-…    # Bot User OAuth Token
+export AGENTO_SLACK_TEST_APP_TOKEN=xapp-…    # App-Level Token, connections:write
+export AGENTO_SLACK_TEST_USER_TOKEN=xoxp-…   # a user token: chat:write, channels:history
+export AGENTO_SLACK_TEST_CHANNEL=C0123ABCDEF # invite the app to it first
+cargo test --test slack_socket_live -j 4 -- --ignored --nocapture
+```
+
+- **It costs money and needs a signed-in Claude CLI.** The reply is a real agent
+  run — `default` permission mode, a scratch working directory, one word asked
+  for. Without the CLI it skips; without the variables it skips; `cargo test`
+  never runs it.
+- **Build the app from the guide's manifest, not from an app you already have.**
+  The point of the run is that `docs/user-guide.md` is sufficient, so an app
+  carrying a scope the manifest forgot proves the opposite of what you wanted.
+- **It cleans up after itself, best effort** — the thread it created is deleted
+  on both the pass and the fail path, each message with the token that posted it.
+  A tidy-up failure never fails the test, so check the channel if a run died
+  hard.
+- **A failure quotes Slack back at you with every token replaced**, which is what
+  the one non-`#[ignore]`d test in that file guards.
+
+To watch the same thing from outside the test, read the worker's own column back
+over `/api` — it is `inbound_status` on the integration, and `inbound_error`
+beside it:
+
+```bash
+TOKEN=$(cat ~/.agento-desktop-dev/api-token)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8991/api/integrations \
+  | jq '.[]? | select(.type=="slack")
+        | {id, name, inbound_enabled, inbound_status, inbound_error, has_app_token}'
+```
+
+`""` is *not running*, then `connecting` → `connected`; `reconnecting` and
+`error` carry the reason in `inbound_error`. **`error` is a report, not a stop** —
+the worker is still retrying, so a fixed token reconnects with no restart, and a
+poll that waits for the column to *clear* waits forever (nothing clears it but
+the registry, at boot or when the row stops being startable). The switch itself
+is `PUT /api/integrations/{id}/inbound`, and it refuses to turn on without a
+stored app token.
+
 ## Engine-only probe (no app)
 
 `python3-gi` + WebKit2 4.1 is the same library Tauri embeds. An
@@ -356,9 +410,9 @@ with it.
 
 **Never run bare `cargo test` here**, and the reason is worth having in
 numbers rather than as a warning: `libagento_lib.a` is **1.2 GB** and the debug
-binary is **429 MB**, each of the eight integration tests links the whole of
-it, and `cargo test` links them **concurrently** — eight multi-gigabyte link
-jobs on a 16 GB machine, which swaps and stops responding. Nothing is wrong
+binary is **429 MB**, each of the twenty-two integration tests links the whole
+of it, and `cargo test` links them **concurrently** — twenty-two multi-gigabyte
+link jobs on a 16 GB machine, which swaps and stops responding. Nothing is wrong
 with the tests; it is linker parallelism, so `check.sh` runs one binary at a
 time with `-j` capped rather than skipping them. `cargo fmt`, `cargo clippy`
 and the frontend build never link, which is why the default mode is safe to run
