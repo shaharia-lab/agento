@@ -281,8 +281,14 @@ flow that actually errored.
   Go and its three-valued `credentials` contract (#515) would otherwise have to
   be resent to flip a boolean. It refuses before it writes — 404 unknown id, 400
   for any type but `slack`, 422 naming `credentials.app_token` when *enabling* a
-  row that stores none. It writes `inbound_enabled` alone and ends in
-  `registry::reload_blocking`, which is what starts and stops the socket worker.
+  row that stores none. Disabling is never refused on the credential axis, so a
+  row whose credentials were scrubbed cannot get stuck on. It writes
+  `inbound_enabled` alone and ends in `registry::reload_blocking`, which is what
+  starts and stops the socket worker. **The route is desktop-only**, so it is
+  recorded in `parity/desktop_routes.json` through `integrations::ROUTES` — the
+  **fourth** owner of that file, and the union in
+  `the_desktop_only_routes_are_recorded_in_both_directions` has to name it or
+  the set-equality assertion silently weakens.
 - **The 422 and the 400 are only worth something because `update` clears the
   column.** `PUT /api/integrations/{id}` can invalidate the switch on either
   axis — a replacing blob that drops `app_token` (#515 makes a sent blob replace
@@ -297,11 +303,7 @@ flow that actually errored.
 - `has_app_token_sql` is **not** scoped by `type`. No validator rejects an
   unknown key, so an API caller can put an `app_token` into a Telegram blob and
   see the read report `true`; nothing follows from it, because the switch that
-  consults it refuses any type but `slack`. It is desktop-only, so it is recorded in
-  `parity/desktop_routes.json` through `integrations::ROUTES` — the **fourth**
-  owner of that file, and the union in
-  `the_desktop_only_routes_are_recorded_in_both_directions` has to name it or
-  the set-equality assertion silently weakens.
+  consults it refuses any type but `slack`.
 - **`inbound_status` and `inbound_error` are the worker's to write** (#567), and
   so is `updated_at` left alone: a disable that cleared the status would erase
   the reason the user is looking at, and a worker rewriting its state on every
