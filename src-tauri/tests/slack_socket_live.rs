@@ -155,7 +155,12 @@ fn fixture_db(dir: &Path, work_dir: &Path, channel: &str) -> PathBuf {
                  3, '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
         rusqlite::params![
             INTEGRATION_ID,
-            channel,
+            // A **JSON array**, not the bare id. `dispatcher::decode_list`
+            // answers an empty `Vec` for anything it cannot parse, and
+            // `select_rule_for_channel` reads that as "every channel" — so a
+            // bare id here would still pass, against a rule that is not the
+            // narrow one this fixture claims to be.
+            serde_json::json!([channel]).to_string(),
             work_dir.to_string_lossy().to_string()
         ],
     )

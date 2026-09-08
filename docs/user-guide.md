@@ -311,6 +311,12 @@ oauth_config:
       - channels:read
 ```
 
+**That is the minimum for Socket Mode, and only for Socket Mode.** The same
+integration also gives your agents Slack *tools*, and two of them need more:
+`read_messages` needs `channels:history` and `list_users` needs `users:read`, so
+add those to the manifest if you want them. `search_messages` needs `search:read`,
+which Slack grants only to a user token — a bot app cannot have it.
+
 Then:
 
 1. **Install to Workspace** (under *Install App*), and copy the **Bot User OAuth
@@ -337,7 +343,9 @@ the answer arrives as a threaded reply.
 
 The first mention starts a chat; every later mention **in that thread** continues
 the same one, so the agent keeps its context. The chat appears in **Chats** with
-a `SLACK` badge and a *Started from* row that links back to the thread.
+a `SLACK` badge and a *Started from* row, which links back to the thread when
+Slack gave Agento a permalink for it and names the channel id alone when it did
+not.
 
 A mention in a thread Agento did not start is ignored — it is somebody else's
 conversation, and joining it uninvited is worse than staying quiet.
@@ -355,6 +363,11 @@ thread to see an answer, ask in the thread.
 the rule's **permission mode**, in the rule's **working directory**, on your
 machine, as you. Agento checks that the message came from a human rather than
 another bot, and nothing else: there is no allowlist of Slack users.
+
+**The channel list is the only filter a Slack rule applies.** The rule form also
+offers a **Prefix** and **Keywords**, because the same form serves Telegram —
+but a mention over Socket Mode is matched on its channel alone, so neither
+narrows what triggers a run. Do not reach for them as a safety measure.
 
 So treat the channel list as the access control it is:
 

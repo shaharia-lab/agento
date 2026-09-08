@@ -349,17 +349,19 @@ healthy integration that Slack cycles never reaches *Error*.
 
 The app-level token is wrong, revoked, or from a different app. Create a new one
 under **Basic Information → App-Level Tokens** with the `connections:write`
-scope, paste it into **App token**, and save — the worker picks it up on its next
-attempt. Agento never clears a stored token on a refusal, so the old one is still
-there until you replace it.
+scope, paste it into **App token**, and save — saving restarts the worker with
+it straight away, so the badge goes back to *Connecting* rather than waiting out
+the current backoff. Agento never clears a stored token on a refusal, so the old
+one is still there until you replace it.
 
-Two things that look like this and are not:
+Three things that look like this and are not:
 
 - `apps.connections.open refused the app token: not_allowed_token_type` — you
   pasted the **bot** token (`xoxb-`) into **App token**. It needs the
   `xapp-` one.
-- `apps.connections.open answered 401, not JSON` — something between Agento and
-  Slack answered instead of Slack, usually a proxy or a captive portal.
+- `apps.connections.open answered 401 Unauthorized, not JSON` — something
+  between Agento and Slack answered instead of Slack, usually a proxy or a
+  captive portal. Slack's own refusals are always JSON, so this is never Slack.
 - `opening the socket mode connection: …` — the token was accepted and the
   websocket itself would not open. **Agento's websocket does not use your system
   proxy settings**, unlike every other call it makes, so a network that requires
@@ -367,8 +369,9 @@ Two things that look like this and are not:
 
 ### Socket Mode says Connected but a mention does nothing
 
-Every one of these is silent by design, and each has its own line in the log at
-`debug` level. Work down the list:
+Every one of these is silent by design. All but the first say why in the log,
+and every one of those lines is at **`debug`** level — so raise the level before
+you go looking. Work down the list:
 
 - **The app is not in the channel.** Slack never sent the event at all — nothing
   appears in the log. `/invite @Agento` in that channel.
@@ -422,11 +425,18 @@ Agento holds the whole answer.
 
 ### Log lines to grep
 
-All of these are in the app log ([Reading the logs](#reading-the-logs)):
+These are all in the app log ([Reading the logs](#reading-the-logs)):
 
 ```bash
-grep -E 'slack (socket|mention|inbound|thread|event)' Agento.log
+grep -i slack Agento.log
 ```
+
+Narrower patterns miss lines they look like they would catch —
+`agent execution failed for slack chat_id=…` and
+`failed to send slack reply chunk …` both put something other than the subsystem
+name after the word.
+
+The ones worth knowing by name:
 
 - `slack socket worker started` / `slack socket worker stopped` — the switch.
 - `slack socket mode worker hosted` — the worker was started for this row.
@@ -439,9 +449,10 @@ grep -E 'slack (socket|mention|inbound|thread|event)' Agento.log
   and whether it started a chat or continued one.
 - `slack mention ignored, …` — a mention that did not, and why.
 
-**Two of these are only emitted at `debug`** — every `slack mention ignored`
-line, and the bot-message drop. If the log shows a *Connected* socket and nothing
-else at all, that is what you are missing.
+**Every `slack mention ignored` line is emitted at `debug`**, as is the
+bot-message drop and the redelivery line; everything else listed above is `info`
+or louder. If the log shows a *Connected* socket and nothing else at all, the
+level is what you are missing.
 
 One thing to know before sharing a log: at `debug` level Agento records the text
 of a Slack mention, on the line `slack mention prompt`. It is the only place a
