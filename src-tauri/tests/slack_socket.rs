@@ -582,9 +582,12 @@ async fn the_stored_status_walks_connected_reconnecting_and_error() {
     let db_path = fixture_db(dir.path(), "status-walk");
     // One good connection, then nothing but refusals: enough to cross the
     // threshold of two and stay there.
+    // Two seconds for the reason spelled out in
+    // `a_full_connect_drop_reconnect_cycle_names_nothing_secret`: the drop must
+    // not beat the `connected` write it is meant to follow.
     let fake = fake_slack(
         vec![],
-        vec![vec![Step::Hold(Duration::from_millis(150)), Step::Drop]],
+        vec![vec![Step::Hold(Duration::from_secs(2)), Step::Drop]],
     )
     .await;
 
@@ -943,9 +946,17 @@ async fn a_reload_mid_connect_leaves_exactly_one_live_connection() {
 async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = fixture_db(dir.path(), "secret");
+    // **The hold has to outlast the `connected` write, not merely the connect.**
+    // A status transition is posted to `status_writer` and written from
+    // `db::blocking`, so it lands some way after the socket opened. With a short
+    // hold the drop can beat it, and the first `connected` this test observes is
+    // then the one written by the *reconnect* — after which the fake's script is
+    // exhausted, the connection is held open forever, and no further transition
+    // ever comes. Two seconds is far longer than that write can take and costs
+    // nothing, because what follows it is polled rather than slept through.
     let fake = fake_slack(
         vec!["invalid_auth".into()],
-        vec![vec![Step::Hold(Duration::from_millis(100)), Step::Drop]],
+        vec![vec![Step::Hold(Duration::from_secs(2)), Step::Drop]],
     )
     .await;
 
