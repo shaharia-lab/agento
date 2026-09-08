@@ -142,9 +142,17 @@ default logs at `debug`.
   the row when they decline to start a worker, ordered before the start rather
   than racing it, and `start_all` clears every Slack row once at boot, before any
   worker exists, which is what corrects a `connected` a crash left behind. The
-  worker's own half is `stopped`: once its handle is dropped, `status_writer`
-  writes nothing more, so a transition queued just before a reload cannot
-  overwrite the replacement's.
+  worker's own half is two checks, and it needs both: `stopped` — set in
+  `SocketWorker::drop` before the shutdown oneshot — is the cheap early exit, and
+  an **epoch re-read inside `status_lock`** is what holds when the drop lands
+  between the check and the write. A `db::blocking` write can sit for the whole
+  five-second `busy_timeout`, which is ample time for a replacement to write
+  `connected` underneath it, and the row would then be stuck on the old worker's
+  last value because a socket that connects and stays connected has no next
+  transition. `status_lock` is global and held across the write, so the two
+  writes are ordered whichever way they arrive and the stale one is a no-op.
+  `clear_status_blocking` deliberately does not take it: the registry clears only
+  where it has already decided no worker will run.
 - **The backoff is re-anchored on the wall clock**, `schedule::runtime`'s rule
   for gocron's reason: `tokio::time::sleep` measures process time, and on a
   suspended machine that is not elapsed wall-clock time, so one long sleep holds

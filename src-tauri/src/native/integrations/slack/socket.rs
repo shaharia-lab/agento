@@ -249,6 +249,10 @@ pub fn start(
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<StatusMsg>();
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Taken here, not in the spawned writer: a worker is the current one from
+    // the moment it is started, and a writer that claimed lazily could be
+    // scheduled after its own replacement's.
+    let epoch = claim_epoch(db_path, integration_id);
     let task = Worker {
         db_path: db_path.to_path_buf(),
         integration_id: integration_id.to_string(),
@@ -261,6 +265,7 @@ pub fn start(
     tokio::spawn(status_writer(
         db_path.to_path_buf(),
         id.clone(),
+        epoch,
         Arc::clone(&stopped),
         status_rx,
     ));
@@ -285,6 +290,70 @@ struct Worker {
     /// worker never awaits a database write, because the thread that would wait
     /// is the one reading the socket.
     status: tokio::sync::mpsc::UnboundedSender<StatusMsg>,
+}
+
+/// Which worker's status writes still count, per row.
+///
+/// Bumped by [`claim_epoch`] on every [`start`], so a worker that has been
+/// replaced can tell. A plain `std` mutex: the section is a map lookup, and
+/// nothing awaits inside it.
+///
+/// **Keyed by the database as well as the id**, because that pair is what
+/// identifies the row a worker writes to. In a shipped build there is one
+/// database and the distinction never arises; in `cargo test` it is the whole
+/// difference between workers that replace each other and workers that merely
+/// share a name, and the test binaries run in one process.
+fn epochs() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static EPOCHS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    EPOCHS.get_or_init(Default::default)
+}
+
+/// Serializes every status write in the process, **and the epoch check that
+/// guards it**.
+///
+/// The two have to be one critical section or the check proves nothing: a
+/// retiring worker's [`StatusMsg`] can pass a `stopped` test and then sit inside
+/// a `db::blocking` write for as long as the five-second `busy_timeout` allows,
+/// which is ample time for its replacement to write `connected` underneath it.
+/// The row would then be stuck on the old worker's last value, because on a
+/// socket that connects and stays connected there is no next transition to
+/// correct it. Holding this across the write makes the two writes ordered, and
+/// re-reading the epoch inside it makes a stale one a no-op whichever order they
+/// arrive in.
+///
+/// Global rather than per-integration because a status transition happens a
+/// handful of times per connection lifetime and a machine has one or two Slack
+/// integrations; a map of mutexes would be more code for a queue that is
+/// essentially always empty. Nothing on the socket's read path waits here.
+fn status_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(Default::default)
+}
+
+/// Take the next epoch for this integration. The caller is now the current
+/// worker, and every earlier one is stale.
+fn epoch_key(db_path: &Path, integration_id: &str) -> String {
+    format!("{}\u{0}{integration_id}", db_path.display())
+}
+
+fn claim_epoch(db_path: &Path, integration_id: &str) -> u64 {
+    let mut epochs = epochs().lock().unwrap_or_else(|e| e.into_inner());
+    let epoch = epochs
+        .entry(epoch_key(db_path, integration_id))
+        .or_default();
+    *epoch += 1;
+    *epoch
+}
+
+fn is_current(db_path: &Path, integration_id: &str, epoch: u64) -> bool {
+    epochs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&epoch_key(db_path, integration_id))
+        .copied()
+        .unwrap_or_default()
+        == epoch
 }
 
 /// One thing to record about the connection.
@@ -318,11 +387,19 @@ struct StatusMsg {
 async fn status_writer(
     db_path: PathBuf,
     integration_id: String,
+    epoch: u64,
     stopped: Arc<std::sync::atomic::AtomicBool>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<StatusMsg>,
 ) {
     while let Some(StatusMsg { status, error }) = rx.recv().await {
         if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            continue;
+        }
+        let _guard = status_lock().lock().await;
+        // Re-read *inside* the lock. `stopped` above is the cheap early exit for
+        // the ordinary case; this is the one that holds when the drop lands
+        // between the two.
+        if !is_current(&db_path, &integration_id, epoch) {
             continue;
         }
         let (path, id) = (db_path.clone(), integration_id.clone());
@@ -830,6 +907,11 @@ pub fn write_status_blocking(db_path: &Path, integration_id: &str, status: &str,
 /// it is the code that decides — so it owns the clear, ordered against the start
 /// rather than racing it.
 pub fn clear_status_blocking(db_path: &Path, integration_id: &str) {
+    // Deliberately **not** behind [`status_lock`]. The registry clears only
+    // where it has already decided no worker will run — `start_one` and `reload`
+    // do it before the start that might follow — so there is no concurrent
+    // writer to order against, and taking an async lock from a `_blocking`
+    // helper would mean this could not be called from `db::blocking` at all.
     run_status_write(
         db_path,
         "UPDATE integrations SET inbound_status = '', inbound_error = '' WHERE id = ?1",
@@ -974,6 +1056,43 @@ mod tests {
                 "the cap plus its jitter is the ceiling: {waits:?}"
             );
         }
+    }
+
+    /// Starting a worker makes every earlier one for that integration stale,
+    /// and leaves other integrations alone.
+    ///
+    /// This is the half of the retiring-worker race that can be asserted
+    /// directly. The interleaving it defends against — a status write already
+    /// inside `db::blocking` when its replacement starts — is driven by
+    /// `a_stopped_worker_writes_no_more_status` over a real socket; what is
+    /// pinned here is that the epoch actually distinguishes the two workers,
+    /// which is what makes the check inside `status_lock` mean anything.
+    #[test]
+    fn starting_a_worker_makes_every_earlier_one_for_that_integration_stale() {
+        let one = std::path::Path::new("/tmp/epoch-test/one.db");
+        let two = std::path::Path::new("/tmp/epoch-test/two.db");
+
+        let a = claim_epoch(one, "s1");
+        assert!(is_current(one, "s1", a));
+
+        let b = claim_epoch(one, "s1");
+        assert_ne!(a, b, "each start takes its own epoch");
+        assert!(!is_current(one, "s1", a), "the replaced worker is stale");
+        assert!(is_current(one, "s1", b));
+
+        // A different integration's starts do not move this one.
+        let other = claim_epoch(one, "s2");
+        assert!(is_current(one, "s1", b));
+        assert!(is_current(one, "s2", other));
+
+        // Neither does the same id against a different database — the pair is
+        // the identity, and two suites' `s1` are not the same row.
+        let elsewhere = claim_epoch(two, "s1");
+        assert!(is_current(one, "s1", b));
+        assert!(is_current(two, "s1", elsewhere));
+
+        // An id nothing ever claimed is at epoch 0, so no live worker matches.
+        assert!(!is_current(one, "never", b));
     }
 
     /// A boot clears every Slack row's inbound state and nothing else's.

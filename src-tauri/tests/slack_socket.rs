@@ -895,7 +895,16 @@ async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     // binary actually produced. The refusal scripted above is what walks the
     // `format!`-an-error path, which is where the token would surface; the two
     // database columns below cannot see that class of leak at all.
-    for record in captured_logs() {
+    let records = captured_logs();
+    // **The emptiness check is the load-bearing half.** `set_boxed_logger`
+    // refuses a second install and this swallows that, so a capture that never
+    // started would satisfy "no record names the token" for the wrong reason —
+    // the exact shape of a green assertion over zero cases.
+    assert!(
+        !records.is_empty(),
+        "the collector captured nothing, so the leak check proves nothing"
+    );
+    for record in records {
         assert!(
             !record.contains("xapp-") && !record.contains(APP_TOKEN),
             "a log record names the app token: {record:?}"

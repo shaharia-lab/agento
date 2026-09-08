@@ -425,7 +425,16 @@ pub async fn start_all(db_path: &Path) -> Result<(), String> {
     // `connecting` a moment later; a row that gets no worker is left saying
     // nothing, which is what the column's default means. See
     // `slack::socket::clear_all_inbound_status_blocking`.
-    super::slack::socket::clear_all_inbound_status_blocking(db_path);
+    // Through `db::blocking` like every other database touch in this module:
+    // `start_all` is spawned onto the runtime at boot, and this is a *write*
+    // against a five-second `busy_timeout` at the one moment the scanner's batch
+    // writer is most likely to hold the lock. The read below is a WAL read and
+    // never waits on a writer, which is why it is not the same question.
+    let clear_db = db_path.to_path_buf();
+    crate::native::db::blocking("slack inbound clear at boot", move || {
+        super::slack::socket::clear_all_inbound_status_blocking(&clear_db);
+    })
+    .await;
     let rows = list_for_hosting(db_path)?;
     for row in rows {
         if !row.is_startable() {
