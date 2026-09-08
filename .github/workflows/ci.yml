@@ -70,12 +70,13 @@ jobs:
           echo "::error::version strings disagree — tauri.conf.json=${conf} package.json=${pkg} package-lock.json=${lock} package-lock.json .packages['']=${lock_pkg} src-tauri/Cargo.toml=${cargo_toml}. Fix with: npm version ${conf} --no-git-tag-version (package.json + lockfile), and set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand (then \`cargo update -p agento --offline\` for Cargo.lock). See docs/releasing.md step 2."
           exit 1
 
-      # Every CLAUDE.md stays under 40k characters. Claude Code truncates a
-      # project instruction file past 150k and the root file reached 304k
-      # (#553), so the notes are split per subsystem and this keeps each part
-      # small enough to be read in full. The script is the single definition of
-      # the limit; `npm run check:claude-md` runs the same thing locally.
-      - name: CLAUDE.md files fit the context budget
+      # The repository holds exactly one CLAUDE.md, at the root, and it stays
+      # under 40k characters. Claude Code truncates a project instruction file
+      # past 150k and the root file reached 304k (#553), so the subsystem notes
+      # live in docs/internal/ (#580) and this keeps the root small enough to be
+      # read in full. The script is the single definition of both rules;
+      # `npm run check:claude-md` runs the same thing locally.
+      - name: CLAUDE.md fits the context budget and stands alone
         run: scripts/check-claude-md-size.sh
 
       - name: Install Linux build dependencies
