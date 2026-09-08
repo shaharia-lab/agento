@@ -313,12 +313,18 @@ oauth_config:
 
 **That is the minimum for Socket Mode, and only for Socket Mode.** The same
 integration also gives your agents seven Slack *tools*, and most of them need
-scopes this manifest does not grant. Add what you want: `read_messages` needs
-`channels:history`, `list_users` needs `users:read`, and `list_channels` and
-`get_channel_info` reach **private** channels only with `groups:read` (they ask
-Slack for public and private together, so without it they fail rather than
-return the public half). One you cannot add — `search_messages` needs
-`search:read`, which Slack grants only to a user token.
+scopes this manifest does not grant. Add what you want:
+
+- `read_messages` needs `channels:history`, and `groups:history` as well for a
+  private channel.
+- `list_users` needs `users:read`.
+- `get_channel_info` reaches a **private** channel only with `groups:read`.
+- `list_channels` needs `groups:read` outright, not only for the private half:
+  it asks Slack for public and private channels together, so without it the
+  tool fails rather than returning the public ones.
+
+One you cannot add: `search_messages` needs `search:read`, which Slack grants
+only to a user token, not to a bot.
 
 Then:
 
