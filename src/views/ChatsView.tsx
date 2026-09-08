@@ -909,44 +909,6 @@ export function ChatsView({
  * one, because a mismatch renders no messages either and "no longer available"
  * would be the wrong sentence for a session that is available elsewhere.
  */
-/**
- * Where the conversation started, when it was not this app (#570).
- *
- * The `Continued from` shape without the hand-off: `NavTarget` addresses a view
- * *inside* Agento and this destination is Slack, so the action is
- * `openExternal` — never `window.open` or a `target="_blank"`, neither of which
- * leaves a Tauri webview.
- *
- * Two honest states. `permalink` is best-effort at the source — Slack's
- * `chat.getPermalink` can fail and the run is not refused over it — so an empty
- * one renders the row **without** the action rather than a link that goes
- * nowhere. The channel is its id, not its name: that is all the mapping row
- * carries.
- */
-function InboundRow({ inbound }: { inbound: ChatInbound }) {
-  return (
-    <InspRow label="Started from">
-      <span className="chat-inbound">
-        <span className="truncate" title={inboundTitle(inbound)}>
-          Slack #{inbound.channel_id}
-        </span>
-        {inbound.permalink && (
-          <a
-            className="chat-inbound__open"
-            href={inbound.permalink}
-            onClick={(e) => {
-              e.preventDefault();
-              openExternal(inbound.permalink);
-            }}
-          >
-            Open in Slack
-          </a>
-        )}
-      </span>
-    </InspRow>
-  );
-}
-
 function ResumedHistory({
   sessionId,
   projectPath,
@@ -1004,6 +966,49 @@ function ResumedHistory({
         <span>Continued here</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * Where the conversation started, when it was not this app (#570).
+ *
+ * The `Continued from` shape without the hand-off: `NavTarget` addresses a view
+ * *inside* Agento and this destination is Slack, so the action is
+ * `openExternal` — never `window.open` or a `target="_blank"`, neither of which
+ * leaves a Tauri webview.
+ *
+ * Two honest states. `permalink` is best-effort at the source — Slack's
+ * `chat.getPermalink` can fail and the run is not refused over it — so an empty
+ * one renders the row **without** the action rather than a link that goes
+ * nowhere. The channel is its id, not its name: that is all the mapping row
+ * carries.
+ */
+function InboundRow({ inbound }: { inbound: ChatInbound }) {
+  return (
+    <InspRow label="Started from">
+      {/* `row insp-row__copy` is the existing "a truncating value beside a
+          fixed-width sibling" shape (`SessionInspector`, the gateway overview):
+          `.insp-row__value` ellipsises one nowrap value, and this row has two.
+          Redeclaring it here would drift the moment inspector spacing is
+          adjusted, so `.chat-inbound` only adds the wrap. */}
+      <span className="row insp-row__copy chat-inbound">
+        <span className="truncate" title={inboundTitle(inbound)}>
+          Slack #{inbound.channel_id}
+        </span>
+        {inbound.permalink && (
+          <a
+            className="chat-inbound__open"
+            href={inbound.permalink}
+            onClick={(e) => {
+              e.preventDefault();
+              openExternal(inbound.permalink);
+            }}
+          >
+            Open in Slack
+          </a>
+        )}
+      </span>
+    </InspRow>
   );
 }
 

@@ -794,13 +794,17 @@ fn bulk_delete(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError>
 /// The session row, read inside the caller's transaction.
 fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSession>, WriteError> {
     tx.query_row(
-        "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
-                settings_profile_id, total_input_tokens, total_output_tokens,
-                total_cache_creation_tokens, total_cache_read_tokens, is_favorite,
-                created_at, updated_at, permission_mode,
-                continued_from_session_id, continued_from_project_path,
-                continued_from_message_count
-         FROM chat_sessions WHERE id = ?1",
+        "SELECT cs.id, cs.title, cs.agent_slug, cs.sdk_session_id, cs.working_directory, cs.model,
+                cs.settings_profile_id, cs.total_input_tokens, cs.total_output_tokens,
+                cs.total_cache_creation_tokens, cs.total_cache_read_tokens, cs.is_favorite,
+                cs.created_at, cs.updated_at, cs.permission_mode,
+                cs.continued_from_session_id, cs.continued_from_project_path,
+                cs.continued_from_message_count,
+                it.chat_id, it.integration_id, i.name, it.channel_id, it.thread_ts, it.permalink
+         FROM chat_sessions cs
+         LEFT JOIN inbound_threads it ON it.chat_id = cs.id
+         LEFT JOIN integrations i ON i.id = it.integration_id
+         WHERE cs.id = ?1",
         [id],
         |row| {
             Ok(ChatSession {
@@ -822,11 +826,14 @@ fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSes
                 continued_from_session_id: row.get(15)?,
                 continued_from_project_path: row.get(16)?,
                 continued_from_message_count: row.get(17)?,
-                // #570 is read-side attribution: the two GETs carry `inbound`,
-                // the write path does not join for it. `ChatsView` reloads the
-                // list after a PATCH rather than reading this body, so nothing
-                // on screen loses the chip.
-                inbound: None,
+                // The same joins as `SESSION_COLUMNS`, because this is the same
+                // `ChatSession` and the *absence* of `inbound` is load-bearing:
+                // a `PATCH` body without it would tell a consumer the chat was
+                // not started from Slack. This SELECT keeps its own column
+                // order (`is_favorite` at 11, the timestamps at 12/13), so the
+                // joined columns land at 18+ the same way and `scan_inbound`
+                // reads both.
+                inbound: scan_inbound(row)?,
             })
         },
     )
@@ -1053,12 +1060,15 @@ mod tests {
             .is_none());
     }
 
-    /// `inbound_threads` is `UNIQUE (chat_id)` and `integrations.id` is a
-    /// primary key, so neither `LEFT JOIN` can multiply a chat row. Seeded with
-    /// a second mapping — on the *other* chat, since one chat cannot hold two —
-    /// the list is still two rows, one query.
+    /// Two chats, each with its own mapping and its own integration, still list
+    /// as two rows carrying the right one each — the `LEFT JOIN`s add columns,
+    /// not rows, and the list stays one query.
+    ///
+    /// It cannot seed a *duplicate* `chat_id`, which is what would actually
+    /// multiply a row: `UNIQUE (chat_id)` forbids it, and `migrate.rs` is where
+    /// that constraint is asserted.
     #[test]
-    fn the_join_cannot_multiply_a_chat_row() {
+    fn the_joins_add_columns_not_rows() {
         let file = fixture();
         map_older_to_slack(&file, "https://acme.slack.com/archives/C0123ABC/p1");
         let conn = rusqlite::Connection::open(file.path()).expect("open");
@@ -1424,6 +1434,54 @@ mod tests {
             body.contains(r#""continued_from_message_count":42"#),
             "…and the boundary, which is what stops a double render: {body}"
         );
+    }
+
+    /// The `PATCH` body is the same `ChatSession`, so it carries `inbound` too:
+    /// a rename or a favourite must not report a Slack-started chat as though
+    /// the UI had started it. `get_session_tx` is a second, differently ordered
+    /// SELECT, which is why this needs its own test rather than resting on the
+    /// read-path ones.
+    #[test]
+    fn a_patch_on_a_slack_started_chat_carries_inbound() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO integrations (id, name, type, created_at, updated_at)
+             VALUES ('int-1', 'Team Slack', 'slack', '2026-01-02 03:04:05 +0000 UTC',
+                     '2026-01-02 03:04:05 +0000 UTC')",
+            [],
+        )
+        .expect("integration");
+        conn.execute(
+            "INSERT INTO inbound_threads
+                (integration_id, channel_id, thread_ts, chat_id, permalink)
+             VALUES ('int-1', 'C0123ABC', '1788000000.000100', ?1,
+                     'https://acme.slack.com/archives/C0123ABC/p1788000000000100')",
+            [&id],
+        )
+        .expect("mapping");
+
+        let answer = patch(file.path(), &id, br#"{"is_favorite":true}"#).expect("patch");
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert!(
+            body.contains(
+                r#""inbound":{"integration_id":"int-1","integration_name":"Team Slack","channel_id":"C0123ABC","thread_ts":"1788000000.000100","permalink":"https://acme.slack.com/archives/C0123ABC/p1788000000000100"}"#
+            ),
+            "the patch response must not report a Slack chat as UI-started: {body}"
+        );
+    }
+
+    /// …and the absence survives the same route: a chat with no mapping still
+    /// sends no `inbound` key from the write path either.
+    #[test]
+    fn an_ordinary_chat_carries_no_inbound_key_through_a_patch() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+        let answer = patch(file.path(), &id, br#"{"is_favorite":true}"#).expect("patch");
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert!(!body.contains("inbound"), "unexpected inbound key: {body}");
     }
 
     /// A chat that is not a continuation puts none of the three on the wire, so

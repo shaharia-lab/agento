@@ -296,19 +296,14 @@
   background: var(--border);
 }
 
-/* The Slack origin row in the inspector (#570). `.insp-row__value` ellipsises a
-   single value on one nowrap line; this row has two children, so the channel id
-   gets the truncation and the action keeps its width — a long channel id must
-   not push "Open in Slack" out of the pane. */
+/* The Slack origin row (#570). The layout is the shared `row insp-row__copy`
+   shape — a truncating value beside a fixed-width sibling — with one addition:
+   it wraps. The inspector is 220px at its narrowest and "Open in Slack" takes
+   most of a value column, so without the wrap the channel id ellipsises to
+   `#C…` and the row no longer says the one thing it exists to say. */
 .chat-inbound {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  min-width: 0;
-}
-
-.chat-inbound > .truncate {
-  min-width: 0;
+  flex-wrap: wrap;
+  row-gap: 0;
 }
 
 .chat-inbound__open {
