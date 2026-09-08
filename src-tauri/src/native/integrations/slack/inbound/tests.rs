@@ -929,8 +929,73 @@ fn the_global_bound_is_taken_around_the_run_and_not_around_the_wait() {
          not while a mention waits for its thread's turn"
     );
     assert!(
-        !include_str!("../socket.rs").contains("semaphore().acquire"),
+        !include_str!("../socket.rs").contains("semaphore()"),
         "and the transport must not take it: a mention waiting for its thread's \
          turn is not a `claude` subprocess"
+    );
+}
+
+/// #568's acceptance criterion 5, through the code that actually sends: a long
+/// answer arrives as consecutive messages in one thread.
+///
+/// `mrkdwn::split` has its own table, but `post`'s loop runs at one chunk in
+/// every other test here — so posting the answer whole, or firing the chunks
+/// concurrently (which `post`'s own doc says renders a thread backwards), would
+/// leave the whole suite green.
+#[tokio::test]
+async fn a_long_answer_arrives_as_consecutive_messages_in_one_thread() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-long");
+    seed_rule(
+        &db,
+        "s-long",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+    );
+    let answer = "x".repeat(10_000);
+    let cli = fake_cli(dir.path(), &answer, "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler(&db, "s-long", "xoxb-t");
+    finish(handler(mention(
+        "<@U0BOT> at length",
+        "1700000000.000100",
+        "",
+        "s-long",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    let posted = slack.posted();
+    assert_eq!(
+        posted.len(),
+        3,
+        "10000 characters over a 4000 limit is three"
+    );
+    assert!(
+        posted
+            .iter()
+            .all(|(thread, _)| thread == "1700000000.000100"),
+        "every chunk in the same thread"
+    );
+    assert_eq!(
+        posted
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<String>(),
+        answer,
+        "in order, and losing nothing"
     );
 }

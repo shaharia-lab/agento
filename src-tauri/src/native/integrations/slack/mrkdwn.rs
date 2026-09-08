@@ -29,9 +29,9 @@
 //! notify everyone in it.
 //!
 //! So [`to_mrkdwn`] escapes the whole answer **before** converting anything, and
-//! the only raw `<`, `>` and `|` in its output are the three it writes itself
-//! around a link whose target it has checked is an `http`, `https` or `mailto`
-//! URL. That check is not decoration: `<…>` is Slack's markup for *everything*,
+//! the only raw `<` and `|` in its output — and the only raw `>` outside a
+//! restored blockquote marker, below — are the ones it writes itself around a
+//! link whose target it has checked is an `http`, `https` or `mailto` URL. That check is not decoration: `<…>` is Slack's markup for *everything*,
 //! so a link target it did not vet is a hole straight back through the escape —
 //! `[](!channel)` would otherwise become `<!channel>`, and a channel member can
 //! ask for that in one sentence. A target that is not such a URL keeps its
@@ -110,14 +110,20 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// A line's leading run of escaped `&gt;` put back as `>`.
+/// A line's leading run of escaped `&gt;` put back as a single `>`.
 ///
 /// Slack's blockquote marker is Markdown's, so escaping is the only thing that
-/// broke it. Only the leading run: a `>` mid-sentence is prose and stays
-/// escaped, which is the whole point of escaping it.
+/// broke it. Two deliberate narrowings:
+///
+/// - **Only the leading run.** A `>` mid-sentence is prose and stays escaped,
+///   which is the whole point of escaping it.
+/// - **However long the run, one marker comes back.** Markdown's `>>>` is a
+///   *nested* blockquote, which Slack does not have; Slack's own `>>>` quotes
+///   **the rest of the message**, so reproducing the run verbatim would turn a
+///   nested quote into a quote of everything after it.
 fn restore_blockquote(line: &str) -> String {
-    let mut markers = 0;
     let mut rest = line;
+    let mut markers = 0;
     while let Some(after) = rest.strip_prefix("&gt;") {
         markers += 1;
         rest = after;
@@ -125,7 +131,7 @@ fn restore_blockquote(line: &str) -> String {
     if markers == 0 {
         return line.to_string();
     }
-    format!("{}{rest}", ">".repeat(markers))
+    format!(">{rest}")
 }
 
 /// ```` ``` ```` or longer, at the start of a line, opening or closing a block.
@@ -408,7 +414,9 @@ mod tests {
             ("[a|b](https://x)", "[a|b](https://x)"),
             // A blockquote is the one line marker escaping would have cost.
             ("> quoted", "> quoted"),
-            (">>> quoted", ">>> quoted"),
+            // Markdown's nested quote is Slack's quote-everything-after, so one
+            // marker comes back however many went in.
+            (">>> quoted", "> quoted"),
             ("a > b", "a &gt; b"),
         ] {
             assert_eq!(to_mrkdwn(markdown), want, "converting {markdown:?}");

@@ -244,7 +244,7 @@ declines to start one.
   turn is not one: taken in `socket.rs::dispatch`, as #567 had it, ten queued
   mentions in a single Slack thread hold every permit while one of them runs —
   and Telegram, which shares that semaphore, stops with them. `dispatch` no
-  longer acquires anything; `inbound::Inbound::run` does, immediately before
+  longer acquires anything; `inbound::Inbound::turn` does, immediately before
   `run_resumed`. The handler future still spans the whole turn (each job carries
   a `oneshot` the worker fires when it ends, however it ended), because a `debug`
   line saying a mention was seen and a reply appearing minutes later are two
@@ -288,7 +288,8 @@ declines to start one.
   words is posted by the app as itself, into a channel it is a member of by
   construction. The only raw `<`, `>` and `|` in the output are the ones this
   module writes around a link whose target it has checked is an `http`, `https`
-  or `mailto` URL. That check is the escape's second half, not tidiness: `<…>` is
+  or `mailto` URL — plus a restored blockquote marker, which is the one other
+  raw `>` it emits. That check is the escape's second half, not tidiness: `<…>` is
   Slack's markup for everything, so an unvetted link target is a hole straight
   back through the escape — `[](!channel)` would otherwise become `<!channel>`,
   and a channel member can ask for that in one sentence. Any other target keeps

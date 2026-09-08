@@ -113,7 +113,7 @@ struct Job {
     /// saying a mention was seen and a reply appearing minutes later are two
     /// different things for anyone reading a log, and #567's `dispatch` has
     /// nothing left to do while this runs. It costs a parked task and no
-    /// semaphore permit — the ten-slot bound is taken in [`Inbound::run`],
+    /// semaphore permit — the ten-slot bound is taken in [`Inbound::turn`],
     /// around the run itself.
     done: tokio::sync::oneshot::Sender<()>,
 }
