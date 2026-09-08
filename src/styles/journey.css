@@ -41,8 +41,9 @@
   border: var(--hairline) solid var(--line);
   border-radius: var(--r-md);
   background: var(--bg);
-  /* Not `hidden`: the CSS trap in CLAUDE.md is `.card`'s overflow collapsing a
-     flex child's min-content height. These are `flex: none` children of a
+  /* Not `hidden`: the CSS trap in docs/internal/frontend.md is `.card`'s
+     overflow collapsing a flex child's min-content height. These are
+     `flex: none` children of a
      column, so a clip would only hide a step's own scroll. */
   overflow: clip;
 }

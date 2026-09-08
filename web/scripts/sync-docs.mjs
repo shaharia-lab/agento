@@ -50,8 +50,15 @@ function rewriteLinks(body) {
     const inDocs = hrefFor(target);
     if (inDocs) return `](${inDocs}${title})`;
 
-    // Anything else points outside docs/ — CLAUDE.md, README.md, parity/,
-    // source files. Real destinations, just not pages on this site.
+    // Anything else is not a page on this site: CLAUDE.md, README.md,
+    // parity/, source files. Real destinations, just not published here.
+    //
+    // **A relative link into a docs/ subdirectory comes out wrong**, because
+    // this strips one leading `../` or `./` and prefixes the blob root — so
+    // `internal/native.md` becomes `<blob>/internal/native.md`, which 404s.
+    // docs/internal/ (#580) is the only such subdirectory, and docs/README.md
+    // names it in prose rather than linking it for exactly this reason. Fix
+    // this before adding a link to one, rather than working around it again.
     const repoPath = target.replace(/^\.\//, '').replace(/^\.\.\//, '');
     return `](${REPO_BLOB}/${repoPath}${title})`;
   });

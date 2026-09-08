@@ -26,8 +26,9 @@
 //! `kid`, and signatures.
 //!
 //! That is also why there is no "show me the private key" affordance anywhere:
-//! `CLAUDE.md`'s standing rule — *"Do not introduce a UI that echoes them back;
-//! the API scrubs them and the UI must not reintroduce them"* — applies to a
+//! `docs/internal/native-integrations.md`'s standing rule — *"Do not introduce
+//! a UI that echoes them back; the API scrubs them and the UI must not
+//! reintroduce them"* — applies to a
 //! durable signing key more than to anything it was written for. Nothing needs
 //! it. What another service consumes is the public half, over JWKS.
 //!

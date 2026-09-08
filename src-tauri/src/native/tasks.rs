@@ -1902,8 +1902,8 @@ struct TaskRequest {
     /// is what a bare `Option` already gives, and the column is `DATETIME NULL`
     /// rather than a zero-valued `NOT NULL`. Note this is also the one field
     /// where `deserialize_with` would change the shape rather than only the
-    /// value — see `CLAUDE.md` → *They are types rather than `deserialize_with`
-    /// functions*.
+    /// value — see `docs/internal/native.md` → *They are types rather than
+    /// `deserialize_with` functions*.
     stop_after_time: Option<GoTime>,
 }
 

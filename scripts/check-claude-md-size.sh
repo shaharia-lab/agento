@@ -28,6 +28,12 @@ while IFS= read -r file; do
   status=1
 done < <(git ls-files '*CLAUDE.md' | grep -v '^CLAUDE\.md$' || true)
 
+# The size loop covers the root file only. The relocated notes in docs/internal/
+# are no longer auto-loaded, so no session pays for all of them at once — but
+# they are still read into context one at a time, and docs/internal/native.md is
+# 39,989 characters. #580 left extending the limit to them as a separate
+# decision ("apply it to docs/internal/*.md only if the team wants it"); if that
+# is wanted, add 'docs/internal/*.md' to the git ls-files below.
 while IFS= read -r file; do
   size=$(wc -c < "$file")
   if [ "$size" -gt "$LIMIT" ]; then
