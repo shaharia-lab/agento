@@ -169,12 +169,15 @@ default logs at `debug`.
   Granting it in the one critical section that decides acceptance makes epoch
   order and acceptance order the same order by construction. `NOT_ACCEPTED`
   matches nothing, so a refused worker is silent. `Registry::stop` and the
-  no-worker arm of `put_if_current` retire the epoch under the same lock; the one
-  that *hands* it to `clear_status` is **`retire_socket_if_current`**, and the
-  generation check in its name is load-bearing — a start that fails is still a
-  start that may have lost, so retiring unconditionally there would drop a
-  concurrent reload's live worker and then blank its row. `None` means the caller
-  lost and touches nothing. Only the boot clear skips all of it, because no
+  no-worker arm of `put_if_current` retire the epoch under the same lock. Two of
+  those *hand* it on to `clear_status` — that arm, and
+  **`retire_socket_if_current`**; `Registry::stop` discards its own, because a
+  stop is either a delete (the row goes too) or a `reload` that clears on
+  whichever no-worker branch it reaches. The generation check in
+  `retire_socket_if_current`'s name is load-bearing: a start that *fails* is
+  still a start that may have lost, so retiring unconditionally there would drop
+  a concurrent reload's live worker and then blank its row. `None` means the
+  caller lost and touches nothing. Only the boot clear skips all of it, because no
   worker exists yet.
   `a_refused_socket_never_takes_the_epoch_from_the_accepted_one` is the guard.
 - **`tests/slack_socket.rs` drives workers with no registry, so it grants the
