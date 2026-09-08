@@ -35,6 +35,7 @@ import type {
 } from "../lib/types";
 import {
   connectionState,
+  inboundState,
   modeFor,
   NOT_CONNECTED,
   PROVIDERS,
@@ -1577,7 +1578,6 @@ function AuthSection({
 
 /** The wording for a provider that declares none. */
 const TRIGGER_TARGETS_FALLBACK: TriggerTargets = {
-  label: "Chat IDs",
   placeholder: "IDs, comma separated (blank = any)",
   help: "Conversation ids, comma-separated; empty = every conversation.",
   noun: "chat",
@@ -1649,15 +1649,28 @@ function draftOf(r: TriggerRule): RuleDraft {
  * happens to have to hand: a partial body there is how flicking a rule off and
  * on silently erased its model, working directory, profile, permission mode and
  * timeout.
+ *
+ * `lists` is the second call site's, and only its. `draftOf` joins each filter
+ * with `", "` for a text input and `splitList` splits it back on `,` — lossless
+ * for anything typed in the form, and *not* for a keyword the API stored with a
+ * comma or with surrounding space in it. The row's toggle edits neither list,
+ * so it hands over the stored arrays verbatim rather than round-tripping them
+ * through a control the user never opened. Same rule as the settings above, one
+ * field further out.
  */
-function ruleBody(d: RuleDraft) {
+interface RuleLists {
+  filter_keywords: string[] | null;
+  filter_chat_ids: string[] | null;
+}
+
+function ruleBody(d: RuleDraft, lists?: RuleLists) {
   return {
     name: d.name.trim(),
     agent_slug: d.agent_slug.trim(),
     enabled: d.enabled,
     filter_prefix: d.filter_prefix.trim(),
-    filter_keywords: splitList(d.filter_keywords),
-    filter_chat_ids: splitList(d.filter_chat_ids),
+    filter_keywords: lists ? lists.filter_keywords : splitList(d.filter_keywords),
+    filter_chat_ids: lists ? lists.filter_chat_ids : splitList(d.filter_chat_ids),
     model: d.model.trim(),
     working_directory: d.working_directory.trim(),
     settings_profile_id: d.settings_profile_id.trim(),
@@ -1823,7 +1836,7 @@ function TriggerRules({
                       run(() =>
                         api.put(
                           `/integrations/${integrationId}/triggers/${r.id}`,
-                          ruleBody({ ...draftOf(r), enabled: on })
+                          ruleBody({ ...draftOf(r), enabled: on }, r)
                         )
                       )
                     }
@@ -1926,12 +1939,23 @@ function RuleForm({
 }) {
   const agent = agents.find((a) => a.slug === draft.agent_slug);
   /**
-   * The same rule `NewChatBar` follows (#299): the runner sets a model only
-   * when the *agent* has one, so a rule's own model is simply not consulted
-   * for an agent that carries one. An editable picker there would be a control
-   * that silently does nothing.
+   * **A rule's model is not `NewChatBar`'s, and the precedence is inverted.**
+   *
+   * The chat path takes the agent's model and ignores the chat's (#299), which
+   * is why that picker locks itself when the agent names one. A trigger fires a
+   * *headless* run, and `agent_run.rs::headless_spec` says the opposite in as
+   * many words — "The caller's model wins over the agent's own" — writing the
+   * rule's model over the agent's whenever it is set;
+   * `dispatcher.rs::run_inputs_carries_the_rules_settings_and_its_timeout`
+   * pins it by asserting a rule's `opus` on an agent that already carried a
+   * model. So locking here would grey out a setting the backend honours, and
+   * caption it with a model different from the one that would run.
+   *
+   * What survives of "from agent" is the *default* option's wording: with no
+   * model of its own the rule really does run the agent's, and naming it is
+   * the honest half of what the lock was for.
    */
-  const modelLocked = !!agent?.model;
+  const agentModel = agent?.model ?? "";
   const timeout = Number(draft.timeout_minutes);
   const timeoutValid =
     draft.timeout_minutes === "" ||
@@ -2018,19 +2042,25 @@ function RuleForm({
       <div className="row" style={{ gap: "var(--sp-3)", flexWrap: "wrap" }}>
         <Dropdown
           small
-          disabled={modelLocked}
-          value={modelLocked ? (agent?.model ?? "") : draft.model}
+          value={draft.model}
           onChange={(model) => onChange({ ...draft, model })}
           ariaLabel="Model"
-          label={
-            modelLocked
-              ? `Model: ${agent?.model} (from agent)`
-              : `Model: ${draft.model || "default"}`
-          }
-          options={[
-            { value: "", label: "Default model" },
-            ...withCurrent(MODELS, draft.model),
-          ]}
+          label={`Model: ${draft.model || (agentModel ? `${agentModel} (from agent)` : "default")}`}
+          /* `withCurrent` over a list that *already* carries the empty option,
+             never prepended beside it: its own empty case is worded
+             "Unset — server default", so calling it on a list without one
+             yields two options keyed `""` — duplicate React keys, and two rows
+             both `aria-selected`, on the default state of every new rule. */
+          options={withCurrent(
+            [
+              {
+                value: "",
+                label: agentModel ? `Agent's model (${agentModel})` : "Default model",
+              },
+              ...MODELS,
+            ],
+            draft.model
+          )}
         />
         <Dropdown
           small
@@ -2038,10 +2068,10 @@ function RuleForm({
           onChange={(permission_mode) => onChange({ ...draft, permission_mode })}
           ariaLabel="Permission mode"
           label={`Permissions: ${draft.permission_mode ? permissionLabel(draft.permission_mode) : "default"}`}
-          options={[
-            { value: "", label: "Default permissions" },
-            ...withCurrent(PERMISSION_MODES, draft.permission_mode),
-          ]}
+          options={withCurrent(
+            [{ value: "", label: "Default permissions" }, ...PERMISSION_MODES],
+            draft.permission_mode
+          )}
         />
         {/* An empty profile list means an install with no profiles, and a
             picker whose only option is "none" is a control that does nothing.
@@ -2117,32 +2147,6 @@ function RuleForm({
 const INBOUND_POLL_MS = 5_000;
 
 /**
- * `inbound_status` → a badge, in `WebhookPanel`'s three-way shape.
- *
- * The class *is* the state, so the label and the tone are returned together
- * (#518): a caller handed only the word would pick its own colour, which is the
- * same defect in a different column. An unrecognised status is reported as
- * itself under the neutral badge rather than guessed at — the worker owns this
- * column (#567) and may learn a fourth word before this file does.
- */
-function inboundBadge(status: string): { label: string; tone: string } {
-  switch (status) {
-    case "connected":
-      return { label: "Connected", tone: "badge--green" };
-    case "connecting":
-      return { label: "Connecting", tone: "badge--amber" };
-    case "reconnecting":
-      return { label: "Reconnecting", tone: "badge--amber" };
-    case "error":
-      return { label: "Error", tone: "badge--red" };
-    case "":
-      return { label: "Not connected", tone: "" };
-    default:
-      return { label: status, tone: "" };
-  }
-}
-
-/**
  * The Socket Mode switch and what the worker last reported (#566, #569).
  *
  * Self-contained, like `TriggerRules` and `WebhookPanel`: it re-reads the one
@@ -2151,9 +2155,22 @@ function inboundBadge(status: string): { label: string; tone: string } {
  * re-seed the form the user may be typing in.
  */
 function InboundPanel({ item }: { item: Integration }) {
+  /**
+   * `updated_at` and `has_app_token` are deps, not decoration.
+   *
+   * `IntegrationDetail` is keyed on the integration id, so a save calls
+   * `onChanged()` without remounting this subtree — and `current` prefers
+   * `row.data` once the first fetch lands. Keyed on `item.id` alone, the row a
+   * user has *just stored their first app token on* would keep answering from
+   * the fetch made before it, leaving the switch disabled under "Store an
+   * app-level token above" with no way back but selecting another row. The
+   * poll cannot rescue it either: it is off precisely while inbound is.
+   * `updated_at` moves on every `PUT /api/integrations/{id}`, so it covers a
+   * token added, replaced or dropped.
+   */
   const row = useResource(
     (signal) => api.get<Integration>(`/integrations/${item.id}`, signal),
-    [item.id]
+    [item.id, item.updated_at, item.has_app_token]
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -2170,10 +2187,12 @@ function InboundPanel({ item }: { item: Integration }) {
   // never refuses a disable on that axis.
   const canTurnOn = hasToken;
 
-  // Only while the connection is meant to be up: a row that is off has no
-  // worker to report anything, so a poll would be a request per five seconds
-  // for a value that cannot change until the user clicks something.
-  usePoll(row.reload, INBOUND_POLL_MS, on);
+  // While the connection is meant to be up, and for as long after a disable as
+  // the worker is still reporting something. Gating on `on` alone stops the
+  // poll in the same tick as the switch, and the one read `toggle` makes is
+  // issued before the worker has torn down — so the badge would sit on
+  // "Connected" beside an off switch until the pane was reopened.
+  usePoll(row.reload, INBOUND_POLL_MS, on || current.inbound_status !== "");
 
   async function toggle(next: boolean) {
     if (next && !canTurnOn) return;
@@ -2189,7 +2208,7 @@ function InboundPanel({ item }: { item: Integration }) {
     }
   }
 
-  const badge = inboundBadge(current.inbound_status);
+  const badge = inboundState(current.inbound_status);
 
   return (
     <div className="formsec">
