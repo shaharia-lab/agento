@@ -210,18 +210,6 @@ pub struct ScrubbedIntegration {
     pub authenticated: bool,
     pub created_at: GoTime,
     pub enabled: bool,
-    /// Whether a credential is stored — **not** the credential (#515).
-    ///
-    /// A wire addition with no Go ancestor, and the only way an edit form can
-    /// tell "a secret is stored" from "no secret" now that omitting the field
-    /// preserves it: without it the UI cannot know whether leaving the input
-    /// alone keeps something or keeps nothing. Computed in SQL by
-    /// [`has_credentials_sql`], the same discipline `authenticated` uses, so the
-    /// value itself never reaches this process.
-    ///
-    /// It sits here because the field order **is** the wire order and this one
-    /// is alphabetical (Go built the object from a map): `enabled` <
-    /// `has_credentials` < `id`.
     /// Whether a Slack **app-level** token is stored — never the token (#566).
     ///
     /// The same discipline `has_credentials` states one field below, for the
@@ -234,6 +222,18 @@ pub struct ScrubbedIntegration {
     /// Alphabetically `enabled` < `has_app_token` < `has_credentials`, and the
     /// field order **is** the wire order.
     pub has_app_token: bool,
+    /// Whether a credential is stored — **not** the credential (#515).
+    ///
+    /// A wire addition with no Go ancestor, and the only way an edit form can
+    /// tell "a secret is stored" from "no secret" now that omitting the field
+    /// preserves it: without it the UI cannot know whether leaving the input
+    /// alone keeps something or keeps nothing. Computed in SQL by
+    /// [`has_credentials_sql`], the same discipline `authenticated` uses, so the
+    /// value itself never reaches this process.
+    ///
+    /// It sits here because the field order **is** the wire order and this one
+    /// is alphabetical (Go built the object from a map): `enabled` <
+    /// `has_app_token` < `has_credentials` < `id`.
     pub has_credentials: bool,
     pub id: String,
     /// Whether the Slack inbound worker should be running for this row (#566).
@@ -1216,11 +1216,23 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     // is *which columns are assigned*, and a
     // `CASE WHEN ?4 IS NULL THEN credentials ELSE ?4 END` would still bind the
     // blob's parameter slot on the path that must not have one.
+    // **A credential replace that drops the app token turns the switch off.**
+    // `update_inbound` refuses to *enable* a row that stores no app-level
+    // token, on the grounds that the switch would otherwise start a worker
+    // that can only fail to connect — and this write can reach the same state
+    // from the other side, because #515's contract makes a sent blob replace
+    // the stored one wholly and the Slack form emits only its mode's fields.
+    // The refusal is worth nothing if the row can arrive there anyway, so the
+    // column is cleared in the same statement rather than left for the worker
+    // to discover. Only on the replace arm: an omitted blob preserves the
+    // credential, so it preserves the switch too.
+    let clears_inbound = credentials.is_some_and(|blob| !stores_an_app_token(blob));
     match credentials {
         Some(blob) => conn.execute(
             "UPDATE integrations SET
             name = ?1, type = ?2, enabled = ?3,
             credentials = ?4, services = ?5, updated_at = ?6,
+            inbound_enabled = CASE WHEN ?8 THEN 0 ELSE inbound_enabled END,
             auth = CASE
                 WHEN auth IS NOT NULL AND auth != '' AND auth != 'null' THEN auth
                 ELSE NULL
@@ -1234,6 +1246,7 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
                 &services_json,
                 &now,
                 id,
+                clears_inbound,
             ],
         ),
         None => conn.execute(
@@ -1295,10 +1308,10 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
             None => existing.has_credentials,
         },
         id: id.to_string(),
-        // This write does not touch the three inbound columns — the switch and
-        // the worker own them — so the response reports what the row already
-        // holds rather than a default.
-        inbound_enabled: existing.inbound_enabled,
+        // `inbound_status` and `inbound_error` are the worker's, so the
+        // response reports what the row already holds. `inbound_enabled` is
+        // reported the way it was just written — see `clears_inbound` above.
+        inbound_enabled: existing.inbound_enabled && !clears_inbound,
         inbound_error: existing.inbound_error,
         inbound_status: existing.inbound_status,
         name: req.name,
@@ -3276,7 +3289,16 @@ mod tests {
                 .has_app_token
         );
 
-        // …and a blob that *is* sent replaces it, app token included.
+        // …and a blob that *is* sent replaces it, app token included — which
+        // is the transition that has to take the switch with it.
+        update_inbound(file.path(), &id, br#"{"enabled":true}"#).expect("enable");
+        assert!(
+            get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+
         let replaced = update(
             file.path(),
             &id,
@@ -3288,6 +3310,45 @@ mod tests {
             body_of(&replaced).contains(r#""has_app_token":false"#),
             "{}",
             body_of(&replaced)
+        );
+        // The 422 on `update_inbound` is worth nothing if this write can reach
+        // the state it refuses, so the replace clears the switch — and the
+        // response says so rather than echoing the old value.
+        assert!(
+            body_of(&replaced).contains(r#""inbound_enabled":false"#),
+            "{}",
+            body_of(&replaced)
+        );
+        assert!(
+            !get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
+
+        // A blob that keeps the token leaves the switch where it was, and so
+        // does a `PUT` that omits `credentials` entirely.
+        update(
+            file.path(),
+            &id,
+            br#"{"name":"R","type":"slack",
+                 "credentials":{"auth_mode":"bot_token","bot_token":"xoxb-3",
+                                "app_token":"xapp-1-abc"}}"#,
+        )
+        .expect("update");
+        update_inbound(file.path(), &id, br#"{"enabled":true}"#).expect("enable");
+        let renamed_again =
+            update(file.path(), &id, br#"{"name":"R2","type":"slack"}"#).expect("update");
+        assert!(
+            body_of(&renamed_again).contains(r#""inbound_enabled":true"#),
+            "{}",
+            body_of(&renamed_again)
+        );
+        assert!(
+            get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
         );
     }
 
