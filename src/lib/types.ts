@@ -50,6 +50,26 @@ export interface ChatMessage {
   blocks?: MessageBlock[];
 }
 
+/**
+ * Where a chat came from when something outside Agento started it — today only
+ * a Slack thread (#570).
+ *
+ * `channel_id` is Slack's **id** (`C0123ABC`), not the channel name: the
+ * mapping row records only the id, and resolving a name is out of scope. Render
+ * it as `#C0123ABC` until a name is available.
+ *
+ * `permalink` can be `""` — Slack's `chat.getPermalink` is best-effort and the
+ * column is `NOT NULL DEFAULT ''`, so the run is not refused over it. An empty
+ * one means **no link**, not a broken one: render the row and drop the action.
+ */
+export interface ChatInbound {
+  integration_id: string;
+  integration_name: string;
+  channel_id: string;
+  thread_ts: string;
+  permalink: string;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
@@ -92,6 +112,13 @@ export interface ChatSession {
    * transcript would show the newest turn twice.
    */
   continued_from_message_count?: number;
+  /**
+   * The Slack thread this chat was started from, absent on every chat Agento's
+   * own UI started. **Absent is the only spelling of "not inbound"** — the
+   * backend omits the key entirely rather than sending `null`, so test the
+   * object, not its fields.
+   */
+  inbound?: ChatInbound;
 }
 
 /**

@@ -92,6 +92,38 @@ pub struct ChatSession {
     /// that advanced this number would double-render the newest turn.
     #[serde(skip_serializing_if = "is_zero")]
     pub continued_from_message_count: i64,
+    /// Where this chat came from when something outside Agento started it —
+    /// today only a Slack thread (#570).
+    ///
+    /// Appended last and `Option::is_none`-skipped for the `continued_from_*`
+    /// reason: a chat with no `inbound_threads` row puts **no `inbound` key** on
+    /// the wire at all, so every chats response written before #570 is
+    /// byte-identical to what it was. Absent is the only spelling of "not
+    /// inbound" — never a present `null` and never an object of empty strings,
+    /// because the UI keys the whole *Started from* row on the object existing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbound: Option<ChatInbound>,
+}
+
+/// The Slack thread a chat was started from, from `inbound_threads` joined to
+/// the integration that owns it.
+///
+/// Present only when the join found a row; see [`ChatSession::inbound`].
+///
+/// `channel_id` is the **id** (`C0123ABC`), not the channel name: the mapping
+/// row records only the id, and resolving a name costs a `conversations.info`
+/// call that #570 puts out of scope. `permalink` is `NOT NULL DEFAULT ''` in
+/// the table and Slack's `chat.getPermalink` is best-effort, so an **empty
+/// permalink is a real, expected state** — the wire carries the key either way
+/// and the UI drops the *Open in Slack* action rather than offering a dead
+/// link.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatInbound {
+    pub integration_id: String,
+    pub integration_name: String,
+    pub channel_id: String,
+    pub thread_ts: String,
+    pub permalink: String,
 }
 
 /// One message in a chat. Mirrors `storage.ChatMessage`.
@@ -164,14 +196,25 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// The session read, for both `GET /api/chats` and `GET /api/chats/{id}`.
+///
+/// The two `LEFT JOIN`s are what fill [`ChatSession::inbound`], and they are
+/// joins rather than a per-row lookup so the list stays **one query** however
+/// many chats there are. Neither can multiply a row: `inbound_threads` is
+/// `UNIQUE (chat_id)` and `integrations.id` is the primary key. Every
+/// `chat_sessions` column is qualified because `created_at` exists on all three
+/// tables and `id` on two of them.
 const SESSION_COLUMNS: &str =
-    "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
-       settings_profile_id, total_input_tokens, total_output_tokens,
-       total_cache_creation_tokens, total_cache_read_tokens,
-       created_at, updated_at, is_favorite, permission_mode,
-       continued_from_session_id, continued_from_project_path,
-       continued_from_message_count
-FROM chat_sessions";
+    "SELECT cs.id, cs.title, cs.agent_slug, cs.sdk_session_id, cs.working_directory, cs.model,
+       cs.settings_profile_id, cs.total_input_tokens, cs.total_output_tokens,
+       cs.total_cache_creation_tokens, cs.total_cache_read_tokens,
+       cs.created_at, cs.updated_at, cs.is_favorite, cs.permission_mode,
+       cs.continued_from_session_id, cs.continued_from_project_path,
+       cs.continued_from_message_count,
+       it.chat_id, it.integration_id, i.name, it.channel_id, it.thread_ts, it.permalink
+FROM chat_sessions cs
+LEFT JOIN inbound_threads it ON it.chat_id = cs.id
+LEFT JOIN integrations i ON i.id = it.integration_id";
 
 /// Every chat session, most recently updated first, as the store orders them.
 ///
@@ -180,7 +223,7 @@ FROM chat_sessions";
 /// chronological order only because every stored value is UTC.
 pub fn list(db_path: &Path) -> Result<Vec<ChatSession>, String> {
     let conn = db::open_read_only(db_path)?;
-    let sql = format!("{SESSION_COLUMNS}\nORDER BY updated_at DESC");
+    let sql = format!("{SESSION_COLUMNS}\nORDER BY cs.updated_at DESC");
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("listing chats: {e}"))?;
@@ -199,7 +242,7 @@ pub fn list(db_path: &Path) -> Result<Vec<ChatSession>, String> {
 /// session — which the caller turns into the 404 Go returns.
 pub fn get(db_path: &Path, id: &str) -> Result<Option<ChatDetail>, String> {
     let conn = db::open_read_only(db_path)?;
-    let sql = format!("{SESSION_COLUMNS} WHERE id = ?");
+    let sql = format!("{SESSION_COLUMNS} WHERE cs.id = ?");
     let session = conn
         .query_row(&sql, [id], scan_session)
         .optional()
@@ -248,7 +291,30 @@ fn scan_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
         continued_from_session_id: row.get(15)?,
         continued_from_project_path: row.get(16)?,
         continued_from_message_count: row.get(17)?,
+        inbound: scan_inbound(row)?,
     })
+}
+
+/// The joined `inbound_threads` row, or `None` when the chat has no mapping.
+///
+/// **The discriminator is the join, not an empty string.** `it.chat_id` is
+/// `NOT NULL` in the table, so it is `NULL` here exactly when the `LEFT JOIN`
+/// matched nothing — while `permalink` is legitimately `''` on a matched row
+/// and `channel_id` could in principle be too. `i.name` is read defensively as
+/// an `Option` even though the foreign key makes the integration row exist:
+/// a name that cannot be read must not cost the whole attribution.
+fn scan_inbound(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<ChatInbound>> {
+    let matched: Option<String> = row.get(18)?;
+    if matched.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ChatInbound {
+        integration_id: row.get::<_, Option<String>>(19)?.unwrap_or_default(),
+        integration_name: row.get::<_, Option<String>>(20)?.unwrap_or_default(),
+        channel_id: row.get::<_, Option<String>>(21)?.unwrap_or_default(),
+        thread_ts: row.get::<_, Option<String>>(22)?.unwrap_or_default(),
+        permalink: row.get::<_, Option<String>>(23)?.unwrap_or_default(),
+    }))
 }
 
 fn scan_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
@@ -580,6 +646,10 @@ pub(super) fn insert_session(
         continued_from_session_id: String::new(),
         continued_from_project_path: String::new(),
         continued_from_message_count: 0,
+        // A row that does not exist yet cannot be mapped to a Slack thread:
+        // `slack/inbound.rs` creates the chat first and writes the
+        // `inbound_threads` row afterwards, so the 201 body is honest.
+        inbound: None,
     })
 }
 
@@ -724,13 +794,17 @@ fn bulk_delete(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError>
 /// The session row, read inside the caller's transaction.
 fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSession>, WriteError> {
     tx.query_row(
-        "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
-                settings_profile_id, total_input_tokens, total_output_tokens,
-                total_cache_creation_tokens, total_cache_read_tokens, is_favorite,
-                created_at, updated_at, permission_mode,
-                continued_from_session_id, continued_from_project_path,
-                continued_from_message_count
-         FROM chat_sessions WHERE id = ?1",
+        "SELECT cs.id, cs.title, cs.agent_slug, cs.sdk_session_id, cs.working_directory, cs.model,
+                cs.settings_profile_id, cs.total_input_tokens, cs.total_output_tokens,
+                cs.total_cache_creation_tokens, cs.total_cache_read_tokens, cs.is_favorite,
+                cs.created_at, cs.updated_at, cs.permission_mode,
+                cs.continued_from_session_id, cs.continued_from_project_path,
+                cs.continued_from_message_count,
+                it.chat_id, it.integration_id, i.name, it.channel_id, it.thread_ts, it.permalink
+         FROM chat_sessions cs
+         LEFT JOIN inbound_threads it ON it.chat_id = cs.id
+         LEFT JOIN integrations i ON i.id = it.integration_id
+         WHERE cs.id = ?1",
         [id],
         |row| {
             Ok(ChatSession {
@@ -752,6 +826,14 @@ fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSes
                 continued_from_session_id: row.get(15)?,
                 continued_from_project_path: row.get(16)?,
                 continued_from_message_count: row.get(17)?,
+                // The same joins as `SESSION_COLUMNS`, because this is the same
+                // `ChatSession` and the *absence* of `inbound` is load-bearing:
+                // a `PATCH` body without it would tell a consumer the chat was
+                // not started from Slack. This SELECT keeps its own column
+                // order (`is_favorite` at 11, the timestamps at 12/13), so the
+                // joined columns land at 18+ the same way and `scan_inbound`
+                // reads both.
+                inbound: scan_inbound(row)?,
             })
         },
     )
@@ -798,6 +880,23 @@ mod tests {
             content    TEXT NOT NULL DEFAULT '',
             blocks     TEXT NOT NULL DEFAULT '[]',
             timestamp  DATETIME NOT NULL
+        );
+        CREATE TABLE integrations (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            type       TEXT NOT NULL DEFAULT 'slack',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE inbound_threads (
+            integration_id TEXT NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+            channel_id     TEXT NOT NULL,
+            thread_ts      TEXT NOT NULL,
+            chat_id        TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            permalink      TEXT NOT NULL DEFAULT '',
+            created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_event_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (integration_id, channel_id, thread_ts),
+            UNIQUE (chat_id)
         );";
 
     /// Two sessions and a handful of messages, in the exact column shapes the
@@ -878,6 +977,122 @@ mod tests {
         assert_eq!(
             encoded(&sessions[1]).trim_end(),
             r#"{"id":"older","title":"New Chat","agent_slug":"writer","sdk_session_id":"","working_directory":"/w/one","model":"claude-sonnet-4-6","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}"#
+        );
+    }
+
+    /// Map `older` to a Slack thread, exactly as `slack/inbound.rs` records it.
+    fn map_older_to_slack(file: &tempfile::NamedTempFile, permalink: &str) {
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO integrations (id, name) VALUES ('int-1', 'Team Slack')",
+            [],
+        )
+        .expect("integration");
+        conn.execute(
+            "INSERT INTO inbound_threads
+                (integration_id, channel_id, thread_ts, chat_id, permalink)
+             VALUES ('int-1', 'C0123ABC', '1788000000.000100', 'older', ?1)",
+            [permalink],
+        )
+        .expect("mapping");
+    }
+
+    /// `inbound` is the **last** key of the session object and carries the five
+    /// fields in the order the struct declares them — the whole point of
+    /// appending it rather than weaving it into the order above.
+    #[test]
+    fn a_slack_started_chat_carries_inbound_as_the_last_key() {
+        let file = fixture();
+        map_older_to_slack(
+            &file,
+            "https://acme.slack.com/archives/C0123ABC/p1788000000000100",
+        );
+        let sessions = list(file.path()).expect("list");
+        assert_eq!(
+            encoded(&sessions[1]).trim_end(),
+            r#"{"id":"older","title":"New Chat","agent_slug":"writer","sdk_session_id":"","working_directory":"/w/one","model":"claude-sonnet-4-6","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z","inbound":{"integration_id":"int-1","integration_name":"Team Slack","channel_id":"C0123ABC","thread_ts":"1788000000.000100","permalink":"https://acme.slack.com/archives/C0123ABC/p1788000000000100"}}"#
+        );
+    }
+
+    /// The other half of the same assertion: a chat with no mapping emits **no
+    /// `inbound` key at all**, so every chats response written before #570 is
+    /// byte-identical. The two exact-bytes tests above are that guarantee for
+    /// the list; this pins the absence by name so a `null` or an object of
+    /// empty strings cannot creep in.
+    #[test]
+    fn a_chat_without_a_mapping_emits_no_inbound_key() {
+        let file = fixture();
+        map_older_to_slack(&file, "https://acme.slack.com/archives/C0123ABC/p1");
+        let sessions = list(file.path()).expect("list");
+        assert!(!encoded(&sessions[0]).contains("inbound"));
+        assert!(encoded(&sessions[1]).contains(r#""inbound":{"#));
+    }
+
+    /// `permalink` is `NOT NULL DEFAULT ''` and `chat.getPermalink` is
+    /// best-effort, so an empty one is a mapped chat — the key is still there
+    /// with an empty value, and it is the UI that drops the action.
+    #[test]
+    fn an_empty_permalink_is_still_a_mapping() {
+        let file = fixture();
+        map_older_to_slack(&file, "");
+        let sessions = list(file.path()).expect("list");
+        let inbound = sessions[1].inbound.as_ref().expect("mapped");
+        assert_eq!(inbound.permalink, "");
+        assert_eq!(inbound.channel_id, "C0123ABC");
+        assert!(encoded(&sessions[1]).contains(r#""permalink":""}"#));
+    }
+
+    /// `GET /api/chats/{id}` carries the same object, through the same join.
+    #[test]
+    fn the_detail_read_carries_inbound_too() {
+        let file = fixture();
+        map_older_to_slack(&file, "https://acme.slack.com/archives/C0123ABC/p1");
+        let detail = get(file.path(), "older").expect("get").expect("found");
+        assert_eq!(
+            detail.session.inbound.as_ref().expect("mapped").thread_ts,
+            "1788000000.000100"
+        );
+        assert!(get(file.path(), "newer")
+            .expect("get")
+            .expect("found")
+            .session
+            .inbound
+            .is_none());
+    }
+
+    /// Two chats, each with its own mapping and its own integration, still list
+    /// as two rows carrying the right one each — the `LEFT JOIN`s add columns,
+    /// not rows, and the list stays one query.
+    ///
+    /// It cannot seed a *duplicate* `chat_id`, which is what would actually
+    /// multiply a row: `UNIQUE (chat_id)` forbids it, and `migrate.rs` is where
+    /// that constraint is asserted.
+    #[test]
+    fn the_joins_add_columns_not_rows() {
+        let file = fixture();
+        map_older_to_slack(&file, "https://acme.slack.com/archives/C0123ABC/p1");
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO integrations (id, name) VALUES ('int-2', 'Other Slack')",
+            [],
+        )
+        .expect("integration");
+        conn.execute(
+            "INSERT INTO inbound_threads
+                (integration_id, channel_id, thread_ts, chat_id, permalink)
+             VALUES ('int-2', 'C9', '2.0', 'newer', '')",
+            [],
+        )
+        .expect("mapping");
+
+        let sessions = list(file.path()).expect("list");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|s| s.inbound.as_ref().map(|i| i.integration_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![Some("int-2"), Some("int-1")]
         );
     }
 
@@ -1219,6 +1434,54 @@ mod tests {
             body.contains(r#""continued_from_message_count":42"#),
             "…and the boundary, which is what stops a double render: {body}"
         );
+    }
+
+    /// The `PATCH` body is the same `ChatSession`, so it carries `inbound` too:
+    /// a rename or a favourite must not report a Slack-started chat as though
+    /// the UI had started it. `get_session_tx` is a second, differently ordered
+    /// SELECT, which is why this needs its own test rather than resting on the
+    /// read-path ones.
+    #[test]
+    fn a_patch_on_a_slack_started_chat_carries_inbound() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO integrations (id, name, type, created_at, updated_at)
+             VALUES ('int-1', 'Team Slack', 'slack', '2026-01-02 03:04:05 +0000 UTC',
+                     '2026-01-02 03:04:05 +0000 UTC')",
+            [],
+        )
+        .expect("integration");
+        conn.execute(
+            "INSERT INTO inbound_threads
+                (integration_id, channel_id, thread_ts, chat_id, permalink)
+             VALUES ('int-1', 'C0123ABC', '1788000000.000100', ?1,
+                     'https://acme.slack.com/archives/C0123ABC/p1788000000000100')",
+            [&id],
+        )
+        .expect("mapping");
+
+        let answer = patch(file.path(), &id, br#"{"is_favorite":true}"#).expect("patch");
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert!(
+            body.contains(
+                r#""inbound":{"integration_id":"int-1","integration_name":"Team Slack","channel_id":"C0123ABC","thread_ts":"1788000000.000100","permalink":"https://acme.slack.com/archives/C0123ABC/p1788000000000100"}"#
+            ),
+            "the patch response must not report a Slack chat as UI-started: {body}"
+        );
+    }
+
+    /// …and the absence survives the same route: a chat with no mapping still
+    /// sends no `inbound` key from the write path either.
+    #[test]
+    fn an_ordinary_chat_carries_no_inbound_key_through_a_patch() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+        let answer = patch(file.path(), &id, br#"{"is_favorite":true}"#).expect("patch");
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert!(!body.contains("inbound"), "unexpected inbound key: {body}");
     }
 
     /// A chat that is not a continuation puts none of the three on the wire, so

@@ -295,3 +295,18 @@
   height: 1px;
   background: var(--border);
 }
+
+/* The Slack origin row (#570). The layout is the shared `row insp-row__copy`
+   shape — a truncating value beside a fixed-width sibling — with one addition:
+   it wraps. The inspector is 220px at its narrowest and "Open in Slack" takes
+   most of a value column, so without the wrap the channel id ellipsises to
+   `#C…` and the row no longer says the one thing it exists to say. */
+.chat-inbound {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.chat-inbound__open {
+  flex: none;
+  font-size: var(--text-sm);
+}
