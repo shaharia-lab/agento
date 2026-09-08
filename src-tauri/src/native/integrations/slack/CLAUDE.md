@@ -108,12 +108,13 @@ default logs at `debug`.
   `slack_processed_events` inside an immediate transaction with the row count
   deciding who won, plus the same best-effort 48-hour sweep. A failed claim is
   `false` — never run the agent against a database that could not record it.
-- **A stream that ends without a close frame is a failure, not a polite
-  reconnect.** Only an explicit `disconnect` envelope or a `Close` frame is
-  `Requested`. Calling a dropped TCP connection polite would reset the
-  consecutive-failure counter, so a flapping gateway would be retried every base
-  wait forever, with `inbound_status` never reaching `error` and nothing telling
-  the user anything is wrong.
+- **Only an explicit `disconnect` envelope is a polite reconnect.** A stream
+  that ends without a close frame is a failure, and so is a `Close` frame that no
+  `disconnect` preceded — Slack's own reconnect sends `disconnect` first, so
+  reaching either means the gateway went away on us. Calling those polite would
+  reset the consecutive-failure counter, so a gateway that keeps dropping or
+  keeps closing would be retried every base wait forever, with `inbound_status`
+  never reaching `error` and nothing telling the user anything is wrong.
 - **A session that stayed up resets the counter even though it failed.** The
   counter is about a gateway that will not have us, not about a laptop lid:
   without this a socket that runs for hours and dies on a suspend adds one to a

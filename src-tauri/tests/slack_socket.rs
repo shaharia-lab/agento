@@ -582,9 +582,10 @@ async fn the_stored_status_walks_connected_reconnecting_and_error() {
     let db_path = fixture_db(dir.path(), "status-walk");
     // One good connection, then nothing but refusals: enough to cross the
     // threshold of two and stay there.
-    // Two seconds for the reason spelled out in
-    // `a_full_connect_drop_reconnect_cycle_names_nothing_secret`: the drop must
-    // not beat the `connected` write it is meant to follow.
+    // **The hold has to outlast the `connected` write, not merely the connect.**
+    // A transition is posted to `status_writer` and written from `db::blocking`,
+    // so it lands some way after the socket opened; with a short hold the drop
+    // can beat it and the first `connected` this test sees is the *reconnect's*.
     let fake = fake_slack(
         vec![],
         vec![vec![Step::Hold(Duration::from_secs(2)), Step::Drop]],
@@ -946,17 +947,9 @@ async fn a_reload_mid_connect_leaves_exactly_one_live_connection() {
 async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = fixture_db(dir.path(), "secret");
-    // **The hold has to outlast the `connected` write, not merely the connect.**
-    // A status transition is posted to `status_writer` and written from
-    // `db::blocking`, so it lands some way after the socket opened. With a short
-    // hold the drop can beat it, and the first `connected` this test observes is
-    // then the one written by the *reconnect* — after which the fake's script is
-    // exhausted, the connection is held open forever, and no further transition
-    // ever comes. Two seconds is far longer than that write can take and costs
-    // nothing, because what follows it is polled rather than slept through.
     let fake = fake_slack(
         vec!["invalid_auth".into()],
-        vec![vec![Step::Hold(Duration::from_secs(2)), Step::Drop]],
+        vec![vec![Step::Hold(Duration::from_millis(200)), Step::Drop]],
     )
     .await;
 
@@ -965,20 +958,25 @@ async fn a_full_connect_drop_reconnect_cycle_names_nothing_secret() {
     let handler = recording_handler(&seen, Duration::ZERO);
     let worker = accepted_worker(&db_path, "secret", options(&fake, handler));
 
-    await_status(
-        &db_path,
-        "secret",
-        &[STATUS_CONNECTED],
-        "after the retry succeeded",
-    )
-    .await;
-    await_status(
-        &db_path,
-        "secret",
-        &[STATUS_RECONNECTING, STATUS_ERROR],
-        "after the drop",
-    )
-    .await;
+    // **Waited on `opens`, not on a status.** This test exists for the `xapp-`
+    // sweep and needs the *cycle* — refusal, connect, drop, reconnect — to have
+    // happened, which is exactly what a third `apps.connections.open` proves.
+    // `inbound_status` is the wrong thing to wait on here: `reconnecting` and
+    // `error` are transient, overwritten by the next `connected` a backoff
+    // later, and a poll that lands either side of that window sees a value that
+    // never changes again. The status walk has its own test
+    // (`the_stored_status_walks_connected_reconnecting_and_error`) which is
+    // scripted so the walk is the last thing that happens.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while fake.opens().len() < 3 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        fake.opens().len() >= 3,
+        "the full refusal -> connect -> drop -> reconnect cycle must have run, \
+         got {} calls to apps.connections.open",
+        fake.opens().len()
+    );
     drop(worker);
 
     // The `grep -r 'xapp-'` half of the acceptance criteria, over the log this

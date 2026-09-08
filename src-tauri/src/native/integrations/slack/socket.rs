@@ -316,8 +316,8 @@ struct Worker {
     status: tokio::sync::mpsc::UnboundedSender<StatusMsg>,
 }
 
-/// Serializes every status write in the process, **and the epoch check that
-/// guards it**.
+/// Serializes the status writes **of one integration**, and the epoch check that
+/// guards them.
 ///
 /// The two have to be one critical section or the check proves nothing: a
 /// retiring worker's [`StatusMsg`] can pass a `stopped` test and then sit inside
@@ -329,13 +329,29 @@ struct Worker {
 /// re-reading the epoch inside it makes a stale one a no-op whichever order they
 /// arrive in.
 ///
-/// Global rather than per-integration because a status transition happens a
-/// handful of times per connection lifetime and a machine has one or two Slack
-/// integrations; a map of mutexes would be more code for a queue that is
-/// essentially always empty. Nothing on the socket's read path waits here.
-fn status_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(Default::default)
+/// **Per integration, not one lock for the process.** What needs ordering is the
+/// writes to *one row*; a single global lock would additionally make one
+/// integration's slow write — and `busy_timeout` allows five seconds of slow —
+/// delay every other integration's status reporting, which is the column being
+/// wrong about a socket that is fine. It is also what made
+/// `tests/slack_socket.rs` flake: eleven workers share that binary, two of them
+/// hold a write lock for a second and a half on purpose, and a global lock
+/// propagated those stalls to every other test's status writes.
+///
+/// The map grows with the number of distinct integration ids the process has
+/// ever hosted, which is the same bound the registry's own maps carry. Nothing
+/// on the socket's read path waits here.
+fn status_lock(integration_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(integration_id.to_string())
+        .or_default()
+        .clone()
 }
 
 /// One thing to record about the connection.
@@ -390,7 +406,8 @@ async fn status_writer(
         if stopped.load(std::sync::atomic::Ordering::SeqCst) {
             continue;
         }
-        let _guard = status_lock().lock().await;
+        let lock = status_lock(&integration_id);
+        let _guard = lock.lock().await;
         // Re-read *inside* the lock. `stopped` above is the cheap early exit for
         // the ordinary case; this is the one that holds when the drop lands
         // between the two.
@@ -913,7 +930,8 @@ pub fn write_status_blocking(db_path: &Path, integration_id: &str, status: &str,
 /// the one place that knows whether a socket is going away or being replaced —
 /// it is the code that decides — so it owns the clear, ordered against the start
 /// rather than racing it.
-/// **Callers other than [`clear_status`] must already hold [`status_lock`].**
+/// **Callers other than [`clear_status`] must already hold this row's
+/// [`status_lock`].**
 /// The one exception is boot, where no worker exists to order against.
 pub fn clear_status_blocking(db_path: &Path, integration_id: &str) {
     run_status_write(
@@ -939,7 +957,8 @@ pub fn clear_status_blocking(db_path: &Path, integration_id: &str) {
 /// would ever correct — a socket that connects and stays connected has no next
 /// transition.
 pub async fn clear_status(db_path: &Path, integration_id: &str, epoch: u64) {
-    let _guard = status_lock().lock().await;
+    let lock = status_lock(integration_id);
+    let _guard = lock.lock().await;
     // The registry took `epoch` when it retired the worker, under its own lock.
     // If something has been accepted since, that acceptance took a later one and
     // this clear is about a decision that has been superseded — writing it would
