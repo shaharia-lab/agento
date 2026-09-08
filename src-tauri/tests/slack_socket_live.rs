@@ -29,9 +29,12 @@
 //!
 //! It is a happy accident that this keeps the app's own scopes honest: the bot
 //! app needs exactly the three scopes the guide's manifest lists, and every call
-//! the *test* makes — `chat.postMessage`, `conversations.replies`, `chat.delete`
-//! — goes out on the user token instead. So a manifest that is missing something
-//! fails here rather than being papered over by a scope the test added.
+//! that would otherwise need a fourth — `chat.postMessage` into the channel and
+//! `conversations.replies` to read the thread back — goes out on the user token
+//! instead. So a manifest missing something fails here rather than being papered
+//! over by a scope the test added. The bot token is used only for `auth.test`,
+//! which needs no scope, and for deleting the app's own messages in the
+//! tear-down, which needs the `chat:write` the manifest already has.
 //!
 //! # What has to be true of the machine
 //!

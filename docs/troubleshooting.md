@@ -371,14 +371,17 @@ Three things that look like this and are not:
 ### Socket Mode says Connected but a mention does nothing
 
 Every one of these is silent by design. Two say nothing in the log at all, and
-of the rest all but one are at **`debug`** level — so raise the level before you
-go looking. Work down the list:
+the rest are at **`debug`** level — so raise the level before you go looking.
+Three of them can also be logged at `warn` or `error`, and each says so below.
+Work down the list:
 
 - **The app is not in the channel.** Slack never sent the event at all — nothing
   appears in the log. `/invite @Agento` in that channel.
 - **No trigger rule matches the channel.** Log:
   `slack mention ignored, no rule for the channel`. Add a rule on the
-  integration, or clear the channel list on an existing one.
+  integration, or clear the channel list on an existing one — unless
+  `failed to load slack trigger rules` is logged just above it at `warn`, in
+  which case the rules could not be read at all and the rule is not the problem.
 - **A rule names this channel and is disabled.** Same log line. A rule that names
   a channel explicitly wins over a blank-list rule *even when it is switched
   off*, so disabling it silences that one channel rather than falling back. Turn
@@ -395,8 +398,11 @@ go looking. Work down the list:
   `slack mention ignored, nothing said to the bot`. The mention was the whole
   message; add the actual question after it.
 - **Slack redelivered an event already handled.** Log:
-  `already processed`. The first delivery is the one that ran, and the reply is
-  in the thread.
+  `already processed`, and the reply is in the thread from the first delivery.
+  **The same line has a second cause**: the claim that records the event failed,
+  and `claim_event` answers "already handled" rather than risk running the agent
+  twice against a database it could not write. Then there is no reply anywhere,
+  and `failed to claim slack event …` is logged just above it at `error`.
 - **The integration is in OAuth mode.** Nothing is logged, because Slack sends
   nothing: Agento's OAuth install does not request `app_mentions:read`, so the
   socket opens, the badge goes green and no mention is ever delivered. Socket
@@ -466,6 +472,9 @@ The ones worth knowing by name:
 - `slack mention matched … kind=start` or `kind=resume` — a mention that ran,
   and whether it started a chat or continued one.
 - `slack mention ignored, …` — a mention that did not, and why.
+- `failed to load slack trigger rules` / `failed to claim slack event …` — a
+  mention dropped because the database could not be read or written, not
+  because of anything you configured.
 
 **Every `slack mention ignored` line is emitted at `debug`**, as is the
 bot-message drop and the redelivery line; everything else listed above is `info`
