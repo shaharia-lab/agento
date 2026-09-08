@@ -28,11 +28,22 @@
 //! member of by construction. An answer talked into saying `<!channel>` would
 //! notify everyone in it.
 //!
-//! So [`to_mrkdwn`] escapes the whole answer **before** converting anything,
-//! and the only raw `<`, `>` and `|` in its output are the ones it writes
-//! itself, building a `<url|text>` link. `gojson::to_vec_marshal` is not this:
-//! it escapes `<` to `\u003c` at the JSON layer and Slack decodes that straight
-//! back to `<`.
+//! So [`to_mrkdwn`] escapes the whole answer **before** converting anything, and
+//! the only raw `<`, `>` and `|` in its output are the three it writes itself
+//! around a link whose target it has checked is an `http`, `https` or `mailto`
+//! URL. That check is not decoration: `<…>` is Slack's markup for *everything*,
+//! so a link target it did not vet is a hole straight back through the escape —
+//! `[](!channel)` would otherwise become `<!channel>`, and a channel member can
+//! ask for that in one sentence. A target that is not such a URL keeps its
+//! Markdown spelling and is posted as prose, which is also what a reader wants
+//! for the `[guide](./setup.md)` Slack could not link to anyway.
+//! `gojson::to_vec_marshal` is not a substitute for any of this: it escapes `<`
+//! to `\u003c` at the JSON layer and Slack decodes that straight back to `<`.
+//!
+//! One thing escaping does cost: a Markdown blockquote. `> quoted` escapes to
+//! `&gt; quoted`, which Slack renders as literal text, so a leading run of them
+//! is restored — Slack's own blockquote is `>` too, and it is the one line-level
+//! marker the answer would otherwise lose.
 //!
 //! **The limit is counted in `char`s, not bytes and not grapheme clusters.**
 //! Slack's own limit is characters, and [`split`] never cuts inside one —
@@ -73,6 +84,8 @@ pub fn to_mrkdwn(markdown: &str) -> String {
             out.push_str(line);
             continue;
         }
+        let restored = restore_blockquote(line);
+        let line = restored.as_str();
         match heading_text(line) {
             // Slack has no headings, so the epic's answer is a bold line. An
             // empty heading (`##` alone) would become a bare `**`, which Slack
@@ -95,6 +108,24 @@ fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// A line's leading run of escaped `&gt;` put back as `>`.
+///
+/// Slack's blockquote marker is Markdown's, so escaping is the only thing that
+/// broke it. Only the leading run: a `>` mid-sentence is prose and stays
+/// escaped, which is the whole point of escaping it.
+fn restore_blockquote(line: &str) -> String {
+    let mut markers = 0;
+    let mut rest = line;
+    while let Some(after) = rest.strip_prefix("&gt;") {
+        markers += 1;
+        rest = after;
+    }
+    if markers == 0 {
+        return line.to_string();
+    }
+    format!("{}{rest}", ">".repeat(markers))
 }
 
 /// ```` ``` ```` or longer, at the start of a line, opening or closing a block.
@@ -181,6 +212,26 @@ fn inline(line: &str) -> String {
     out
 }
 
+/// Whether `url` may be written between the raw `<` and `>` of a Slack link.
+///
+/// **This is the escape's second half, not a tidiness check.** `<…>` is Slack's
+/// markup for everything — `<!channel>` is a broadcast, `<@U1>` a mention,
+/// `<#C0|general>` a channel link — so a link target copied out unvetted
+/// reintroduces every form [`escape`] just removed, through a `[](…)` a channel
+/// member can ask the agent for in one sentence. An `http`, `https` or `mailto`
+/// URL is the only target Slack would render as a link anyway; everything else
+/// keeps its Markdown spelling and is posted as prose. `|` is refused in either
+/// half for the same reason: it is the separator.
+fn is_postable_url(url: &str, text: &str) -> bool {
+    if url.contains('|') || text.contains('|') {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+}
+
 /// `(text, url, end)` for the `[text](url)` starting at `open`, or `None`.
 ///
 /// Deliberately non-recursive and non-nesting: the label may not contain `]`
@@ -195,11 +246,12 @@ fn link_at(line: &str, open: usize) -> Option<(&str, &str, usize)> {
     let target = &after[close + 2..];
     let paren = target.find(')')?;
     let url = &target[..paren];
-    if url.is_empty() {
+    let text = &after[..close];
+    if url.is_empty() || !is_postable_url(url, text) {
         return None;
     }
     let end = open + 1 + close + 2 + paren + 1;
-    Some((&after[..close], url, end))
+    Some((text, url, end))
 }
 
 /// `text` as consecutive messages of at most `limit` characters each.
@@ -290,13 +342,19 @@ mod tests {
             ("#hashtag", "#hashtag"),
             ("**bold**", "*bold*"),
             ("a **bold** word", "a *bold* word"),
-            ("[a](b)", "<b|a>"),
+            ("[a](https://b)", "<https://b|a>"),
+            // A target Slack would not render as a link keeps its Markdown
+            // spelling, which is also what stops `[](!channel)` below.
+            ("[a](b)", "[a](b)"),
+            ("[guide](./setup.md)", "[guide](./setup.md)"),
+            ("[m](mailto:a@b.c)", "<mailto:a@b.c|m>"),
+            ("[a](HTTPS://B)", "<HTTPS://B|a>"),
             (
                 "see [the docs](https://x/y?a=1&b=2)",
                 "see <https://x/y?a=1&amp;b=2|the docs>",
             ),
-            ("![alt](u)", "<u|alt>"),
-            ("[](u)", "<u>"),
+            ("![alt](https://u)", "<https://u|alt>"),
+            ("[](https://u)", "<https://u>"),
             // Lists survive: Slack renders `- ` as a bullet already.
             ("- one\n- two", "- one\n- two"),
             // Malformed links stay text rather than eating the line.
@@ -304,6 +362,7 @@ mod tests {
             // A `!` that is not an image reference is prose, and keeps its `!`.
             ("![unclosed", "![unclosed"),
             ("![a] (b)", "![a] (b)"),
+            ("![](!channel)", "![](!channel)"),
             ("[a] (b)", "[a] (b)"),
             ("[a]()", "[a]()"),
             // A code span is its own subject.
@@ -311,7 +370,7 @@ mod tests {
             ("`[a](b)`", "`[a](b)`"),
             ("an unclosed ` **span**", "an unclosed ` *span*"),
             // Headings convert their own inline content.
-            ("## [a](b)", "*<b|a>*"),
+            ("## [a](https://b)", "*<https://b|a>*"),
             ("##", ""),
             ("", ""),
         ] {
@@ -338,6 +397,19 @@ mod tests {
             ("```\n<!channel>\n```", "```\n&lt;!channel&gt;\n```"),
             // Escaped once, never twice.
             ("&amp;", "&amp;amp;"),
+            // The second half of the escape: a link target is `<…>` markup too,
+            // and `[](!channel)` is a broadcast a channel member can ask for in
+            // one sentence.
+            ("[](!channel)", "[](!channel)"),
+            ("[x](!channel)", "[x](!channel)"),
+            ("[](!here)", "[](!here)"),
+            ("[](@U12345)", "[](@U12345)"),
+            ("[](#C0000|general)", "[](#C0000|general)"),
+            ("[a|b](https://x)", "[a|b](https://x)"),
+            // A blockquote is the one line marker escaping would have cost.
+            ("> quoted", "> quoted"),
+            (">>> quoted", ">>> quoted"),
+            ("a > b", "a &gt; b"),
         ] {
             assert_eq!(to_mrkdwn(markdown), want, "converting {markdown:?}");
         }
@@ -347,10 +419,10 @@ mod tests {
     #[test]
     fn a_fenced_block_is_copied_out_byte_for_byte() {
         let markdown =
-            "Before **bold**\n\n```md\n## Heading\n**bold** and [a](b)\n```\n\nAfter [x](y)";
+            "Before **bold**\n\n```md\n## Heading\n**bold** and [a](b)\n```\n\nAfter [x](https://y)";
         assert_eq!(
             to_mrkdwn(markdown),
-            "Before *bold*\n\n```md\n## Heading\n**bold** and [a](b)\n```\n\nAfter <y|x>"
+            "Before *bold*\n\n```md\n## Heading\n**bold** and [a](b)\n```\n\nAfter <https://y|x>"
         );
     }
 

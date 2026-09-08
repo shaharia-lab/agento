@@ -417,10 +417,10 @@ fn only_the_bots_own_mention_is_stripped() {
 #[test]
 fn every_run_outcome_has_a_sentence() {
     let answered = RunResult {
-        answer: "## Title\n\n[a](b)".to_string(),
+        answer: "## Title\n\n[a](https://b)".to_string(),
         ..RunResult::default()
     };
-    assert_eq!(reply_for(Ok(answered), "c"), "*Title*\n\n<b|a>");
+    assert_eq!(reply_for(Ok(answered), "c"), "*Title*\n\n<https://b|a>");
     assert_eq!(reply_for(Ok(RunResult::default()), "c"), NO_RESPONSE_REPLY);
     assert_eq!(reply_for(Err("boom".to_string()), "c"), ERROR_REPLY);
     assert_eq!(
@@ -498,7 +498,13 @@ async fn a_top_level_mention_starts_a_chat_and_answers_in_its_thread() {
         cwd.to_str().expect("utf-8 path"),
         "2026-01-01 00:00:00 +0000 UTC",
     );
-    let cli = fake_cli(dir.path(), "## Title\n\nsee [a](b)", "sess", false, 0);
+    let cli = fake_cli(
+        dir.path(),
+        "## Title\n\nsee [a](https://b)",
+        "sess",
+        false,
+        0,
+    );
 
     let _env = env_lock().lock().await;
     std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
@@ -532,7 +538,7 @@ async fn a_top_level_mention_starts_a_chat_and_answers_in_its_thread() {
             ("user".to_string(), "summarise the day".to_string()),
             (
                 "assistant".to_string(),
-                "## Title\n\nsee [a](b)".to_string()
+                "## Title\n\nsee [a](https://b)".to_string()
             ),
         ],
         "the chat holds what was said, as Markdown; only Slack sees mrkdwn"
@@ -542,7 +548,7 @@ async fn a_top_level_mention_starts_a_chat_and_answers_in_its_thread() {
         slack.posted(),
         vec![(
             "1700000000.000100".to_string(),
-            "*Title*\n\nsee <b|a>".to_string()
+            "*Title*\n\nsee <https://b|a>".to_string()
         )],
         "one reply, in the thread, converted"
     );
@@ -901,13 +907,30 @@ async fn an_auth_failure_answers_only_in_a_thread_agento_started() {
 /// Slack thread would silently hold every permit while one of them ran.
 #[test]
 fn the_global_bound_is_taken_around_the_run_and_not_around_the_wait() {
+    let flat = include_str!("../inbound.rs")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let acquire = flat
+        .find("dispatcher::semaphore().acquire()")
+        .expect("the run must take the dispatcher's permit");
+    let prompt_line = flat
+        .find("\"slack mention prompt")
+        .expect("the turn logs its prompt before it runs");
+    let run = flat
+        .find("agent_run::run_resumed(")
+        .expect("the turn calls run_resumed");
+    // Presence alone would stay green if the acquire moved back to `accept`,
+    // which is the regression this test is named for. Its *position* is the
+    // claim: after the chat has been resolved, immediately before the run.
     assert!(
-        include_str!("../inbound.rs").contains("dispatcher::semaphore().acquire()"),
-        "the run must take the dispatcher's permit"
+        prompt_line < acquire && acquire < run,
+        "the permit must be taken between resolving the chat and running it, \
+         not while a mention waits for its thread's turn"
     );
     assert!(
-        !include_str!("../socket.rs").contains("semaphore()"),
-        "and the transport must not: a mention waiting for its thread's turn is \
-         not a `claude` subprocess"
+        !include_str!("../socket.rs").contains("semaphore().acquire"),
+        "and the transport must not take it: a mention waiting for its thread's \
+         turn is not a `claude` subprocess"
     );
 }

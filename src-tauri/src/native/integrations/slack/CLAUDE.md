@@ -232,8 +232,13 @@ declines to start one.
   otherwise find no `inbound_threads` row — the row is written by the run it is
   queued behind — and be dropped as a mention in a thread Agento did not start.
   This is the one ordering constraint the FIFO exists for, and it is why
-  classification is split across `accept` (rule, mention strip) and `turn`
-  (mapping, start-or-resume).
+  classification is split across `accept` (the rule) and `turn` (the mapping, the
+  bot-id strip, start-or-resume). The order the queue preserves is **enqueue**
+  order, not arrival order: `socket.rs::dispatch` spawns a task per envelope and
+  each awaits its dedup claim before a handler runs, so two mentions posted a
+  millisecond apart can reach the queue either way round and nothing downstream
+  could put that back. What it guarantees is first-queued-first-answered, and no
+  overlap.
 - **The ten-slot bound is taken around the run, not around the handler.** It
   exists to bound `claude` subprocesses, and a mention waiting for its thread's
   turn is not one: taken in `socket.rs::dispatch`, as #567 had it, ten queued
@@ -282,7 +287,15 @@ declines to start one.
   mention. This is the first surface where an answer derived from a stranger's
   words is posted by the app as itself, into a channel it is a member of by
   construction. The only raw `<`, `>` and `|` in the output are the ones this
-  module writes building a `<url|text>` link; `gojson::to_vec_marshal` is not a
+  module writes around a link whose target it has checked is an `http`, `https`
+  or `mailto` URL. That check is the escape's second half, not tidiness: `<…>` is
+  Slack's markup for everything, so an unvetted link target is a hole straight
+  back through the escape — `[](!channel)` would otherwise become `<!channel>`,
+  and a channel member can ask for that in one sentence. Any other target keeps
+  its Markdown spelling and is posted as prose, which is what a reader wants for
+  the `[guide](./setup.md)` Slack could not link to anyway. A leading `&gt;` run
+  is put back to `>`, because Slack's blockquote is Markdown's and escaping is
+  the only thing that broke it. `gojson::to_vec_marshal` is not a
   substitute, since its `\u003c` is decoded straight back by Slack. The split
   counts `char`s, prefers a blank line then a line ending then the limit, and
   passes over a break inside a fenced block while any break outside one remains

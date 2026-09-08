@@ -31,8 +31,15 @@
 //! ## The per-thread FIFO
 //!
 //! A `thread → queue` map with one worker task per key, torn down when its
-//! queue drains, so two mentions in one thread run in arrival order and never
-//! overlap. It is **in addition to** the chat's busy lock, not instead of it:
+//! queue drains, so two mentions in one thread run **in the order they were
+//! queued** and never overlap. Queued, not *arrived*: #567 spawns a task per
+//! envelope and each awaits its dedup claim before the handler is called at
+//! all, so two mentions posted a millisecond apart can reach [`enqueue`] either
+//! way round and nothing downstream could put that back. What the queue
+//! guarantees — and what the acceptance criterion is about — is that whichever
+//! arrives first at the queue is answered first, and that the second never runs
+//! while the first is running. It is **in addition to** the chat's busy lock,
+//! not instead of it:
 //! `agent_run::run_resumed` takes `chat::live::try_lock`, which is what stops a
 //! Slack turn and a UI turn colliding on the same chat row (decision 9). The
 //! queue is what makes the *ordering* deterministic; the lock is what makes the

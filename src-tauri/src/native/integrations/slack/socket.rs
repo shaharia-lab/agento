@@ -709,7 +709,7 @@ impl Worker {
             // **The ten-slot bound is the handler's to take, not this task's**
             // (#568). `trigger::dispatcher::semaphore` is still the one bound
             // and it is still where the run happens under it — but it is
-            // acquired in `inbound::Inbound::run`, around the run itself. Taken
+            // acquired in `inbound::Inbound::turn`, around the run itself. Taken
             // here it would count a mention *waiting for its Slack thread's
             // turn* against a limit that is about `claude` subprocesses, and ten
             // queued mentions in one thread would hold every permit while one
