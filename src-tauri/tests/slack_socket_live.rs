@@ -147,6 +147,12 @@ fn claude_cli_present() -> bool {
 /// matching every channel the app is in, and it runs in `work_dir` under the
 /// `default` permission mode. That is the shape `docs/user-guide.md` tells a
 /// reader to use, so it is the shape the test exercises.
+///
+/// `agent_slug` is empty on purpose — `runner::load` reads that as "no agent",
+/// so the fixture needs no `agents` row. A slug naming an agent that does not
+/// exist is an `Err` and the mention would be answered with the error sentence.
+/// The `/api` writes refuse an empty slug; this is a direct insert, not a
+/// `POST`, so it is reachable here and nowhere a user can get to.
 fn fixture_db(dir: &Path, work_dir: &Path, channel: &str) -> PathBuf {
     let db_path = dir.join("agento.db");
     let mut conn = db::ensure_database(&db_path).expect("create the database");
@@ -275,36 +281,49 @@ async fn replies(
         .unwrap_or_default())
 }
 
-/// Wait until the thread holds `want` messages posted by `bot_user`, and answer
-/// their texts.
+/// Wait for the app to answer *after* `after_ts`, and answer what it said.
+///
+/// **Keyed on the timestamp, not on a running count.** An answer longer than
+/// 4000 characters is posted as several messages (`mrkdwn::split`), so "wait
+/// until two bot messages exist" is satisfied by one long first answer — and
+/// the resume assertions would then hold without a resume having happened.
+/// Every message strictly newer than the mention that provoked it is that
+/// mention's answer, however many parts it arrives in.
 ///
 /// **The wait has a deadline and the deadline names the hang**: a worker that
 /// never connected, a rule that never matched and a model that is simply slow
 /// are indistinguishable from a test that only waits.
-async fn await_replies(
+async fn await_reply_after(
     env: &Env,
     bot_user: &str,
     thread_ts: &str,
-    want: usize,
+    after_ts: &str,
 ) -> Result<Vec<String>, String> {
+    let after: f64 = after_ts
+        .parse()
+        .map_err(|_| format!("a slack ts that is not a number: {after_ts:?}"))?;
     let deadline = Instant::now() + REPLY_TIMEOUT;
-    let mut seen = Vec::new();
     while Instant::now() < deadline {
         let messages = replies(&env.user_token, &env.channel, thread_ts).await?;
-        seen = messages
+        let said: Vec<String> = messages
             .iter()
             .filter(|m| m.get("user").and_then(serde_json::Value::as_str) == Some(bot_user))
+            .filter(|m| {
+                m.get("ts")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|ts| ts.parse::<f64>().ok())
+                    .is_some_and(|ts| ts > after)
+            })
             .filter_map(|m| m.get("text").and_then(serde_json::Value::as_str))
             .map(str::to_string)
             .collect();
-        if seen.len() >= want {
-            return Ok(seen);
+        if !said.is_empty() {
+            return Ok(said);
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
     Err(format!(
-        "waited {REPLY_TIMEOUT:?} for {want} reply/replies in the thread and saw {}: {seen:?}",
-        seen.len()
+        "waited {REPLY_TIMEOUT:?} for the app to answer in the thread after {after_ts}, and it did not"
     ))
 }
 
@@ -424,7 +443,7 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
     let thread: Thread = (bot_user.clone(), thread_ts.clone());
     let carry = |why: String| (why, Some(thread.clone()));
 
-    let first = await_replies(env, &bot_user, &thread_ts, 1)
+    let first = await_reply_after(env, &bot_user, &thread_ts, &thread_ts)
         .await
         .map_err(&carry)?;
     if first[0].trim().is_empty() {
@@ -462,7 +481,7 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
     // The follow-up, inside the thread. This is the whole point: a second chat
     // here would mean the mapping was not read, and the agent would have lost
     // everything it was told.
-    post(
+    let follow_up_ts = post(
         &env.user_token,
         &env.channel,
         &format!("<@{bot_user}> {SECOND_PROMPT}"),
@@ -470,10 +489,10 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
     )
     .await
     .map_err(&carry)?;
-    let both = await_replies(env, &bot_user, &thread_ts, 2)
+    let second = await_reply_after(env, &bot_user, &thread_ts, &follow_up_ts)
         .await
         .map_err(&carry)?;
-    eprintln!("second reply: {:?}", both[1]);
+    eprintln!("second reply: {:?}", second[0]);
 
     let chats = scalar(db_path, "SELECT COUNT(*) FROM chat_sessions");
     if chats != 1 {
@@ -501,8 +520,10 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
     if title.contains(&env.channel) {
         return Err(carry(format!(
             "the chat is titled {title:?}, which carries the channel id rather \
-             than its name — `conversations.info` was refused, so the app is \
-             missing the `channels:read` scope the guide's manifest lists"
+             than its name — `conversations.info` did not answer. Either the app \
+             is missing `channels:read` (or `groups:read`, if the test channel \
+             is private), or AGENTO_SLACK_TEST_CHANNEL is a channel *name* where \
+             it has to be an id"
         )));
     }
 

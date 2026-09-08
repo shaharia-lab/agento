@@ -312,10 +312,13 @@ oauth_config:
 ```
 
 **That is the minimum for Socket Mode, and only for Socket Mode.** The same
-integration also gives your agents seven Slack *tools*, and three of them need
-scopes this manifest does not grant. Two you can add: `read_messages` needs
-`channels:history` and `list_users` needs `users:read`. The third you cannot —
-`search_messages` needs `search:read`, which Slack grants only to a user token.
+integration also gives your agents seven Slack *tools*, and most of them need
+scopes this manifest does not grant. Add what you want: `read_messages` needs
+`channels:history`, `list_users` needs `users:read`, and `list_channels` and
+`get_channel_info` reach **private** channels only with `groups:read` (they ask
+Slack for public and private together, so without it they fail rather than
+return the public half). One you cannot add — `search_messages` needs
+`search:read`, which Slack grants only to a user token.
 
 Then:
 
@@ -330,8 +333,8 @@ Then:
    token**, and save. It has to be the **Bot token** mode: Agento's OAuth
    install never asks for `app_mentions:read`, so an OAuth row connects
    perfectly happily and is then sent nothing.
-4. Turn on **Inbound → Socket Mode**. The badge beside it reads *Connecting* and
-   then *Connected*.
+4. Turn on **Inbound → Socket Mode**. The badge beside it reads `CONNECTING`
+   and then `CONNECTED`.
 5. In Slack, **invite the app to the channel** — `/invite @Agento`. Slack does
    not deliver `app_mention` from a channel the app is not in.
 6. Add a **trigger rule** on the same integration: which agent runs, and which

@@ -331,26 +331,27 @@ an agent. Setting it up is in the
 ### What the Socket Mode badge is telling you
 
 The badge under **Integrations → Slack → Inbound** is the connection's own
-report, written by the worker that holds it. There are five states:
+report, written by the worker that holds it. It renders in capitals, and there
+are five states:
 
 | Badge | Meaning |
 | --- | --- |
-| *Not running* | Socket Mode is off, or no worker has run since the app started. Also what you see when Socket Mode is on and the app-level or bot token has since gone missing — Agento starts no worker for a connection that could not reply. |
-| *Connecting* | The worker has started and is opening its first connection. |
-| *Connected* | The socket is open and Slack's events are arriving. |
-| *Reconnecting* | The connection ended and the worker is waiting to try again — either because Slack asked it to (routine, several times a day) or because an attempt failed and it has not failed five times in a row yet. Hover the badge for the reason, when there is one — a reconnect Slack asked for has none. |
-| *Error* | Five consecutive attempts failed. **The worker is still retrying** — this is a report, not a stop — so fixing the cause reconnects it without restarting Agento. The reason is under the badge in red, and on the badge as a tooltip. |
+| `NOT RUNNING` | Socket Mode is off, or no worker has run since the app started. Also what you see when Socket Mode is on and the app-level or bot token has since gone missing — Agento starts no worker for a connection that could not reply. |
+| `CONNECTING` | The worker has started and is opening its first connection. |
+| `CONNECTED` | The socket is open and Slack's events are arriving. |
+| `RECONNECTING` | The connection ended and the worker is waiting to try again — either because Slack asked it to (routine, several times a day) or because an attempt failed and it has not failed five times in a row yet. Hover the badge for the reason, when there is one — a reconnect Slack asked for has none. |
+| `ERROR` | Five consecutive attempts failed. **The worker is still retrying** — this is a report, not a stop — so fixing the cause reconnects it without restarting Agento. The reason is under the badge in red, and on the badge as a tooltip. |
 
-*Reconnecting* on its own is not a fault. The waits double from one second to a
+`RECONNECTING` on its own is not a fault. The waits double from one second to a
 minute, and a connection that stayed up for a minute resets the count, so a
-healthy integration that Slack cycles never reaches *Error*.
+healthy integration that Slack cycles never reaches `ERROR`.
 
 ### "apps.connections.open refused the app token: invalid_auth"
 
 The app-level token is wrong, revoked, or from a different app. Create a new one
 under **Basic Information → App-Level Tokens** with the `connections:write`
 scope, paste it into **App token**, and save — saving restarts the worker with
-it straight away, so the badge goes back to *Connecting* rather than waiting out
+it straight away, so the badge goes back to `CONNECTING` rather than waiting out
 the current backoff. Agento never clears a stored token on a refusal, so the old
 one is still there until you replace it.
 
@@ -479,7 +480,7 @@ The ones worth knowing by name:
 
 **Every `slack mention ignored` line is emitted at `debug`**, as is the
 bot-message drop and the redelivery line; everything else listed above is `info`
-or louder. If the log shows a *Connected* socket and nothing else at all, the
+or louder. If the log shows a `CONNECTED` socket and nothing else at all, the
 level is what you are missing.
 
 One thing to know before sharing a log: at `debug` level Agento records the text
