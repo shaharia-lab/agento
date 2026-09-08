@@ -48,7 +48,7 @@ required, not optional, and this table is the only thing that will prompt it.
 | `native/scanner/`, `native/insights/` | `docs/internal/native-scanner.md`, `docs/internal/native-insights.md` — the scan, the insight worker, the search index and its numbers |
 | `native/schedule/` | `docs/internal/native-schedule.md` — the scheduler, the executor, gocron and cron semantics, manual runs |
 | `native/integrations/` | `docs/internal/native-integrations.md` — the registry, credentials, OAuth |
-| each provider under `native/integrations/` | `docs/internal/native-integrations-{slack,telegram,github,google,jira,confluence}.md` — one file per ported integration |
+| each provider under `native/integrations/` | `docs/internal/native-integrations-slack.md`, `-telegram.md`, `-github.md`, `-google.md`, `-jira.md`, `-confluence.md` — one file per ported integration |
 | `native/claude_settings/`, `native/notifications/` | `docs/internal/native-claude-settings.md`, `docs/internal/native-notifications.md` |
 | `parity/` | `parity/README.md` — what the goldens are and what freezing them cost |
 
