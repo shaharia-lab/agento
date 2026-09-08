@@ -1,0 +1,874 @@
+//! Slack Socket Mode: one long-lived websocket per enabled Slack integration
+//! (#567, epic #562).
+//!
+//! A desktop app has no public URL, so an Events API webhook is not available to
+//! it at all — Socket Mode is the only way a Slack event reaches Agento. This
+//! module is the transport half: open the connection, acknowledge, de-duplicate,
+//! reconnect, and keep `inbound_status`/`inbound_error` current. What an
+//! `app_mention` *does* is #568's, and arrives here as [`SocketOptions::handler`];
+//! the default is a no-op that logs at `debug`.
+//!
+//! # The rules, and why each is a rule
+//!
+//! - **Acknowledge before anything else.** Slack expects `{"envelope_id": …}`
+//!   within seconds and redelivers the envelope otherwise, so the ack is written
+//!   to the socket before the claim, before the handler, and before any database
+//!   touch. The handler then runs on `tokio::spawn` under the trigger
+//!   dispatcher's semaphore, which is why that semaphore is `pub(crate)` rather
+//!   than this module opening a second bound on the same agent runs.
+//! - **De-duplicate by `event_id`.** An unacknowledged envelope is redelivered,
+//!   and a reconnect can replay one, so "acknowledged" is not "processed".
+//!   [`claim_event`] is `trigger::receiver::claim_update`'s shape exactly —
+//!   `INSERT OR IGNORE` inside an immediate transaction, the row count deciding
+//!   who won, plus the same best-effort 48-hour sweep.
+//! - **Back off on the wall clock, not on `tokio::time`.** A capped doubling
+//!   schedule re-anchored against `Utc::now()`, for the reason
+//!   `schedule::runtime`'s `advance_past_now` re-anchors: a suspended laptop
+//!   does not advance a `tokio::time::sleep` on every platform, and a reconnect
+//!   that waits out a shut lid is an integration that is silently down long
+//!   after the machine is back.
+//! - **A fresh `apps.connections.open` on every attempt.** The `wss://` URL it
+//!   returns is single-use; reconnecting to the previous one fails.
+//! - **The status is a stored value, not a log line.** `inbound_status` walks
+//!   `connecting` → `connected` → `reconnecting` → `error`, with
+//!   `inbound_error` carrying the last reason, so the UI can show an outage
+//!   rather than the user discovering it by being ignored. That is the
+//!   gateway's `BindFailed` reasoning (`gateway/registry.rs`), applied to a
+//!   value the UI already reads.
+//! - **`error` still retries.** It is the *reported* state after
+//!   [`SocketOptions::failure_threshold`] consecutive failures, not a stop: an
+//!   expired token that the user then fixes must reconnect without a restart. A
+//!   401 from `apps.connections.open` is reported and **never** clears the
+//!   stored credential — that is `token_validate::clear_auth`'s decision to
+//!   make, on a route a person asked for.
+//! - **Nothing blocking on the runtime.** Every database touch goes through
+//!   [`db::blocking`]; `a_socket_workers_contended_write_lock_does_not_stall_the_runtime`
+//!   in `tests/slack_socket.rs` is the copy of that rule for this task.
+//! - **The `xapp-` token is read once and captured into the task.** It is never
+//!   logged, never formatted into an error, and this module derives no `Debug`
+//!   that could carry it.
+
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use futures_util::SinkExt;
+use tokio_stream::StreamExt;
+use tokio_tungstenite::tungstenite::Message;
+
+use crate::native::db;
+
+/// `inbound_status` while an attempt is in flight and nothing has succeeded yet.
+pub const STATUS_CONNECTING: &str = "connecting";
+/// `inbound_status` for a live socket.
+pub const STATUS_CONNECTED: &str = "connected";
+/// `inbound_status` between a drop and the next successful connect.
+pub const STATUS_RECONNECTING: &str = "reconnecting";
+/// `inbound_status` after [`SocketOptions::failure_threshold`] consecutive
+/// failures. **Still retrying** — see the module header.
+pub const STATUS_ERROR: &str = "error";
+
+/// The first backoff wait.
+const DEFAULT_BASE_BACKOFF: Duration = Duration::from_secs(1);
+/// The ceiling the doubling stops at.
+const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// Consecutive failed attempts before the status is reported as `error`.
+const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
+/// How long `apps.connections.open` may take. Shorter than the Slack client's
+/// sixty seconds: this call is on the reconnect path, and a request that hangs
+/// is a worker that is not backing off.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+/// The largest chunk of a backoff wait spent inside one `tokio::time::sleep`.
+/// See [`sleep_until`] — the point is to re-read the wall clock often.
+const SLEEP_CHUNK: Duration = Duration::from_secs(1);
+/// How long the sweep keeps a processed `event_id`. `claim_update`'s horizon.
+const DEDUP_HORIZON_HOURS: i64 = 48;
+
+/// One `app_mention` event, as much of it as the transport can see.
+///
+/// Deliberately not the raw payload: #568 decides what an `app_mention` does,
+/// and giving it the fields Slack always sends keeps the parse in one place.
+/// No `Debug` is derived on the worker's own state, but this carries no
+/// credential and a handler will want to log it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppMention {
+    /// The integration whose socket delivered it.
+    pub integration_id: String,
+    /// `event.channel`.
+    pub channel: String,
+    /// `event.user`.
+    pub user: String,
+    /// `event.text`, with the leading `<@bot>` mention left in.
+    pub text: String,
+    /// `event.ts` — the message's own timestamp, and its id within the channel.
+    pub ts: String,
+    /// `event.thread_ts`, empty when the mention is not in a thread.
+    pub thread_ts: String,
+    /// The envelope's `payload.event_id`, which is what dedup claims.
+    pub event_id: String,
+}
+
+/// What runs after the ack. Returns a future so a handler may await — #568's
+/// does, since it starts an agent run.
+pub type EventHandler =
+    Arc<dyn Fn(AppMention) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Everything about a worker that a test needs to move and production does not.
+///
+/// A plain struct rather than a `#[cfg(test)]` override like
+/// [`client::API_BASE`](super::client): `tests/slack_socket.rs` is a separate
+/// binary, so a `cfg(test)` seam inside the library is invisible to it, and the
+/// alternative — an environment variable, as `AGENTO_CLAUDE_EXECUTABLE` is —
+/// would be process-wide state for something each worker can simply be handed.
+/// Production builds exactly one of these, [`SocketOptions::default`].
+#[derive(Clone)]
+pub struct SocketOptions {
+    /// Where `apps.connections.open` lives. Slack's own base by default.
+    pub api_base: String,
+    /// The first backoff wait; each consecutive failure doubles it.
+    pub base_backoff: Duration,
+    /// The ceiling the doubling stops at.
+    pub max_backoff: Duration,
+    /// Consecutive failures before the status is reported as `error`.
+    pub failure_threshold: u32,
+    /// What an `app_mention` does. The default logs at `debug` and returns.
+    pub handler: EventHandler,
+}
+
+impl Default for SocketOptions {
+    fn default() -> Self {
+        Self {
+            api_base: default_api_base(),
+            base_backoff: DEFAULT_BASE_BACKOFF,
+            max_backoff: DEFAULT_MAX_BACKOFF,
+            failure_threshold: DEFAULT_FAILURE_THRESHOLD,
+            handler: default_handler(),
+        }
+    }
+}
+
+/// Slack's own base, and in an in-crate test whatever
+/// [`client::API_BASE`](super::client) has been pointed at — so a `registry`
+/// test can drive the whole start path, which builds its options with
+/// [`SocketOptions::default`], without reaching the real `slack.com`.
+fn default_api_base() -> String {
+    super::client::api_base()
+}
+
+/// #568 replaces this. Until then an `app_mention` is observed and dropped, at
+/// `debug` so a user who turns inbound on can see the transport working without
+/// anything acting on their messages.
+fn default_handler() -> EventHandler {
+    Arc::new(|mention: AppMention| {
+        Box::pin(async move {
+            log::debug!(
+                "slack socket: app_mention integration_id={:?} channel={:?} event_id={:?}",
+                mention.integration_id,
+                mention.channel,
+                mention.event_id
+            );
+        })
+    })
+}
+
+/// A running Socket Mode worker. **Dropping it stops the worker**, which is the
+/// discipline the whole `integrations::registry` is built on: the handle *is*
+/// the cancel, so there is no second map of cancel functions to keep in step.
+///
+/// The stop is prompt at every point of the loop — the connect, the read and the
+/// backoff wait all select on the same oneshot — so a `stop` landing mid-connect
+/// abandons the attempt rather than leaving a socket holding a credential.
+pub struct SocketWorker {
+    /// `Option` only so `Drop` can take it; always `Some` while alive.
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    integration_id: String,
+}
+
+impl Drop for SocketWorker {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        log::info!(
+            "slack socket worker stopped: integration_id={:?}",
+            self.integration_id
+        );
+    }
+}
+
+/// Start a worker. Returns as soon as the task is spawned — the connect happens
+/// inside it.
+///
+/// **Returning before the first connect is the point.** The caller is
+/// `registry::start_one`, which has to record the handle under the generation it
+/// read; awaiting a connection first would hold that decision open for however
+/// long Slack takes, and a `stop` in that window would have nothing to drop.
+pub fn start(
+    db_path: &Path,
+    integration_id: &str,
+    app_token: &str,
+    options: SocketOptions,
+) -> SocketWorker {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let task = Worker {
+        db_path: db_path.to_path_buf(),
+        integration_id: integration_id.to_string(),
+        // Read once from `HostingRow` and captured here. It does not leave.
+        app_token: app_token.to_string(),
+        options,
+    };
+    let id = integration_id.to_string();
+    tokio::spawn(async move { task.run(shutdown_rx).await });
+    log::info!("slack socket worker started: integration_id={id:?}");
+    SocketWorker {
+        shutdown: Some(shutdown_tx),
+        integration_id: id,
+    }
+}
+
+/// The task's own state. Derives nothing: [`Self::app_token`] is a secret and a
+/// `{self:?}` in a log line is the same leak with a longer fuse — the rule
+/// `registry::HostingRow` already states for the blob this came out of.
+struct Worker {
+    db_path: PathBuf,
+    integration_id: String,
+    app_token: String,
+    options: SocketOptions,
+}
+
+/// Why an inner session ended. Both reconnect; they differ only in what the
+/// status says while the next attempt runs.
+enum SessionEnd {
+    /// Slack asked us to reconnect (a `disconnect` envelope), or the socket
+    /// closed cleanly. Not a failure — the consecutive counter resets.
+    Requested,
+    /// The socket died. The reason is user-visible.
+    Failed(String),
+}
+
+impl Worker {
+    async fn run(self, mut shutdown: tokio::sync::oneshot::Receiver<()>) {
+        // Consecutive *failed* attempts. Reset by any established connection,
+        // which is what makes a nightly `disconnect` — Slack rotates its
+        // gateways — cost one base wait rather than an ever-growing one.
+        let mut failures: u32 = 0;
+        self.write_status(STATUS_CONNECTING, "").await;
+
+        loop {
+            let outcome = tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                outcome = self.session() => outcome,
+            };
+
+            match outcome {
+                Ok(SessionEnd::Requested) => {
+                    failures = 0;
+                    self.write_status(STATUS_RECONNECTING, "").await;
+                }
+                Ok(SessionEnd::Failed(reason)) | Err(reason) => {
+                    failures = failures.saturating_add(1);
+                    let status = if failures >= self.options.failure_threshold {
+                        STATUS_ERROR
+                    } else {
+                        STATUS_RECONNECTING
+                    };
+                    log::warn!(
+                        "slack socket: integration_id={:?} attempt={failures} status={status}: {reason}",
+                        self.integration_id
+                    );
+                    self.write_status(status, &reason).await;
+                }
+            }
+
+            let wait = backoff_for(
+                failures,
+                self.options.base_backoff,
+                self.options.max_backoff,
+                jitter_ratio(),
+            );
+            let deadline = Utc::now() + chrono::Duration::from_std(wait).unwrap_or_default();
+            if sleep_until(deadline, &mut shutdown).await.is_break() {
+                return;
+            }
+        }
+    }
+
+    /// One attempt: open a connection and pump it until it ends.
+    async fn session(&self) -> Result<SessionEnd, String> {
+        let url = self.open_connection().await?;
+        let (mut socket, _) =
+            tokio::time::timeout(OPEN_TIMEOUT, tokio_tungstenite::connect_async(url.as_str()))
+                .await
+                .map_err(|_| "opening the socket mode connection timed out".to_string())?
+                .map_err(|e| format!("opening the socket mode connection: {e}"))?;
+
+        self.write_status(STATUS_CONNECTED, "").await;
+
+        while let Some(frame) = socket.next().await {
+            let frame = match frame {
+                Ok(frame) => frame,
+                Err(e) => return Ok(SessionEnd::Failed(format!("reading the socket: {e}"))),
+            };
+            let text = match frame {
+                Message::Text(text) => text.to_string(),
+                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
+                // Slack sends no binary frames; one is not a reason to drop the
+                // connection, only to say nothing was understood.
+                Message::Binary(_) => continue,
+                Message::Close(_) => return Ok(SessionEnd::Requested),
+            };
+
+            let Some(envelope) = Envelope::parse(&text) else {
+                log::warn!(
+                    "slack socket: integration_id={:?}: an envelope did not parse",
+                    self.integration_id
+                );
+                continue;
+            };
+
+            // **The ack comes first, before the claim and before the handler.**
+            // Slack redelivers anything unacknowledged within seconds, and the
+            // handler starts an agent run — orders of magnitude longer.
+            if let Some(envelope_id) = envelope.envelope_id.as_deref() {
+                let ack = format!(
+                    "{{\"envelope_id\":{}}}",
+                    serde_json::Value::String(envelope_id.to_string())
+                );
+                if let Err(e) = socket.send(Message::text(ack)).await {
+                    return Ok(SessionEnd::Failed(format!(
+                        "acknowledging an envelope: {e}"
+                    )));
+                }
+            }
+
+            if envelope.kind == "disconnect" {
+                log::info!(
+                    "slack socket: integration_id={:?}: slack asked for a reconnect ({})",
+                    self.integration_id,
+                    envelope.reason
+                );
+                return Ok(SessionEnd::Requested);
+            }
+
+            if let Some(mention) = envelope.app_mention(&self.integration_id) {
+                self.dispatch(mention).await;
+            }
+        }
+
+        // **The stream ending without a close frame is a failure, not a polite
+        // reconnect.** It is what a dropped TCP connection looks like from
+        // here, and calling it `Requested` would reset the consecutive-failure
+        // counter — so a gateway that keeps dropping us would be retried every
+        // second forever, with `inbound_status` never reaching `error` and
+        // nothing telling the user anything is wrong.
+        Ok(SessionEnd::Failed(
+            "the connection closed without a disconnect".to_string(),
+        ))
+    }
+
+    /// Claim the event, then run the handler under the trigger dispatcher's
+    /// semaphore.
+    ///
+    /// Spawned rather than awaited: the socket has to go back to reading, or the
+    /// next envelope waits out an agent run and Slack redelivers it.
+    async fn dispatch(&self, mention: AppMention) {
+        let db_path = self.db_path.clone();
+        let integration_id = self.integration_id.clone();
+        let event_id = mention.event_id.clone();
+        let claimed = db::blocking("slack event claim", move || {
+            claim_event(&db_path, &integration_id, &event_id)
+        })
+        .await
+        .unwrap_or(false);
+        if !claimed {
+            log::debug!(
+                "slack socket: integration_id={:?}: event_id={:?} already processed",
+                self.integration_id,
+                mention.event_id
+            );
+            return;
+        }
+
+        let handler = Arc::clone(&self.options.handler);
+        let integration_id = self.integration_id.clone();
+        tokio::spawn(async move {
+            let Ok(_permit) = crate::native::trigger::dispatcher::semaphore()
+                .acquire()
+                .await
+            else {
+                log::warn!(
+                    "dispatcher stopped, dropping slack app_mention integration_id={integration_id:?}"
+                );
+                return;
+            };
+            handler(mention).await;
+        });
+    }
+
+    /// `apps.connections.open` with the app-level token, answering the
+    /// single-use `wss://` URL it hands back.
+    ///
+    /// Slack's own convention, which the six ported tools already follow:
+    /// **`ok` decides, not the HTTP status.** No message here interpolates the
+    /// token; what a failure names is Slack's `error` code or the transport's.
+    async fn open_connection(&self) -> Result<String, String> {
+        let client = super::client::http_client()
+            .ok_or_else(|| "the slack http client could not be built".to_string())?;
+        let url = format!("{}/apps.connections.open", self.options.api_base);
+        let response = tokio::time::timeout(
+            OPEN_TIMEOUT,
+            client
+                .post(&url)
+                .bearer_auth(&self.app_token)
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .send(),
+        )
+        .await
+        .map_err(|_| "apps.connections.open timed out".to_string())?
+        .map_err(|e| format!("apps.connections.open: {e}"))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("reading apps.connections.open: {e}"))?;
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|_| format!("apps.connections.open answered {status}, not JSON"))?;
+
+        // **`ok` decides, not the HTTP status** — Slack's own convention, and the
+        // one a port gets backwards, as `slack/CLAUDE.md` records for the seven
+        // tools. A 500 carrying `{"ok":true}` is a success here too.
+        if parsed.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            let reason = parsed
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown_error");
+            return Err(format!(
+                "apps.connections.open refused the app token: {reason}"
+            ));
+        }
+        parsed
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "apps.connections.open returned no url".to_string())
+    }
+
+    /// Write `inbound_status`/`inbound_error`, and **nothing else**.
+    ///
+    /// `updated_at` is deliberately not bumped: a worker rewriting its state on
+    /// every reconnection would keep moving the record's timestamp for something
+    /// the user did not do. `integrations/CLAUDE.md` states that as the contract
+    /// #566 left for this worker.
+    async fn write_status(&self, status: &'static str, error: &str) {
+        let db_path = self.db_path.clone();
+        let id = self.integration_id.clone();
+        let error = error.to_string();
+        db::blocking("slack inbound status", move || {
+            write_status_blocking(&db_path, &id, status, &error);
+        })
+        .await;
+    }
+}
+
+/// The parsed shape of a Socket Mode envelope. Only the fields the transport
+/// acts on; the payload is re-read for the event itself.
+struct Envelope {
+    kind: String,
+    envelope_id: Option<String>,
+    reason: String,
+    payload: serde_json::Value,
+}
+
+impl Envelope {
+    fn parse(text: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        Some(Self {
+            kind: value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            envelope_id: value
+                .get("envelope_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+            reason: value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            payload: value
+                .get("payload")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    /// The envelope's `app_mention`, or `None` for every other event.
+    ///
+    /// **Every other Slack event type is out of scope** (#567's *Out of Scope*),
+    /// and silently: a workspace sends dozens of event types Agento subscribes
+    /// to by accident, and each one is still acknowledged above — dropping it
+    /// here rather than at the ack is what keeps Slack from redelivering it.
+    fn app_mention(&self, integration_id: &str) -> Option<AppMention> {
+        if self.kind != "events_api" {
+            return None;
+        }
+        let event = self.payload.get("event")?;
+        if event.get("type").and_then(serde_json::Value::as_str)? != "app_mention" {
+            return None;
+        }
+        let text_field = |value: &serde_json::Value, key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let event_id = self
+            .payload
+            .get("event_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())?
+            .to_string();
+        Some(AppMention {
+            integration_id: integration_id.to_string(),
+            channel: text_field(event, "channel"),
+            user: text_field(event, "user"),
+            text: text_field(event, "text"),
+            ts: text_field(event, "ts"),
+            thread_ts: text_field(event, "thread_ts"),
+            event_id,
+        })
+    }
+}
+
+/// `true` when this event is new and has now been claimed.
+///
+/// `trigger::receiver::claim_update`'s shape, with a TEXT `event_id` instead of
+/// an integer `update_id`. The claim is atomic — `INSERT OR IGNORE` inside an
+/// immediate transaction, the row count deciding who won — because an envelope
+/// redelivered while the first delivery's handler is still running would
+/// otherwise start the agent twice, and Socket Mode redelivers anything it does
+/// not see acknowledged.
+///
+/// A failure to record is `false`: do not run the agent against a database that
+/// could not record the run.
+pub fn claim_event(db_path: &Path, integration_id: &str, event_id: &str) -> bool {
+    let claim = || -> Result<bool, String> {
+        let mut conn = db::open_read_write(db_path)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("begin slack event claim: {e}"))?;
+        let now = crate::native::gotime::now_go_text();
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO slack_processed_events
+                    (integration_id, event_id, processed_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![integration_id, event_id, now],
+            )
+            .map_err(|e| format!("marking a slack event as processed: {e}"))?;
+
+        // The same best-effort 48-hour sweep `claim_update` does, and ignored
+        // the same way: a full table is a slow claim, never a wrong one.
+        let cutoff = crate::native::gotime::go_string_from_millis(
+            (Utc::now() - chrono::Duration::hours(DEDUP_HORIZON_HOURS)).timestamp_millis(),
+        );
+        let _ = tx.execute(
+            "DELETE FROM slack_processed_events WHERE processed_at < ?1",
+            [&cutoff],
+        );
+
+        tx.commit()
+            .map_err(|e| format!("commit slack event claim: {e}"))?;
+        Ok(inserted > 0)
+    };
+    match claim() {
+        Ok(claimed) => claimed,
+        Err(e) => {
+            log::error!(
+                "failed to claim slack event integration_id={integration_id:?} \
+                 event_id={event_id:?} error={e}"
+            );
+            false
+        }
+    }
+}
+
+/// `UPDATE integrations SET inbound_status, inbound_error`. Public so a test can
+/// read the contract back; nothing on the wire calls it.
+pub fn write_status_blocking(db_path: &Path, integration_id: &str, status: &str, error: &str) {
+    let write = || -> Result<(), String> {
+        let conn = db::open_read_write(db_path)?;
+        conn.execute(
+            "UPDATE integrations SET inbound_status = ?1, inbound_error = ?2 WHERE id = ?3",
+            rusqlite::params![status, error, integration_id],
+        )
+        .map_err(|e| format!("saving the inbound status: {e}"))?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        log::error!(
+            "failed to record the slack inbound status integration_id={integration_id:?} \
+             status={status:?} error={e}"
+        );
+    }
+}
+
+/// The wait before attempt `failures + 1`: `base * 2^failures`, capped, plus up
+/// to a quarter of itself as jitter.
+///
+/// `failures == 0` is the reconnect after a *successful* session and gets the
+/// base wait; every consecutive failure doubles it. The jitter is additive and
+/// bounded above by `ratio < 0.25 * step`, which is what keeps the schedule
+/// **strictly increasing** below the cap — two workers reconnecting in lockstep
+/// is what jitter is for, and a jitter wide enough to reorder two steps would
+/// make "the second attempt waits longer than the first" untrue.
+fn backoff_for(failures: u32, base: Duration, max: Duration, ratio: f64) -> Duration {
+    let step = base
+        .checked_mul(1u32.checked_shl(failures.min(31)).unwrap_or(u32::MAX))
+        .unwrap_or(max)
+        .min(max);
+    let jitter = step.mul_f64(ratio.clamp(0.0, 1.0) * 0.25);
+    step.saturating_add(jitter)
+}
+
+/// A cheap, dependency-free source of jitter in `[0, 1)`.
+///
+/// `rand` is in the lockfile (via `rmcp`) but not a direct dependency, and this
+/// needs no distribution guarantees at all — only that two processes waking at
+/// the same instant do not pick the same wait. The nanosecond field of the wall
+/// clock is exactly that.
+fn jitter_ratio() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    f64::from(nanos) / 1_000_000_000.0
+}
+
+/// Wait until a **wall-clock** instant, or until the worker is stopped.
+///
+/// `tokio::time::sleep` measures elapsed process time, and on a suspended
+/// machine that is not elapsed wall-clock time — the same difference
+/// `schedule::runtime` re-anchors against with `advance_past_now`, quoting
+/// gocron's own "the machine went to sleep, and woke up some time later". A
+/// single long sleep would therefore hold the socket down for the length of a
+/// shut lid *after* the lid opens. Sleeping in [`SLEEP_CHUNK`] slices and
+/// re-reading `Utc::now()` each time bounds that error at one chunk.
+///
+/// `Break` means the worker was stopped and must return.
+async fn sleep_until(
+    deadline: DateTime<Utc>,
+    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+) -> std::ops::ControlFlow<()> {
+    loop {
+        let remaining = deadline - Utc::now();
+        if remaining <= chrono::Duration::zero() {
+            return std::ops::ControlFlow::Continue(());
+        }
+        let chunk = remaining.to_std().unwrap_or(SLEEP_CHUNK).min(SLEEP_CHUNK);
+        tokio::select! {
+            biased;
+            _ = &mut *shutdown => return std::ops::ControlFlow::Break(()),
+            () = tokio::time::sleep(chunk) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        file
+    }
+
+    /// The property the reconnect test in `tests/slack_socket.rs` observes over
+    /// a socket, asserted here over the schedule itself — deterministically, at
+    /// every jitter value rather than the one the clock happened to produce.
+    ///
+    /// A wider jitter would break it: at `± step` two adjacent steps overlap,
+    /// and "the second attempt waits longer than the first" becomes true only
+    /// most of the time, which is the shape of a test that passes in CI and
+    /// fails on someone's laptop.
+    #[test]
+    fn the_backoff_doubles_to_a_cap_and_never_goes_backwards() {
+        let base = Duration::from_secs(1);
+        let max = Duration::from_secs(60);
+        for ratio in [0.0, 0.25, 0.5, 0.999] {
+            let waits: Vec<Duration> = (0..10).map(|n| backoff_for(n, base, max, ratio)).collect();
+            for pair in waits.windows(2) {
+                assert!(
+                    pair[1] >= pair[0],
+                    "the schedule went backwards at ratio {ratio}: {waits:?}"
+                );
+            }
+            assert!(
+                waits[1] > waits[0],
+                "the second wait must be strictly longer than the first at ratio {ratio}: {waits:?}"
+            );
+            assert!(
+                *waits.last().expect("ten waits") <= max.mul_f64(1.25),
+                "the cap plus its jitter is the ceiling: {waits:?}"
+            );
+        }
+    }
+
+    /// The cap is a cap: a very large failure count must neither overflow nor
+    /// wrap back to a short wait, which is how a shift-based doubling fails.
+    #[test]
+    fn a_runaway_failure_count_still_waits_the_cap_and_no_more() {
+        let max = Duration::from_secs(60);
+        for failures in [31u32, 32, 64, u32::MAX] {
+            let wait = backoff_for(failures, Duration::from_secs(1), max, 0.0);
+            assert_eq!(wait, max, "failures={failures} left the cap");
+        }
+    }
+
+    /// `INSERT OR IGNORE` claims once. The second call is the redelivery Socket
+    /// Mode makes when it does not see an ack, and it must not reach a handler.
+    #[test]
+    fn an_event_is_claimed_once_per_integration() {
+        let file = db();
+        assert!(
+            claim_event(file.path(), "int-1", "Ev1"),
+            "the first delivery"
+        );
+        assert!(!claim_event(file.path(), "int-1", "Ev1"), "a redelivery");
+        assert!(
+            claim_event(file.path(), "int-2", "Ev1"),
+            "another integration is a different event"
+        );
+    }
+
+    /// The status write touches two columns and no others. `updated_at` is the
+    /// one that matters: a worker that reconnects hourly would otherwise keep
+    /// moving the record's timestamp for something the user did not do.
+    #[test]
+    fn a_status_write_moves_neither_updated_at_nor_the_switch() {
+        let file = db();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO integrations
+                (id, name, type, enabled, credentials, services, created_at, updated_at,
+                 inbound_enabled, inbound_status, inbound_error)
+             VALUES ('s1', 'S', 'slack', 1, '{}', '{}', 'then', 'then', 1, '', '')",
+            [],
+        )
+        .expect("seed");
+        drop(conn);
+
+        write_status_blocking(file.path(), "s1", STATUS_ERROR, "invalid_auth");
+
+        let conn = rusqlite::Connection::open(file.path()).expect("reopen");
+        let (status, error, updated, enabled): (String, String, String, i64) = conn
+            .query_row(
+                "SELECT inbound_status, inbound_error, updated_at, inbound_enabled
+                 FROM integrations WHERE id = 's1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read back");
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(error, "invalid_auth");
+        assert_eq!(updated, "then", "the status write must not bump updated_at");
+        assert_eq!(enabled, 1, "the status write must not touch the switch");
+    }
+
+    /// Only `app_mention` inside an `events_api` envelope becomes work, and an
+    /// event with no `event_id` is not dispatched at all — dedup has nothing to
+    /// claim for it, so it would run again on every redelivery.
+    #[test]
+    fn only_an_app_mention_carrying_an_event_id_becomes_work() {
+        let mention = Envelope::parse(
+            r#"{"type":"events_api","envelope_id":"e1","payload":{"event_id":"Ev1",
+                "event":{"type":"app_mention","channel":"C1","user":"U1","text":"hi",
+                         "ts":"1.1","thread_ts":"1.0"}}}"#,
+        )
+        .expect("parse")
+        .app_mention("int-1")
+        .expect("an app_mention");
+        assert_eq!(mention.event_id, "Ev1");
+        assert_eq!(mention.channel, "C1");
+        assert_eq!(mention.thread_ts, "1.0");
+
+        let not_work = [
+            // A different event type.
+            r#"{"type":"events_api","payload":{"event_id":"Ev2","event":{"type":"message"}}}"#,
+            // An app_mention with no event_id to claim.
+            r#"{"type":"events_api","payload":{"event":{"type":"app_mention"}}}"#,
+            // A control envelope.
+            r#"{"type":"hello"}"#,
+            r#"{"type":"disconnect","reason":"refresh_requested"}"#,
+        ];
+        for text in not_work {
+            assert!(
+                Envelope::parse(text)
+                    .expect("parse")
+                    .app_mention("int-1")
+                    .is_none(),
+                "{text} must not become work"
+            );
+        }
+    }
+
+    /// A `thread_ts` that Slack omits is the empty string, not a missing field
+    /// that drops the whole mention — a top-level mention is the common case.
+    #[test]
+    fn a_mention_outside_a_thread_carries_an_empty_thread_ts() {
+        let mention = Envelope::parse(
+            r#"{"type":"events_api","envelope_id":"e1","payload":{"event_id":"Ev1",
+                "event":{"type":"app_mention","channel":"C1","user":"U1","text":"hi","ts":"1.1"}}}"#,
+        )
+        .expect("parse")
+        .app_mention("int-1")
+        .expect("an app_mention");
+        assert_eq!(mention.thread_ts, "");
+    }
+
+    /// An envelope id is JSON-encoded rather than interpolated. Slack's ids are
+    /// UUIDs, but the ack is a document and building it with `format!` on a
+    /// value from the network is how a quote in it becomes a broken frame.
+    #[test]
+    fn an_envelope_id_is_json_encoded_into_the_ack() {
+        let ack = format!(
+            "{{\"envelope_id\":{}}}",
+            serde_json::Value::String("a\"b".to_string())
+        );
+        assert_eq!(ack, r#"{"envelope_id":"a\"b"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&ack).expect("valid json");
+        assert_eq!(parsed["envelope_id"], "a\"b");
+    }
+
+    /// The default handler is what ships until #568, and the thing it must not
+    /// do is anything: no database touch, no reply, no panic.
+    #[tokio::test]
+    async fn the_default_handler_does_nothing_at_all() {
+        let handler = default_handler();
+        handler(AppMention {
+            integration_id: "int-1".into(),
+            channel: "C1".into(),
+            user: "U1".into(),
+            text: "hi".into(),
+            ts: "1.1".into(),
+            thread_ts: String::new(),
+            event_id: "Ev1".into(),
+        })
+        .await;
+    }
+}

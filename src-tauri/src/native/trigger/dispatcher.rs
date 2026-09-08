@@ -49,7 +49,13 @@ const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// What Go replies with on every failure path.
 const ERROR_REPLY: &str = "Sorry, something went wrong.";
 
-fn semaphore() -> &'static Semaphore {
+/// `pub(crate)` rather than module-private since #567: Slack's Socket Mode
+/// worker runs its handler under **this** bound, not a second one. Two
+/// semaphores would each be ten, so a workspace busy on both transports could
+/// have twenty agent runs in flight against a limit that says ten — and the
+/// limit is about `claude` subprocesses, which do not care which transport
+/// asked for them.
+pub(crate) fn semaphore() -> &'static Semaphore {
     static SEM: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
     SEM.get_or_init(|| Semaphore::new(MAX_CONCURRENT))
 }

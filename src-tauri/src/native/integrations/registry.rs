@@ -131,6 +131,7 @@ use rusqlite::OptionalExtension;
 
 use crate::claude::InProcessMcpServer;
 
+use super::slack::socket::SocketWorker;
 use super::{decode_services, ServiceConfig};
 
 /// One integration row, **credentials included**.
@@ -221,10 +222,9 @@ impl HostingRow {
     /// JSON string is escaped in the blob, so the decoded token is not always a
     /// slice of it, and every other credential accessor in this module hands
     /// back an owned value for the same reason.
-    /// `allow(dead_code)` for [`Self::inbound_enabled`]'s reason: #567's worker
-    /// is the caller, and the accessor is what that change reads rather than
+    /// #567's socket worker is the caller, through
+    /// [`start_socket_worker`], and this accessor is what it reads rather than
     /// reaching into the blob itself.
-    #[allow(dead_code)]
     pub(crate) fn app_token(&self) -> Option<String> {
         serde_json::from_str::<serde_json::Value>(&self.credentials)
             .ok()?
@@ -271,6 +271,16 @@ pub struct Registry {
 #[derive(Default)]
 struct State {
     servers: HashMap<String, InProcessMcpServer>,
+    /// The Slack Socket Mode workers, keyed the same way (#567).
+    ///
+    /// A second map rather than a second field on the value, because the two
+    /// handles are independent: every hosted type has a server, and only a
+    /// Slack row with `inbound_enabled` and an `xapp-` token has a worker. They
+    /// share one generation, so [`Registry::stop`] and
+    /// [`Registry::put_if_current`] move both at once and a stop racing a
+    /// reload can no more leave a socket holding a credential than it can leave
+    /// a bound port.
+    sockets: HashMap<String, SocketWorker>,
     /// Bumped by every [`Registry::stop`], and never reset.
     ///
     /// This is what closes the window `reload` opens by design: a start records
@@ -315,7 +325,14 @@ impl Registry {
         let mut state = self.lock();
         *state.generations.entry(id.to_string()).or_default() += 1;
         let removed = state.servers.remove(id);
+        // Removed inside the same lock and dropped with it, for the reason
+        // above: dropping a [`SocketWorker`] only sends a oneshot, so there is
+        // nothing to await, and releasing first would leave a window in which
+        // the map says the worker is gone while the socket is still open
+        // holding the app token.
+        let removed_socket = state.sockets.remove(id);
         drop(state);
+        drop(removed_socket);
         if removed.is_some() {
             log::info!("integration MCP server stopped: id={id:?}");
         }
@@ -341,12 +358,35 @@ impl Registry {
     /// Returns whether the handle was kept. A refused handle is dropped here,
     /// which fires its shutdown oneshot — so the listener the caller started
     /// goes away rather than outliving the row it was built from.
-    fn put_if_current(&self, id: &str, generation: u64, server: InProcessMcpServer) -> bool {
+    ///
+    /// The socket worker is recorded in the **same** critical section as the
+    /// server, so the pair a `start_one` built is kept or dropped together. Two
+    /// calls would leave a `stop` landing between them able to keep one half.
+    fn put_if_current(
+        &self,
+        id: &str,
+        generation: u64,
+        server: InProcessMcpServer,
+        socket: Option<SocketWorker>,
+    ) -> bool {
         let mut state = self.lock();
         if state.generations.get(id).copied().unwrap_or_default() != generation {
             return false;
         }
         state.servers.insert(id.to_string(), server);
+        match socket {
+            Some(socket) => {
+                state.sockets.insert(id.to_string(), socket);
+            }
+            // A Slack row whose inbound switch was turned off still reloads, and
+            // the reload must retire the previous worker rather than leave it
+            // running against a row that no longer wants it.
+            None => {
+                let stale = state.sockets.remove(id);
+                drop(state);
+                drop(stale);
+            }
+        }
         true
     }
 
@@ -354,6 +394,14 @@ impl Registry {
     /// this; it exists so the lifecycle can be asserted.
     pub fn is_hosted(&self, id: &str) -> bool {
         self.lock().servers.contains_key(id)
+    }
+
+    /// Whether a Slack Socket Mode worker is running for this integration.
+    /// Nothing on the wire reads this either — `inbound_status` is what the UI
+    /// sees, and it is the worker's to write. This exists so the lifecycle can
+    /// be asserted (#567).
+    pub fn is_socket_running(&self, id: &str) -> bool {
+        self.lock().sockets.contains_key(id)
     }
 }
 
@@ -376,7 +424,7 @@ pub async fn start_all(db_path: &Path) -> Result<(), String> {
             continue;
         }
         let generation = generations.get(&row.id).copied().unwrap_or_default();
-        if let Err(e) = start_one(&row, generation).await {
+        if let Err(e) = start_one(db_path, &row, generation).await {
             log::warn!(
                 "failed to start integration server: id={:?} type={:?} error={e}",
                 row.id,
@@ -408,7 +456,7 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
     if !row.is_startable() {
         return Ok(()); // disabled or not authenticated
     }
-    start_one(&row, generation).await
+    start_one(db_path, &row, generation).await
 }
 
 /// `startOne`: resolve the type's starter, run it, record the handle.
@@ -417,10 +465,12 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
 /// decided to start: a mismatch means the integration was stopped or deleted
 /// while the server was being built, and the handle is dropped rather than
 /// recorded — which stops the listener it just bound.
-async fn start_one(row: &HostingRow, generation: u64) -> Result<(), String> {
+async fn start_one(db_path: &Path, row: &HostingRow, generation: u64) -> Result<(), String> {
     let server = start_for_type(row).await?;
     let url = server.url().to_string();
-    if !registry().put_if_current(&row.id, generation, server) {
+    let socket = start_socket_worker(db_path, row);
+    let hosted_socket = socket.is_some();
+    if !registry().put_if_current(&row.id, generation, server, socket) {
         log::info!(
             "integration MCP server discarded before it was recorded, \
              the integration was stopped while it started: id={:?} type={:?}",
@@ -430,11 +480,45 @@ async fn start_one(row: &HostingRow, generation: u64) -> Result<(), String> {
         return Ok(());
     }
     log::info!(
-        "integration MCP server started: id={:?} type={:?} url={url}",
+        "integration MCP server started: id={:?} type={:?} url={url} socket={hosted_socket}",
         row.id,
         row.integration_type
     );
     Ok(())
+}
+
+/// The Slack Socket Mode worker for this row, when the row asks for one (#567).
+///
+/// Three conditions, and each is a different absence: the type must be `slack`,
+/// migration 39's switch must be on, and the credentials blob must actually hold
+/// an `xapp-` token. The last is not redundant with the 422 on `PUT
+/// /api/integrations/{id}/inbound` — a later `PUT /api/integrations/{id}` can
+/// replace the blob with one that has no `app_token`, which is exactly why that
+/// write clears `inbound_enabled`; this is the second line, because a row stored
+/// before that clearing existed still has to start cleanly rather than open a
+/// socket with an empty bearer.
+///
+/// **Started here rather than in `start_for_type`**, which returns one
+/// `InProcessMcpServer` and is the starter table for the six hosted types. The
+/// worker is not a seventh type — it is a second handle on one of them.
+fn start_socket_worker(db_path: &Path, row: &HostingRow) -> Option<SocketWorker> {
+    if row.integration_type != "slack" || !row.inbound_enabled {
+        return None;
+    }
+    let Some(app_token) = row.app_token() else {
+        log::warn!(
+            "slack inbound is enabled but no app token is stored, \
+             not starting the socket worker: id={:?}",
+            row.id
+        );
+        return None;
+    };
+    Some(super::slack::socket::start(
+        db_path,
+        &row.id,
+        &app_token,
+        super::slack::socket::SocketOptions::default(),
+    ))
 }
 
 /// The starter table. Go builds a `map[string]ServerStarter` at wiring time;
@@ -1387,6 +1471,127 @@ mod tests {
 
     const GITHUB_SERVICES: &str = r#"{"repos":{"enabled":true,"tools":["list_repos","get_repo"]}}"#;
 
+    const SLACK_SERVICES: &str =
+        r#"{"messaging":{"enabled":true,"tools":["send_message","list_channels"]}}"#;
+    const SLACK_APP_TOKEN: &str = "xapp-1-A000-1111-secret";
+
+    fn slack_credentials(app_token: Option<&str>) -> String {
+        match app_token {
+            Some(token) => format!(
+                r#"{{"auth_mode":"bot_token","bot_token":"xoxb-test","app_token":"{token}"}}"#
+            ),
+            None => r#"{"auth_mode":"bot_token","bot_token":"xoxb-test"}"#.to_string(),
+        }
+    }
+
+    fn set_inbound(file: &tempfile::NamedTempFile, id: &str, enabled: bool) {
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE integrations SET inbound_enabled = ?1 WHERE id = ?2",
+                rusqlite::params![i64::from(enabled), id],
+            )
+            .expect("set the switch");
+    }
+
+    /// A Slack row carries **two** handles or one, and the switch plus the
+    /// stored token is what decides which — over the same `start_all` / `reload`
+    /// / `stop` path the MCP server already travels (#567).
+    ///
+    /// The three negative cases are the point. A socket started for a row with
+    /// the switch off would ignore `PUT /api/integrations/{id}/inbound`
+    /// entirely; one started for a row with no `app_token` would open a
+    /// connection with an empty bearer and report `error` forever; and a socket
+    /// left running by a reload that turned the switch off is a socket holding a
+    /// credential for a state the user has just left — the same failure the
+    /// generation counter exists to prevent for listeners.
+    #[tokio::test]
+    async fn a_slack_socket_worker_follows_the_switch_and_the_stored_token() {
+        // Pointed at a local fake, never at slack.com: the worker's first act is
+        // an `apps.connections.open`, and a test that reached the real one would
+        // pass offline for the wrong reason.
+        let _guard = super::super::slack::client::api_base_lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let app = axum::Router::new().fallback(|| async {
+                // What Slack answers for a token it will not accept.
+                (
+                    axum::http::StatusCode::OK,
+                    r#"{"ok":false,"error":"invalid_auth"}"#,
+                )
+            });
+            let _ = axum::serve(listener, app).await;
+        });
+        super::super::slack::client::set_api_base(Some(format!("http://{addr}")));
+
+        let file = db();
+        // Inbound on, token stored: both handles.
+        insert(
+            &file,
+            "sl-on",
+            "slack",
+            true,
+            Some(r#"{"validated":true}"#),
+            &slack_credentials(Some(SLACK_APP_TOKEN)),
+            SLACK_SERVICES,
+        );
+        // Inbound off: server only.
+        insert(
+            &file,
+            "sl-off",
+            "slack",
+            true,
+            Some(r#"{"validated":true}"#),
+            &slack_credentials(Some(SLACK_APP_TOKEN)),
+            SLACK_SERVICES,
+        );
+        // Inbound on but nothing to authenticate with: server only.
+        insert(
+            &file,
+            "sl-tokenless",
+            "slack",
+            true,
+            Some(r#"{"validated":true}"#),
+            &slack_credentials(None),
+            SLACK_SERVICES,
+        );
+        set_inbound(&file, "sl-on", true);
+        set_inbound(&file, "sl-tokenless", true);
+
+        start_all(file.path()).await.expect("start_all");
+        for id in ["sl-on", "sl-off", "sl-tokenless"] {
+            assert!(registry().is_hosted(id), "{id} must be hosted");
+        }
+        assert!(registry().is_socket_running("sl-on"));
+        assert!(!registry().is_socket_running("sl-off"));
+        assert!(!registry().is_socket_running("sl-tokenless"));
+
+        // Turning the switch off and reloading retires the worker without
+        // touching the hosted server.
+        set_inbound(&file, "sl-on", false);
+        reload(file.path(), "sl-on").await.expect("reload");
+        assert!(registry().is_hosted("sl-on"));
+        assert!(
+            !registry().is_socket_running("sl-on"),
+            "a reload with the switch off must retire the worker"
+        );
+
+        // And back on again.
+        set_inbound(&file, "sl-on", true);
+        reload(file.path(), "sl-on").await.expect("reload");
+        assert!(registry().is_socket_running("sl-on"));
+
+        for id in ["sl-on", "sl-off", "sl-tokenless"] {
+            registry().stop(id);
+            assert!(!registry().is_hosted(id));
+            assert!(!registry().is_socket_running(id));
+        }
+        super::super::slack::client::set_api_base(None);
+    }
+
     fn github_credentials() -> String {
         format!(r#"{{"auth_mode":"pat","personal_access_token":"{PAT}"}}"#)
     }
@@ -1673,7 +1878,7 @@ mod tests {
             .await
             .expect("a server to race with");
         assert!(
-            !registry().put_if_current("gh-race", generation, server),
+            !registry().put_if_current("gh-race", generation, server, None),
             "a handle whose generation has moved must be refused"
         );
         assert!(!registry().is_hosted("gh-race"));
@@ -1683,7 +1888,7 @@ mod tests {
         let server = start_filtered_server(file.path(), "gh-race", &[])
             .await
             .expect("server");
-        assert!(registry().put_if_current("gh-race", generation, server));
+        assert!(registry().put_if_current("gh-race", generation, server, None));
         assert!(registry().is_hosted("gh-race"));
         registry().stop("gh-race");
     }

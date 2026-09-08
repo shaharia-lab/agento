@@ -1383,7 +1383,8 @@ async fn free_port() -> u16 {
 
 // ── Startup ordering ─────────────────────────────────────────────────────────
 
-/// The gateway may not start before the credential system it verifies against.
+/// The gateway and the Slack socket worker may not start before the credential
+/// system they verify against, or the database they write to.
 ///
 /// **This is a source assertion, and deliberately so.** The property is about
 /// the order of three calls in one `setup` closure that also creates a database,
@@ -1420,6 +1421,44 @@ fn a_gateway_start_requires_an_installed_keypair() {
         revoked < gateway,
         "the gateway must not be started before the revoked-token set is loaded, \
          or it accepts a revoked token for the length of that window"
+    );
+
+    // #567 put a **second** thing this process opens at boot on the far side of
+    // that install: `integrations::registry::start_all` now starts a Slack
+    // Socket Mode worker per enabled row, and a worker is a listener in every
+    // way that matters here — it is spawned rather than awaited, it holds a
+    // credential, and it begins accepting inbound work the moment it connects.
+    //
+    // Its own hard requirement is `migrate::apply`: the worker's first act is a
+    // `db::blocking` write of `inbound_status`, which is migration 39's column,
+    // so a start above the migrations writes to a schema that does not have it
+    // and reports nothing for the rest of the launch. The credential ordering is
+    // the same rule the gateway follows, kept for the same reason — every
+    // listener this process opens at boot, the gateway's inbound HTTP and
+    // Slack's inbound websocket alike, is on one side of the install, so the
+    // question is answered once rather than argued per listener.
+    let migrate = source
+        .find("migrate::apply")
+        .expect("lib.rs must apply the migrations");
+    let integrations = source
+        .find("integrations::registry::start_all")
+        .expect("lib.rs must start the integrations");
+
+    assert!(
+        migrate < integrations,
+        "the slack socket worker must not be started before the migrations have \
+         run, or its first `inbound_status` write lands on a schema without the \
+         column and the integration reports nothing all launch"
+    );
+    assert!(
+        install < integrations,
+        "the slack socket worker must not be started before the signing keypair \
+         is installed"
+    );
+    assert!(
+        revoked < integrations,
+        "the slack socket worker must not be started before the revoked-token \
+         set is loaded"
     );
 }
 
