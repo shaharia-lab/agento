@@ -112,16 +112,31 @@ pub async fn run_headless(
     collected
 }
 
-/// A `RunSpec` for a headless run of `agent`, with no session pinned.
+/// A `RunSpec` for a headless run of `agent`, with no session pinned and
+/// `settings` imposed over the agent's own choices.
 ///
 /// `buildRunOptions` sets neither session field, so the CLI generates its own id
 /// and the caller stores it afterwards.
+///
+/// **Empty is "no choice was recorded"** for every field of `settings`, so the
+/// zero value reproduces exactly what a headless run did before a caller could
+/// configure one: the agent's model, the agent's permission mode, and no
+/// working directory or settings profile. That is what the scheduler passes for
+/// the two fields a task does not carry.
 pub fn headless_spec(
     db_path: &std::path::Path,
     agent: crate::native::agents::Agent,
-    working_dir: String,
-    settings_profile_id: String,
+    settings: &ExecutionSettings,
 ) -> RunSpec {
+    // The caller's model wins over the agent's own, and it is written into
+    // `agent.model` rather than into the closure below: `build_options` reads
+    // the agent for any spec that has one, and this spec always has one, so the
+    // closure is the arm that never runs. `resume_spec` has to write both
+    // because a chat may have no agent.
+    let mut agent = agent;
+    if !settings.model.is_empty() {
+        agent.model = settings.model.clone();
+    }
     RunSpec {
         agent: Some(agent),
         // Never called: both callers synthesize an agent rather than passing
@@ -130,11 +145,12 @@ pub fn headless_spec(
         // tools where a nil one gets none.
         no_agent_model: Box::new(String::new),
         settings: Arc::new(runner::TurnSettings::from_db(db_path)),
-        working_dir,
-        settings_profile_id,
-        // A headless run carries no conversation-level choice, so the agent's
-        // own mode applies — `buildRunOptions` sets no permission mode either.
-        permission_mode: String::new(),
+        working_dir: settings.working_directory.clone(),
+        settings_profile_id: settings.settings_profile_id.clone(),
+        // A trigger rule may impose one (#565). Empty leaves the pre-#565
+        // answer: no conversation-level choice, so `build_options` applies the
+        // agent's own mode — `buildRunOptions` sets none either.
+        permission_mode: settings.permission_mode.clone(),
         resume_session_id: None,
         custom_session_id: String::new(),
     }
@@ -663,6 +679,60 @@ mod tests {
         assert_eq!(spec.settings_profile_id, "rule-profile");
         assert_eq!(spec.permission_mode, "bypass");
         assert_eq!((spec.no_agent_model)(), "rule-model");
+    }
+
+    /// The four settings reach a fresh headless run too, not only a resumed
+    /// one — which is what a trigger rule needs (#565). The model goes onto the
+    /// agent, because that is the arm `build_options` reads for a spec that has
+    /// one, and `headless_spec` always has one.
+    #[test]
+    fn headless_execution_settings_reach_the_spec() {
+        let agent = crate::native::agents::Agent {
+            name: "A".to_string(),
+            slug: "a".to_string(),
+            description: String::new(),
+            model: "agent-model".to_string(),
+            thinking: String::new(),
+            permission_mode: String::new(),
+            system_prompt: String::new(),
+            capabilities: Default::default(),
+            claude_config_dir: String::new(),
+        };
+
+        let spec = headless_spec(
+            std::path::Path::new(NO_DB),
+            agent.clone(),
+            &ExecutionSettings::default(),
+        );
+        assert_eq!(spec.working_dir, "");
+        assert_eq!(spec.settings_profile_id, "");
+        assert_eq!(
+            spec.permission_mode, "",
+            "no choice recorded, so `build_options` applies the agent's own"
+        );
+        assert_eq!(
+            spec.agent.as_ref().map(|a| a.model.as_str()),
+            Some("agent-model"),
+            "the zero value is exactly what a headless run did before #565"
+        );
+
+        let spec = headless_spec(
+            std::path::Path::new(NO_DB),
+            agent,
+            &ExecutionSettings {
+                model: "rule-model".to_string(),
+                working_directory: "/from/the/rule".to_string(),
+                settings_profile_id: "rule-profile".to_string(),
+                permission_mode: "plan".to_string(),
+            },
+        );
+        assert_eq!(spec.working_dir, "/from/the/rule");
+        assert_eq!(spec.settings_profile_id, "rule-profile");
+        assert_eq!(spec.permission_mode, "plan");
+        assert_eq!(
+            spec.agent.as_ref().map(|a| a.model.as_str()),
+            Some("rule-model")
+        );
     }
 
     /// The model override has to be written into **both** arms `build_options`

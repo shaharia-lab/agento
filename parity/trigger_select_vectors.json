@@ -1,0 +1,115 @@
+{
+  "cases": [
+    {
+      "name": "specific/enabled-beats-an-enabled-default",
+      "note": "the channel's own rule is more specific than a workspace-wide one, whatever the store order",
+      "channel_id": "C1",
+      "rules": [
+        { "id": "default", "enabled": true, "filter_chat_ids": null },
+        { "id": "specific", "enabled": true, "filter_chat_ids": ["C1"] }
+      ],
+      "selected": "specific"
+    },
+    {
+      "name": "specific/disabled-is-silence-even-with-an-enabled-default",
+      "note": "THE clause: a disabled channel-specific rule is the channel's off switch and does not fall through",
+      "channel_id": "C1",
+      "rules": [
+        { "id": "default", "enabled": true, "filter_chat_ids": null },
+        { "id": "specific", "enabled": false, "filter_chat_ids": ["C1"] }
+      ],
+      "selected": null
+    },
+    {
+      "name": "default/answers-a-channel-with-no-rule-of-its-own",
+      "note": "an empty filter_chat_ids is the workspace-wide default",
+      "channel_id": "C2",
+      "rules": [
+        { "id": "default", "enabled": true, "filter_chat_ids": null },
+        { "id": "specific", "enabled": true, "filter_chat_ids": ["C1"] }
+      ],
+      "selected": "default"
+    },
+    {
+      "name": "default/disabled-alone-is-silence",
+      "note": "no specific rule and the default is off, so nothing answers",
+      "channel_id": "C2",
+      "rules": [{ "id": "default", "enabled": false, "filter_chat_ids": null }],
+      "selected": null
+    },
+    {
+      "name": "specific/two-for-one-channel-take-the-earlier-created_at",
+      "note": "rules arrive oldest first, so the tie is the first of them",
+      "channel_id": "C1",
+      "rules": [
+        { "id": "older", "enabled": true, "filter_chat_ids": ["C1"] },
+        { "id": "newer", "enabled": true, "filter_chat_ids": ["C1"] }
+      ],
+      "selected": "older"
+    },
+    {
+      "name": "specific/a-disabled-one-is-not-walked-past-to-a-later-specific-one",
+      "note": "the off switch wins the tie too: the earlier rule owns the channel and it is off",
+      "channel_id": "C1",
+      "rules": [
+        { "id": "older", "enabled": false, "filter_chat_ids": ["C1"] },
+        { "id": "newer", "enabled": true, "filter_chat_ids": ["C1"] }
+      ],
+      "selected": null
+    },
+    {
+      "name": "default/two-take-the-earlier-created_at",
+      "note": "same tie-break as the specific rules",
+      "channel_id": "C9",
+      "rules": [
+        { "id": "older", "enabled": true, "filter_chat_ids": null },
+        { "id": "newer", "enabled": true, "filter_chat_ids": null }
+      ],
+      "selected": "older"
+    },
+    {
+      "name": "default/a-disabled-one-is-skipped-for-an-enabled-one",
+      "note": "unlike a specific rule, a disabled default is not an off switch — it is simply not a default",
+      "channel_id": "C9",
+      "rules": [
+        { "id": "off", "enabled": false, "filter_chat_ids": null },
+        { "id": "on", "enabled": true, "filter_chat_ids": null }
+      ],
+      "selected": "on"
+    },
+    {
+      "name": "specific/a-rule-for-another-channel-is-neither-specific-nor-a-default",
+      "note": "a non-empty filter_chat_ids that does not name this channel never answers for it",
+      "channel_id": "C2",
+      "rules": [{ "id": "elsewhere", "enabled": true, "filter_chat_ids": ["C1"] }],
+      "selected": null
+    },
+    {
+      "name": "specific/one-rule-may-name-several-channels",
+      "note": "membership, not equality — the same rule owns every channel it lists",
+      "channel_id": "C3",
+      "rules": [
+        { "id": "default", "enabled": true, "filter_chat_ids": null },
+        { "id": "team", "enabled": true, "filter_chat_ids": ["C2", "C3"] }
+      ],
+      "selected": "team"
+    },
+    {
+      "name": "specific/exact-string-compare",
+      "note": "a channel id is compared byte for byte, as Telegram's chat ids are",
+      "channel_id": "c1",
+      "rules": [
+        { "id": "default", "enabled": true, "filter_chat_ids": null },
+        { "id": "specific", "enabled": true, "filter_chat_ids": ["C1"] }
+      ],
+      "selected": "default"
+    },
+    {
+      "name": "no-rules/is-silence",
+      "note": "an integration with no rules answers nothing at all",
+      "channel_id": "C1",
+      "rules": [],
+      "selected": null
+    }
+  ]
+}

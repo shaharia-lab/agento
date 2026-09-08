@@ -296,7 +296,7 @@ pub struct TriggerRule {
 ///
 /// Four hours. High enough that no legitimate run is refused, low enough that a
 /// mistyped value cannot park a subprocess for a week.
-const RULE_MAX_TIMEOUT_MINUTES: i64 = 240;
+pub(crate) const RULE_MAX_TIMEOUT_MINUTES: i64 = 240;
 
 /// Every `auth_mode` a credential blob may legitimately carry.
 ///

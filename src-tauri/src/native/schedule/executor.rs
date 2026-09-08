@@ -686,8 +686,14 @@ async fn run_agent(
     let spec = crate::native::agent_run::headless_spec(
         db_path,
         agent,
-        task.working_directory.clone(),
-        task.settings_profile_id.clone(),
+        // A task carries only these two of the four. Its model and permission
+        // mode have always been the agent's, and #565 gave the *rule* the other
+        // two rather than changing what a scheduled task does.
+        &crate::native::agent_run::ExecutionSettings {
+            working_directory: task.working_directory.clone(),
+            settings_profile_id: task.settings_profile_id.clone(),
+            ..Default::default()
+        },
     );
     let timeout = std::time::Duration::from_secs(
         u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
