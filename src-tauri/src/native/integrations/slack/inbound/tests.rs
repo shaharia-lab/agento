@@ -841,8 +841,11 @@ async fn a_second_mention_in_the_thread_queues_and_resumes_the_same_chat() {
 /// channel — including a reply inside the thread that run opened.
 ///
 /// Two things nothing else pins. First, the positive half of #582's criterion 1:
-/// the prefix-*stripped* remainder is what reaches the chat and the CLI, not the
-/// raw mention. Second, the follow-up rule stated in this module's header: a
+/// the prefix-*stripped* remainder is what reaches the chat and the chat title,
+/// not the raw mention — and the mention that fails the prefix reaches no CLI at
+/// all. (The prompt travels to the CLI on stdin, which `spawns` does not record;
+/// the chat's own message row is the observable, and it is written by the run.)
+/// Second, the follow-up rule stated in this module's header: a
 /// mention in one of Agento's own threads is filtered exactly like the one that
 /// started it, because `accept` decides before the thread map is read. A rule
 /// with a prefix therefore wants that prefix on every message, and the reply

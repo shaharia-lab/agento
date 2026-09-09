@@ -271,7 +271,7 @@ declines to start one.
   of running *more* than was asked for, so `accept` now gates the **already
   selected** rule through `trigger::match_rule::match_rule` — the same function
   Telegram calls, unmodified, with `parity/trigger_match_vectors.json` still its
-  authority. Three consequences worth stating:
+  authority. Four consequences worth stating:
   - **The filters are a gate on the selected rule, never a reason to look for
     another one.** `select_rule_for_channel`'s most-specific-wins (#565) picks the
     rule; a rule that then refuses the message means silence, not a fall-through
