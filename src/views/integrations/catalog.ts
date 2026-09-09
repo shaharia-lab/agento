@@ -67,6 +67,20 @@ export interface TriggerTargets {
   help: string;
   /** The singular noun a row's `N x filter(s)` summary is built from. */
   noun: string;
+  /**
+   * What Prefix and Keywords are matched against on this provider.
+   *
+   * Required rather than optional: the two inputs are shown for every provider
+   * that supports triggers, and #582 was the case where they were shown, stored
+   * and then ignored — a filter that looks like a safety measure and is not one.
+   * Making the wording mandatory means a provider cannot gain the inputs without
+   * someone writing down what they do there.
+   *
+   * The two answers genuinely differ. Telegram matches the message as sent;
+   * Slack matches what is left once the `@mention` is removed, because every
+   * `app_mention` begins with a bot id no user typed.
+   */
+  filterHelp: string;
 }
 
 export interface Provider {
@@ -218,6 +232,8 @@ export const PROVIDERS: Provider[] = [
       placeholder: "C0123ABCDEF, C0456GHIJKL (blank = any channel)",
       help: "Slack channel ids, comma-separated; empty = every channel the app is in.",
       noun: "channel",
+      filterHelp:
+        "Checked after the @mention is removed: the prefix must start what is left, a keyword may appear anywhere in it. Leave both empty to answer every mention in a matched channel.",
     },
     extraField: {
       key: "app_token",
@@ -360,6 +376,8 @@ export const PROVIDERS: Provider[] = [
       placeholder: "Chat IDs, comma separated (blank = any chat)",
       help: "Telegram chat ids, comma-separated; empty = every chat the bot is in.",
       noun: "chat",
+      filterHelp:
+        "Checked against the message as sent: the prefix must start it, a keyword may appear anywhere in it. Leave both empty to answer every message.",
     },
   },
   {

@@ -232,8 +232,8 @@ declines to start one.
   otherwise find no `inbound_threads` row — the row is written by the run it is
   queued behind — and be dropped as a mention in a thread Agento did not start.
   This is the one ordering constraint the FIFO exists for, and it is why
-  classification is split across `accept` (the rule) and `turn` (the mapping, the
-  bot-id strip, start-or-resume). The order the queue preserves is **enqueue**
+  classification is split across `accept` (the rule, the strip, the filters) and
+  `turn` (the mapping, start-or-resume). The order the queue preserves is **enqueue**
   order, not arrival order: `socket.rs::dispatch` spawns a task per envelope and
   each awaits its dedup claim before a handler runs, so two mentions posted a
   millisecond apart can reach the queue either way round and nothing downstream
@@ -250,13 +250,46 @@ declines to start one.
   line saying a mention was seen and a reply appearing minutes later are two
   different things to anyone reading a log — but that wait now costs a parked
   task and no permit.
-- **`auth.test` is resolved after the mapping decision, not before it.** It is
-  the one Slack failure the handler cannot work around, and its answer is
-  `ERROR_REPLY` — so resolving it first would post that sentence into a thread
-  Agento never started, which is exactly what the ignore rule exists to prevent.
-  Reading the thread map likewise distinguishes *no row* from *could not read*:
-  `busy_timeout` is five seconds, and a database busy behind the session scanner
-  would otherwise make a resume look like a stranger's thread and answer nothing.
+- **`auth.test` is resolved in `accept`; its `ERROR_REPLY` is still posted in
+  `turn`.** The two used to be one step, and #582 separated them. The bot user id
+  is what the `<@Uxxx>` strip needs and the strip is what the filters read, so the
+  id has to be in hand *before* the filter decision, which is before the queue.
+  The sentence it fails with does not move: `accept` posts nothing at all, and the
+  `ERROR_REPLY` for an unresolvable id waits in `turn` until the mapping decision
+  has established the thread as Agento's — otherwise it lands in a thread Agento
+  never started, which is exactly what the ignore rule exists to prevent. A `Job`
+  therefore carries `prompt: Option<String>`, and `None` is that one failure
+  rather than a drop. Reading the thread map likewise distinguishes *no row* from
+  *could not read*: `busy_timeout` is five seconds, and a database busy behind the
+  session scanner would otherwise make a resume look like a stranger's thread and
+  answer nothing.
+- **Strip, then filter, then enqueue — and the filters read the stripped text
+  (#582).** The trigger-rule form has always shown Prefix and Keywords for every
+  provider, and until #582 the Slack path read neither: `filter_prefix` and
+  `filter_keywords` were loaded off the row by `dispatcher::load_rules` and
+  dropped. A control that is displayed, stored and ignored fails in the direction
+  of running *more* than was asked for, so `accept` now gates the **already
+  selected** rule through `trigger::match_rule::match_rule` — the same function
+  Telegram calls, unmodified, with `parity/trigger_match_vectors.json` still its
+  authority. Three consequences worth stating:
+  - **The filters are a gate on the selected rule, never a reason to look for
+    another one.** `select_rule_for_channel`'s most-specific-wins (#565) picks the
+    rule; a rule that then refuses the message means silence, not a fall-through
+    to the workspace default. `a_mention_the_channels_rule_refuses_never_falls_through_to_the_default`
+    is the guard.
+  - **Keywords are matched against the stripped text, which is a deliberate
+    divergence from Telegram.** `match_rule`'s header pins keywords to the *whole*
+    message because Go did; on Slack the whole message always begins with a
+    `<@Uxxx>` no user typed, so a keyword equal to a fragment of the bot's own id
+    would fire on every mention. `keywords_are_case_insensitive_and_never_see_the_bots_own_id`
+    is that case. The prefix is matched on the stripped text for the same reason,
+    which is also what makes `@bot /ask …` and `/ask @bot …` one message.
+  - **`match_rule`'s own `chat_ids` clause is a no-op here, and is left in
+    place.** Selection has already returned either a rule naming this channel or a
+    rule naming none, and the matcher reads the second as "everything", so the two
+    agree. `the_matchers_channel_check_agrees_with_the_rule_selection` asserts that
+    rather than the code routing around it — one matcher, called the same way from
+    both transports.
 - **Queue teardown is under the map lock.** A worker that found its channel
   empty, released nothing and then removed its entry would lose a job queued in
   between, so the drain re-checks the channel while holding the lock that hands
@@ -273,10 +306,11 @@ declines to start one.
   for the same reason — `[Telegram] <rule>` and `[Slack] #channel: <60 chars>` are
   the only difference between the two call sites.
 - **`auth.test` is called once per handler, not per event and not per
-  connection.** The bot user id is what the `<@Uxxx>` strip and the
-  empty-remainder rule both need; a failure to get it is a failed turn and
-  answers `ERROR_REPLY`, because a Slack that will not answer `auth.test` will
-  not accept `chat.postMessage` either. `conversations.info` (chat title) and
+  connection.** The bot user id is what the `<@Uxxx>` strip, the empty-remainder
+  rule and the filters all need; a failure to get it is a failed turn and answers
+  `ERROR_REPLY`, because a Slack that will not answer `auth.test` will not accept
+  `chat.postMessage` either. Moving the call into `accept` moves its cost rather
+  than doubling it — the `OnceCell` is per handler, and `turn` already awaited it. `conversations.info` (chat title) and
   `chat.getPermalink` are best-effort on the start path only — the channel id and
   an empty permalink are the fallbacks, and neither refuses the run.
 - **`mrkdwn.rs` escapes `&`, `<` and `>` before it converts anything**, over the

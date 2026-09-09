@@ -1588,6 +1588,8 @@ const TRIGGER_TARGETS_FALLBACK: TriggerTargets = {
   placeholder: "IDs, comma separated (blank = any)",
   help: "Conversation ids, comma-separated; empty = every conversation.",
   noun: "chat",
+  filterHelp:
+    "The prefix must start the message and a keyword may appear anywhere in it. Leave both empty to answer every message.",
 };
 
 /** The longest run a rule may ask for, matching the write's own bound. */
@@ -2053,6 +2055,7 @@ function RuleForm({
           />
         </label>
       </div>
+      <div className="formrow__help">{targets.filterHelp}</div>
 
       <div className="row" style={{ gap: "var(--sp-3)" }}>
         <label className="field field--sm" style={{ flex: 1 }}>
