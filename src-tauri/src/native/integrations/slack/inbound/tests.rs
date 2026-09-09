@@ -30,7 +30,9 @@ use crate::native::agent_run::RunResult;
 use crate::native::integrations::slack::client::{api_base_lock, set_api_base};
 use crate::native::integrations::slack::socket::AppMention;
 
-use super::{reply_for, strip_mention, ERROR_REPLY, NO_RESPONSE_REPLY};
+use crate::native::trigger::match_rule::RuleFilters;
+
+use super::{filtered_prompt, reply_for, strip_mention, Dropped, ERROR_REPLY, NO_RESPONSE_REPLY};
 
 const BOT_USER: &str = "U0BOT";
 const CHANNEL: &str = "C1";
@@ -291,7 +293,7 @@ fn migrated(dir: &Path, integration_id: &str) -> PathBuf {
     db_path
 }
 
-/// A trigger rule, oldest-first by the `created_at` this is called with.
+/// A trigger rule with no message filters, oldest-first by `created_at`.
 #[allow(clippy::too_many_arguments)] // one parameter per stored column, by design
 fn seed_rule(
     db_path: &Path,
@@ -303,13 +305,42 @@ fn seed_rule(
     working_directory: &str,
     created_at: &str,
 ) {
+    seed_filtered_rule(
+        db_path,
+        integration_id,
+        id,
+        enabled,
+        channels,
+        model,
+        working_directory,
+        created_at,
+        "",
+        "[]",
+    );
+}
+
+/// The same, with `filter_prefix` and `filter_keywords` as they are stored — the
+/// prefix bare, the keywords a JSON array (#582).
+#[allow(clippy::too_many_arguments)] // one parameter per stored column, by design
+fn seed_filtered_rule(
+    db_path: &Path,
+    integration_id: &str,
+    id: &str,
+    enabled: bool,
+    channels: &str,
+    model: &str,
+    working_directory: &str,
+    created_at: &str,
+    prefix: &str,
+    keywords: &str,
+) {
     let conn = rusqlite::Connection::open(db_path).expect("open");
     conn.execute(
         "INSERT INTO trigger_rules
             (id, integration_id, name, agent_slug, enabled, filter_prefix, filter_keywords,
              filter_chat_ids, model, working_directory, settings_profile_id, permission_mode,
              timeout_minutes, created_at, updated_at)
-         VALUES (?1, ?2, ?1, '', ?3, '', '[]', ?4, ?5, ?6, '', 'plan', 0, ?7, ?7)",
+         VALUES (?1, ?2, ?1, '', ?3, ?8, ?9, ?4, ?5, ?6, '', 'plan', 0, ?7, ?7)",
         rusqlite::params![
             id,
             integration_id,
@@ -317,7 +348,9 @@ fn seed_rule(
             channels,
             model,
             working_directory,
-            created_at
+            created_at,
+            prefix,
+            keywords
         ],
     )
     .expect("seed a rule");
@@ -409,6 +442,140 @@ fn only_the_bots_own_mention_is_stripped() {
     ] {
         assert_eq!(strip_mention(text, BOT_USER), want, "stripping {text:?}");
     }
+}
+
+/// Only the filters, which is all [`filtered_prompt`] reads of a rule.
+fn filters(prefix: &str, keywords: &[&str], channels: &[&str]) -> RuleFilters {
+    RuleFilters {
+        prefix: prefix.to_string(),
+        keywords: keywords.iter().map(|k| k.to_string()).collect(),
+        chat_ids: channels.iter().map(|c| c.to_string()).collect(),
+    }
+}
+
+/// #582's first criterion: the prefix decides, and what follows it is the run.
+#[test]
+fn a_prefix_gates_the_mention_and_the_remainder_is_the_prompt() {
+    let ask = filters("/ask", &[], &[]);
+    assert_eq!(
+        filtered_prompt(&ask, "<@U0BOT> /ask what is the status", BOT_USER, CHANNEL),
+        Ok("what is the status".to_string())
+    );
+    assert_eq!(
+        filtered_prompt(&ask, "<@U0BOT> what is the status", BOT_USER, CHANNEL),
+        Err(Dropped::Filtered),
+        "a mention that does not carry the prefix runs nothing"
+    );
+}
+
+/// …and it decides on the *stripped* text, so where the `@mention` sits in the
+/// message cannot change the answer. Slack puts it wherever the user typed it.
+#[test]
+fn the_prefix_is_matched_wherever_the_mention_was_typed() {
+    let ask = filters("/ask", &[], &[]);
+    for text in [
+        "<@U0BOT> /ask deploy the thing",
+        "/ask <@U0BOT> deploy the thing",
+        "/ask deploy the thing <@U0BOT>",
+        "<@U0BOT|agento> /ask deploy the thing",
+    ] {
+        assert_eq!(
+            filtered_prompt(&ask, text, BOT_USER, CHANNEL),
+            Ok("deploy the thing".to_string()),
+            "matching {text:?}"
+        );
+    }
+}
+
+/// Keywords are a case-insensitive OR — and they read the stripped text, which
+/// is the one place this path deliberately differs from Telegram's.
+#[test]
+fn keywords_are_case_insensitive_and_never_see_the_bots_own_id() {
+    let deploy = filters("", &["deploy"], &[]);
+    assert_eq!(
+        filtered_prompt(&deploy, "<@U0BOT> please Deploy staging", BOT_USER, CHANNEL),
+        Ok("please Deploy staging".to_string())
+    );
+    assert_eq!(
+        filtered_prompt(&deploy, "<@U0BOT> please ship staging", BOT_USER, CHANNEL),
+        Err(Dropped::Filtered)
+    );
+
+    // The divergence, as the case that would prove it broken: `match_rule`
+    // matches keywords against the whole message because Go did, and on Slack
+    // the whole message always begins with `<@U0BOT>`. A keyword that only
+    // occurs inside that id was never typed by anybody and must not fire.
+    let bot_shaped = filters("", &["u0bot"], &[]);
+    assert_eq!(
+        filtered_prompt(&bot_shaped, "<@U0BOT> hello", BOT_USER, CHANNEL),
+        Err(Dropped::Filtered),
+        "the bot's own id is not part of what the user said"
+    );
+}
+
+/// #582's fourth criterion, and the one that says an upgrade changes nothing
+/// for a rule that sets no filters: every mention in a matched channel runs.
+#[test]
+fn no_filters_runs_every_mention_in_the_channel() {
+    assert_eq!(
+        filtered_prompt(
+            &RuleFilters::default(),
+            "<@U0BOT> anything at all",
+            BOT_USER,
+            CHANNEL
+        ),
+        Ok("anything at all".to_string())
+    );
+}
+
+/// The two shapes of "there is nothing to run", told apart because they read
+/// differently in a log: a bare prefix, and a mention with no words after it.
+#[test]
+fn a_bare_prefix_and_a_bare_mention_both_run_nothing() {
+    let ask = filters("/ask", &[], &[]);
+    assert_eq!(
+        filtered_prompt(&ask, "<@U0BOT> /ask", BOT_USER, CHANNEL),
+        Err(Dropped::Filtered),
+        "an empty prompt is not a match — `match_rule`'s own rule"
+    );
+    assert_eq!(
+        filtered_prompt(&ask, "<@U0BOT>   \n ", BOT_USER, CHANNEL),
+        Err(Dropped::NothingSaid),
+        "nothing was said, so the prefix never came into it"
+    );
+    assert_eq!(
+        filtered_prompt(&RuleFilters::default(), "<@U0BOT>", BOT_USER, CHANNEL),
+        Err(Dropped::NothingSaid),
+        "and that is true with no filters at all"
+    );
+}
+
+/// `match_rule` re-checks `chat_ids`, which `select_rule_for_channel` has
+/// already decided. Asserted rather than special-cased: both shapes that
+/// selection can hand over say yes, so the two agree and this path can keep
+/// calling the same function Telegram calls.
+#[test]
+fn the_matchers_channel_check_agrees_with_the_rule_selection() {
+    let named = filters("", &[], &[CHANNEL]);
+    assert_eq!(
+        filtered_prompt(&named, "<@U0BOT> hello", BOT_USER, CHANNEL),
+        Ok("hello".to_string()),
+        "a rule naming this channel is the first thing selection can return"
+    );
+    assert_eq!(
+        filtered_prompt(&RuleFilters::default(), "<@U0BOT> hello", BOT_USER, CHANNEL),
+        Ok("hello".to_string()),
+        "and a rule naming none is the second — the matcher reads it as every \
+         channel"
+    );
+
+    // The shape selection cannot hand over, for completeness: it is the only
+    // one the clause would refuse, which is why leaving it in costs nothing.
+    let elsewhere = filters("", &[], &["C-other"]);
+    assert_eq!(
+        filtered_prompt(&elsewhere, "<@U0BOT> hello", BOT_USER, CHANNEL),
+        Err(Dropped::Filtered)
+    );
 }
 
 /// Every ending has a sentence, and a timeout has the same one as a failure —
@@ -670,6 +837,116 @@ async fn a_second_mention_in_the_thread_queues_and_resumes_the_same_chat() {
     );
 }
 
+/// The prefix decides on a run, and it decides on **every** message in the
+/// channel — including a reply inside the thread that run opened.
+///
+/// Two things nothing else pins. First, the positive half of #582's criterion 1:
+/// the prefix-*stripped* remainder is what reaches the chat and the chat title,
+/// not the raw mention — and the mention that fails the prefix reaches no CLI at
+/// all. (The prompt travels to the CLI on stdin, which `spawns` does not record;
+/// the chat's own message row is the observable, and it is written by the run.)
+/// Second, the follow-up rule stated in this module's header: a
+/// mention in one of Agento's own threads is filtered exactly like the one that
+/// started it, because `accept` decides before the thread map is read. A rule
+/// with a prefix therefore wants that prefix on every message, and the reply
+/// that omits it is silence — no run, no message on the chat, nothing posted.
+#[tokio::test]
+async fn a_prefixed_rule_gates_the_follow_up_in_its_own_thread_too() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-prefix");
+    seed_filtered_rule(
+        &db,
+        "s-prefix",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+        "/ask",
+        "[]",
+    );
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler(&db, "s-prefix", "xoxb-t");
+
+    // Awaited one at a time: this is about what each mention decides, and the
+    // concurrent case is `a_second_mention_in_the_thread_queues_and_resumes…`.
+    finish(handler(mention(
+        "<@U0BOT> /ask deploy staging",
+        "1700000000.000100",
+        "",
+        "s-prefix",
+    )))
+    .await;
+    finish(handler(mention(
+        "<@U0BOT> and the database?",
+        "1700000000.000200",
+        "1700000000.000100",
+        "s-prefix",
+    )))
+    .await;
+    finish(handler(mention(
+        "<@U0BOT> /ask and the database?",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-prefix",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    let mapped = threads(&db);
+    assert_eq!(
+        mapped.len(),
+        1,
+        "one thread, opened by the mention that matched"
+    );
+    let chat_id = mapped[0].1.clone();
+
+    assert_eq!(
+        messages(&db, &chat_id)
+            .iter()
+            .map(|(role, content)| format!("{role}:{content}"))
+            .collect::<Vec<_>>(),
+        vec![
+            "user:deploy staging".to_string(),
+            "assistant:answer 1".to_string(),
+            "user:and the database?".to_string(),
+            "assistant:answer 2".to_string(),
+        ],
+        "the prompt is the prefix-stripped remainder, and the un-prefixed \
+         follow-up between the two never reached the chat at all"
+    );
+    assert_eq!(
+        slack.posted(),
+        vec![
+            ("1700000000.000100".to_string(), "answer 1".to_string()),
+            ("1700000000.000100".to_string(), "answer 2".to_string()),
+        ],
+        "two answers for three mentions: the one that failed the prefix said \
+         nothing at all"
+    );
+    assert_eq!(
+        spawns(dir.path()).len(),
+        2,
+        "and started no third `claude` run"
+    );
+    assert_eq!(
+        chat_title(&db, &chat_id),
+        "[Slack] #general: deploy staging",
+        "the title is built from the prompt that ran, not the raw mention"
+    );
+}
+
 /// Acceptance criterion 3's two handler-side ignores. A mention from a bot is
 /// the third, and it never reaches this module — `Envelope::app_mention` drops
 /// it, where `a_bot_authored_app_mention_is_not_work` pins it.
@@ -719,6 +996,65 @@ async fn an_unmapped_thread_and_an_empty_remainder_produce_nothing() {
         .query_row("SELECT count(*) FROM chat_sessions", [], |row| row.get(0))
         .expect("count");
     assert_eq!(chats, 0, "no chat was created");
+}
+
+/// #582's fifth criterion, end to end: a mention that matches the channel and
+/// fails that rule's filters is dropped outright. It must **not** fall through
+/// to the workspace-wide default, which would make a prefix widen what runs
+/// instead of narrowing it.
+#[tokio::test]
+async fn a_mention_the_channels_rule_refuses_never_falls_through_to_the_default() {
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-filter");
+    // The channel's own rule wants `/ask`; the workspace default wants nothing
+    // and would answer every mention if selection ever reached it.
+    seed_filtered_rule(
+        &db,
+        "s-filter",
+        "channel",
+        true,
+        &format!("[\"{CHANNEL}\"]"),
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+        "/ask",
+        "[]",
+    );
+    seed_rule(
+        &db,
+        "s-filter",
+        "default",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-02 00:00:00 +0000 UTC",
+    );
+    // No `AGENTO_CLAUDE_EXECUTABLE` at all: anything that reached a run would
+    // fail loudly and answer `ERROR_REPLY`, so silence here is silence.
+    let handler = super::handler(&db, "s-filter", "xoxb-t");
+
+    finish(handler(mention(
+        "<@U0BOT> what is the status",
+        "1700000000.000100",
+        "",
+        "s-filter",
+    )))
+    .await;
+    set_api_base(None);
+
+    assert!(
+        slack.posted().is_empty(),
+        "a filtered mention says nothing at all"
+    );
+    assert!(threads(&db).is_empty(), "and maps no thread");
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    let chats: i64 = conn
+        .query_row("SELECT count(*) FROM chat_sessions", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(chats, 0, "and starts no chat under the default rule either");
 }
 
 /// A failing run still answers, and the chat still holds what was asked — the
@@ -840,9 +1176,12 @@ async fn a_disabled_channel_rule_silences_that_channel_only() {
 /// Review round 1, finding 4: the one Slack failure the handler cannot work
 /// around must not answer into a thread Agento never started.
 ///
-/// `auth.test` is resolved **after** the mapping decision for exactly this
-/// reason. A stranger's thread gets nothing; a thread of Agento's own gets the
-/// failure sentence, because silence there is the outcome that is never allowed.
+/// #582 moved the *resolution* into `accept`, before the queue, because the
+/// filters cannot read a mention until the bot's own id has stripped it — but
+/// the `ERROR_REPLY` stayed in `turn`, behind the mapping decision, for exactly
+/// this reason. A stranger's thread gets nothing; a thread of Agento's own gets
+/// the failure sentence, because silence there is the outcome that is never
+/// allowed.
 #[tokio::test]
 async fn an_auth_failure_answers_only_in_a_thread_agento_started() {
     let _base = api_base_lock().await;
