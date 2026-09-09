@@ -1176,9 +1176,12 @@ async fn a_disabled_channel_rule_silences_that_channel_only() {
 /// Review round 1, finding 4: the one Slack failure the handler cannot work
 /// around must not answer into a thread Agento never started.
 ///
-/// `auth.test` is resolved **after** the mapping decision for exactly this
-/// reason. A stranger's thread gets nothing; a thread of Agento's own gets the
-/// failure sentence, because silence there is the outcome that is never allowed.
+/// #582 moved the *resolution* into `accept`, before the queue, because the
+/// filters cannot read a mention until the bot's own id has stripped it — but
+/// the `ERROR_REPLY` stayed in `turn`, behind the mapping decision, for exactly
+/// this reason. A stranger's thread gets nothing; a thread of Agento's own gets
+/// the failure sentence, because silence there is the outcome that is never
+/// allowed.
 #[tokio::test]
 async fn an_auth_failure_answers_only_in_a_thread_agento_started() {
     let _base = api_base_lock().await;
