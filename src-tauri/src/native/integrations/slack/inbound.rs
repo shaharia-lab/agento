@@ -21,10 +21,20 @@
 //!    a fall-through to the workspace default (#565). No rule at all is silence.
 //! 3. **Whether the rule wants what was said.** The bot's own `<@Uxxx>` is
 //!    removed, an empty remainder is ignored, and what is left is put through
-//!    that rule's `filter_prefix` and `filter_keywords` (#582). All three are
-//!    decided in [`Inbound::accept`], before the queue, so a mention the rule
-//!    does not want costs no chat, no thread lookup and no run — and, like
-//!    every other drop here, says nothing in Slack.
+//!    that rule's `filter_prefix` and `filter_keywords` (#582). The strip, the
+//!    empty-remainder rule and the filters are all decided in
+//!    [`Inbound::accept`], before the queue, so a mention the rule does not want
+//!    costs no chat, no thread lookup and no run — and, like every other drop
+//!    here, says nothing in Slack.
+//!
+//! **(3) gates a reply inside a thread Agento started exactly as it gates the
+//! mention that started it.** `accept` has not read the thread map at that point
+//! and deliberately does not — see (1) — so a rule carrying a prefix wants that
+//! prefix on every message, follow-ups included. That is the reading of #582's
+//! *apply the filters to app-mention events*, and it is the safe direction: the
+//! alternative exempts anyone who can reply in the thread from the filter the
+//! channel was given. [`filtered_prompt`] states it again at the decision, and
+//! `a_prefixed_rule_gates_the_follow_up_in_its_own_thread_too` pins it.
 //!
 //! The mapping lookup in (1) deliberately happens **inside the per-thread
 //! worker**, not when the event arrives. The second mention in a thread whose
@@ -618,6 +628,13 @@ impl Dropped {
 ///   what the user wrote. On Slack it always begins with the bot's id, which no
 ///   keyword can sensibly target and which would make a keyword equal to a
 ///   fragment of that id fire on every mention.
+///
+/// It answers for **every** mention, a reply in one of Agento's own threads
+/// included: the thread map is read later, in [`Inbound::turn`], and reading it
+/// here would put the filter behind the very lookup the FIFO exists to delay. So
+/// a prefixed rule asks for its prefix on every message in the channel rather
+/// than only on the one that opens a thread — which is the direction that runs
+/// less, and the direction a user who wrote a prefix asked for.
 ///
 /// `match_rule` also re-checks `chat_ids`, which is a no-op here and asserted as
 /// one by [`tests`]: `select_rule_for_channel` has already returned either a

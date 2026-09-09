@@ -233,7 +233,7 @@ export const PROVIDERS: Provider[] = [
       help: "Slack channel ids, comma-separated; empty = every channel the app is in.",
       noun: "channel",
       filterHelp:
-        "Checked after the @mention is removed: the prefix must start what is left, a keyword may appear anywhere in it. Leave both empty to answer every mention in a matched channel.",
+        "Checked after the @mention is removed: the prefix must start what is left, a keyword may appear anywhere in it. Replies inside a thread Agento started are checked too. Leave both empty to answer every mention in a matched channel.",
     },
     extraField: {
       key: "app_token",

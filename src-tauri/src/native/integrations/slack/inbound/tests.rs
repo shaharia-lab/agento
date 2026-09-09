@@ -837,6 +837,113 @@ async fn a_second_mention_in_the_thread_queues_and_resumes_the_same_chat() {
     );
 }
 
+/// The prefix decides on a run, and it decides on **every** message in the
+/// channel — including a reply inside the thread that run opened.
+///
+/// Two things nothing else pins. First, the positive half of #582's criterion 1:
+/// the prefix-*stripped* remainder is what reaches the chat and the CLI, not the
+/// raw mention. Second, the follow-up rule stated in this module's header: a
+/// mention in one of Agento's own threads is filtered exactly like the one that
+/// started it, because `accept` decides before the thread map is read. A rule
+/// with a prefix therefore wants that prefix on every message, and the reply
+/// that omits it is silence — no run, no message on the chat, nothing posted.
+#[tokio::test]
+async fn a_prefixed_rule_gates_the_follow_up_in_its_own_thread_too() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-prefix");
+    seed_filtered_rule(
+        &db,
+        "s-prefix",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+        "/ask",
+        "[]",
+    );
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler(&db, "s-prefix", "xoxb-t");
+
+    // Awaited one at a time: this is about what each mention decides, and the
+    // concurrent case is `a_second_mention_in_the_thread_queues_and_resumes…`.
+    finish(handler(mention(
+        "<@U0BOT> /ask deploy staging",
+        "1700000000.000100",
+        "",
+        "s-prefix",
+    )))
+    .await;
+    finish(handler(mention(
+        "<@U0BOT> and the database?",
+        "1700000000.000200",
+        "1700000000.000100",
+        "s-prefix",
+    )))
+    .await;
+    finish(handler(mention(
+        "<@U0BOT> /ask and the database?",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-prefix",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    let mapped = threads(&db);
+    assert_eq!(
+        mapped.len(),
+        1,
+        "one thread, opened by the mention that matched"
+    );
+    let chat_id = mapped[0].1.clone();
+
+    assert_eq!(
+        messages(&db, &chat_id)
+            .iter()
+            .map(|(role, content)| format!("{role}:{content}"))
+            .collect::<Vec<_>>(),
+        vec![
+            "user:deploy staging".to_string(),
+            "assistant:answer 1".to_string(),
+            "user:and the database?".to_string(),
+            "assistant:answer 2".to_string(),
+        ],
+        "the prompt is the prefix-stripped remainder, and the un-prefixed \
+         follow-up between the two never reached the chat at all"
+    );
+    assert_eq!(
+        slack.posted(),
+        vec![
+            ("1700000000.000100".to_string(), "answer 1".to_string()),
+            ("1700000000.000100".to_string(), "answer 2".to_string()),
+        ],
+        "two answers for three mentions: the one that failed the prefix said \
+         nothing at all"
+    );
+    assert_eq!(
+        spawns(dir.path()).len(),
+        2,
+        "and started no third `claude` run"
+    );
+    assert_eq!(
+        chat_title(&db, &chat_id),
+        "[Slack] #general: deploy staging",
+        "the title is built from the prompt that ran, not the raw mention"
+    );
+}
+
 /// Acceptance criterion 3's two handler-side ignores. A mention from a bot is
 /// the third, and it never reaches this module — `Envelope::app_mention` drops
 /// it, where `a_bot_authored_app_mention_is_not_work` pins it.

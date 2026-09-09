@@ -284,6 +284,16 @@ declines to start one.
     would fire on every mention. `keywords_are_case_insensitive_and_never_see_the_bots_own_id`
     is that case. The prefix is matched on the stripped text for the same reason,
     which is also what makes `@bot /ask …` and `/ask @bot …` one message.
+  - **The filters gate a reply inside one of Agento's own threads too.** `accept`
+    has not read `inbound_threads` at that point and deliberately does not — the
+    mapping lookup belongs inside the per-thread worker, per the bullet above —
+    so a rule carrying a prefix asks for that prefix on every message in the
+    channel, follow-ups included. That is the reading of #582's *apply the
+    filters to app-mention events*, and it is the direction that runs less: the
+    alternative exempts anyone who can reply in a thread from the filter the
+    channel was given. Slack's `filterHelp` in `views/integrations/catalog.ts`
+    says so to the user, and
+    `a_prefixed_rule_gates_the_follow_up_in_its_own_thread_too` is the guard.
   - **`match_rule`'s own `chat_ids` clause is a no-op here, and is left in
     place.** Selection has already returned either a rule naming this channel or a
     rule naming none, and the matcher reads the second as "everything", so the two
@@ -310,9 +320,10 @@ declines to start one.
   rule and the filters all need; a failure to get it is a failed turn and answers
   `ERROR_REPLY`, because a Slack that will not answer `auth.test` will not accept
   `chat.postMessage` either. Moving the call into `accept` moves its cost rather
-  than doubling it — the `OnceCell` is per handler, and `turn` already awaited it. `conversations.info` (chat title) and
-  `chat.getPermalink` are best-effort on the start path only — the channel id and
-  an empty permalink are the fallbacks, and neither refuses the run.
+  than doubling it — the `OnceCell` is per handler, and `turn` already awaited it.
+  `conversations.info` (chat title) and `chat.getPermalink` are best-effort on the
+  start path only — the channel id and an empty permalink are the fallbacks, and
+  neither refuses the run.
 - **`mrkdwn.rs` escapes `&`, `<` and `>` before it converts anything**, over the
   whole answer including its fenced blocks. Slack renders those entities back as
   themselves everywhere, so escaping costs the answer nothing — and not escaping
