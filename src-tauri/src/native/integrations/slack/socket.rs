@@ -753,7 +753,8 @@ impl Worker {
             .map_err(|_| format!("apps.connections.open answered {status}, not JSON"))?;
 
         // **`ok` decides, not the HTTP status** — Slack's own convention, and the
-        // one a port gets backwards, as `slack/CLAUDE.md` records for the seven
+        // one a port gets backwards, as
+        // `docs/internal/native-integrations-slack.md` records for the seven
         // tools. A 500 carrying `{"ok":true}` is a success here too.
         if parsed.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
             let reason = parsed
@@ -931,8 +932,8 @@ pub fn claim_event(db_path: &Path, integration_id: &str, event_id: &str) -> bool
 ///
 /// `updated_at` is deliberately not bumped: a worker rewriting its state on
 /// every reconnection would keep moving the record's timestamp for something the
-/// user did not do. `integrations/CLAUDE.md` states that as the contract #566
-/// left for this worker.
+/// user did not do. `docs/internal/native-integrations.md` states that as the
+/// contract #566 left for this worker.
 pub fn write_status_blocking(db_path: &Path, integration_id: &str, status: &str, error: &str) {
     run_status_write(
         db_path,

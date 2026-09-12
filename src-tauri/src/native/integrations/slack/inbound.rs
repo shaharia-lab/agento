@@ -19,8 +19,22 @@
 //! 2. **Which rule.** [`select_rule_for_channel`] — most specific first, and a
 //!    *disabled* channel-specific rule is that channel's off switch rather than
 //!    a fall-through to the workspace default (#565). No rule at all is silence.
-//! 3. **Whether there is anything to say.** The bot's own `<@Uxxx>` is removed;
-//!    an empty remainder is ignored.
+//! 3. **Whether the rule wants what was said.** The bot's own `<@Uxxx>` is
+//!    removed, an empty remainder is ignored, and what is left is put through
+//!    that rule's `filter_prefix` and `filter_keywords` (#582). The strip, the
+//!    empty-remainder rule and the filters are all decided in
+//!    [`Inbound::accept`], before the queue, so a mention the rule does not want
+//!    costs no chat, no thread lookup and no run — and, like every other drop
+//!    here, says nothing in Slack.
+//!
+//! **(3) gates a reply inside a thread Agento started exactly as it gates the
+//! mention that started it.** `accept` has not read the thread map at that point
+//! and deliberately does not — see (1) — so a rule carrying a prefix wants that
+//! prefix on every message, follow-ups included. That is the reading of #582's
+//! *apply the filters to app-mention events*, and it is the safe direction: the
+//! alternative exempts anyone who can reply in the thread from the filter the
+//! channel was given. [`filtered_prompt`] states it again at the decision, and
+//! `a_prefixed_rule_gates_the_follow_up_in_its_own_thread_too` pins it.
 //!
 //! The mapping lookup in (1) deliberately happens **inside the per-thread
 //! worker**, not when the event arrives. The second mention in a thread whose
@@ -63,11 +77,12 @@
 //!   is the drift those `pub(crate)` consts exist to prevent.
 //! - **The bot user id comes from `auth.test` once**, cached for the life of the
 //!   handler rather than fetched per event. Without it neither the mention strip
-//!   nor the empty-remainder rule can be applied, so a failure to get it is a
-//!   failed turn and answers [`ERROR_REPLY`] — a Slack that will not answer
-//!   `auth.test` will not accept `chat.postMessage` either. It is fetched
-//!   **after** the thread has been established as Agento's, because that reply
-//!   would otherwise land in a stranger's thread.
+//!   nor the filters can be applied, so a failure to get it is a failed turn and
+//!   answers [`ERROR_REPLY`] — a Slack that will not answer `auth.test` will not
+//!   accept `chat.postMessage` either. It is fetched in [`Inbound::accept`],
+//!   because the filter decision is made there; **the failure sentence still
+//!   waits** for [`Inbound::turn`] to establish the thread as Agento's, which is
+//!   what stops it landing in a stranger's thread. `accept` itself never posts.
 //! - **The dispatcher's ten-slot semaphore is taken around the run**, not around
 //!   the handler. It bounds `claude` subprocesses, and a mention waiting for its
 //!   thread's turn is not one: taken at the handler, ten queued mentions in one
@@ -86,6 +101,7 @@ use crate::claude::CancellationToken;
 use crate::native::agent_run;
 use crate::native::db;
 use crate::native::trigger::dispatcher::{self, Rule, ERROR_REPLY, NO_RESPONSE_REPLY};
+use crate::native::trigger::match_rule::{match_rule, RuleFilters};
 use crate::native::trigger::select_rule::select_rule_for_channel;
 
 use crate::native::gourl::Values;
@@ -107,6 +123,16 @@ struct Job {
     thread_ts: String,
     top_level: bool,
     rule: Rule,
+    /// The words this mention runs with: the text with the bot's own `<@Uxxx>`
+    /// removed and the rule's filters already applied, so the text that was
+    /// filtered is exactly the text that runs.
+    ///
+    /// `None` is the one decision [`Inbound::accept`] cannot make — `auth.test`
+    /// would not say who the bot is, so there is nothing to strip the mention
+    /// with and nothing to filter. That is a failed turn rather than a drop, and
+    /// carrying it here keeps its [`ERROR_REPLY`] where it has always been: in
+    /// [`Inbound::turn`], after the thread is known to be Agento's.
+    prompt: Option<String>,
     /// Dropped or signalled when this job is finished, however it finished.
     ///
     /// The handler future is the whole turn, not the enqueue: a `debug` line
@@ -165,6 +191,32 @@ impl Inbound {
             return;
         };
 
+        // The strip and the filters both need the bot's own id, and the filter
+        // decision belongs before the queue: a mention this rule does not want
+        // must not take a thread's turn, read the thread map or start a chat.
+        let decided = self
+            .bot_user_id()
+            .await
+            .map(|bot| filtered_prompt(&rule.filters, &mention.text, bot, &mention.channel));
+        let prompt = match decided {
+            Some(Ok(matched)) => Some(matched),
+            Some(Err(dropped)) => {
+                // Slack's own opaque identifiers only: what the user wrote is
+                // not repeated here, and a drop is not news at `info`.
+                log::debug!(
+                    "slack mention ignored, {} integration_id={:?} channel={:?} rule_id={:?}",
+                    dropped.reason(),
+                    self.integration_id,
+                    mention.channel,
+                    rule.id
+                );
+                return;
+            }
+            // Not a drop: `turn` answers `ERROR_REPLY` for this, in a thread it
+            // has established as Agento's. See `Job::prompt`.
+            None => None,
+        };
+
         let (done, finished) = tokio::sync::oneshot::channel();
         enqueue(
             &self,
@@ -173,6 +225,7 @@ impl Inbound {
                 thread_ts,
                 top_level,
                 rule,
+                prompt,
                 done,
             },
         );
@@ -283,25 +336,17 @@ impl Inbound {
         }
 
         // Only now, with the thread established as Agento's, is there anywhere
-        // a failure sentence may be posted.
-        let Some(bot_user_id) = self.bot_user_id().await else {
+        // a failure sentence may be posted — which is why the one decision
+        // `accept` could not make is answered here rather than there.
+        let Some(prompt) = job.prompt.as_deref() else {
             self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
                 .await;
             return;
         };
-        let prompt = strip_mention(&job.mention.text, bot_user_id);
-        if prompt.is_empty() {
-            log::debug!(
-                "slack mention ignored, nothing said to the bot integration_id={:?} channel={:?}",
-                self.integration_id,
-                job.mention.channel
-            );
-            return;
-        }
 
         let (chat_id, kind) = match mapped {
             Some(chat_id) => (chat_id, "resume"),
-            None => match self.start_chat(job, &prompt).await {
+            None => match self.start_chat(job, prompt).await {
                 Some(chat_id) => (chat_id, "start"),
                 None => {
                     self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
@@ -336,7 +381,7 @@ impl Inbound {
         let result = agent_run::run_resumed(
             &self.db_path,
             &chat_id,
-            &prompt,
+            prompt,
             &job.rule.settings,
             dispatcher::run_timeout(&job.rule),
         )
@@ -533,6 +578,80 @@ fn enqueue(state: &Arc<Inbound>, job: Job) {
     queues.insert(key.clone(), tx);
     let worker = Arc::clone(state);
     tokio::spawn(async move { worker.drain(key, rx).await });
+}
+
+/// Why a mention produced no run and no reply.
+///
+/// Two reasons rather than one because they read differently in a log: nothing
+/// was said to the bot at all, or the rule was asked for something narrower
+/// than what was said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dropped {
+    /// Removing the bot's own `<@Uxxx>` left nothing.
+    NothingSaid,
+    /// The rule's `filter_prefix` or `filter_keywords` said no.
+    Filtered,
+}
+
+impl Dropped {
+    /// The clause a `debug` line reads with. No Slack-derived text, by
+    /// construction — these are two constants.
+    fn reason(self) -> &'static str {
+        match self {
+            Dropped::NothingSaid => "nothing said to the bot",
+            Dropped::Filtered => "the rule's filters did not match",
+        }
+    }
+}
+
+/// The prompt a mention runs with under `filters`, or why it runs with none.
+///
+/// This is the whole of #582: the form has always shown Prefix and Keywords for
+/// every provider, and until now the Slack path read neither — a filter that is
+/// displayed and stored and then ignored narrows nothing, and fails in the
+/// direction of running *more* than was asked for.
+///
+/// Three rules, and only the last is Slack-specific:
+///
+/// - **The filters see the stripped text, not the event text.** Every
+///   `app_mention` begins with a `<@Uxxx>` no user typed, so a prefix matched
+///   against the raw text could only ever match the bot's own id. Stripping
+///   first is also what makes `@bot /ask …` and `/ask @bot …` the same message.
+/// - **`match_rule` is reused exactly as Telegram calls it**, so a prefix folds
+///   the way Go's `EqualFold` folds, a bare `/ask` with nothing after it is not
+///   a match, and keywords are a case-insensitive OR. Nothing in
+///   `native::trigger::match_rule` is modified; `parity/trigger_match_vectors.json`
+///   stays Telegram's authority.
+/// - **Keywords are therefore matched against the stripped text, which is a
+///   deliberate divergence from Telegram.** `match_rule`'s header pins keywords
+///   to the *whole* message because Go did, and on Telegram the whole message is
+///   what the user wrote. On Slack it always begins with the bot's id, which no
+///   keyword can sensibly target and which would make a keyword equal to a
+///   fragment of that id fire on every mention.
+///
+/// It answers for **every** mention, a reply in one of Agento's own threads
+/// included: the thread map is read later, in [`Inbound::turn`], and reading it
+/// here would put the filter behind the very lookup the FIFO exists to delay. So
+/// a prefixed rule asks for its prefix on every message in the channel rather
+/// than only on the one that opens a thread — which is the direction that runs
+/// less, and the direction a user who wrote a prefix asked for.
+///
+/// `match_rule` also re-checks `chat_ids`, which is a no-op here and asserted as
+/// one by [`tests`]: `select_rule_for_channel` has already returned either a
+/// rule naming this channel or a rule naming none, and the matcher reads the
+/// second as "everything". The check is left in place rather than routed around
+/// so that this path and Telegram's run the same function.
+fn filtered_prompt(
+    filters: &RuleFilters,
+    text: &str,
+    bot_user_id: &str,
+    channel: &str,
+) -> Result<String, Dropped> {
+    let stripped = strip_mention(text, bot_user_id);
+    if stripped.is_empty() {
+        return Err(Dropped::NothingSaid);
+    }
+    match_rule(filters, &stripped, channel).ok_or(Dropped::Filtered)
 }
 
 /// `text` with every `<@bot>` (and `<@bot|label>`) removed, then trimmed.

@@ -10,7 +10,7 @@
 
 The six integration ports each carry their own notes one directory down
 (`github/`, `confluence/`, `jira/`, `slack/`, `telegram/`, `google/`). Read
-`src-tauri/src/claude/CLAUDE.md` (*Hosting a tool*) before any of them, and
+`docs/internal/claude-sdk.md` (*Hosting a tool*) before any of them, and
 `github/` before porting or changing anything: it settles *how to port an
 integration*, and each later one records only what it adds.
 
@@ -46,7 +46,7 @@ row lists and reads normally, and `unavailableCopy` in
 **`reload` is unconditional.** Stop then start, no diff: there is a window with
 no server and the port changes on every save. That window is not exotic — a
 model mid-`create_issue` when the user hits Save is the ordinary case, which is
-why shutdown is graceful (*Hosting a tool*, `src-tauri/src/claude/CLAUDE.md`) and why
+why shutdown is graceful (*Hosting a tool*, `docs/internal/claude-sdk.md`) and why
 `a_tool_call_in_flight_survives_the_handles_drop` exists.
 
 **No lock is held across the stop, the async row read and the start**, so a

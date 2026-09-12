@@ -410,7 +410,8 @@ impl ServerHandler for ToolServer {
         // owns them. `ttlMs: 0` is the spec's "immediately stale" (the tool set
         // is per turn and per integration row) and `private` is right because
         // every listener carries its own bearer token. Why in full, including
-        // what `prompts/list` and `resources/*` would need: `CLAUDE.md`,
+        // what `prompts/list` and `resources/*` would need:
+        // `docs/internal/claude-sdk.md`,
         // *Hosting a tool*. Pinned on the wire by
         // `mcp::tests::a_tool_list_carries_the_cache_hints_the_cli_requires`.
         Ok(ListToolsResult::with_all_items(self.router.list_all())
