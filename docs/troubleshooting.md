@@ -8,6 +8,7 @@ Common problems and what to do about them.
 - [History and analytics](#history-and-analytics)
 - [Scheduled tasks](#scheduled-tasks)
 - [Integrations](#integrations)
+- [Slack](#slack)
 - [LLM Gateway](#llm-gateway)
 - [Updates](#updates)
 - [Reading the logs](#reading-the-logs)
@@ -321,6 +322,173 @@ still listed and its data is safe, but it cannot be edited or used.
 
 ---
 
+## Slack
+
+These cover **Socket Mode** — the inbound half, where a mention in a channel runs
+an agent. Setting it up is in the
+[user guide](user-guide.md#slack-socket-mode).
+
+### What the Socket Mode badge is telling you
+
+The badge under **Integrations → Slack → Inbound** is the connection's own
+report, written by the worker that holds it. It renders in capitals, and there
+are five states:
+
+| Badge | Meaning |
+| --- | --- |
+| `NOT RUNNING` | Socket Mode is off, or no worker has run since the app started. Also what you see when Socket Mode is on and the app-level or bot token has since gone missing — Agento starts no worker for a connection that could not reply. |
+| `CONNECTING` | The worker has started and is opening its first connection. |
+| `CONNECTED` | The socket is open and Slack's events are arriving. |
+| `RECONNECTING` | The connection ended and the worker is waiting to try again — either because Slack asked it to (routine, several times a day) or because an attempt failed and it has not failed five times in a row yet. Hover the badge for the reason, when there is one — a reconnect Slack asked for has none. |
+| `ERROR` | Five consecutive attempts failed. **The worker is still retrying** — this is a report, not a stop — so fixing the cause reconnects it without restarting Agento. The reason is under the badge in red, and on the badge as a tooltip. |
+
+`RECONNECTING` on its own is not a fault. The waits double from one second to a
+minute, and a connection that stayed up for a minute resets the count, so a
+healthy integration that Slack cycles never reaches `ERROR`.
+
+### "apps.connections.open refused the app token: invalid_auth"
+
+The app-level token is wrong, revoked, or from a different app. Create a new one
+under **Basic Information → App-Level Tokens** with the `connections:write`
+scope, paste it into **App token**, and save — saving restarts the worker with
+it straight away, so the badge goes back to `CONNECTING` rather than waiting out
+the current backoff. Agento never clears a stored token on a refusal, so the old
+one is still there until you replace it.
+
+Three things that look like this and are not:
+
+- `apps.connections.open refused the app token: not_allowed_token_type` — you
+  pasted the **bot** token (`xoxb-`) into **App token**. It needs the
+  `xapp-` one.
+- `apps.connections.open answered 401 Unauthorized, not JSON` — something
+  between Agento and Slack answered instead of Slack, usually a proxy or a
+  captive portal. Slack's own refusals are always JSON, so this is never Slack.
+- `opening the socket mode connection` — the token was accepted and the
+  websocket itself would not open (the line ends either `: <reason>` or
+  ` timed out`). **Agento's websocket does not use your system
+  proxy settings**, unlike every other call it makes, so a network that requires
+  a proxy fails here and nowhere else.
+
+### Socket Mode says Connected but a mention does nothing
+
+Every one of these is silent by design. Of the nine, two say nothing in the log
+at all, six are at **`debug`** level — so raise the level before you go looking
+— and one is at `error`. Two of the six have a second, database cause that logs
+at `warn` or `error` just above them, and each says so below. Work down the
+list:
+
+- **The app is not in the channel.** Slack never sent the event at all — nothing
+  appears in the log. `/invite @Agento` in that channel.
+- **No trigger rule matches the channel.** Log:
+  `slack mention ignored, no rule for the channel`. Add a rule on the
+  integration, or clear the channel list on an existing one — unless
+  `failed to load slack trigger rules` is logged just above it at `warn`, in
+  which case the rules could not be read at all and the rule is not the problem.
+- **A rule names this channel and is disabled.** Same log line. A rule that names
+  a channel explicitly wins over a blank-list rule *even when it is switched
+  off*, so disabling it silences that one channel rather than falling back. Turn
+  it on, or take the channel out of its list.
+- **The thread was not started by Agento.** Log:
+  `slack mention ignored, a thread Agento did not start`. Only a mention that
+  starts a new thread can start a chat; inside an existing thread Agento answers
+  only if it started it. Mention the app at the top level of the channel instead.
+- **The message came from a bot.** Log:
+  `slack socket: ignoring an app_mention from a bot`. Agento ignores anything
+  posted by another app or with a message subtype. There is no way to turn this
+  off.
+- **Nothing was said to the bot.** Log:
+  `slack mention ignored, nothing said to the bot`. The mention was the whole
+  message; add the actual question after it.
+- **Slack redelivered an event already handled.** Log:
+  `already processed`, and the reply is in the thread from the first delivery.
+  **The same line has a second cause**: the claim that records the event failed,
+  and `claim_event` answers "already handled" rather than risk running the agent
+  twice against a database it could not write. Then there is no reply anywhere,
+  and `failed to claim slack event …` is logged just above it at `error`.
+- **The integration is in OAuth mode.** Nothing is logged, because Slack sends
+  nothing: Agento's OAuth install does not request `app_mentions:read`, so the
+  socket opens, the badge goes green and no mention is ever delivered. Socket
+  Mode needs the **Bot token** mode and an app installed from the guide's
+  manifest.
+- **The thread map could not be read** on a mention inside an existing thread.
+  Log: `reading the slack thread map`, and **this one is at `error`, not
+  `debug`** — the only line in this list that is. A mention that *starts* a
+  thread gets the error sentence instead; one inside a thread is dropped
+  silently, because Agento cannot tell whether the thread was its own.
+
+### The reply is "Sorry, something went wrong."
+
+That one sentence covers every failure of the run itself, so the log is the only
+place the reason exists.
+
+**One of the four is logged after the mention was matched, and three are logged
+instead of it.** So look for a `slack mention matched` line first: if there is
+one, take its `chat_id` and grep for
+
+- `agent execution failed for slack chat_id=…` — the run failed or timed out.
+  Timeouts are indistinguishable from failures in Slack; the rule's **Timeout**
+  is what bounds them.
+
+and if there is not, the mention failed before it got that far and there is no
+chat id to grep for. One of these three is the reason:
+
+- `slack inbound cannot identify itself` — Slack refused `auth.test`, so the
+  bot token is wrong or revoked. Replace it under **Bot token**.
+- `failed to create chat session for a slack mention` — the database write
+  failed.
+- `reading the slack thread map` — the database could not be read.
+
+A reply of "No response generated." is different: the run succeeded and produced
+no text.
+
+### The answer arrives cut off
+
+A reply longer than 4000 characters is posted as several messages, and posting
+stops at the first chunk Slack refuses — leaving a truncated answer with nothing
+marking it as truncated. The log has
+`failed to send slack reply chunk N channel=…` with Slack's reason. The chat in
+Agento holds the whole answer.
+
+### Log lines to grep
+
+These are all in the app log ([Reading the logs](#reading-the-logs)):
+
+```bash
+grep -i slack Agento.log
+```
+
+Narrower patterns miss lines they look like they would catch —
+`agent execution failed for slack chat_id=…` and
+`failed to send slack reply chunk …` both put something other than the subsystem
+name after the word.
+
+The ones worth knowing by name:
+
+- `slack socket worker started` / `slack socket worker stopped` — the switch.
+- `slack socket mode worker hosted` — the worker was started for this row.
+- `slack inbound is enabled but no app token is stored` /
+  `not starting the slack socket worker, no usable bot token` — why it was not.
+- `slack socket: … attempt=N status=…` — one line per failed connection attempt,
+  with Slack's reason.
+- `slack socket: … slack asked for a reconnect` — the routine cycle.
+- `slack mention matched … kind=start` or `kind=resume` — a mention that ran,
+  and whether it started a chat or continued one.
+- `slack mention ignored, …` — a mention that did not, and why.
+- `failed to load slack trigger rules` / `failed to claim slack event …` — a
+  mention dropped because the database could not be read or written, not
+  because of anything you configured.
+
+**Every `slack mention ignored` line is emitted at `debug`**, as is the
+bot-message drop and the redelivery line; everything else listed above is `info`
+or louder. If the log shows a `CONNECTED` socket and nothing else at all, the
+level is what you are missing.
+
+One thing to know before sharing a log: at `debug` level Agento records the text
+of a Slack mention, on the line `slack mention prompt`. It is the only place a
+message body is written to the log.
+
+---
+
 ## LLM Gateway
 
 ### Overview says "Port unavailable"
@@ -555,8 +723,10 @@ data is untouched by a reinstall.
 The live file plus three dated archives are kept, roughly 20 MB in total.
 
 The log records one line per API request, plus what each write did. It does
-**not** record message bodies, prompts, credentials or search terms. It does
-record agent slugs and file paths, so treat it as mildly sensitive when sharing.
+**not** record message bodies, prompts, credentials or search terms — with one
+exception, at `debug` level only: the text of a Slack mention, on the line
+`slack mention prompt` (see [Slack](#slack)). It does record agent slugs and file
+paths, so treat it as mildly sensitive when sharing.
 
 ---
 

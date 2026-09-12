@@ -243,16 +243,16 @@ Available in the desktop app:
 | Service | What agents can do |
 | --- | --- |
 | **Google** | Calendar events, Gmail, Drive files |
-| **Slack** | List channels, read and send messages, search |
+| **Slack** | List channels, read and send messages, search, and trigger agents from mentions |
 | **GitHub** | Repositories, issues, pull requests, actions, releases |
 | **Telegram** | Send messages, and trigger agents from incoming ones |
 | **Jira** | Search, create, update and transition issues |
 | **Confluence** | Read, search, create and update pages |
 
 **To connect one:** open Integrations and pick a service under **Add
-integration**, then fill in the form. Google and Slack use OAuth, so a browser
-window opens and you approve access there. GitHub, Telegram, Jira and Confluence
-use a token you paste in.
+integration**, then fill in the form. Google uses OAuth, so a browser window
+opens and you approve access there. Slack offers both OAuth and a bot token you
+paste in; GitHub, Telegram, Jira and Confluence use a token you paste in.
 
 For each integration you choose which **services** are enabled (for example Gmail
 but not Drive) and which **tools** within them. Agents then pick from what you
@@ -267,6 +267,132 @@ deliberate: saving a scrubbed form would wipe the working credential.
 A Telegram integration can also run agents on incoming messages. Add a trigger
 rule saying which messages match and which agent handles them. The agent's reply
 goes back to the same chat.
+
+### Slack Socket Mode
+
+A Slack integration can also run agents on **mentions of the app** in a channel.
+Agento holds an outbound websocket to Slack — Socket Mode — so this works from a
+desktop machine with no public URL and no inbound firewall rule.
+
+**Before anything else, read [Who can run an agent this way](#who-can-run-an-agent-this-way).**
+A channel you switch this on for is an execution surface.
+
+#### Create the Slack app from this manifest
+
+At <https://api.slack.com/apps> choose **Create New App → From an app manifest**,
+pick your workspace, and paste this:
+
+```yaml
+display_information:
+  name: Agento
+  description: Runs an Agento agent when you mention it in a channel.
+settings:
+  socket_mode_enabled: true
+  event_subscriptions:
+    bot_events:
+      # The one event Agento listens for. Nothing else is subscribed, and
+      # anything else Slack sends is dropped without being looked at.
+      - app_mention
+  interactivity:
+    is_enabled: false
+features:
+  bot_user:
+    display_name: Agento
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      # Delivers the app_mention event itself.
+      - app_mentions:read
+      # Posts the agent's answer back into the thread.
+      - chat:write
+      # Reads the channel's name, used to title the chat. Use groups:read
+      # instead if the channel is private.
+      - channels:read
+```
+
+**That is the minimum for Socket Mode, and only for Socket Mode.** The same
+integration also gives your agents seven Slack *tools*, and most of them need
+scopes this manifest does not grant. Add what you want:
+
+- `read_messages` needs `channels:history`, and `groups:history` as well for a
+  private channel.
+- `list_users` needs `users:read`.
+- `get_channel_info` reaches a **private** channel only with `groups:read`.
+- `list_channels` needs `groups:read` outright, not only for the private half:
+  it asks Slack for public and private channels together, so without it the
+  tool fails rather than returning the public ones.
+
+One you cannot add: `search_messages` needs `search:read`, which Slack grants
+only to a user token, not to a bot.
+
+Then:
+
+1. **Install to Workspace** (under *Install App*), and copy the **Bot User OAuth
+   Token** — it starts `xoxb-`.
+2. Under **Basic Information → App-Level Tokens**, create a token with the
+   `connections:write` scope and copy it — it starts `xapp-`. This is a
+   *different* token from the one above, and Socket Mode cannot open a
+   connection without it.
+3. In Agento, open **Integrations → Slack**, choose the **Bot token** auth mode,
+   paste the `xoxb-` token into **Bot token** and the `xapp-` token into **App
+   token**, and save. It has to be the **Bot token** mode: Agento's OAuth
+   install never asks for `app_mentions:read`, so an OAuth row connects
+   perfectly happily and is then sent nothing.
+4. Turn on **Inbound → Socket Mode**. The badge beside it reads `CONNECTING`
+   and then `CONNECTED`.
+5. In Slack, **invite the app to the channel** — `/invite @Agento`. Slack does
+   not deliver `app_mention` from a channel the app is not in.
+6. Add a **trigger rule** on the same integration: which agent runs, and which
+   channels it answers in. Leave the channel list blank to answer in every
+   channel the app is in.
+
+Now `@Agento what changed in this repo today?` in that channel starts a run, and
+the answer arrives as a threaded reply.
+
+#### One Slack thread is one chat
+
+The first mention starts a chat; every later mention **in that thread** continues
+the same one, so the agent keeps its context. The chat appears in **Chats** with
+a `SLACK` badge and a *Started from* row, which links back to the thread when
+Slack gave Agento a permalink for it and names the channel id alone when it did
+not.
+
+A mention in a thread Agento did not start is ignored — it is somebody else's
+conversation, and joining it uninvited is worse than staying quiet.
+
+#### It only goes one way
+
+Slack drives the chat; the chat does not drive Slack. Turns you take in the
+Agento window on a Slack-started chat are **not** mirrored back to the thread,
+and nothing you do in Slack is affected by the window being open. If you want the
+thread to see an answer, ask in the thread.
+
+#### Who can run an agent this way
+
+**Anyone who can post in a configured channel can run that rule's agent** — with
+the rule's **permission mode**, in the rule's **working directory**, on your
+machine, as you. Agento checks that the message came from a human rather than
+another bot, and nothing else: there is no allowlist of Slack users.
+
+**The channel list is the only filter a Slack rule applies.** The rule form also
+offers a **Prefix** and **Keywords**, because the same form serves Telegram —
+but a mention over Socket Mode is matched on its channel alone, so neither
+narrows what triggers a run. Do not reach for them as a safety measure.
+
+So treat the channel list as the access control it is:
+
+- Name the channels explicitly in the rule rather than leaving the list blank,
+  and make them channels whose membership you would grant a shell to.
+- Set the rule's **permission mode** and **working directory** deliberately. A
+  rule left on a permissive mode in your home directory is a rule that lets a
+  channel member read and change anything you can.
+- Remember that inviting the app to a new channel silently widens this when the
+  rule's channel list is blank.
+
+Turning **Socket Mode** off closes the connection immediately and nothing is
+deleted; the tokens, the rules and the chats are all still there when you turn it
+back on.
 
 ### If you paired WhatsApp in an older version
 
