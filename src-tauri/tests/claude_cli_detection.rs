@@ -51,11 +51,14 @@ fn the_resolver_walks_its_order_under_a_gui_launchs_environment() {
 
     // SAFETY: this binary holds exactly one test, so nothing else is reading
     // the environment concurrently — which is why the module is written that
-    // way. See the header.
+    // way. See the header. `AGENTO_CLI_CANDIDATE_ROOT` re-roots rule 5's
+    // absolute directories under the tempdir (`test-hooks`, #535), or a real
+    // install in `/usr/local/bin` would answer the "nothing anywhere" case.
     unsafe {
         std::env::set_var("HOME", &home);
         std::env::set_var("PATH", LAUNCHD_PATH);
         std::env::set_var("SHELL", &shell);
+        std::env::set_var("AGENTO_CLI_CANDIDATE_ROOT", tmp.path());
         std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
     }
 

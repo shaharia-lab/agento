@@ -100,11 +100,14 @@ async fn re_resolving_the_cli_does_not_stall_the_runtime() {
     // SAFETY: one test in this binary, so nothing else reads the environment
     // concurrently. `AGENTO_CLAUDE_EXECUTABLE` must stay **unset** — it is rule
     // 1 and returns before any walk, so setting it would make this test pass
-    // against the very thing it is written to catch.
+    // against the very thing it is written to catch. `AGENTO_CLI_CANDIDATE_ROOT`
+    // re-roots rule 5's absolute directories under the tempdir (`test-hooks`,
+    // #535), or a real install in `/usr/local/bin` ends the walk with a CLI.
     unsafe {
         std::env::set_var("HOME", &home);
         std::env::set_var("PATH", tmp.path().join("no-such-bin"));
         std::env::set_var("SHELL", &shell);
+        std::env::set_var("AGENTO_CLI_CANDIDATE_ROOT", tmp.path());
         std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
     }
 

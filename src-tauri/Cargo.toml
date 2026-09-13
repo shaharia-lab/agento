@@ -419,7 +419,18 @@ lto = false
 codegen-units = 16
 opt-level = 0
 
+[features]
+# Off in every shipped build. Enabled only by the self dev-dependency below, so
+# it reaches test and bench targets and nothing else. See
+# `claude_cli::candidates` (#535).
+test-hooks = []
+
 [dev-dependencies]
 tempfile = "3.27.0"
 # Collecting a streamed SSE body in the turn tests.
 http-body-util = "0.1"
+# The package itself, with `test-hooks` on: the supported way to compile the
+# library differently for `cargo test` without touching `cargo build`. An
+# integration test links the library built without `cfg(test)`, so a
+# `#[cfg(test)]` branch would be compiled out for exactly the suites that need it.
+agento = { path = ".", features = ["test-hooks"] }
