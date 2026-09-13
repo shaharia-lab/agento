@@ -78,7 +78,8 @@
 //!
 //! It runs on the document **as written**, before merge expansion, so a key that
 //! `<<: *anchor` brings in and the entry also spells out is an override, not a
-//! duplicate — `yaml.v3`'s check is a parse-time rule too. The position given is
+//! duplicate — `yaml.v3`'s check (`decoder.mapping`) also runs on the literal
+//! mapping, before its merge expansion. The position given is
 //! the **enclosing mapping's** start: `MapAccess` exposes no marks, so the second
 //! occurrence's own line is not available, and the message does not pretend it
 //! is.
@@ -902,7 +903,8 @@ docs:
 
     /// The refusal names a key and **never** a value, asserted on a token's
     /// absence: the duplicated entry carries a `Bearer` token, and so does a
-    /// duplicated header, whose *key* is the header name.
+    /// duplicated header, whose *key* is the header name — and a duplicated
+    /// complex key, whose content is file content too.
     #[test]
     fn a_repeated_key_refusal_never_echoes_a_value() {
         const SECRET: &str = "sk-live-NOTAREALTOKEN";
@@ -930,6 +932,16 @@ docs:
         .expect_err("a header declared twice");
         assert!(!err.contains(SECRET), "the value leaked: {err}");
         assert!(err.contains(r#"mapping key "Authorization""#), "{err}");
+
+        // A non-scalar key is never a server name, and its content is file
+        // content: it is named by placeholder, not printed.
+        let err = parse(
+            "mcps.yaml",
+            &format!("? [{SECRET}]\n: one\n? [{SECRET}]\n: two\n"),
+        )
+        .expect_err("a complex key declared twice");
+        assert!(!err.contains(SECRET), "the key's content leaked: {err}");
+        assert!(err.contains(r#"mapping key "<complex key>""#), "{err}");
     }
 
     /// An anchor merged into two entries is not a duplicate, and neither is a
