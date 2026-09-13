@@ -214,6 +214,25 @@ model stays `""` (i.e. "set no model option") rather than becoming `resolve`'s
 `"sonnet"`: a database this process cannot open is not a user who never saved
 settings.
 
+**The CLI's cwd is always set; an empty `working_directory` resolves to the
+settings default** (#559). Four paths reach the spawn with `""` — `POST /api/chats`,
+a task, a trigger rule left on *agent default*, and a continued session — and
+`build_options` is the one hop all four share, so the resolution lives there:
+`TurnSettings::default_working_dir()` is `resolve`'s `default_working_dir`, so
+`AGENTO_WORKING_DIR`, else the stored setting, else `<temp>/agento/work`. It
+deliberately does **not** copy `default_model()`'s "unreadable row answers `""`":
+there is no "set no cwd" worth having, because that is inheriting the Agento
+process's own cwd (`src-tauri/` under `npm run app`), which is the bug. The
+**default** is created when missing — nothing else creates `<temp>/agento/work` —
+and a failed create is a `warn` left to the spawn to report. A directory the chat,
+task or rule **chose** is never created: a renamed repo or an unmounted drive still
+fails the spawn rather than becoming an empty folder a bypassing run acts in
+(`runner::tests::a_chosen_working_dir_that_is_missing_is_not_created`). The stored row keeps
+`""`; the Chats list reads `GET /settings` to show where such a chat runs. Since
+`with_cwd` travels with `with_setting_sources(["project"])`, those runs also gained
+the project setting source, pointed at the default directory
+(`runner::tests::an_empty_working_dir_runs_in_the_settings_default`).
+
 **An embedded raw value is compacted and HTML-escaped on the way out, and Go
 does it on the way *in*** (#298). `encoding/json` runs
 `compact(…, escapeHTML=true)` over a `Marshaler`'s output, so a nested

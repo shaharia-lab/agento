@@ -184,6 +184,21 @@ impl TurnSettings {
             .default_model
     }
 
+    /// `settingsMgr.Get().DefaultWorkingDir`: `AGENTO_WORKING_DIR`, else the
+    /// stored setting, else `<temp>/agento/work` — `resolve`'s chain, not a
+    /// second copy of it (#559).
+    ///
+    /// Unlike [`Self::default_model`], a database this process cannot open
+    /// still answers a usable path: `resolve`'s own default is a temp
+    /// directory, not a value invented from the user's intent, and the
+    /// alternative — setting no cwd — is inheriting the app process's own.
+    pub(crate) fn default_working_dir(&self) -> String {
+        let row = self.stored().cloned().unwrap_or_default();
+        crate::native::settings::resolve(row)
+            .settings
+            .default_working_dir
+    }
+
     /// `config.ClaudeRunConfigDir`: `CLAUDE_CONFIG_DIR`, else the stored global
     /// setting, else the default.
     fn run_config_dir(&self) -> String {
@@ -285,11 +300,22 @@ pub async fn build_options(
 
     // A working dir also selects the project setting source, exactly as Go
     // does. Note `--settings` below can suppress it; that is Go's behaviour too.
-    if !spec.working_dir.is_empty() {
-        opts = opts
-            .with_cwd(spec.working_dir.clone())
-            .with_setting_sources(["project"]);
-    }
+    // An empty `working_dir` resolves to the settings default rather than
+    // inheriting the app process's cwd (#559) — `src-tauri/` under
+    // `npm run app`, and whatever the launcher chose for a release build.
+    //
+    // Only the default is created. A directory the user chose that has since
+    // gone missing — a renamed repo, an unmounted drive — must fail the spawn
+    // as it always has, rather than become an empty folder a bypassing run
+    // then acts in and reports success from.
+    let cwd = if spec.working_dir.is_empty() {
+        let default = spec.settings.default_working_dir();
+        ensure_dir(&default);
+        default
+    } else {
+        spec.working_dir.clone()
+    };
+    opts = opts.with_cwd(cwd).with_setting_sources(["project"]);
 
     let config_dir = resolve_agent_config_dir(spec.agent.as_ref(), &spec.settings);
     if config_dir != crate::native::settings::default_claude_config_dir()
@@ -1049,6 +1075,21 @@ fn profile_file_path_in(config_dir: &str, index_dir: &str, profile_id: &str) -> 
     fallback
 }
 
+/// Create the run's working directory when it is missing (#559).
+///
+/// Nothing else creates `<temp>/agento/work`, so defaulting to it on a fresh
+/// install would turn an inherited-cwd run into a spawn failure. A failure here
+/// is a `warn` and nothing more: the directory may exist and merely be
+/// unreadable to `stat`, and one that is truly unusable is the spawn's to report.
+fn ensure_dir(dir: &str) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warn!(
+            "working directory not created dir={dir:?} error={:?}",
+            e.to_string()
+        );
+    }
+}
+
 /// Which `claude` binary to spawn.
 ///
 /// The SDK defaults to the bare name resolved on `PATH`, which is exactly what
@@ -1382,12 +1423,125 @@ mod tests {
         // And the fourth consumer, which an agent chat never reaches — asked
         // here so the count covers every field a turn can want.
         let _ = settings.default_model();
+        // And the working directory (#559), which `build_options` already
+        // resolved above — `spec_for` names none — asked again for the count.
+        let _ = settings.default_working_dir();
 
         assert_eq!(
             settings.loads(),
             1,
             "the settings row was read more than once for one turn"
         );
+    }
+
+    /// A migrated database whose settings row stores `dir` as the default
+    /// working directory.
+    fn settings_db_with_working_dir(dir: &str) -> tempfile::NamedTempFile {
+        let file = settings_db();
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO user_settings (id, default_working_dir) VALUES (1, ?1)",
+                [dir],
+            )
+            .expect("seed settings");
+        file
+    }
+
+    /// What `resolve` answers for `stored` in this process: the developer's own
+    /// `AGENTO_WORKING_DIR` wins when exported, so the assertions below are
+    /// identities in that case and still literal in CI. The env rung itself is
+    /// pinned in `tests/chat_turn.rs`, under the lock that makes setting it safe.
+    fn expected_working_dir(stored: String) -> String {
+        crate::native::settings::env_value("AGENTO_WORKING_DIR").unwrap_or(stored)
+    }
+
+    /// #559: an empty `working_dir` is the settings default, never "no cwd" —
+    /// which inherited the Agento process's own. The directory is created before
+    /// the spawn, and the project setting source travels with the cwd, because
+    /// `with_cwd` and `with_setting_sources` are one decision.
+    #[tokio::test]
+    async fn an_empty_working_dir_runs_in_the_settings_default() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let stored = dir.path().join("not-yet").to_string_lossy().into_owned();
+        let file = settings_db_with_working_dir(&stored);
+        let mut spec = spec_for(Capabilities::default());
+        spec.settings = std::sync::Arc::new(TurnSettings::from_db(file.path()));
+
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+
+        let want = expected_working_dir(stored);
+        assert_eq!(opts.cwd, want);
+        assert!(
+            std::path::Path::new(&want).is_dir(),
+            "created before the spawn"
+        );
+        assert_eq!(opts.setting_sources, vec!["project".to_string()]);
+    }
+
+    /// The last rung: no stored value, or no row this process can read, is
+    /// `<temp>/agento/work` — `resolve`'s default, deliberately *not*
+    /// `default_model`'s "answer nothing on an unreadable row".
+    #[test]
+    fn with_nothing_stored_the_working_dir_is_the_temp_default() {
+        let temp_default = std::env::temp_dir()
+            .join("agento")
+            .join("work")
+            .to_string_lossy()
+            .into_owned();
+        let want = expected_working_dir(temp_default);
+        let empty = settings_db();
+
+        assert_eq!(TurnSettings::none().default_working_dir(), want);
+        assert_eq!(
+            TurnSettings::from_db(empty.path()).default_working_dir(),
+            want,
+            "an empty stored value"
+        );
+        assert_eq!(
+            TurnSettings::from_db("/nonexistent/agento/definitely-not-a-db").default_working_dir(),
+            want,
+            "an unreadable database"
+        );
+    }
+
+    /// A default that cannot be created is left to the spawn to report: the
+    /// turn is still built, on that directory, rather than refused.
+    #[tokio::test]
+    async fn a_default_that_cannot_be_created_does_not_refuse_the_turn() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let blocker = dir.path().join("a-file");
+        std::fs::write(&blocker, "").expect("write blocker");
+        let stored = blocker.join("work").to_string_lossy().into_owned();
+        let file = settings_db_with_working_dir(&stored);
+        let mut spec = spec_for(Capabilities::default());
+        spec.settings = std::sync::Arc::new(TurnSettings::from_db(file.path()));
+
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
+            .await
+            .expect("a directory that cannot be created is not a refusal");
+
+        assert_eq!(opts.cwd, expected_working_dir(stored));
+    }
+
+    /// The other side of creating the default: a directory the chat, task or
+    /// rule **chose** is never created. A renamed repo or an unmounted drive
+    /// must still fail the spawn, not become an empty folder the run acts in.
+    #[tokio::test]
+    async fn a_chosen_working_dir_that_is_missing_is_not_created() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let chosen = dir.path().join("renamed-repo");
+        let mut spec = spec_for(Capabilities::default());
+        spec.working_dir = chosen.to_string_lossy().into_owned();
+
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+
+        assert_eq!(opts.cwd, spec.working_dir, "the chosen directory is kept");
+        assert!(!chosen.exists(), "a chosen directory was created");
     }
 
     /// The zero case, which is the other half of the same rule: an absolute
@@ -1408,12 +1562,17 @@ mod tests {
         let mut spec = spec_for(Capabilities::default());
         spec.agent = Some(agent);
         spec.settings = std::sync::Arc::clone(&settings);
+        // A chat that names its own working directory, so the config dir is the
+        // only field left that could reach the row: an empty one resolves the
+        // settings default (#559), which is a read of its own.
+        spec.working_dir = dir.path().to_string_lossy().into_owned();
 
-        let (_opts, _servers, _hosted) = build_options(&spec, no_op_handler())
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
 
         assert_eq!(settings.loads(), 0);
+        assert_eq!(opts.cwd, spec.working_dir, "a chosen directory is kept");
     }
 
     /// The precedence itself, unchanged: an absolute per-agent override wins,

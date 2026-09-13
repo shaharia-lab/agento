@@ -246,9 +246,10 @@ async fn a_rules_execution_settings_reach_the_spawned_cli() {
     // buys is the mode the CLI reads, which is the flag asserted above.
 }
 
-/// A rule that records nothing runs exactly as a trigger run did before #565:
-/// the agent's model, no working directory, and the bypassing catch-all that a
-/// headless run with no configured mode has always taken.
+/// A rule that records nothing runs as a trigger run did before #565 — the
+/// agent's model and the bypassing catch-all a headless run with no configured
+/// mode has always taken — with one deliberate exception: since #559 an unset
+/// working directory is the settings default, not the app process's own cwd.
 #[tokio::test]
 async fn a_rule_that_configures_nothing_runs_as_it_always_did() {
     let Some(_) = python3() else {
@@ -262,16 +263,25 @@ async fn a_rule_that_configures_nothing_runs_as_it_always_did() {
 
     let _env = env_lock().lock().await;
     std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    // No settings row, so the answer is `resolve`'s last rung — unless a
+    // developer's own export would win over it.
+    std::env::remove_var("AGENTO_WORKING_DIR");
     tokio::time::timeout(std::time::Duration::from_secs(30), run_the_rule(&db))
         .await
         .expect("the run must finish, not hang")
         .expect("the run answered");
 
     let (argv, reported_cwd) = only_spawn(dir.path());
+    let temp_default = std::env::temp_dir().join("agento").join("work");
     assert_eq!(
         Path::new(&reported_cwd),
+        std::fs::canonicalize(&temp_default).expect("the default was created"),
+        "an unset working directory is the settings default, not where the app is (#559)"
+    );
+    assert_ne!(
+        Path::new(&reported_cwd),
         std::fs::canonicalize(std::env::current_dir().expect("cwd")).expect("canonicalize"),
-        "an unset working directory leaves the process where the app is"
+        "the run must not inherit the app process's cwd"
     );
     assert_eq!(flag_value(&argv, "--model"), Some("agent-model"));
     assert_eq!(

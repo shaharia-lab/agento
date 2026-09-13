@@ -43,7 +43,10 @@ fn python3() -> Option<String> {
 fn fake_cli(dir: &Path, emit: &str) -> PathBuf {
     let script = format!(
         r#"#!/usr/bin/env {python}
-import json, sys
+import json, os, sys
+
+with open({cwd}, "w") as _cwd:
+    _cwd.write(os.getcwd())
 
 def say(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -81,6 +84,7 @@ for line in sys.stdin:
         continue
 "#,
         python = python3().unwrap_or_else(|| "python3".into()),
+        cwd = serde_json::to_string(&dir.join("cwd").to_string_lossy()).unwrap(),
         emit = emit,
     );
     let path = dir.join("fake-claude");
@@ -228,6 +232,57 @@ async fn a_scheduled_run_records_a_successful_job_and_persists_its_chat() {
     assert_eq!(task.last_run_status, "success");
     assert!(task.last_run_at.is_some());
     assert_eq!(task.status, "active", "a cron task keeps running");
+}
+
+/// #559, the executor's half: a task with no `working_directory` runs the CLI
+/// in the settings default, not in whatever directory this process has.
+///
+/// The default is pointed at a directory that does **not** exist yet, because
+/// nothing else creates `<temp>/agento/work` on a fresh install — a spawn into
+/// a missing cwd would fail the run rather than merely misplace it.
+#[tokio::test]
+async fn a_task_with_no_working_directory_runs_in_the_settings_default() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    let default = dir.path().join("settings-default").join("work");
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute(
+            "INSERT INTO user_settings (id, default_working_dir) VALUES (1, ?1)",
+            [default.to_string_lossy()],
+        )
+        .expect("seed settings");
+
+    let cli = fake_cli(
+        dir.path(),
+        r#"        raw('{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sdk-cwd","usage":{"input_tokens":1,"output_tokens":1}}')"#,
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    // The stored rung is the subject; a developer's own export would win.
+    std::env::remove_var("AGENTO_WORKING_DIR");
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "exactly one run: {jobs:?}");
+    assert_eq!(jobs[0].0, "success", "error was {:?}", jobs[0].1);
+    assert!(default.is_dir(), "the default directory was created");
+    let recorded = std::fs::read_to_string(dir.path().join("cwd")).expect("the CLI ran");
+    // Canonicalised on both sides: macOS's temp dir is behind a symlink, and
+    // `os.getcwd()` answers the resolved path.
+    assert_eq!(
+        std::fs::canonicalize(recorded).expect("recorded cwd"),
+        std::fs::canonicalize(&default).expect("default dir"),
+        "the task ran outside the settings default"
+    );
 }
 
 /// #541, end to end: a **paused** task, sitting **at** its `stop_after_count`,

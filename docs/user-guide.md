@@ -83,6 +83,13 @@ The working directory matters. It is the folder the agent can see and act in, th
 same way `claude` behaves when you run it from that folder. **Browse…** opens your
 system's file picker, falling back to a built-in one if that is unavailable.
 
+A chat or task that reaches Agento with no working directory — one created through
+the API, a scheduled task that names none, a Slack or Telegram rule left on *agent
+default* — runs in the **Settings → General** working directory, not in whatever
+folder Agento itself was started from. The Chats list shows that folder for such a
+chat. Conversations that already ran somewhere else keep their place in History;
+only new runs change.
+
 Your choices are remembered and filled in next time you start a chat. They start
 from **Settings → General** the first time.
 
@@ -892,7 +899,9 @@ instead, revoke that token by name in **Settings → Security**.
 
 ### General
 
-- **Working directory**: the default folder for new chats and tasks.
+- **Working directory**: the default folder for new chats and tasks, and the folder
+  any chat, task or rule without a working directory of its own runs in. Agento
+  creates it if it does not exist.
 - **Default model**: used when neither the chat nor the agent picks one.
 - **Public URL**: only relevant if you also run the server.
 - **Updates**: how Agento behaves when a new version exists. See

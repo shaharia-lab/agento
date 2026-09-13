@@ -20,6 +20,7 @@ import type {
   ChatSession,
   ClaudeMessage,
   ClaudeSessionDetail,
+  SettingsResponse,
 } from "../lib/types";
 import {
   Empty,
@@ -91,6 +92,14 @@ export function ChatsView({
     (signal) => api.get<Agent[]>("/agents", signal),
     []
   );
+  // Where a chat with no working directory of its own actually runs (#559):
+  // the runner resolves `""` to this, env override included, so the list shows
+  // it rather than implying the chat has no folder at all.
+  const settings = useResource<SettingsResponse | null>(
+    (signal) => api.get<SettingsResponse>("/settings", signal),
+    []
+  );
+  const defaultWorkingDir = settings.data?.settings.default_working_dir ?? "";
 
   const [selected, setSelected] = useState<string | null>(null);
   const [drafting, setDrafting] = useState(false);
@@ -500,7 +509,9 @@ export function ChatsView({
                     <div className="listrow__preview">
                       {c.working_directory
                         ? tildePath(c.working_directory)
-                        : c.model || "No working directory"}
+                        : defaultWorkingDir
+                          ? tildePath(defaultWorkingDir)
+                          : c.model || "Default working directory"}
                     </div>
                     <div className="listrow__meta">
                       {c.id === stream.chatId && (
@@ -872,7 +883,9 @@ export function ChatsView({
                 <div className="pathwell mono">
                   {session.working_directory
                     ? tildePath(session.working_directory)
-                    : "Not set"}
+                    : defaultWorkingDir
+                      ? tildePath(defaultWorkingDir)
+                      : "Default working directory"}
                 </div>
               </InspGroup>
 
