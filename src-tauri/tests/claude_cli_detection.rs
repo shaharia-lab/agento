@@ -81,6 +81,24 @@ fn the_resolver_walks_its_order_under_a_gui_launchs_environment() {
     assert_eq!(found.source, Source::Candidate);
     assert_eq!(found.path, aliased.to_string_lossy());
 
+    // ── The absolute entries are really re-rooted, not vacuously absent. ─────
+    // On a machine with nothing in `/opt/homebrew/bin` every stage here passes
+    // whether or not `AGENTO_CLI_CANDIDATE_ROOT` is honoured, so a renamed
+    // variable or a feature that stopped reaching this build would go unseen.
+    // A CLI under the root's Homebrew directory outranks `~/.claude/local`,
+    // because the absolute entries are tried first.
+    let homebrew = tmp.path().join("opt/homebrew/bin");
+    std::fs::create_dir_all(&homebrew).expect("rooted homebrew dir");
+    let rooted = write_cli(&homebrew, "claude", "2.1.231 (Claude Code)", 0);
+    let found = resolve(None).expect("the re-rooted Homebrew install is found");
+    assert_eq!(found.source, Source::Candidate);
+    assert_eq!(
+        found.path,
+        rooted.to_string_lossy(),
+        "rule 5's absolute directories were not re-rooted under the tempdir"
+    );
+    std::fs::remove_file(&rooted).expect("remove the rooted CLI");
+
     // ── A program named `claude` that is not Claude Code is not the CLI. ─────
     // Left unchecked it reads as a healthy install *and* gets spawned for every
     // turn, failing with something that looks nothing like a missing dependency.
