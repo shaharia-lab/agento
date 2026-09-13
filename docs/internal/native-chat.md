@@ -223,8 +223,11 @@ a task, a trigger rule left on *agent default*, and a continued session — and
 deliberately does **not** copy `default_model()`'s "unreadable row answers `""`":
 there is no "set no cwd" worth having, because that is inheriting the Agento
 process's own cwd (`src-tauri/` under `npm run app`), which is the bug. The
-directory is created when missing — nothing else creates `<temp>/agento/work` —
-and a failed create is a `warn` left to the spawn to report. The stored row keeps
+**default** is created when missing — nothing else creates `<temp>/agento/work` —
+and a failed create is a `warn` left to the spawn to report. A directory the chat,
+task or rule **chose** is never created: a renamed repo or an unmounted drive still
+fails the spawn rather than becoming an empty folder a bypassing run acts in
+(`runner::tests::a_chosen_working_dir_that_is_missing_is_not_created`). The stored row keeps
 `""`; the Chats list reads `GET /settings` to show where such a chat runs. Since
 `with_cwd` travels with `with_setting_sources(["project"])`, those runs also gained
 the project setting source, pointed at the default directory

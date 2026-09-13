@@ -883,7 +883,9 @@ export function ChatsView({
                 <div className="pathwell mono">
                   {session.working_directory
                     ? tildePath(session.working_directory)
-                    : "Not set"}
+                    : defaultWorkingDir
+                      ? tildePath(defaultWorkingDir)
+                      : "Default working directory"}
                 </div>
               </InspGroup>
 

@@ -303,12 +303,18 @@ pub async fn build_options(
     // An empty `working_dir` resolves to the settings default rather than
     // inheriting the app process's cwd (#559) — `src-tauri/` under
     // `npm run app`, and whatever the launcher chose for a release build.
+    //
+    // Only the default is created. A directory the user chose that has since
+    // gone missing — a renamed repo, an unmounted drive — must fail the spawn
+    // as it always has, rather than become an empty folder a bypassing run
+    // then acts in and reports success from.
     let cwd = if spec.working_dir.is_empty() {
-        spec.settings.default_working_dir()
+        let default = spec.settings.default_working_dir();
+        ensure_dir(&default);
+        default
     } else {
         spec.working_dir.clone()
     };
-    ensure_dir(&cwd);
     opts = opts.with_cwd(cwd).with_setting_sources(["project"]);
 
     let config_dir = resolve_agent_config_dir(spec.agent.as_ref(), &spec.settings);
@@ -1518,6 +1524,24 @@ mod tests {
             .expect("a directory that cannot be created is not a refusal");
 
         assert_eq!(opts.cwd, expected_working_dir(stored));
+    }
+
+    /// The other side of creating the default: a directory the chat, task or
+    /// rule **chose** is never created. A renamed repo or an unmounted drive
+    /// must still fail the spawn, not become an empty folder the run acts in.
+    #[tokio::test]
+    async fn a_chosen_working_dir_that_is_missing_is_not_created() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let chosen = dir.path().join("renamed-repo");
+        let mut spec = spec_for(Capabilities::default());
+        spec.working_dir = chosen.to_string_lossy().into_owned();
+
+        let (opts, _servers, _hosted) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+
+        assert_eq!(opts.cwd, spec.working_dir, "the chosen directory is kept");
+        assert!(!chosen.exists(), "a chosen directory was created");
     }
 
     /// The zero case, which is the other half of the same rule: an absolute
