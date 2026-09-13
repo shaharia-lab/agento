@@ -318,11 +318,14 @@ fn tool_use_input_survives_the_round_trip_byte_for_byte() {
 fn fake_cli(dir: &Path, emit: &str) -> PathBuf {
     let script = format!(
         r#"#!/usr/bin/env {python}
-import json, sys, threading, time
+import json, os, sys, threading, time
 
 LOG = {log}
 _log = open(LOG, "a")
 _lock = threading.Lock()
+
+with open({cwd}, "w") as _cwd:
+    _cwd.write(os.getcwd())
 
 def record(entry):
     with _lock:
@@ -361,6 +364,7 @@ for line in sys.stdin:
 "#,
         python = python3().unwrap_or_else(|| "python3".into()),
         log = serde_json::to_string(&stdin_log(dir).to_string_lossy()).unwrap(),
+        cwd = serde_json::to_string(&cwd_log(dir).to_string_lossy()).unwrap(),
         emit = emit,
     );
     let path = dir.join("fake-claude");
@@ -377,6 +381,11 @@ for line in sys.stdin:
 /// Where [`fake_cli`] records the lines it was sent.
 fn stdin_log(dir: &Path) -> PathBuf {
     dir.join("stdin.jsonl")
+}
+
+/// Where [`fake_cli`] records the directory it was started in (#559).
+fn cwd_log(dir: &Path) -> PathBuf {
+    dir.join("cwd")
 }
 
 /// Everything the SDK wrote to the CLI, decoded, in order.
@@ -474,6 +483,128 @@ async fn a_turn_forwards_the_cli_lines_verbatim_and_ends_on_the_final_result() {
         frames[0].1,
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"t1","name":"Bash","input":{"z":1.50,"a":1}}]}}"#
     );
+}
+
+// ─── The working directory (#559) ─────────────────────────────────────────────
+
+/// A CLI that acknowledges `initialize` and answers the first message with a
+/// bare `result` — for tests whose subject is where it was started, not what it
+/// said.
+const RESULT_ONLY: &str = r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        raw('{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sdk-cwd","usage":{"input_tokens":1,"output_tokens":1}}')
+"#;
+
+/// `file`'s settings row, with `default_working_dir` stored as `dir`.
+fn seed_default_working_dir(file: &tempfile::NamedTempFile, dir: &Path) {
+    rusqlite::Connection::open(file.path())
+        .expect("open")
+        .execute(
+            "INSERT INTO user_settings (id, default_working_dir) VALUES (1, ?1)",
+            [dir.to_string_lossy()],
+        )
+        .expect("seed settings");
+}
+
+/// Drive one turn with `AGENTO_WORKING_DIR` set to `env`, or unset for `None`.
+///
+/// Set and removed **inside** the env lock, for [`run_turn_on`]'s reason: every
+/// turn's `build_options` now reads the variable, so a value left behind would
+/// move every later test's CLI.
+async fn run_turn_with_working_dir_env(
+    cli: &Path,
+    file: &tempfile::NamedTempFile,
+    chat_id: &str,
+    env: Option<&Path>,
+) -> String {
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", cli);
+    std::env::remove_var("AGENTO_MCPS_FILE");
+    match env {
+        Some(dir) => std::env::set_var("AGENTO_WORKING_DIR", dir),
+        None => std::env::remove_var("AGENTO_WORKING_DIR"),
+    }
+
+    let response = agento_lib::native::chat::turn::run(
+        file.path().to_path_buf(),
+        chat_id.to_string(),
+        "where am I".to_string(),
+    )
+    .await
+    .expect("the turn should stream");
+    assert_eq!(response.status(), 200);
+    let collected = collect_with_timeout(response).await;
+    std::env::remove_var("AGENTO_WORKING_DIR");
+    String::from_utf8(collected.to_bytes().to_vec()).expect("utf8")
+}
+
+/// The directory the fake CLI was started in, canonicalised — macOS's temp dir
+/// is behind a symlink and `os.getcwd()` answers the resolved path.
+fn recorded_cwd(dir: &Path) -> PathBuf {
+    let raw = std::fs::read_to_string(cwd_log(dir)).expect("the CLI ran and recorded its cwd");
+    std::fs::canonicalize(raw).expect("recorded cwd exists")
+}
+
+/// #559: a chat whose `working_directory` is `""` runs the CLI in the stored
+/// settings default — not in this test process's cwd, which is what an empty
+/// value used to mean.
+///
+/// The default does not exist before the turn, because nothing else creates
+/// `<temp>/agento/work` on a fresh install and a missing cwd fails the spawn.
+#[tokio::test]
+async fn a_chat_with_no_working_directory_runs_in_the_settings_default() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(dir.path(), RESULT_ONLY);
+    let stored = dir.path().join("stored-default").join("work");
+    let id = unique_id("default-cwd");
+    let file = migrated_with_chat(&id);
+    seed_default_working_dir(&file, &stored);
+
+    let body = run_turn_with_working_dir_env(&cli, &file, &id, None).await;
+    let names: Vec<String> = frames(&body).into_iter().map(|(e, _)| e).collect();
+    assert_eq!(names, vec!["result"], "body was: {body}");
+
+    assert!(stored.is_dir(), "the default directory was created");
+    assert_eq!(
+        recorded_cwd(dir.path()),
+        std::fs::canonicalize(&stored).expect("stored default"),
+        "the CLI ran outside the settings default"
+    );
+}
+
+/// The rung above it: `AGENTO_WORKING_DIR` beats the stored default, because
+/// the runner goes through `settings::resolve` rather than reading the column.
+#[tokio::test]
+async fn agento_working_dir_wins_over_the_stored_default() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(dir.path(), RESULT_ONLY);
+    let stored = dir.path().join("stored-default");
+    let from_env = dir.path().join("from-env");
+    std::fs::create_dir_all(&from_env).expect("env dir");
+    let id = unique_id("env-cwd");
+    let file = migrated_with_chat(&id);
+    seed_default_working_dir(&file, &stored);
+
+    let body = run_turn_with_working_dir_env(&cli, &file, &id, Some(&from_env)).await;
+    let names: Vec<String> = frames(&body).into_iter().map(|(e, _)| e).collect();
+    assert_eq!(names, vec!["result"], "body was: {body}");
+
+    assert_eq!(
+        recorded_cwd(dir.path()),
+        std::fs::canonicalize(&from_env).expect("env dir"),
+        "AGENTO_WORKING_DIR must win over the stored default"
+    );
+    assert!(!stored.exists(), "the losing rung is never created");
 }
 
 /// The rule most likely to be got wrong: `result` means "turn done", not
