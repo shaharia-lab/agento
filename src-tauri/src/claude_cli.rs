@@ -525,13 +525,31 @@ pub fn resolve(stored_override: Option<&str>) -> Option<Resolution> {
 /// `home` is optional because the absolute entries do not need it: an
 /// environment with no `HOME` still gets Homebrew and `/usr/local/bin` checked.
 fn candidates(home: Option<&Path>) -> Vec<PathBuf> {
+    candidates_under(candidate_root().as_deref(), home)
+}
+
+/// [`candidates`] with the absolute entries re-rooted under `root`. Split out so
+/// the re-rooting is testable without writing a process-wide variable that every
+/// other unit test calling [`candidates`] would read concurrently.
+fn candidates_under(root: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
     let name = cli_name();
     let mut dirs: Vec<PathBuf> = Vec::new();
 
     // Homebrew (Apple silicon, then Intel) and the system npm prefix. Absent
     // from launchd's PATH, present in every macOS user's shell.
+    //
+    // These are the one part of the walk that no environment variable can
+    // redirect, which made the integration suites hermetic only on a machine
+    // with no Claude Code in any of them (#535). Under the `test-hooks`
+    // feature — off in every shipped build — they are re-rooted, so a suite
+    // can own all five rules. The shipped walk is unchanged.
     for abs in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
-        dirs.push(PathBuf::from(abs));
+        // `trim_start_matches`, not `&abs[1..]`: an entry that ever lost its
+        // leading slash must not turn the join into an absolute overwrite.
+        dirs.push(root.map_or_else(
+            || PathBuf::from(abs),
+            |root| root.join(abs.trim_start_matches('/')),
+        ));
     }
 
     let Some(home) = home else {
@@ -575,6 +593,21 @@ fn candidates(home: Option<&Path>) -> Vec<PathBuf> {
     ));
 
     dirs.into_iter().map(|d| d.join(name)).collect()
+}
+
+/// Where the integration suites re-root rule 5's absolute directories. Exists
+/// only under the `test-hooks` feature, which nothing but the package's own
+/// dev-dependency enables (#535).
+#[cfg(feature = "test-hooks")]
+fn candidate_root() -> Option<PathBuf> {
+    std::env::var_os("AGENTO_CLI_CANDIDATE_ROOT").map(PathBuf::from)
+}
+
+/// A shipped build: no root, and the variable is not read at all, so it is not
+/// a lever a user can reach.
+#[cfg(not(feature = "test-hooks"))]
+fn candidate_root() -> Option<PathBuf> {
+    None
 }
 
 /// The subdirectories of `parent`, each with `suffix` appended, newest name
@@ -957,6 +990,63 @@ mod tests {
                 format!("/usr/local/bin/{name}"),
                 format!("/opt/local/bin/{name}"),
             ]
+        );
+    }
+
+    /// A root moves the three absolute entries under it, in the same order, and
+    /// touches nothing else — so a suite that sets it owns rule 5 without
+    /// changing what rule 5 scans relative to `HOME` (#535). Driven through
+    /// `candidates_under` rather than the variable, which every other test here
+    /// calling `candidates` would otherwise read concurrently.
+    #[test]
+    fn a_candidate_root_re_roots_only_the_absolute_locations() {
+        let root = Path::new("/tmp/suite-root");
+        let home = Path::new("/home/u");
+        let shipped = candidates_under(None, Some(home));
+        let rooted = candidates_under(Some(root), Some(home));
+        let name = cli_name();
+        assert_eq!(
+            rooted[..3],
+            [
+                root.join("opt/homebrew/bin").join(name),
+                root.join("usr/local/bin").join(name),
+                root.join("opt/local/bin").join(name),
+            ]
+        );
+        assert_eq!(rooted[3..], shipped[3..], "the home-relative entries moved");
+        assert_eq!(rooted[3], home.join(".local/bin").join(name));
+    }
+
+    /// The shipped walk is unchanged only while `test-hooks` stays off in every
+    /// build a user installs, and the one thing that can quietly break that is
+    /// the manifest: the feature added to `default`, or enabled on a normal
+    /// dependency edge. A `cargo test` build always has the feature on, so the
+    /// gate is pinned where it is decided rather than by a test that could only
+    /// ever run with it off.
+    #[test]
+    fn test_hooks_is_enabled_by_nothing_but_the_dev_dependency() {
+        let manifest = include_str!("../Cargo.toml");
+        let mut section = "";
+        let mut mentions = Vec::new();
+        for line in manifest.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.starts_with('[') {
+                section = line;
+            } else if line.contains("test-hooks") {
+                mentions.push((section, line));
+            }
+        }
+        assert_eq!(
+            mentions,
+            [
+                ("[features]", "test-hooks = []"),
+                (
+                    "[dev-dependencies]",
+                    r#"agento = { path = ".", features = ["test-hooks"] }"#
+                ),
+            ],
+            "`test-hooks` must be declared, off by default, and enabled only by \
+             the self dev-dependency — anywhere else it reaches a shipped build"
         );
     }
 

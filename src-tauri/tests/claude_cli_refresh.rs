@@ -75,11 +75,14 @@ fn a_cli_that_stops_being_spawnable_is_resolved_again_without_a_restart() {
     // SAFETY: this binary holds exactly one test, so nothing else is reading
     // the environment concurrently — which is why the module is written that
     // way. See the header. `PATH` points at nothing so rule 4 contributes
-    // nothing, and the walk is decided by the candidate list alone.
+    // nothing, and the walk is decided by the candidate list alone — which is
+    // only this test's list because `AGENTO_CLI_CANDIDATE_ROOT` re-roots its
+    // absolute directories under the tempdir (`test-hooks`, #535).
     unsafe {
         std::env::set_var("HOME", &home);
         std::env::set_var("PATH", tmp.path().join("no-such-bin"));
         std::env::set_var("SHELL", &shell);
+        std::env::set_var("AGENTO_CLI_CANDIDATE_ROOT", tmp.path());
         std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
     }
 

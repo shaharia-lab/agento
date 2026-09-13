@@ -479,3 +479,14 @@ answer is cached, and **revalidated before every spawn** (#533, below).
     between two reads would report one rule's path beside another rule's name.
   There is no filesystem watcher and no background re-detection timer. Saving
   the setting still takes effect at the next start, which the Settings help says.
+- **`AGENTO_CLI_CANDIDATE_ROOT` is a test hook, not an override** (#535). Rule
+  5's three absolute directories (`/opt/homebrew/bin`, `/usr/local/bin`,
+  `/opt/local/bin`) are the one part of the walk `HOME`, `PATH` and `SHELL`
+  cannot redirect, so the `claude_cli_*` integration suites were hermetic only
+  on a machine with no Claude Code in any of them. Under the `test-hooks` Cargo
+  feature those directories are re-rooted under that variable. The feature is
+  off in every shipped build — only the package's self dev-dependency turns it
+  on, so it reaches `cargo test` and never `cargo build` — and with it off
+  `candidate_root()` is `None` and the variable is not read at all: **the
+  shipped walk is unchanged**. `claude_cli::tests` pins that the feature is
+  enabled nowhere but the dev-dependency.
