@@ -65,6 +65,24 @@
 //! *"unknown transport"* over a file that is perfectly valid. That is the same
 //! user-visible failure Part A of #375 removed, so it is not a nicety.
 //!
+//! # A repeated key refuses the file, and the refusal names the key
+//!
+//! `yaml.v3` refuses a whole document that repeats a mapping key **at any
+//! depth** (`mapping key "a" already defined at line 1`), and so does this. A
+//! duplicated server name would otherwise resolve an agent's `capabilities.mcp`
+//! entry to a server other than the one a reader finds first in the file.
+//! `serde_norway`'s own `Mapping` already refuses one — but only through a serde
+//! message, which this module never forwards, so the user read *"does not decode
+//! at line 1 column 1"* and nothing about why. [`DupChecked`] does that walk
+//! itself and reports the key through a side channel (#499).
+//!
+//! It runs on the document **as written**, before merge expansion, so a key that
+//! `<<: *anchor` brings in and the entry also spells out is an override, not a
+//! duplicate — `yaml.v3`'s check is a parse-time rule too. The position given is
+//! the **enclosing mapping's** start: `MapAccess` exposes no marks, so the second
+//! occurrence's own line is not available, and the message does not pretend it
+//! is.
+//!
 //! # No decode failure quotes what it was decoding
 //!
 //! `mcps.yaml` holds credentials — a `Bearer` token under `headers` is the
@@ -77,9 +95,11 @@
 //! own message truncates the value to eight characters; dropping it entirely is
 //! strictly safer and loses nothing a line number does not supply.)
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess};
 use serde::Deserialize;
 
 use crate::claude::options::{McpHttpServer, McpSseServer, McpStdioServer};
@@ -218,6 +238,119 @@ impl<'de> Deserialize<'de> for YamlString {
     }
 }
 
+/// A `serde_norway::Value` that refuses a repeated mapping key, at any depth.
+///
+/// `yaml.v3` refuses the whole document on a duplicate and this module's
+/// contract is parity with it (#499). Every other case builds exactly the
+/// `Value` that `serde_norway::Value`'s own `Deserialize` builds, so `parse`
+/// continues unchanged past it — pinned by
+/// `the_duplicate_check_decodes_a_valid_document_to_the_same_value`.
+///
+/// The duplicated key is reported through the slot rather than through the
+/// error, because `syntax_error` drops serde messages on purpose — see the
+/// module header on not quoting what was decoded. A key is safe to name; a
+/// value is not, and none is ever read into the slot.
+#[derive(Clone, Copy)]
+struct DupChecked<'a>(&'a Cell<Option<String>>);
+
+impl<'de> DeserializeSeed<'de> for DupChecked<'_> {
+    type Value = serde_norway::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DupChecked<'_> {
+    type Value = serde_norway::Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("any YAML value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+        Ok(serde_norway::Value::Bool(v))
+    }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(serde_norway::Value::Number(v.into()))
+    }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(serde_norway::Value::Number(v.into()))
+    }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(serde_norway::Value::Number(v.into()))
+    }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(serde_norway::Value::String(v.to_owned()))
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        Ok(serde_norway::Value::String(v))
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(serde_norway::Value::Null)
+    }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(serde_norway::Value::Null)
+    }
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        self.deserialize(deserializer)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut out = serde_norway::Sequence::new();
+        while let Some(element) = seq.next_element_seed(self)? {
+            out.push(element);
+        }
+        Ok(serde_norway::Value::Sequence(out))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out = serde_norway::Mapping::new();
+        while let Some(key) = map.next_key::<serde_norway::Value>()? {
+            if out.contains_key(&key) {
+                self.0.set(Some(render_key(&key)));
+                return Err(serde::de::Error::custom("duplicate mapping key"));
+            }
+            let value = map.next_value_seed(self)?;
+            out.insert(key, value);
+        }
+        Ok(serde_norway::Value::Mapping(out))
+    }
+
+    /// A `!tag` node. Its content is walked with the same seed, so a duplicate
+    /// under a tag refuses like any other.
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+        let (tag, contents) = data.variant::<String>()?;
+        let value = contents.newtype_variant_seed(self)?;
+        Ok(serde_norway::Value::Tagged(Box::new(
+            serde_norway::value::TaggedValue {
+                tag: serde_norway::value::Tag::new(tag),
+                value,
+            },
+        )))
+    }
+}
+
+/// A duplicated key as the refusal names it: a scalar as its plain text, and
+/// anything else — YAML permits a mapping or a sequence as a key — as a
+/// placeholder, because such a key is never a server name and its content is
+/// not this message's to print.
+fn render_key(key: &serde_norway::Value) -> String {
+    match key {
+        serde_norway::Value::String(s) => s.clone(),
+        serde_norway::Value::Number(n) => n.to_string(),
+        serde_norway::Value::Bool(b) => b.to_string(),
+        serde_norway::Value::Null => "null".to_string(),
+        _ => "<complex key>".to_string(),
+    }
+}
+
 /// The parsed registry: server name → the JSON the CLI is handed in
 /// `--mcp-config`.
 ///
@@ -288,8 +421,16 @@ pub fn load(path: Option<&Path>) -> Result<Registry, String> {
 /// `LoadMCPRegistry` unwrapped, naming the server rather than the file, because
 /// the server name is what a reader searches the file for.
 fn parse(label: &str, data: &str) -> Result<Registry, String> {
-    let mut root: serde_norway::Value =
-        serde_norway::from_str(data).map_err(|e| syntax_error(label, &e))?;
+    // The duplicate check has to run here, on the document as written: after
+    // `apply_merge` a merged-in key the entry also spells out is gone, and it is
+    // an override rather than a duplicate. See the module header.
+    let duplicate: Cell<Option<String>> = Cell::new(None);
+    let mut root = DupChecked(&duplicate)
+        .deserialize(serde_norway::Deserializer::from_str(data))
+        .map_err(|e| match duplicate.take() {
+            Some(key) => duplicate_error(label, &key, &e),
+            None => syntax_error(label, &e),
+        })?;
 
     // An **empty** file is a YAML null, and so is one holding nothing but `---`
     // or a comment. Go's `yaml.Unmarshal` leaves the destination map nil for all
@@ -347,6 +488,27 @@ fn syntax_error(label: &str, e: &serde_norway::Error) -> String {
             at.column()
         ),
         None => format!("parsing MCP registry {label:?}: does not decode"),
+    }
+}
+
+/// A repeated key reported by **key and position**, never by content — the rule
+/// [`syntax_error`] follows. The key is a server name, a header name or an
+/// environment variable name at every level this can fire on, none of which is
+/// a secret; no value is ever read into it.
+///
+/// The position is the enclosing mapping's start, which is all `serde_norway`
+/// attaches — see the module header — so the sentence says "in the mapping at".
+fn duplicate_error(label: &str, key: &str, e: &serde_norway::Error) -> String {
+    match e.location() {
+        Some(at) => format!(
+            "parsing MCP registry {label:?}: mapping key {key:?} is defined more than once, \
+             in the mapping at line {} column {}",
+            at.line(),
+            at.column()
+        ),
+        None => {
+            format!("parsing MCP registry {label:?}: mapping key {key:?} is defined more than once")
+        }
     }
 }
 
@@ -697,6 +859,143 @@ docs:
             rendered.contains("weather"),
             "the names are still useful: {rendered}"
         );
+    }
+
+    /// A repeated mapping key refuses the **whole** file, at any depth, and the
+    /// refusal names the key — `yaml.v3`'s rule (#499).
+    ///
+    /// `serde_norway` refused these before #499 too, but only with a serde
+    /// message `parse` drops, so the user read a bare position. The key-naming
+    /// assertions are therefore the regression guard: they fail against
+    /// `serde_norway::from_str` in `parse`, where the `is_err` alone would not.
+    #[test]
+    fn a_repeated_key_refuses_the_file_and_names_the_key() {
+        // The issue's fixture: the same server name twice, another between.
+        let err = parse(
+            "mcps.yaml",
+            "a:\n  transport: stdio\nb:\n  transport: sse\na:\n  transport: sse\n",
+        )
+        .expect_err("a server name declared twice");
+        assert_eq!(
+            err,
+            "parsing MCP registry \"mcps.yaml\": mapping key \"a\" is defined more than once, \
+             in the mapping at line 1 column 1"
+        );
+
+        // One level down: a key repeated inside a single server's entry.
+        let err = parse(
+            "mcps.yaml",
+            "docs:\n  transport: stdio\n  command: first\n  command: second\n",
+        )
+        .expect_err("a field declared twice");
+        assert!(err.contains(r#"mapping key "command""#), "{err}");
+        assert!(err.contains("at line 2 column 3"), "{err}");
+
+        // And inside a sequence element, which is still a mapping.
+        let err = parse(
+            "mcps.yaml",
+            "docs:\n  transport: stdio\n  args:\n    - {k: 1, k: 2}\n",
+        )
+        .expect_err("a mapping inside a list");
+        assert!(err.contains(r#"mapping key "k""#), "{err}");
+    }
+
+    /// The refusal names a key and **never** a value, asserted on a token's
+    /// absence: the duplicated entry carries a `Bearer` token, and so does a
+    /// duplicated header, whose *key* is the header name.
+    #[test]
+    fn a_repeated_key_refusal_never_echoes_a_value() {
+        const SECRET: &str = "sk-live-NOTAREALTOKEN";
+
+        let err = parse(
+            "mcps.yaml",
+            &format!(
+                "weather:\n  transport: sse\n  url: https://a.example\n\
+                 weather:\n  transport: streamable_http\n  url: https://b.example\n  \
+                 headers: {{Authorization: \"Bearer {SECRET}\"}}\n"
+            ),
+        )
+        .expect_err("a server name declared twice");
+        assert!(!err.contains(SECRET), "the value leaked: {err}");
+        assert!(!err.contains("example"), "a value leaked: {err}");
+        assert!(err.contains(r#"mapping key "weather""#), "{err}");
+
+        let err = parse(
+            "mcps.yaml",
+            &format!(
+                "weather:\n  transport: sse\n  url: https://w.example\n  headers:\n    \
+                 Authorization: \"Bearer {SECRET}\"\n    Authorization: \"Bearer {SECRET}2\"\n"
+            ),
+        )
+        .expect_err("a header declared twice");
+        assert!(!err.contains(SECRET), "the value leaked: {err}");
+        assert!(err.contains(r#"mapping key "Authorization""#), "{err}");
+    }
+
+    /// An anchor merged into two entries is not a duplicate, and neither is a
+    /// key an entry spells out over one it merged in: the check runs on the
+    /// document as written, before `apply_merge`.
+    #[test]
+    fn a_shared_anchor_and_a_merge_override_are_not_duplicates() {
+        let registry = parse(
+            "mcps.yaml",
+            r#"
+base: &base
+  transport: stdio
+  command: /usr/bin/shared
+one:
+  <<: *base
+  args: ["--one"]
+two:
+  <<: *base
+  command: /usr/bin/own
+"#,
+        )
+        .expect("a shared anchor decodes");
+        assert_eq!(
+            registry.count(),
+            3,
+            "the anchor's own entry is a server too"
+        );
+        assert_eq!(
+            registry.get("one").expect("one"),
+            &serde_json::json!({"type": "stdio", "command": "/usr/bin/shared", "args": ["--one"]})
+        );
+        assert_eq!(
+            registry.get("two").expect("two")["command"],
+            "/usr/bin/own",
+            "the literal key overrides the merged one"
+        );
+    }
+
+    /// On every document without a duplicate, the check builds exactly the
+    /// `Value` `serde_norway` builds — scalars of every kind, nulls, tags, a
+    /// complex key, merge keys — so nothing past it in `parse` sees a
+    /// difference.
+    #[test]
+    fn the_duplicate_check_decodes_a_valid_document_to_the_same_value() {
+        let data = r#"
+base: &base
+  transport: stdio
+  env: {A: 1, B: true, C: 1.5, D: ~, E: 0x10, F: "s"}
+docs:
+  <<: *base
+  command: /usr/bin/docs-mcp
+  args: ["--root", 8080, ~, false, [nested, {x: 1}]]
+tagged: !custom
+  x: [1, 2]
+? [complex, key]
+: value
+1: numeric key
+~: null key
+"#;
+        let slot = Cell::new(None);
+        let checked = DupChecked(&slot)
+            .deserialize(serde_norway::Deserializer::from_str(data))
+            .expect("no duplicate");
+        let plain: serde_norway::Value = serde_norway::from_str(data).expect("valid");
+        assert_eq!(checked, plain);
+        assert!(slot.take().is_none());
     }
 
     /// A file with nothing in it is an empty registry and **no** error. This is

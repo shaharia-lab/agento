@@ -366,9 +366,12 @@ about three.
 - **Merge keys (`<<: *anchor`) are expanded during decode** and need
   `Value::apply_merge` here, or a perfectly valid file refuses every MCP-backed
   agent with *"unknown transport"*.
-- **A duplicate server name is an error in Go and last-one-wins here** — the one
-  divergence left standing, as [#499](https://github.com/shaharia-lab/agento/issues/499),
-  because no `serde_yaml` fork exposes a flag for it.
+- **A repeated mapping key refuses the whole file, at any depth**, and the
+  refusal names the key but no value (#499; `DupChecked`, and the module
+  header's *A repeated key refuses the file*). `serde_norway` 0.9.42 already
+  refused one, but only through a serde message this module drops, so the user
+  read a bare position. The check runs before merge expansion, so a key that
+  `<<: *anchor` brings in and an entry also spells out is an override.
 
 Two rules about what a failure here may *say*, both because this file holds
 credentials and a refusal's text reaches a chat body, `job_history.error_message`
