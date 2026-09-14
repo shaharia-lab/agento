@@ -1141,8 +1141,8 @@ async fn claude_executable() -> String {
 }
 
 /// [`crate::claude_cli::spawn_path`], off the runtime for the reason
-/// [`claude_executable`] gives: its first call, and a retry after a failure,
-/// spawn a login shell bounded at three seconds.
+/// [`claude_executable`] gives: its first call spawns a login shell bounded at
+/// three seconds, and waits for it.
 ///
 /// A `JoinError` sets no `PATH`, which is what a probe that failed leaves.
 async fn spawn_path() -> Option<String> {

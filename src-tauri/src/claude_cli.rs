@@ -1151,13 +1151,30 @@ mod tests {
             None,
             "the turn that found the retry due waited for it"
         );
+        // The slot is claimed before the probe runs — read while the probe is
+        // still held, so the detached thread cannot have written yet — which is
+        // what keeps a turn arriving mid-retry from starting a second one.
+        assert_eq!(
+            cell.read()
+                .expect("cell")
+                .as_ref()
+                .map(|entry| entry.probed_at),
+            Some(later),
+            "the retry did not claim its slot before probing"
+        );
+        // A panic here would land on a detached thread and fail nothing, so a
+        // second retry is counted instead.
+        static SECOND_RETRIES: AtomicUsize = AtomicUsize::new(0);
+        let second_retry = || {
+            SECOND_RETRIES.fetch_add(1, SeqCst);
+            None
+        };
+        assert_eq!(login_path_at(cell, later, second_retry), None);
         release.send(()).expect("release the retry");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let answered = loop {
-            let found = login_path_at(cell, later, || -> Option<String> {
-                panic!("probed again while the retry was in flight")
-            });
+            let found = login_path_at(cell, later, second_retry);
             if found.is_some() || Instant::now() >= deadline {
                 break found;
             }
@@ -1169,6 +1186,11 @@ mod tests {
             "the retry's answer never landed"
         );
         assert_eq!(PROBES.load(SeqCst), 2);
+        assert_eq!(
+            SECOND_RETRIES.load(SeqCst),
+            0,
+            "a second retry started while the first was in flight"
+        );
 
         let much_later = later + REFRESH_COOLDOWN * 10;
         assert_eq!(
