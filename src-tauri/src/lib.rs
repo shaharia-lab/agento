@@ -362,6 +362,15 @@ pub fn run() {
                     }
                 }
 
+                // The login shell's `PATH` for every spawned agent (#588). On a
+                // thread of its own, so it adds nothing to the window's wait:
+                // unlike the executable there is no stored override for a racing
+                // caller to lose, and a turn that arrives first waits on this
+                // same probe rather than running a second one.
+                std::thread::spawn(|| {
+                    crate::claude_cli::spawn_path();
+                });
+
                 // The `/api` signing key (#405, replacing #400's per-launch
                 // string), loaded **before** the listener is spawned so no
                 // request can arrive while there is nothing to verify against —

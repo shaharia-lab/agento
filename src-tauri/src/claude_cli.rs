@@ -110,7 +110,25 @@
 //!
 //! What this deliberately is **not**: a filesystem watcher, a background
 //! re-detection timer, or a `--version` check per turn.
+//!
+//! # The spawned process's `PATH` (#588)
+//!
+//! Finding `claude` was half of the launchd problem. The CLI inherits this
+//! process's environment, so on a GUI launch it — and the Bash tool and every
+//! `npx`/`uvx`/Homebrew MCP server it starts — ran on launchd's four entries
+//! while the same tools worked in the user's terminal. [`spawn_path`] asks the
+//! login shell for its `PATH`, and `runner::build_options` hands the child that
+//! value with this process's own entries appended.
+//!
+//! It is probed **independently of the walk above**, because rules 1 and 2
+//! return before the login shell is asked and a user who named their CLI still
+//! needs their tools found. It changes the environment only — which binary is
+//! spawned is still this module's five rules. An answer is kept for the life of
+//! the process; a failure leaves the inherited `PATH` untouched and is retried
+//! at most once per [`REFRESH_COOLDOWN`].
 
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{PoisonError, RwLock};
@@ -813,9 +831,299 @@ fn wait_bounded(mut child: std::process::Child, timeout: Duration) -> Option<std
     }
 }
 
+/// What [`spawn_path`] remembers: the login shell's `PATH`, or `None` when it
+/// gave no answer, and when that answer was produced.
+struct LoginPath {
+    value: Option<String>,
+    probed_at: Instant,
+}
+
+/// Separate from [`CACHE`] because it answers a separate question: the
+/// executable walk can finish before the login shell is ever asked (rules 1 and
+/// 2), and the spawned process's `PATH` is needed regardless.
+static LOGIN_PATH: RwLock<Option<LoginPath>> = RwLock::new(None);
+
+/// The `PATH` every spawned `claude` is given (#588): the login shell's, with
+/// this process's own entries appended — or `None` when the login shell gave no
+/// answer, in which case the child inherits this process's `PATH` exactly as it
+/// always has.
+///
+/// Blocking. The first call, and a retry after a failure, spawn a login shell
+/// bounded by `PROBE_TIMEOUT`; every other call is a read. `lib.rs` makes the
+/// first call on a startup thread, and `runner::build_options` makes the rest
+/// through `spawn_blocking`, for the reason `runner::claude_executable` gives.
+pub fn spawn_path() -> Option<String> {
+    let login = login_path_at(&LOGIN_PATH, Instant::now(), probe_login_path)?;
+    Some(merge_paths(&login, std::env::var_os("PATH").as_deref()))
+}
+
+/// [`spawn_path`]'s cache, with the cell, the clock and the probe as parameters
+/// so a test can place the cooldown boundary without the process-wide cell or a
+/// shell.
+///
+/// The first fill holds the write lock across the probe, as [`fill`] does, so a
+/// turn arriving while the startup thread is still probing waits for that
+/// answer instead of running a second shell. **An answer is kept** for the
+/// life of the process — a `PATH` edited in `.zshrc` takes effect at the next
+/// launch, as it does for a terminal that is already open. **A failure is
+/// re-probed** once [`REFRESH_COOLDOWN`] has passed, with the slot claimed under
+/// the lock before the probe starts and the probe itself outside every lock —
+/// the same shape as [`spawnable_at`]'s refresh.
+fn login_path_at(
+    cell: &RwLock<Option<LoginPath>>,
+    now: Instant,
+    probe: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    // An explicit scope, for the reason `fill` gives: the read guard must be
+    // gone before the write lock is taken.
+    {
+        let guard = cell.read().unwrap_or_else(PoisonError::into_inner);
+        match guard.as_ref() {
+            Some(LoginPath { value: Some(v), .. }) => return Some(v.clone()),
+            Some(entry) if !refresh_due(Some(entry.probed_at), now) => return None,
+            _ => {}
+        }
+    }
+
+    {
+        let mut guard = cell.write().unwrap_or_else(PoisonError::into_inner);
+        match guard.as_mut() {
+            None => {
+                let value = probe();
+                *guard = Some(LoginPath {
+                    value: value.clone(),
+                    probed_at: Instant::now(),
+                });
+                return value;
+            }
+            // Somebody answered, or claimed the retry, between the two locks.
+            Some(LoginPath { value: Some(v), .. }) => return Some(v.clone()),
+            Some(entry) if refresh_due(Some(entry.probed_at), now) => entry.probed_at = now,
+            Some(_) => return None,
+        }
+    }
+
+    let value = probe();
+    let mut guard = cell.write().unwrap_or_else(PoisonError::into_inner);
+    if let Some(entry) = guard.as_mut() {
+        entry.value = value.clone();
+        // From completion, as `spawnable_at` does, so a probe that took its
+        // whole timeout does not immediately allow another.
+        entry.probed_at = Instant::now();
+    }
+    value
+}
+
+/// The login shell's `PATH`, then every entry of `inherited` it lacks, in their
+/// original order, with repeats and empty entries dropped.
+///
+/// Appended rather than replaced, so the change is purely additive: a login
+/// shell whose `PATH` is narrower than the one Agento was started with — `npm
+/// run app` from a terminal, a launcher that adds its own directory — must not
+/// take those entries away from the agent.
+fn merge_paths(login: &str, inherited: Option<&OsStr>) -> String {
+    let mut seen = HashSet::new();
+    let entries: Vec<PathBuf> = std::env::split_paths(login)
+        .chain(inherited.into_iter().flat_map(std::env::split_paths))
+        .filter(|entry| !entry.as_os_str().is_empty() && seen.insert(entry.clone()))
+        .collect();
+    std::env::join_paths(entries)
+        .ok()
+        .and_then(|joined| joined.into_string().ok())
+        .unwrap_or_else(|| login.to_string())
+}
+
+/// Printed before the login shell's answer, so nothing an rc file printed
+/// ahead of it — including a line of its own starting `PATH=` — is read as one.
+#[cfg(unix)]
+const PATH_MARKER: &str = "__AGENTO_LOGIN_PATH__";
+
+/// Ask `$SHELL` for its `PATH`, logging the outcome once per probe.
+#[cfg(unix)]
+fn probe_login_path() -> Option<String> {
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
+    let found = login_shell_env_path(&shell);
+    match found.as_deref() {
+        Some(path) => log::info!(
+            "login shell PATH resolved entries={}",
+            std::env::split_paths(path).count()
+        ),
+        None => log::warn!(
+            "login shell PATH: {shell} gave no answer; spawned agents inherit this process's PATH"
+        ),
+    }
+    found
+}
+
+/// Windows has no login shell, and no launchd `PATH` for one to answer; the
+/// child inherits this process's `PATH` as it always has.
+#[cfg(not(unix))]
+fn probe_login_path() -> Option<String> {
+    None
+}
+
+/// Start `shell` the way a terminal does and read its exported `PATH`.
+///
+/// `env` rather than `printf "$PATH"`: fish expands a quoted `$PATH` to its
+/// entries joined by *spaces*, while every shell exports it colon-joined.
+/// `command` bypasses an alias an rc file put over `env` or `grep` — a
+/// `grep --color=always` would wrap the answer in escapes. The command is a
+/// constant, for the reason [`login_shell_path`] gives.
+#[cfg(unix)]
+fn login_shell_env_path(shell: &str) -> Option<String> {
+    let command = format!("echo {PATH_MARKER}; command env | command grep '^PATH='");
+    let child = Command::new(shell)
+        .arg("-lic")
+        .arg(&command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| log::debug!("login shell PATH: spawning {shell} to probe: {e}"))
+        .ok()?;
+    let output = wait_bounded(child, PROBE_TIMEOUT)?;
+    // The exit status is not read: `grep` finding nothing is already an empty
+    // answer, and an rc file's own failures do not make the `PATH` wrong.
+    parse_login_path(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The value of the first `PATH=` line after the last marker, or `None` when
+/// there is no marker, no such line, or an empty value.
+#[cfg(unix)]
+fn parse_login_path(stdout: &str) -> Option<String> {
+    let (_, answer) = stdout.rsplit_once(PATH_MARKER)?;
+    let value = answer
+        .lines()
+        .find_map(|line| line.trim_end_matches('\r').strip_prefix("PATH="))?;
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only what follows the marker is the answer: an rc file that prints a
+    /// `PATH=` line of its own, or any other chatter, is not read.
+    #[cfg(unix)]
+    #[test]
+    fn the_login_path_is_read_after_the_marker_and_nothing_before_it() {
+        let stdout = "Now using node v22.11.0\n\
+                      PATH=/printed/by/an/rc/file\n\
+                      __AGENTO_LOGIN_PATH__\n\
+                      PATH=/opt/homebrew/bin:/usr/bin:/bin\r\n";
+        assert_eq!(
+            parse_login_path(stdout).as_deref(),
+            Some("/opt/homebrew/bin:/usr/bin:/bin")
+        );
+    }
+
+    /// Every shape of "no answer" is `None`, which is what leaves the inherited
+    /// `PATH` in place rather than handing the child an empty one.
+    #[cfg(unix)]
+    #[test]
+    fn a_login_shell_that_gave_no_path_answers_nothing() {
+        for stdout in [
+            "",
+            "Welcome back!\n",
+            "PATH=/usr/bin\n",
+            "__AGENTO_LOGIN_PATH__\n",
+            "__AGENTO_LOGIN_PATH__\nPATH=\n",
+        ] {
+            assert_eq!(parse_login_path(stdout), None, "parsing {stdout:?}");
+        }
+    }
+
+    /// The probe's own command line, run by a real shell: the fake login shell
+    /// prints chatter, exports a `PATH` and runs what it was given with `-c`,
+    /// which is all a login shell does from the probe's point of view.
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_reads_the_path_a_login_shell_exports() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let shell = write_script(
+            tmp.path(),
+            "login-shell",
+            "echo 'Now using node v22.11.0'\n\
+             PATH=/login/only/bin:/usr/bin:/bin\n\
+             export PATH\n\
+             exec /bin/sh -c \"$2\"",
+        );
+        assert_eq!(
+            login_shell_env_path(&shell.to_string_lossy()).as_deref(),
+            Some("/login/only/bin:/usr/bin:/bin")
+        );
+
+        let broken = write_script(tmp.path(), "broken-shell", "exit 1");
+        assert_eq!(login_shell_env_path(&broken.to_string_lossy()), None);
+        assert_eq!(login_shell_env_path("/nonexistent/shell"), None);
+    }
+
+    /// The login entries lead, and nothing the process was started with is
+    /// lost — a terminal launch's extra directories survive the merge.
+    #[test]
+    fn the_inherited_path_is_appended_rather_than_replaced() {
+        let login = std::env::join_paths(["/opt/homebrew/bin", "/usr/bin", "/bin"])
+            .expect("join")
+            .into_string()
+            .expect("utf-8");
+        let inherited = std::env::join_paths(["/usr/bin", "/proj/node_modules/.bin", "", "/bin"])
+            .expect("join");
+        let merged = merge_paths(&login, Some(&inherited));
+        assert_eq!(
+            std::env::split_paths(&merged).collect::<Vec<_>>(),
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/proj/node_modules/.bin"),
+            ]
+        );
+        assert_eq!(merge_paths(&login, None), login);
+    }
+
+    /// No per-turn subprocess: an answer is probed once and kept, and a failure
+    /// is retried only once the cooldown has passed — a second spawn inside it
+    /// runs no shell at all.
+    #[test]
+    fn a_login_path_is_kept_and_a_failed_probe_waits_out_the_cooldown() {
+        let probes = std::cell::Cell::new(0);
+        let cell = RwLock::new(None);
+        let now = Instant::now();
+
+        let failing = || {
+            probes.set(probes.get() + 1);
+            None
+        };
+        assert_eq!(login_path_at(&cell, now, failing), None);
+        assert_eq!(login_path_at(&cell, now, failing), None);
+        assert_eq!(probes.get(), 1, "a spawn inside the cooldown probed again");
+
+        let answering = || {
+            probes.set(probes.get() + 1);
+            Some("/opt/homebrew/bin:/usr/bin".to_string())
+        };
+        let later = now + REFRESH_COOLDOWN + Duration::from_secs(1);
+        assert_eq!(
+            login_path_at(&cell, later, answering).as_deref(),
+            Some("/opt/homebrew/bin:/usr/bin")
+        );
+        assert_eq!(
+            probes.get(),
+            2,
+            "the failure was not retried after the cooldown"
+        );
+
+        let much_later = later + REFRESH_COOLDOWN * 10;
+        assert_eq!(
+            login_path_at(&cell, much_later, answering).as_deref(),
+            Some("/opt/homebrew/bin:/usr/bin")
+        );
+        assert_eq!(
+            probes.get(),
+            2,
+            "an answer was probed again rather than kept"
+        );
+    }
 
     /// The four alias spellings were measured against real shells, not guessed:
     /// zsh's `command -v` for an alias prints `claude=/path`, its `whence -v`
