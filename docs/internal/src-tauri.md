@@ -501,6 +501,8 @@ answer is cached, and **revalidated before every spawn** (#533, below).
   path (chat, scheduled run, trigger) goes through `build_options`, so there is
   one site. It is probed once on a startup thread; an answer is kept for the
   process's life, a failure leaves the inherited `PATH` untouched and is
-  retried at most once per `REFRESH_COOLDOWN`, and the call is
+  retried at most once per `REFRESH_COOLDOWN` **on a detached thread** — the
+  turn that finds a retry due does not wait for it, because unlike the
+  executable's refresh this one runs while agents work — and the call is
   `spawn_blocking`ed like `claude_executable`. Pinned end to end by
   `tests/claude_cli_login_path.rs`.

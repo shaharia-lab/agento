@@ -125,7 +125,8 @@
 //! needs their tools found. It changes the environment only — which binary is
 //! spawned is still this module's five rules. An answer is kept for the life of
 //! the process; a failure leaves the inherited `PATH` untouched and is retried
-//! at most once per [`REFRESH_COOLDOWN`].
+//! at most once per [`REFRESH_COOLDOWN`], in the background, so no turn waits
+//! on a retry.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -848,10 +849,10 @@ static LOGIN_PATH: RwLock<Option<LoginPath>> = RwLock::new(None);
 /// answer, in which case the child inherits this process's `PATH` exactly as it
 /// always has.
 ///
-/// Blocking. The first call, and a retry after a failure, spawn a login shell
-/// bounded by `PROBE_TIMEOUT`; every other call is a read. `lib.rs` makes the
-/// first call on a startup thread, and `runner::build_options` makes the rest
-/// through `spawn_blocking`, for the reason `runner::claude_executable` gives.
+/// Blocking. The first call spawns a login shell bounded by `PROBE_TIMEOUT`;
+/// every other call is a read. `lib.rs` makes the first call on a startup
+/// thread, and `runner::build_options` makes the rest through `spawn_blocking`,
+/// for the reason `runner::claude_executable` gives.
 pub fn spawn_path() -> Option<String> {
     let login = login_path_at(&LOGIN_PATH, Instant::now(), probe_login_path)?;
     Some(merge_paths(&login, std::env::var_os("PATH").as_deref()))
@@ -865,15 +866,23 @@ pub fn spawn_path() -> Option<String> {
 /// turn arriving while the startup thread is still probing waits for that
 /// answer instead of running a second shell. **An answer is kept** for the
 /// life of the process — a `PATH` edited in `.zshrc` takes effect at the next
-/// launch, as it does for a terminal that is already open. **A failure is
-/// re-probed** once [`REFRESH_COOLDOWN`] has passed, with the slot claimed under
-/// the lock before the probe starts and the probe itself outside every lock —
-/// the same shape as [`spawnable_at`]'s refresh.
-fn login_path_at(
-    cell: &RwLock<Option<LoginPath>>,
+/// launch, as it does for a terminal that is already open.
+///
+/// **A failure is re-probed in the background**, once [`REFRESH_COOLDOWN`] has
+/// passed, with the slot claimed under the lock first so only one retry runs.
+/// The turn that finds it due answers `None` at once rather than waiting.
+/// Unlike [`spawnable_at`]'s refresh — which runs only when no agent could
+/// start anyway — this one runs while agents work, so an rc file that always
+/// outlasts the timeout would otherwise add that timeout to a turn every
+/// cooldown, forever.
+fn login_path_at<P>(
+    cell: &'static RwLock<Option<LoginPath>>,
     now: Instant,
-    probe: impl FnOnce() -> Option<String>,
-) -> Option<String> {
+    probe: P,
+) -> Option<String>
+where
+    P: FnOnce() -> Option<String> + Send + 'static,
+{
     // An explicit scope, for the reason `fill` gives: the read guard must be
     // gone before the write lock is taken.
     {
@@ -903,15 +912,22 @@ fn login_path_at(
         }
     }
 
-    let value = probe();
-    let mut guard = cell.write().unwrap_or_else(PoisonError::into_inner);
-    if let Some(entry) = guard.as_mut() {
-        entry.value = value.clone();
-        // From completion, as `spawnable_at` does, so a probe that took its
-        // whole timeout does not immediately allow another.
-        entry.probed_at = Instant::now();
+    let retry = std::thread::Builder::new()
+        .name("login-path-probe".into())
+        .spawn(move || {
+            let value = probe();
+            let mut guard = cell.write().unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = guard.as_mut() {
+                entry.value = value;
+                // From completion, as `spawnable_at` does, so a probe that took
+                // its whole timeout does not immediately allow another.
+                entry.probed_at = Instant::now();
+            }
+        });
+    if let Err(e) = retry {
+        log::warn!("login shell PATH: starting the retry: {e}");
     }
-    value
+    None
 }
 
 /// The login shell's `PATH`, then every entry of `inherited` it lacks, in their
@@ -920,12 +936,16 @@ fn login_path_at(
 /// Appended rather than replaced, so the change is purely additive: a login
 /// shell whose `PATH` is narrower than the one Agento was started with — `npm
 /// run app` from a terminal, a launcher that adds its own directory — must not
-/// take those entries away from the agent.
+/// take those entries away from the agent. An inherited entry that is not UTF-8
+/// is the one thing skipped: the child's environment is built from `String`s,
+/// and one such entry must not cost the child every other inherited one.
 fn merge_paths(login: &str, inherited: Option<&OsStr>) -> String {
     let mut seen = HashSet::new();
     let entries: Vec<PathBuf> = std::env::split_paths(login)
         .chain(inherited.into_iter().flat_map(std::env::split_paths))
-        .filter(|entry| !entry.as_os_str().is_empty() && seen.insert(entry.clone()))
+        .filter(|entry| {
+            !entry.as_os_str().is_empty() && entry.to_str().is_some() && seen.insert(entry.clone())
+        })
         .collect();
     std::env::join_paths(entries)
         .ok()
@@ -1081,45 +1101,82 @@ mod tests {
         assert_eq!(merge_paths(&login, None), login);
     }
 
-    /// No per-turn subprocess: an answer is probed once and kept, and a failure
-    /// is retried only once the cooldown has passed — a second spawn inside it
-    /// runs no shell at all.
+    /// One inherited entry that is not UTF-8 is skipped on its own; it must not
+    /// send the merge down a fallback that drops every inherited entry.
+    #[cfg(unix)]
     #[test]
-    fn a_login_path_is_kept_and_a_failed_probe_waits_out_the_cooldown() {
-        let probes = std::cell::Cell::new(0);
-        let cell = RwLock::new(None);
+    fn a_non_utf8_inherited_entry_costs_only_itself() {
+        use std::os::unix::ffi::OsStrExt;
+        let inherited = OsStr::from_bytes(b"/usr/bin:/bad/\xff:/proj/bin");
+        assert_eq!(
+            merge_paths("/opt/homebrew/bin", Some(inherited)),
+            "/opt/homebrew/bin:/usr/bin:/proj/bin"
+        );
+    }
+
+    /// No per-turn subprocess and no per-turn wait: an answer is probed once and
+    /// kept, a failure is retried only once the cooldown has passed, and the
+    /// turn that finds the retry due answers at once instead of waiting on it.
+    #[test]
+    fn a_login_path_is_kept_and_a_failed_probe_is_retried_in_the_background() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        static PROBES: AtomicUsize = AtomicUsize::new(0);
+        const ANSWER: &str = "/opt/homebrew/bin:/usr/bin";
+        let cell: &'static RwLock<Option<LoginPath>> = Box::leak(Box::new(RwLock::new(None)));
         let now = Instant::now();
 
         let failing = || {
-            probes.set(probes.get() + 1);
+            PROBES.fetch_add(1, SeqCst);
             None
         };
-        assert_eq!(login_path_at(&cell, now, failing), None);
-        assert_eq!(login_path_at(&cell, now, failing), None);
-        assert_eq!(probes.get(), 1, "a spawn inside the cooldown probed again");
+        assert_eq!(login_path_at(cell, now, failing), None);
+        assert_eq!(login_path_at(cell, now, failing), None);
+        assert_eq!(
+            PROBES.load(SeqCst),
+            1,
+            "a spawn inside the cooldown probed again"
+        );
 
-        let answering = || {
-            probes.set(probes.get() + 1);
-            Some("/opt/homebrew/bin:/usr/bin".to_string())
+        // The retry's probe is held until after the call has returned. A retry
+        // run inline would come back with the answer rather than `None`.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let answering = move || {
+            let _ = held.recv_timeout(Duration::from_secs(5));
+            PROBES.fetch_add(1, SeqCst);
+            Some(ANSWER.to_string())
         };
         let later = now + REFRESH_COOLDOWN + Duration::from_secs(1);
         assert_eq!(
-            login_path_at(&cell, later, answering).as_deref(),
-            Some("/opt/homebrew/bin:/usr/bin")
+            login_path_at(cell, later, answering),
+            None,
+            "the turn that found the retry due waited for it"
         );
+        release.send(()).expect("release the retry");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let answered = loop {
+            let found = login_path_at(cell, later, || -> Option<String> {
+                panic!("probed again while the retry was in flight")
+            });
+            if found.is_some() || Instant::now() >= deadline {
+                break found;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(
-            probes.get(),
-            2,
-            "the failure was not retried after the cooldown"
+            answered.as_deref(),
+            Some(ANSWER),
+            "the retry's answer never landed"
         );
+        assert_eq!(PROBES.load(SeqCst), 2);
 
         let much_later = later + REFRESH_COOLDOWN * 10;
         assert_eq!(
-            login_path_at(&cell, much_later, answering).as_deref(),
-            Some("/opt/homebrew/bin:/usr/bin")
+            login_path_at(cell, much_later, failing).as_deref(),
+            Some(ANSWER)
         );
         assert_eq!(
-            probes.get(),
+            PROBES.load(SeqCst),
             2,
             "an answer was probed again rather than kept"
         );
