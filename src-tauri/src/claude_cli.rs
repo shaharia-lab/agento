@@ -1053,12 +1053,27 @@ mod tests {
         }
     }
 
+    /// Held by every test here that writes a script and then executes one.
+    ///
+    /// On Linux `execve` refuses a file any process still has open for writing,
+    /// and a `fork` on another test's thread copies this thread's write fd into
+    /// its child until that child execs — so two such tests running at once can
+    /// make either one's spawn fail with `ETXTBSY`, which `verify` and the probe
+    /// both read as a plain "no". A retry cannot help, since neither surfaces
+    /// the error. `tests/claude_sdk.rs::is_text_file_busy` describes the race.
+    #[cfg(unix)]
+    fn serialize_script_spawns() -> std::sync::MutexGuard<'static, ()> {
+        static SCRIPT_SPAWNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SCRIPT_SPAWNS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// The probe's own command line, run by a real shell: the fake login shell
     /// prints chatter, exports a `PATH` and runs what it was given with `-c`,
     /// which is all a login shell does from the probe's point of view.
     #[cfg(unix)]
     #[test]
     fn the_probe_reads_the_path_a_login_shell_exports() {
+        let _serial = serialize_script_spawns();
         let tmp = tempfile::tempdir().expect("tempdir");
         let shell = write_script(
             tmp.path(),
@@ -1473,6 +1488,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn verify_accepts_only_a_binary_that_answers_like_claude_code() {
+        let _serial = serialize_script_spawns();
         let tmp = tempfile::tempdir().expect("tempdir");
 
         let real = write_script(tmp.path(), "claude", "echo '2.1.231 (Claude Code)'");
@@ -1494,6 +1510,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_hanging_binary_is_killed_at_the_timeout() {
+        let _serial = serialize_script_spawns();
         let tmp = tempfile::tempdir().expect("tempdir");
         let hang = write_script(tmp.path(), "hang", "sleep 30");
         let started = Instant::now();
