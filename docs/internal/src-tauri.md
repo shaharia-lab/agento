@@ -490,3 +490,19 @@ answer is cached, and **revalidated before every spawn** (#533, below).
   `candidate_root()` is `None` and the variable is not read at all: **the
   shipped walk is unchanged**. `claude_cli::tests` pins that the feature is
   enabled nowhere but the dev-dependency.
+- **The login shell also supplies the spawned CLI's `PATH`** (#588). Finding
+  `claude` was half of the launchd problem: the child inherits this process's
+  environment, so the Bash tool and every `npx`/`uvx`/Homebrew MCP server it
+  starts saw launchd's four entries while the same tools worked in a terminal.
+  `claude_cli::spawn_path` asks `$SHELL -lic` for its exported `PATH` —
+  independently of the walk, because rules 1 and 2 never ask the shell — and
+  `runner::build_options` passes it through `opts.env`, login entries first and
+  this process's own appended, so a terminal launch loses nothing. Every spawn
+  path (chat, scheduled run, trigger) goes through `build_options`, so there is
+  one site. It is probed once on a startup thread; an answer is kept for the
+  process's life, a failure leaves the inherited `PATH` untouched and is
+  retried at most once per `REFRESH_COOLDOWN` **on a detached thread** — the
+  turn that finds a retry due does not wait for it, because unlike the
+  executable's refresh this one runs while agents work — and the call is
+  `spawn_blocking`ed like `claude_executable`. Pinned end to end by
+  `tests/claude_cli_login_path.rs`.
