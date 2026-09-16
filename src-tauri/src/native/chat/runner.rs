@@ -369,6 +369,15 @@ pub async fn build_options(
 
     opts = opts.with_claude_executable(claude_executable().await);
 
+    // The login shell's `PATH` (#588), so the tools and the `npx`/`uvx`/Homebrew
+    // MCP servers a user has installed resolve for the agent as they do in the
+    // user's terminal, rather than against launchd's four entries. Through
+    // `opts.env`, which `build_env` applies over the inherited environment; when
+    // the shell gave no answer nothing is set and the inherited `PATH` stands.
+    if let Some(path) = spawn_path().await {
+        opts = opts.with_env([("PATH", path)]);
+    }
+
     // `resolveAgentConfig` branches on whether the **chat names an agent**, not
     // on whether that agent has a model: it returns the agent's config outright,
     // and `runner.go` then sets a model only when `agentCfg.Model != ""`. So an
@@ -1128,6 +1137,20 @@ async fn claude_executable() -> String {
         .unwrap_or_else(|e| {
             log::warn!("claude cli: resolving off the runtime failed: {e}");
             "claude".to_string()
+        })
+}
+
+/// [`crate::claude_cli::spawn_path`], off the runtime for the reason
+/// [`claude_executable`] gives: its first call spawns a login shell bounded at
+/// three seconds, and waits for it.
+///
+/// A `JoinError` sets no `PATH`, which is what a probe that failed leaves.
+async fn spawn_path() -> Option<String> {
+    tokio::task::spawn_blocking(crate::claude_cli::spawn_path)
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("login shell PATH: resolving off the runtime failed: {e}");
+            None
         })
 }
 
