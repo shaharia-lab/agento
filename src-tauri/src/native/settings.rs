@@ -129,6 +129,12 @@ pub struct UserSettings {
     /// Empty means "detect it", which is what [`crate::claude_cli`] then does.
     #[serde(deserialize_with = "null_is_zero_value")]
     pub claude_executable_path: String,
+    /// Whether the Credentials Checker runs at all (#601, epic #597).
+    ///
+    /// Default off, and after `claude_executable_path` for the same reason that
+    /// field is last: no Go counterpart, so appending moves no existing byte.
+    #[serde(deserialize_with = "null_is_zero_value")]
+    pub credentials_checker_enabled: bool,
 }
 
 /// Read the settings row as stored. A missing row, a read error, or malformed
@@ -151,7 +157,8 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                     COALESCE(idle_gap_threshold_minutes, 0),
                     COALESCE(claude_config_dir, ''),
                     COALESCE(claude_config_dirs, ''),
-                    COALESCE(claude_executable_path, '')
+                    COALESCE(claude_executable_path, ''),
+                    COALESCE(credentials_checker_enabled, 0)
              FROM user_settings WHERE id = 1",
             [],
             |r| {
@@ -159,6 +166,7 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                 let dark_mode: i64 = r.get(3)?;
                 let hidden_raw: String = r.get(9)?;
                 let extra_raw: String = r.get(12)?;
+                let credentials_checker: i64 = r.get(14)?;
                 Ok(UserSettings {
                     default_working_dir: r.get(0)?,
                     default_model: r.get(1)?,
@@ -174,6 +182,7 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                     claude_config_dir: r.get(11)?,
                     claude_config_dirs: decode_string_list(&extra_raw),
                     claude_executable_path: r.get(13)?,
+                    credentials_checker_enabled: credentials_checker != 0,
                 })
             },
         )
@@ -936,8 +945,9 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
              appearance_dark_mode, appearance_font_size, appearance_font_family,
              notification_settings, event_bus_worker_pool_size, public_url,
              hidden_projects, idle_gap_threshold_minutes,
-             claude_config_dir, claude_config_dirs, claude_executable_path)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             claude_config_dir, claude_config_dirs, claude_executable_path,
+             credentials_checker_enabled)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(id) DO UPDATE SET
             default_working_dir = excluded.default_working_dir,
             default_model = excluded.default_model,
@@ -952,7 +962,8 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
             idle_gap_threshold_minutes = excluded.idle_gap_threshold_minutes,
             claude_config_dir = excluded.claude_config_dir,
             claude_config_dirs = excluded.claude_config_dirs,
-            claude_executable_path = excluded.claude_executable_path",
+            claude_executable_path = excluded.claude_executable_path,
+            credentials_checker_enabled = excluded.credentials_checker_enabled",
         rusqlite::params![
             settings.default_working_dir,
             settings.default_model,
@@ -968,6 +979,7 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
             settings.claude_config_dir,
             encode_string_list(&settings.claude_config_dirs),
             settings.claude_executable_path,
+            i64::from(settings.credentials_checker_enabled),
         ],
     )
     .map(|_| ())
@@ -1167,7 +1179,8 @@ mod tests {
             idle_gap_threshold_minutes INTEGER NOT NULL DEFAULT 0,
             claude_config_dir          TEXT    NOT NULL DEFAULT '',
             claude_config_dirs         TEXT    NOT NULL DEFAULT '[]',
-            claude_executable_path     TEXT    NOT NULL DEFAULT ''
+            claude_executable_path     TEXT    NOT NULL DEFAULT '',
+            credentials_checker_enabled INTEGER NOT NULL DEFAULT 0
         );";
 
     fn fixture(row: Option<&str>) -> Connection {
@@ -1192,12 +1205,14 @@ mod tests {
                   appearance_dark_mode, appearance_font_size, appearance_font_family,
                   notification_settings, event_bus_worker_pool_size, public_url,
                   hidden_projects, idle_gap_threshold_minutes,
-                  claude_config_dir, claude_config_dirs, claude_executable_path)
+                  claude_config_dir, claude_config_dirs, claude_executable_path,
+                  credentials_checker_enabled)
                VALUES (1, 'working-dir', 'the-model', 1,
                        1, 13, 'the-font',
                        'the-notifications', 7, 'the-url',
                        '["/hidden/one"]', 25,
-                       '/run/dir', '["/extra/dir"]', '/the/claude')"#,
+                       '/run/dir', '["/extra/dir"]', '/the/claude',
+                       1)"#,
         ));
 
         let stored = load_stored(&conn);
@@ -1221,6 +1236,7 @@ mod tests {
             Some(vec!["/extra/dir".to_string()])
         );
         assert_eq!(stored.claude_executable_path, "/the/claude");
+        assert!(stored.credentials_checker_enabled);
 
         // The narrowed view must agree with the row it was derived from — one
         // reader is the point.
@@ -1301,7 +1317,8 @@ mod tests {
                 r#""notification_settings":"{}","event_bus_worker_pool_size":3,"#,
                 r#""public_url":"","hidden_projects":["/home/u/secret"],"#,
                 r#""idle_gap_threshold_minutes":0,"claude_config_dir":"","#,
-                r#""claude_config_dirs":[],"claude_executable_path":""},"locked":{},"model_from_env":false}"#,
+                r#""claude_config_dirs":[],"claude_executable_path":"","#,
+                r#""credentials_checker_enabled":false},"locked":{},"model_from_env":false}"#,
                 "\n"
             )
         );
@@ -1667,7 +1684,8 @@ mod tests {
                 r#""public_url":"https://agento.example","#,
                 r#""hidden_projects":["/home/u/secret","/home/u/other"],"#,
                 r#""idle_gap_threshold_minutes":25,"claude_config_dir":"","#,
-                r#""claude_config_dirs":null,"claude_executable_path":""},"locked":{},"model_from_env":false}"#,
+                r#""claude_config_dirs":null,"claude_executable_path":"","#,
+                r#""credentials_checker_enabled":false},"locked":{},"model_from_env":false}"#,
                 "\n"
             )
         );
@@ -1713,9 +1731,73 @@ mod tests {
                 r#""notification_settings":"","event_bus_worker_pool_size":0,"#,
                 r#""public_url":"","hidden_projects":null,"#,
                 r#""idle_gap_threshold_minutes":7,"claude_config_dir":"","#,
-                r#""claude_config_dirs":null,"claude_executable_path":""},"locked":{},"model_from_env":false}"#,
+                r#""claude_config_dirs":null,"claude_executable_path":"","#,
+                r#""credentials_checker_enabled":false},"locked":{},"model_from_env":false}"#,
                 "\n"
             )
+        );
+    }
+
+    /// A `GET /api/settings`, through the handler, on its own read-only
+    /// connection — so it sees only what the row holds, never what a `PUT`
+    /// answered.
+    fn get(db: &std::path::Path) -> String {
+        let ctx = super::super::Ctx {
+            db_path: db.to_path_buf(),
+        };
+        let answer = serve(
+            &ctx,
+            &super::super::Request {
+                method: &Method::GET,
+                path: "/api/settings",
+                query: "",
+                content_type: "",
+                secret_token: "",
+                body: &[],
+            },
+        )
+        .expect("answered");
+        String::from_utf8(answer.body.unwrap_or_default()).expect("utf8")
+    }
+
+    /// **The Credentials Checker is off until the user turns it on** (#601).
+    #[test]
+    fn a_fresh_install_has_the_credentials_checker_off() {
+        let _env = crate::paths::tests::env_lock();
+        let file = migrated_db();
+        let body = get(file.path());
+        assert!(
+            body.contains(r#""credentials_checker_enabled":false"#),
+            "{body}"
+        );
+    }
+
+    /// Turning it on survives into the **next** request (#601). Asserting the
+    /// `PUT`'s own answer would pass with the field on the struct alone, since
+    /// that answer echoes the decoded body; only a separate `GET` proves the
+    /// column was written and read back.
+    #[test]
+    fn the_credentials_checker_switch_persists_across_requests() {
+        let _env = crate::paths::tests::env_lock();
+        if !nothing_is_locked() {
+            return;
+        }
+        let file = migrated_db();
+        let (status, _) = put(file.path(), r#"{"credentials_checker_enabled":true}"#);
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let body = get(file.path());
+        assert!(
+            body.contains(r#""credentials_checker_enabled":true"#),
+            "{body}"
+        );
+
+        // A `null` is the zero value, not a 400 — and it turns the switch off.
+        let (status, _) = put(file.path(), r#"{"credentials_checker_enabled":null}"#);
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let body = get(file.path());
+        assert!(
+            body.contains(r#""credentials_checker_enabled":false"#),
+            "{body}"
         );
     }
 
