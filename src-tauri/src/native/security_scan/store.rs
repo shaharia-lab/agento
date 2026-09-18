@@ -138,12 +138,14 @@ pub fn is_whitelisted(conn: &Connection, rule_id: &str, match_hash: &str) -> Res
 /// `status` and `detected_at`**: a finding the user marked `false_positive`
 /// stays marked, and "detected" means first detected.
 ///
-/// **The call is the session's whole scan, so it is authoritative for `open`
-/// rows**: an `open` finding of this session that this scan did not write —
-/// a rule retired or tightened by a ruleset bump, or a match now whitelisted —
-/// is deleted. `whitelisted` and `false_positive` rows are kept, since they
-/// carry a verdict the user made. It follows that `text` must be the whole
-/// transcript the offsets index into, never one chunk of it.
+/// **The call is the session's whole scan, so it decides which rows still
+/// exist**: an `open` or `whitelisted` finding of this session that this scan
+/// did not produce — a rule retired or tightened by a ruleset bump — is
+/// deleted, so removing a whitelist entry later cannot resurrect it as `open`.
+/// A whitelisted match this scan *did* produce keeps its row, marked
+/// `whitelisted`. `false_positive` rows are always kept: that verdict is the
+/// user's, not the scan's. It follows that `text` must be the whole transcript
+/// the offsets index into, never one chunk of it.
 ///
 /// A finding whose range does not lie on character boundaries of `text` fails
 /// the whole call and writes nothing — it means the caller passed the wrong
@@ -186,6 +188,16 @@ pub fn record_scan(
             (mask(matched), hash_match(matched))
         };
         if is_whitelisted(&tx, f.rule_id, &hash)? {
+            // Never written as `open`. A row this match already has stays, and
+            // is made `whitelisted` if it was somehow still `open`.
+            tx.execute(
+                "UPDATE credential_findings SET status = 'whitelisted'
+                  WHERE session_id = ?1 AND project_path = ?2 AND rule_id = ?3
+                    AND location_start = ?4 AND status = 'open'",
+                params![session_id, project_path, f.rule_id, f.start as i64],
+            )
+            .map_err(|e| format!("suppressing a {} finding for {session_id}: {e}", f.rule_id))?;
+            written.insert((f.rule_id, f.start as i64));
             continue;
         }
         let mut stmt = tx
@@ -221,7 +233,8 @@ pub fn record_scan(
     let stale: Vec<(i64, String, i64)> = tx
         .prepare(
             "SELECT id, rule_id, location_start FROM credential_findings
-              WHERE session_id = ?1 AND project_path = ?2 AND status = 'open'",
+              WHERE session_id = ?1 AND project_path = ?2
+                AND status IN ('open', 'whitelisted')",
         )
         .and_then(|mut stmt| {
             stmt.query_map(params![session_id, project_path], |r| {
@@ -229,7 +242,7 @@ pub fn record_scan(
             })?
             .collect()
         })
-        .map_err(|e| format!("reading {session_id}'s open findings: {e}"))?;
+        .map_err(|e| format!("reading {session_id}'s findings: {e}"))?;
     for (id, rule_id, start) in stale {
         if !written.contains(&(rule_id.as_str(), start)) {
             tx.execute("DELETE FROM credential_findings WHERE id = ?1", params![id])
@@ -326,9 +339,13 @@ pub fn add_whitelist_entry(
 ///
 /// A `whitelisted` finding goes back to `open` in the same transaction unless a
 /// remaining entry still covers it by rule id or by hash — every finding stores
-/// both, so that is an exact check, not a guess. This is what makes a whitelist
-/// action reversible from Settings (design doc §5.3). `false_positive` rows are
-/// the user's own verdict and are not touched.
+/// both, so that is an exact check, not a guess. `false_positive` rows are the
+/// user's own verdict and are not touched.
+///
+/// **This reverses a whitelist action only for findings that have a row.** A
+/// match [`record_scan`] suppressed at write time — whitelisted before it was
+/// first found — was never stored, and nothing here requeues its session, so
+/// it reappears only on the next ruleset bump.
 pub fn remove_whitelist_entry(conn: &mut Connection, id: i64) -> Result<bool, String> {
     let tx = conn
         .transaction()
@@ -801,6 +818,40 @@ mod tests {
                 ("/b".into(), "rule-b".into(), "open".into()),
             ]
         );
+    }
+
+    #[test]
+    fn a_whitelisted_finding_the_rescan_no_longer_produces_is_not_resurrected() {
+        let mut conn = db();
+        record_scan(&mut conn, "s1", "/a", 1, TEXT, &[alpha(), bravo()]).expect("record");
+        let by_hash = add_whitelist_entry(
+            &mut conn,
+            &WhitelistTarget::Hash(hash_match("leaked-value-alpha-0001")),
+            None,
+        )
+        .expect("whitelist");
+        let by_rule = add_whitelist_entry(&mut conn, &WhitelistTarget::Rule("rule-b".into()), None)
+            .expect("whitelist");
+
+        // v2 retires rule-a; rule-b still fires and is still whitelisted.
+        record_scan(&mut conn, "s1", "/a", 2, TEXT, &[bravo()]).expect("rescan");
+        assert_eq!(
+            stored(&conn),
+            vec![(
+                "rule-b".into(),
+                "whitelisted".into(),
+                Some(hash_match("leaked-value-bravo-0002"))
+            )]
+        );
+
+        // Removing both entries re-opens what is real and nothing else.
+        remove_whitelist_entry(&mut conn, by_hash).expect("remove");
+        remove_whitelist_entry(&mut conn, by_rule).expect("remove");
+        let statuses: Vec<(String, String)> = stored(&conn)
+            .into_iter()
+            .map(|(rule, status, _)| (rule, status))
+            .collect();
+        assert_eq!(statuses, vec![("rule-b".into(), "open".into())]);
     }
 
     #[test]
