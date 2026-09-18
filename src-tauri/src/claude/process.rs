@@ -188,6 +188,23 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
         // one that gives the CLI a chance to exit cleanly.
         .kill_on_drop(true);
 
+    // The child leads its own process group (#594), so a signal sent to the
+    // group from outside this future — an app-exit hook, a startup reaper
+    // holding only the pid `job_history` recorded — reaches everything the CLI
+    // started: its MCP servers, its Bash tool's children. Without it they share
+    // Agento's group, and there is no signal that names the run's tree alone.
+    //
+    // The shutdown path below still signals the pid, not the group. One
+    // termination path does go: a terminal's Ctrl-C and hangup reach its
+    // foreground group, so an Agento started from a shell (`npm run app`) no
+    // longer takes its runs down with it — the orphan the app-exit hook (#595)
+    // has to cover. On Windows the flag groups the tree for console control
+    // events only; killing it whole needs a Job Object, which is #595's too.
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+
     if !opts.cwd.is_empty() {
         command.current_dir(&opts.cwd);
     }
@@ -213,6 +230,17 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
     })?;
     let stderr = child.stderr.take();
     let pid = child.id();
+
+    // Before anything is read, so a crash straight after the spawn still leaves
+    // behind a record naming the process. `id()` is `None` only once the child
+    // has been reaped, which nothing has done yet.
+    if let (Some(hook), Some(pid)) = (&opts.on_spawn, pid) {
+        hook(crate::claude::options::Spawned {
+            pid,
+            started_at: std::time::SystemTime::now(),
+        })
+        .await;
+    }
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let shared = Arc::new(Shared {
@@ -1057,6 +1085,11 @@ pub(crate) fn build_env(opts: &Options) -> Vec<(String, String)> {
 }
 
 // ─── Signals ─────────────────────────────────────────────────────────────────
+
+/// `CREATE_NEW_PROCESS_GROUP` from `winbase.h`, spelled out rather than taking
+/// a Windows API crate for one constant.
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// Sends SIGTERM, giving the CLI a chance to exit cleanly.
 #[cfg(unix)]

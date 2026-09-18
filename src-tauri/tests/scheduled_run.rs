@@ -792,3 +792,119 @@ async fn a_run_whose_init_drops_the_tools_still_succeeds_and_records_it() {
         .expect("row");
     assert_eq!(task.last_run_status, "success");
 }
+
+/// #594: the CLI a run spawns leads its own process group, its pid is on the
+/// job row **before the run's output is read**, and a signal to that group
+/// reaches everything the CLI started — not just the CLI.
+///
+/// The fake reads the job row itself when the prompt arrives, which is after
+/// the handshake and therefore after the spawn hook was awaited: a pid written
+/// any later — by the finish, say — would read back `NULL` here. It also starts
+/// a grandchild, the stand-in for an MCP server or a Bash tool's child, which
+/// is the process a pid-only signal would leave behind.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_run_records_the_pid_of_a_process_group_leader_before_its_output_is_read() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    let info = dir.path().join("process.json");
+
+    let cli = fake_cli(
+        dir.path(),
+        &format!(
+            r#"        import sqlite3, subprocess
+        grandchild = subprocess.Popen(["sleep", "60"], stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        con = sqlite3.connect({db})
+        recorded = con.execute("SELECT pid, pid_started_at FROM job_history").fetchone()
+        con.close()
+        with open({info}, "w") as out:
+            out.write(json.dumps({{"pid": os.getpid(), "pgid": os.getpgid(0),
+                                   "grandchild": grandchild.pid,
+                                   "recorded_pid": recorded[0],
+                                   "recorded_at": recorded[1]}}))
+        raw('{{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sdk-pid","usage":{{"input_tokens":1,"output_tokens":1}}}}')"#,
+            db = serde_json::to_string(&db.to_string_lossy()).unwrap(),
+            info = serde_json::to_string(&info.to_string_lossy()).unwrap(),
+        ),
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "exactly one run: {jobs:?}");
+    assert_eq!(jobs[0].0, "success", "error was {:?}", jobs[0].1);
+
+    let seen: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&info).expect("the fake wrote what it saw"))
+            .expect("json");
+    let pid = seen["pid"].as_i64().expect("pid");
+    let grandchild = seen["grandchild"].as_i64().expect("grandchild") as libc::pid_t;
+
+    // Whatever else fails, the grandchild must not outlive the test by a minute.
+    struct Reap(libc::pid_t);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            // SAFETY: kill(2) on a pid this test's fake started.
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+            }
+        }
+    }
+    let reap = Reap(grandchild);
+
+    assert_eq!(
+        seen["pgid"].as_i64(),
+        Some(pid),
+        "the CLI leads its own process group"
+    );
+    assert_eq!(
+        seen["recorded_pid"].as_i64(),
+        Some(pid),
+        "the pid was on the row before the run produced anything: {seen}"
+    );
+    assert!(
+        seen["recorded_at"]
+            .as_str()
+            .is_some_and(|at| at.ends_with("+0000 UTC")),
+        "the spawn time is stored as a Go UTC time: {seen}"
+    );
+
+    // …and the finish did not overwrite either column.
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    let (stored_pid, stored_at): (Option<i64>, Option<String>) = conn
+        .query_row("SELECT pid, pid_started_at FROM job_history", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .expect("row");
+    assert_eq!(stored_pid, Some(pid));
+    assert_eq!(stored_at.as_deref(), seen["recorded_at"].as_str());
+
+    // The grandchild is still alive — the run's own shutdown signals the pid,
+    // not the group — and a signal to the group the stored pid names reaches it.
+    // SAFETY: kill(2) with signal 0 only probes; the group is this test's fake.
+    assert_eq!(unsafe { libc::kill(grandchild, 0) }, 0, "grandchild alive");
+    let signalled = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    assert_eq!(signalled, 0, "the stored pid names a live process group");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // An orphaned, killed grandchild is reaped by init (or a subreaper); until
+    // then it is a zombie that still answers signal 0, hence the poll.
+    while unsafe { libc::kill(grandchild, 0) } == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the grandchild survived a signal to the group"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // Reaped, so the pid is free for the OS to reuse: never signal it again.
+    std::mem::forget(reap);
+}

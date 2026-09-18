@@ -250,6 +250,27 @@ const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// written from the caller's task before the subprocess exists at all.
 pub type StderrSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
+/// The process a run spawned, as [`Options::on_spawn`] is told it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spawned {
+    /// The child's OS pid. It is also the id of the process group the child
+    /// leads (#594), so signalling `-pid` reaches everything the CLI started.
+    pub pid: u32,
+    /// Wall-clock time taken straight after `spawn` returned. A pid alone is
+    /// not an identity once the process has exited and the OS reuses it; a
+    /// consumer compares this against the live process's own start time.
+    pub started_at: std::time::SystemTime,
+}
+
+/// What an [`Options::on_spawn`] hook returns; awaited before the handshake.
+pub type SpawnFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Told the spawned process once, before a byte of its output is read.
+///
+/// Async for the reason the permission handler is: the one caller records the
+/// pid in SQLite, and that must not block a runtime worker.
+pub type SpawnHook = std::sync::Arc<dyn Fn(Spawned) -> SpawnFuture + Send + Sync>;
+
 /// All configuration for a run. Build with [`Options::default`] plus the
 /// `with_*` methods.
 #[derive(Clone, Default)]
@@ -360,6 +381,11 @@ pub struct Options {
     /// stderr is captured silently and included in errors on failure.
     pub stderr: Option<StderrSink>,
 
+    /// Called with the child's pid as soon as it is spawned, and awaited before
+    /// the initialize handshake — so whatever it records exists before the run
+    /// produces anything, and survives a crash straight after the spawn (#594).
+    pub on_spawn: Option<SpawnHook>,
+
     /// Additional environment variables merged into the subprocess env, applied
     /// last so they win.
     pub env: BTreeMap<String, String>,
@@ -405,6 +431,7 @@ impl std::fmt::Debug for Options {
                 &self.elicitation_handler.is_some(),
             )
             .field("hook_events", &self.hooks.keys().collect::<Vec<_>>())
+            .field("has_on_spawn", &self.on_spawn.is_some())
             .finish()
     }
 }

@@ -405,7 +405,7 @@ async fn execute_and_reply(
     };
 
     let (spec, timeout) = run_inputs(db_path, agent, rule);
-    let result = agent_run::run_headless(&spec, prompt, timeout).await;
+    let result = agent_run::run_headless(&spec, prompt, timeout, None).await;
 
     let result = match result {
         Ok(result) => result,
