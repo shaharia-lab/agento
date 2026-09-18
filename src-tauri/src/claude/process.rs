@@ -33,7 +33,7 @@
 //!   drop its transport and route tool calls back over `mcp_message`, which
 //!   this SDK does not implement. See [`initialize_msg`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
@@ -73,7 +73,7 @@ const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const STDERR_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long a terminating process is given before it is killed outright.
-const SIGKILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const SIGKILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A reply to one of our outbound control requests, once correlated.
 #[derive(Debug, Default)]
@@ -197,9 +197,9 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
     // The shutdown path below still signals the pid, not the group. One
     // termination path does go: a terminal's Ctrl-C and hangup reach its
     // foreground group, so an Agento started from a shell (`npm run app`) no
-    // longer takes its runs down with it — the orphan the app-exit hook (#595)
-    // has to cover. On Windows the flag groups the tree for console control
-    // events only; killing it whole needs a Job Object, which is #595's too.
+    // longer takes its runs down with it — the orphan the app-exit hook (#595,
+    // [`terminate_all_runs`]) covers. On Windows the flag groups the tree for
+    // console control events only; the exit hook kills it with `taskkill /T`.
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
@@ -230,6 +230,22 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
     })?;
     let stderr = child.stderr.take();
     let pid = child.id();
+
+    // Registered before anything else can go wrong, and held by the reader task
+    // until it has reaped the child — so the app-exit hook (#595) sees every
+    // CLI that is still ours to signal, and never one whose pid has been freed.
+    // Refused once the app is quitting: a timer that fires inside the exit
+    // window must not start a run the hook has already finished looking for.
+    let live = match pid.and_then(|pid| LIVE.register(pid)) {
+        Some(live) => Some(live),
+        None if LIVE.quitting() => {
+            if let Some(pid) = pid {
+                kill_group(pid);
+            }
+            return Err(Error::Other(format!("claude: not started: {APP_QUIT}")));
+        }
+        None => None,
+    };
 
     // Before anything is read, so a crash straight after the spawn still leaves
     // behind a record naming the process. `id()` is `None` only once the child
@@ -419,6 +435,9 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
             // Surface stderr on an unexpected exit (bad flag, auth error,
             // crash). Suppressed when the caller asked us to stop.
             let exit = child.wait().await;
+            // Reaped: the pid is free for the kernel to reuse, so it leaves the
+            // set the app-exit hook signals from this instant.
+            drop(live);
 
             // Drain stderr before reading the buffer, so the message is the
             // whole of what the CLI said rather than whatever had arrived by
@@ -1120,6 +1139,231 @@ fn kill(pid: Option<u32>) {
 #[cfg(not(unix))]
 fn kill(_pid: Option<u32>) {}
 
+// ─── Live processes, and the app-exit hook ───────────────────────────────────
+
+/// The reason a run ends with when the app quits under it (#595). Written onto
+/// the run's `job_history` row by the executor.
+pub(crate) const APP_QUIT: &str = "terminated: app quit";
+
+/// Every CLI this process has spawned and not yet reaped.
+///
+/// A GUI quit does not run destructors — `kill_on_drop` and `Stream::drop`
+/// never fire — so without this set nothing at exit knows which processes are
+/// still running on the app's behalf, and each becomes an orphan that goes on
+/// working with nobody reading its output (#593).
+static LIVE: LiveProcesses = LiveProcesses::new();
+
+/// How often [`LiveProcesses::terminate_all`] looks for the groups it signalled.
+const LIVENESS_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// A set of spawned, un-reaped CLI pids. Each pid also names the CLI's process
+/// group, because the spawn makes the child a group leader (#594).
+///
+/// An instance rather than bare statics so the tests can own one: the
+/// process-wide one is [`LIVE`], and setting *its* `quitting` inside a test
+/// binary would make every concurrently running spawn refuse to start.
+pub(crate) struct LiveProcesses {
+    state: StdMutex<LiveState>,
+}
+
+struct LiveState {
+    /// Set once, by [`LiveProcesses::terminate_all`]; never cleared.
+    quitting: bool,
+    pids: BTreeSet<u32>,
+}
+
+/// A pid's membership of a [`LiveProcesses`], ended by dropping it — which the
+/// reader task does straight after `wait()` has reaped the child.
+pub(crate) struct LiveEntry {
+    owner: &'static LiveProcesses,
+    pid: u32,
+}
+
+impl Drop for LiveEntry {
+    fn drop(&mut self) {
+        self.owner.lock().pids.remove(&self.pid);
+    }
+}
+
+/// What [`LiveProcesses::terminate_all`] did, for the exit log line.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Terminated {
+    /// Groups sent SIGTERM (on Windows: killed, there being no gentler step).
+    pub signalled: usize,
+    /// Groups still alive at the end of the grace period, and killed outright.
+    pub killed: usize,
+}
+
+impl LiveProcesses {
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: StdMutex::new(LiveState {
+                quitting: false,
+                pids: BTreeSet::new(),
+            }),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LiveState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records a spawned child. `None` once [`Self::terminate_all`] has begun:
+    /// the check and the insert share one lock, so a child is either in the
+    /// snapshot the exit hook signals or refused here, never neither.
+    pub(crate) fn register(&'static self, pid: u32) -> Option<LiveEntry> {
+        let mut state = self.lock();
+        if state.quitting {
+            return None;
+        }
+        state.pids.insert(pid);
+        Some(LiveEntry { owner: self, pid })
+    }
+
+    pub(crate) fn quitting(&self) -> bool {
+        self.lock().quitting
+    }
+
+    /// Stops every registered CLI's process tree, in at most `grace` plus one
+    /// poll: SIGTERM to each group, then SIGKILL to any group still alive when
+    /// the grace runs out. The same two steps, and the same grace, as a turn's
+    /// own shutdown path — applied to the group rather than the pid, because at
+    /// exit there is no later chance to reach the CLI's MCP servers and tool
+    /// children.
+    ///
+    /// Marks the set quitting first, so nothing registers behind the snapshot.
+    ///
+    /// **A group is only signalled while it can still be ours.** Its pid stays
+    /// registered until the leader is reaped, so no other process can hold it;
+    /// once the leader is gone the group may live on in grandchildren, and a
+    /// pgid is never handed out while any member remains. A group that has
+    /// emptied is dropped from the loop and never signalled again.
+    pub(crate) async fn terminate_all(&self, grace: std::time::Duration) -> Terminated {
+        let mut alive: Vec<u32> = {
+            let mut state = self.lock();
+            state.quitting = true;
+            state.pids.iter().copied().collect()
+        };
+        let signalled = alive.len();
+        if signalled == 0 {
+            return Terminated::default();
+        }
+
+        for &pid in &alive {
+            terminate_group(pid);
+        }
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            // Narrowed every pass, never re-derived from the snapshot: a group
+            // seen empty once may have had its pid reused since, and probing
+            // it again would find — and at the deadline kill — a stranger.
+            alive.retain(|&pid| self.group_alive(pid));
+            if alive.is_empty() {
+                return Terminated {
+                    signalled,
+                    killed: 0,
+                };
+            }
+            if tokio::time::Instant::now() >= deadline {
+                for &pid in &alive {
+                    kill_group(pid);
+                }
+                return Terminated {
+                    signalled,
+                    killed: alive.len(),
+                };
+            }
+            tokio::time::sleep(LIVENESS_POLL).await;
+        }
+    }
+
+    /// Whether any member of `pid`'s group — the un-reaped leader included —
+    /// still exists. `EPERM` means it exists and is not ours to signal, which
+    /// cannot happen for a group we created but is "alive" either way.
+    #[cfg(unix)]
+    fn group_alive(&self, pid: u32) -> bool {
+        let Some(pgid) = group_id(pid) else {
+            return false;
+        };
+        // SAFETY: signal 0 checks existence and permission and sends nothing.
+        let rc = unsafe { libc::kill(-pgid, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    /// Windows has no group to probe; the leader being un-reaped is the answer.
+    #[cfg(not(unix))]
+    fn group_alive(&self, pid: u32) -> bool {
+        self.lock().pids.contains(&pid)
+    }
+}
+
+/// Whether the app is quitting, as far as the agent runs are concerned.
+pub(crate) fn app_quitting() -> bool {
+    LIVE.quitting()
+}
+
+/// Stops every in-flight CLI run of this process — scheduled, manual, trigger
+/// and chat alike, since all of them spawn through [`spawn_and_stream`].
+/// Bounded by [`SIGKILL_GRACE`]. Called by the app-exit hook in `lib.rs`.
+pub(crate) async fn terminate_all_runs() -> Terminated {
+    LIVE.terminate_all(SIGKILL_GRACE).await
+}
+
+/// `pid` as a process-group id for `kill(-pgid, …)`, refusing the two values
+/// whose negation is not a group: `kill(0, …)` signals Agento's own group and
+/// `kill(-1, …)` every process the user owns.
+#[cfg(unix)]
+fn group_id(pid: u32) -> Option<libc::pid_t> {
+    let pgid = libc::pid_t::try_from(pid).ok()?;
+    (pgid > 1).then_some(pgid)
+}
+
+#[cfg(unix)]
+fn terminate_group(pid: u32) {
+    if let Some(pgid) = group_id(pid) {
+        // SAFETY: kill(2) on a group we created; ESRCH for an emptied group is
+        // the outcome the caller already treats as done.
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    if let Some(pgid) = group_id(pid) {
+        // SAFETY: as above.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+}
+
+/// Windows has no SIGTERM, so both steps are the tree kill: `taskkill /T` walks
+/// the parent-pid links from the CLI down, which is what a Job Object would
+/// give and all this needs at exit.
+#[cfg(windows)]
+fn terminate_group(pid: u32) {
+    kill_group(pid);
+}
+
+#[cfg(windows)]
+fn kill_group(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    /// `CREATE_NO_WINDOW` from `winbase.h`: no console flashes up on quit.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if let Err(e) = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+    {
+        log::warn!("taskkill pid={pid}: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1353,5 +1597,147 @@ mod tests {
             Options::new().permission_mode,
             permission_mode::BYPASS_PERMISSIONS
         );
+    }
+
+    // ─── The app-exit hook (#595) ────────────────────────────────────────────
+
+    /// Spawns `script` under `sh` as its own group leader, the way the CLI is
+    /// spawned, registers it, and reaps it on a task the way the reader does —
+    /// dropping the entry only once `wait()` returns. Returns once the script
+    /// has printed its first line, so a trap it sets is in place before any
+    /// test signals it.
+    #[cfg(unix)]
+    async fn spawn_registered(live: &'static LiveProcesses, script: &str) -> u32 {
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", script])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawning sh");
+        let pid = child.id().expect("a live child has a pid");
+        let entry = live.register(pid).expect("not quitting yet");
+        let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+        let ready = stdout.next_line().await.unwrap();
+        assert_eq!(ready.as_deref(), Some("ready"));
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+            drop(entry);
+            drop(stdout);
+        });
+        pid
+    }
+
+    #[cfg(unix)]
+    async fn wait_until_gone(live: &LiveProcesses, pid: u32) {
+        for _ in 0..100 {
+            if !live.group_alive(pid) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("process group {pid} is still alive");
+    }
+
+    /// The ordinary quit: every group honours SIGTERM, so the whole tree — the
+    /// leader *and* the grandchild it backgrounded — is gone well inside the
+    /// grace, and nothing needs killing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_all_stops_every_tree_that_honours_sigterm() {
+        static LIVE: LiveProcesses = LiveProcesses::new();
+        let a = spawn_registered(&LIVE, "sleep 60 & echo ready; wait").await;
+        let b = spawn_registered(&LIVE, "sleep 60 & echo ready; wait").await;
+
+        let started = std::time::Instant::now();
+        let done = LIVE.terminate_all(std::time::Duration::from_secs(5)).await;
+
+        assert_eq!(
+            done,
+            Terminated {
+                signalled: 2,
+                killed: 0
+            }
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(!LIVE.group_alive(a) && !LIVE.group_alive(b));
+    }
+
+    /// The bound: a tree that ignores SIGTERM is killed when the grace runs out,
+    /// so quitting waits for the grace and no longer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_all_kills_a_tree_that_ignores_sigterm_after_the_grace() {
+        static LIVE: LiveProcesses = LiveProcesses::new();
+        let pid = spawn_registered(&LIVE, "trap '' TERM; sleep 60 & echo ready; wait").await;
+
+        let grace = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let done = LIVE.terminate_all(grace).await;
+        let took = started.elapsed();
+
+        assert_eq!(
+            done,
+            Terminated {
+                signalled: 1,
+                killed: 1
+            }
+        );
+        assert!(took >= grace, "killed before the grace ran out: {took:?}");
+        assert!(
+            took < std::time::Duration::from_secs(3),
+            "unbounded: {took:?}"
+        );
+        wait_until_gone(&LIVE, pid).await;
+    }
+
+    /// A tree that honours SIGTERM beside one that does not: the first is gone
+    /// long before the deadline and only the second is killed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_all_kills_only_the_trees_still_alive_at_the_deadline() {
+        static LIVE: LiveProcesses = LiveProcesses::new();
+        let polite = spawn_registered(&LIVE, "sleep 60 & echo ready; wait").await;
+        let stubborn = spawn_registered(&LIVE, "trap '' TERM; sleep 60 & echo ready; wait").await;
+
+        let done = LIVE
+            .terminate_all(std::time::Duration::from_millis(500))
+            .await;
+
+        assert_eq!(
+            done,
+            Terminated {
+                signalled: 2,
+                killed: 1
+            }
+        );
+        assert!(!LIVE.group_alive(polite));
+        wait_until_gone(&LIVE, stubborn).await;
+    }
+
+    /// A child spawned after the hook took its snapshot would outlive it, so
+    /// the set refuses to take one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nothing_registers_once_terminate_all_has_begun() {
+        static LIVE: LiveProcesses = LiveProcesses::new();
+        assert!(!LIVE.quitting());
+
+        let done = LIVE.terminate_all(std::time::Duration::from_secs(5)).await;
+
+        assert_eq!(done, Terminated::default());
+        assert!(LIVE.quitting());
+        assert!(LIVE.register(std::process::id()).is_none());
+    }
+
+    /// `kill(0, …)` is Agento's own group and `kill(-1, …)` is every process the
+    /// user owns; neither is ever a CLI's group.
+    #[cfg(unix)]
+    #[test]
+    fn group_id_refuses_the_pids_whose_negation_is_not_a_group() {
+        assert_eq!(group_id(0), None);
+        assert_eq!(group_id(1), None);
+        assert_eq!(group_id(u32::MAX), None);
+        assert_eq!(group_id(4242), Some(4242));
     }
 }

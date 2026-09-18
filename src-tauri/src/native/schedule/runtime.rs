@@ -225,6 +225,18 @@ impl Scheduler {
         })
     }
 
+    /// Whether any run, scheduled or manual, is in flight in this process —
+    /// which, since the guard is released only after the run's row is written,
+    /// is also whether any `job_history` write is still to come. The app-exit
+    /// hook (#595) waits on it.
+    pub fn has_runs_in_flight(&self) -> bool {
+        !self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
     /// Whether a run of `task_id` is in flight in this process.
     pub fn is_running(&self, task_id: &str) -> bool {
         self.in_flight

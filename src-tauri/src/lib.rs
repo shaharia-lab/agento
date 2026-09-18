@@ -45,6 +45,8 @@ compile_error!(
      panicking-handler 500 in proxy.rs and the scan guard in native/scan.rs"
 );
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::Serialize;
 use tauri::Manager;
 
@@ -615,8 +617,110 @@ pub fn run() {
         });
 
     builder
-        .run(tauri::generate_context!())
-        .expect("error while running Agento");
+        .build(tauri::generate_context!())
+        .expect("error while building Agento")
+        .run(|app, event| match event {
+            // The quit a user asks for: the window's close, ⌘Q, the menu's Quit.
+            // Deferred, not refused — the hook stops every in-flight run and
+            // then exits itself, with the same code.
+            tauri::RunEvent::ExitRequested { code, api, .. }
+                if code != Some(tauri::RESTART_EXIT_CODE)
+                    && !EXIT.runs_stopped.load(Ordering::SeqCst) =>
+            {
+                api.prevent_exit();
+                if EXIT.stopping.swap(true, Ordering::SeqCst) {
+                    return; // a second ⌘Q while the first is still stopping
+                }
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    stop_in_flight_runs().await;
+                    EXIT.runs_stopped.store(true, Ordering::SeqCst);
+                    app.exit(code.unwrap_or(0));
+                });
+            }
+            // Every path out ends here, including the ones the hook above cannot
+            // defer: a restart (`prevent_exit` is ignored for one — it is the
+            // updater's), and a quit that skips `ExitRequested`. The stop runs
+            // on the async runtime and this thread waits on a channel, bounded
+            // — never `block_on`, which panics if this thread is ever inside an
+            // async context, and a panic here would take the updater's relaunch
+            // down with it.
+            tauri::RunEvent::Exit if !EXIT.runs_stopped.swap(true, Ordering::SeqCst) => {
+                let (done, stopped) = std::sync::mpsc::channel();
+                tauri::async_runtime::spawn(async move {
+                    stop_in_flight_runs().await;
+                    let _ = done.send(());
+                });
+                let _ = stopped.recv_timeout(exit_bound());
+            }
+            _ => {}
+        });
+}
+
+/// Where the app-exit hook (#595) has got to. `stopping` makes a repeated quit
+/// wait on the first; `runs_stopped` lets the exit the hook itself requests
+/// through, and keeps [`tauri::RunEvent::Exit`] from stopping them twice.
+struct ExitState {
+    stopping: AtomicBool,
+    runs_stopped: AtomicBool,
+}
+
+static EXIT: ExitState = ExitState {
+    stopping: AtomicBool::new(false),
+    runs_stopped: AtomicBool::new(false),
+};
+
+/// How long the exit hook waits, after the processes are gone, for the
+/// scheduler to finish writing their `job_history` rows. A row still `running`
+/// when it runs out is left for the startup reaper (#596).
+const EXIT_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The most [`stop_in_flight_runs`] may take: one second over its two waits,
+/// so the bound is the backstop and not the thing that ends an ordinary slow
+/// exit.
+fn exit_bound() -> std::time::Duration {
+    crate::claude::process::SIGKILL_GRACE + EXIT_ROW_GRACE + std::time::Duration::from_secs(1)
+}
+
+/// Stops every in-flight agent run before Agento exits (#595).
+///
+/// A GUI quit runs no destructors, so without this each CLI a run started —
+/// scheduled, manual, trigger or chat — outlives the app with nobody reading
+/// it: the orphan behind #593. Its process group gets SIGTERM, then SIGKILL
+/// after the same grace a turn's own shutdown allows
+/// (`claude::process::terminate_all_runs`); the executor, seeing the run fail
+/// while the app is quitting, marks its row `failed` with
+/// `terminated: app quit`, and this waits a little for that write.
+///
+/// **Bounded as a whole**, so a child that will not die, or a row write stuck
+/// behind a lock, delays quitting by seconds and never wedges it.
+async fn stop_in_flight_runs() {
+    let bound = exit_bound();
+    let stop = async {
+        let done = crate::claude::process::terminate_all_runs().await;
+        if done.signalled > 0 {
+            log::info!(
+                "app exit: stopped in-flight agent runs signalled={} killed={}",
+                done.signalled,
+                done.killed
+            );
+        }
+        let Some(scheduler) = crate::native::schedule::runtime::running() else {
+            return;
+        };
+        let rows_deadline = tokio::time::Instant::now() + EXIT_ROW_GRACE;
+        while scheduler.has_runs_in_flight() && tokio::time::Instant::now() < rows_deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if scheduler.has_runs_in_flight() {
+            log::warn!("app exit: a scheduled run's row is still being written; the startup reaper will finish it");
+        }
+    };
+    if tokio::time::timeout(bound, stop).await.is_err() {
+        log::warn!(
+            "app exit: stopping in-flight agent runs took longer than {bound:?}; exiting anyway"
+        );
+    }
 }
 
 /// The three places an app command has to be named, and the assertion that they

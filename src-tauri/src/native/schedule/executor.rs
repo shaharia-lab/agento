@@ -482,6 +482,7 @@ fn finish(
     let result = match result {
         Ok(result) => result,
         Err(e) => {
+            let e = failure_message(e, crate::claude::process::app_quitting());
             log::error!("task execution failed task_id={:?} error={e}", task.id);
             finish_job_history(&db_path, &mut job, started_at, "failed", &e, None, "");
             if run.kind.advances_schedule() {
@@ -844,6 +845,17 @@ fn append_message(
     Ok(())
 }
 
+/// What a failed run's row says. A run the app-exit hook stopped (#595) says
+/// so, rather than carrying whatever the signal made of its stderr or exit
+/// status — `claude exited with signal: 15`, which reads as a crash.
+fn failure_message(error: String, app_quitting: bool) -> String {
+    if app_quitting {
+        crate::claude::process::APP_QUIT.to_string()
+    } else {
+        error
+    }
+}
+
 /// `finishJobHistory`.
 #[allow(clippy::too_many_arguments)]
 fn finish_job_history(
@@ -1085,6 +1097,20 @@ fn publish_task_failed(db_path: &std::path::Path, task: &ScheduledTask, error_me
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run stopped by the app-exit hook (#595) records why, not what the
+    /// signal did to it; any other failure keeps its own message.
+    #[test]
+    fn a_run_stopped_by_app_quit_says_so_on_its_row() {
+        assert_eq!(
+            failure_message("claude exited with signal: 15".into(), true),
+            "terminated: app quit"
+        );
+        assert_eq!(
+            failure_message("claude exited with signal: 15".into(), false),
+            "claude exited with signal: 15"
+        );
+    }
 
     /// The whole of finding #1 on PR #365's second review: `chat_messages.id`
     /// is `INTEGER PRIMARY KEY AUTOINCREMENT`, so a supplied UUID is a
