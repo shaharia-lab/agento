@@ -134,6 +134,31 @@ fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
     }
 }
 
+/// Write one session to a file the user picked in the native Save-As dialog
+/// (#591). `native::sessions::export` holds the formats and says why this is a
+/// command rather than an `/api` route.
+///
+/// `async` so it is off the main thread, and the work itself on the blocking
+/// pool: it reads the database and a transcript that can run to megabytes.
+#[tauri::command]
+async fn export_session(
+    session_id: String,
+    dest_path: String,
+    options: native::sessions::export::ExportOptions,
+) -> Result<native::sessions::export::ExportResult, String> {
+    let db = paths::database_path().ok_or("no home directory to find the database in")?;
+    native::db::blocking("session export", move || {
+        native::sessions::export::export(
+            &db,
+            &session_id,
+            std::path::Path::new(&dest_path),
+            &options,
+        )
+    })
+    .await
+    .unwrap_or_else(|| Err("the export failed unexpectedly".to_string()))
+}
+
 /// How this copy was installed.
 ///
 /// This has to be decided at runtime, not build time: one `tauri build` on
@@ -286,7 +311,8 @@ pub fn run() {
             host_info,
             logs::log_files,
             logs::read_log,
-            logs::export_logs
+            logs::export_logs,
+            export_session
         ])
         .setup(|app| {
             let handle = app.handle().clone();

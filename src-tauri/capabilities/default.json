@@ -16,6 +16,7 @@
     "allow-log-files",
     "allow-read-log",
     "allow-export-logs",
+    "allow-export-session",
     "core:default",
     "core:window:allow-minimize",
     "core:window:allow-unminimize",

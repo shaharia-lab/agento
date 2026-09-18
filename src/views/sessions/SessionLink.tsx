@@ -10,7 +10,7 @@
  *
  * - **`sessionMenuItems` is the menu**, and it is the single definition of it.
  *   `SessionsView`'s own rows build their menu from this function too, so the
- *   five entries cannot drift into two lists that agree only by inspection.
+ *   six entries cannot drift into two lists that agree only by inspection.
  *   What each entry *does* is the caller's, because the list view patches its
  *   loaded page and reloads its facets where this component has neither.
  * - **`SessionLink` is the control** — the button, the right-click, and the
@@ -33,6 +33,7 @@ import { describeError } from "../../lib/hooks";
 import { useNavigate } from "../../lib/nav";
 import type { ClaudeSessionSummary, SessionPage } from "../../lib/types";
 import { ContextMenu, type ContextMenuItem } from "../../components/ui";
+import { SessionExportPanel, type SessionExportTarget } from "./SessionExport";
 import "../../styles/sessionlink.css";
 
 /**
@@ -79,11 +80,13 @@ export interface SessionMenuSpec {
   onView(): void;
   onToggleFavorite(): void;
   onContinue(): void;
+  /** Open the export panel (#591) — `SessionExport.tsx`, the same everywhere. */
+  onExport(): void;
   onCopy(what: string, value: string): void;
 }
 
 /**
- * The five entries a session's context menu has, everywhere it has one.
+ * The six entries a session's context menu has, everywhere it has one.
  *
  * One definition rather than one per surface: a second hand-written array is
  * what drifts, and the labels here are load-bearing (the favourite item's
@@ -112,6 +115,11 @@ export function sessionMenuItems(spec: SessionMenuSpec): ContextMenuItem[] {
       icon: "play",
       disabled: spec.busy,
       onSelect: spec.onContinue,
+    },
+    {
+      label: "Export…",
+      icon: "download",
+      onSelect: spec.onExport,
     },
     {
       label: "Copy session ID",
@@ -153,6 +161,7 @@ export function SessionLink({
   const [row, setRow] = useState<ClaudeSessionSummary>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const [exporting, setExporting] = useState<SessionExportTarget>();
 
   const open = useCallback(
     () => navigate("sessions", { sessionId }),
@@ -228,10 +237,21 @@ export function SessionLink({
         onView: open,
         onToggleFavorite: toggleFavorite,
         onContinue: continueInChat,
+        // Opens where the menu was: this closure was built while the menu
+        // was open, so it still holds `at` after the menu has closed.
+        onExport: () =>
+          at &&
+          setExporting({
+            sessionId,
+            title: row?.display_title || title,
+            at,
+          }),
         onCopy: copyValue,
       }),
     [
       sessionId,
+      title,
+      at,
       row,
       projectPath,
       busy,
@@ -242,6 +262,7 @@ export function SessionLink({
     ]
   );
 
+  const closeExport = useCallback(() => setExporting(undefined), []);
   const label = title || sessionId;
 
   return (
@@ -283,6 +304,9 @@ export function SessionLink({
       )}
       {at && (
         <ContextMenu at={at} items={items} onClose={() => setAt(undefined)} />
+      )}
+      {exporting && (
+        <SessionExportPanel target={exporting} onClose={closeExport} />
       )}
     </>
   );

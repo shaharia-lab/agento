@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { api } from "../../lib/api";
 import { useResource } from "../../lib/hooks";
 import { compactNumber, dateTime, integer, tildePath, usd } from "../../lib/format";
@@ -10,6 +10,11 @@ import type {
   ClaudeTodo,
 } from "../../lib/types";
 import { Empty, Segmented } from "../../components/ui";
+import {
+  EXPORT_PANEL_WIDTH,
+  SessionExportPanel,
+  type SessionExportTarget,
+} from "./SessionExport";
 import { SessionJourney } from "./SessionJourney";
 import { SessionTranscript } from "./SessionTranscript";
 
@@ -45,6 +50,10 @@ export function SessionDetail({
   // does; switching back and forth re-fetches, which is the same trade every
   // other view in the app makes.
   const [tab, setTab] = useState<Tab>("transcript");
+  // The same panel the list's right-click opens (#591), anchored under the
+  // toolbar button here.
+  const [exporting, setExporting] = useState<SessionExportTarget>();
+  const closeExport = useCallback(() => setExporting(undefined), []);
 
   const detail = useResource<ClaudeSessionDetail>(
     (signal) =>
@@ -89,7 +98,24 @@ export function SessionDetail({
           <Icon name="play" size={13} />
           {continuing ? "Starting…" : "Continue in chat"}
         </button>
+        <button
+          className="btn"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setExporting({
+              sessionId: session.session_id,
+              title,
+              at: { x: r.right - EXPORT_PANEL_WIDTH, y: r.bottom + 4 },
+            });
+          }}
+        >
+          <Icon name="download" size={13} />
+          Export
+        </button>
       </div>
+      {exporting && (
+        <SessionExportPanel target={exporting} onClose={closeExport} />
+      )}
 
       {/* A success leaves this view entirely, so this only ever renders a
           failure — and it renders in the toolbar's own band rather than in a

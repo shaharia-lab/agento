@@ -47,6 +47,10 @@ import {
   totalCost,
 } from "./sessions/sessionMetrics";
 import { findSessionById, sessionMenuItems } from "./sessions/SessionLink";
+import {
+  SessionExportPanel,
+  type SessionExportTarget,
+} from "./sessions/SessionExport";
 import "../styles/sessions.css";
 
 /**
@@ -920,12 +924,16 @@ export function SessionsView({
    */
   const [menu, setMenu] = useState<{ at: { x: number; y: number }; id: string }>();
   const closeMenu = useCallback(() => setMenu(undefined), []);
+
+  /** The export panel (#591), opened from the row menu where it stood. */
+  const [exporting, setExporting] = useState<SessionExportTarget>();
+  const closeExport = useCallback(() => setExporting(undefined), []);
   const menuSession = useMemo(
     () => (menu ? items.find((s) => s.session_id === menu.id) : undefined),
     [menu, items]
   );
 
-  // The five entries come from `sessionMenuItems`, shared with `SessionLink`
+  // The six entries come from `sessionMenuItems`, shared with `SessionLink`
   // (#536): this view and every surface that merely *names* a session must
   // offer the same menu, and a second hand-written array is what drifts. What
   // each entry does stays here — the list patches its loaded page and reloads
@@ -941,9 +949,16 @@ export function SessionsView({
       onView: () => setOpenId(s.session_id),
       onToggleFavorite: () => toggleFavorite(s),
       onContinue: () => continueInChat(s),
+      onExport: () =>
+        menu &&
+        setExporting({
+          sessionId: s.session_id,
+          title: s.display_title,
+          at: menu.at,
+        }),
       onCopy: copyValue,
     });
-  }, [menuSession, busy, toggleFavorite, continueInChat, copyValue]);
+  }, [menu, menuSession, busy, toggleFavorite, continueInChat, copyValue]);
 
   /* --- Derived view data --------------------------------------------------- */
 
@@ -1695,6 +1710,9 @@ export function SessionsView({
 
       {menu && menuSession && (
         <ContextMenu at={menu.at} items={menuItems} onClose={closeMenu} />
+      )}
+      {exporting && (
+        <SessionExportPanel target={exporting} onClose={closeExport} />
       )}
     </div>
   );
