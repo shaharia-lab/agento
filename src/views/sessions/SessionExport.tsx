@@ -35,6 +35,9 @@ export interface SessionExportTarget {
   at: { x: number; y: number };
 }
 
+/** The panel's width, exported so an anchor can right-align it. */
+export const EXPORT_PANEL_WIDTH = 280;
+
 const FORMATS: { value: ExportFormat; label: string }[] = [
   { value: "markdown", label: "Markdown" },
   { value: "jsonl", label: "JSONL" },
@@ -132,8 +135,8 @@ export function SessionExportPanel({
       aria-label="Export session"
       style={
         pos
-          ? { left: pos.left, top: pos.top }
-          : { left: 0, top: 0, visibility: "hidden" }
+          ? { width: EXPORT_PANEL_WIDTH, left: pos.left, top: pos.top }
+          : { width: EXPORT_PANEL_WIDTH, left: 0, top: 0, visibility: "hidden" }
       }
     >
       <div className="sess-export__title">Export session</div>

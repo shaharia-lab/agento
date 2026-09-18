@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { api } from "../../lib/api";
 import { useResource } from "../../lib/hooks";
 import { compactNumber, dateTime, integer, tildePath, usd } from "../../lib/format";
@@ -10,7 +10,11 @@ import type {
   ClaudeTodo,
 } from "../../lib/types";
 import { Empty, Segmented } from "../../components/ui";
-import { SessionExportPanel, type SessionExportTarget } from "./SessionExport";
+import {
+  EXPORT_PANEL_WIDTH,
+  SessionExportPanel,
+  type SessionExportTarget,
+} from "./SessionExport";
 import { SessionJourney } from "./SessionJourney";
 import { SessionTranscript } from "./SessionTranscript";
 
@@ -49,6 +53,7 @@ export function SessionDetail({
   // The same panel the list's right-click opens (#591), anchored under the
   // toolbar button here.
   const [exporting, setExporting] = useState<SessionExportTarget>();
+  const closeExport = useCallback(() => setExporting(undefined), []);
 
   const detail = useResource<ClaudeSessionDetail>(
     (signal) =>
@@ -100,7 +105,7 @@ export function SessionDetail({
             setExporting({
               sessionId: session.session_id,
               title,
-              at: { x: r.right - 280, y: r.bottom + 4 },
+              at: { x: r.right - EXPORT_PANEL_WIDTH, y: r.bottom + 4 },
             });
           }}
         >
@@ -109,10 +114,7 @@ export function SessionDetail({
         </button>
       </div>
       {exporting && (
-        <SessionExportPanel
-          target={exporting}
-          onClose={() => setExporting(undefined)}
-        />
+        <SessionExportPanel target={exporting} onClose={closeExport} />
       )}
 
       {/* A success leaves this view entirely, so this only ever renders a
