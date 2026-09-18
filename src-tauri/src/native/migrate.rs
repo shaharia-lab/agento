@@ -37,6 +37,9 @@
 //! reads and writes (#563, epic #562). Migration **40** is the tenth:
 //! `job_history.pid` and `job_history.pid_started_at`, the OS process a run
 //! spawned and when, so something outside the run can find it (#594, epic #593).
+//! Migration **41** is the eleventh: the Credentials Checker's
+//! `credential_findings`, `credential_whitelist` and `credential_scan_state`
+//! tables, none of which may ever hold a raw secret (#600, epic #597).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -268,8 +271,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 40, "expected 40 migrations");
-        assert_eq!(expected_version(), 40);
+        assert_eq!(all.len(), 41, "expected 41 migrations");
+        assert_eq!(expected_version(), 41);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -363,7 +366,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 40);
+        assert_eq!(current_version(&conn).expect("version"), 41);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -550,6 +553,46 @@ mod tests {
         assert_eq!((pid, started), (None, None));
     }
 
+    /// **Migration 41's tables key on the session pair, and a rescan of the
+    /// same match is refused rather than duplicated** (#600).
+    ///
+    /// `credential_scan_state` is what records a clean scan, so it must hold
+    /// one session under two project paths as two rows; `credential_findings`'
+    /// UNIQUE key is what makes re-scanning an unchanged transcript a no-op.
+    #[test]
+    fn the_credential_tables_key_on_the_session_pair() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        apply(&mut conn).expect("apply");
+        conn.execute_batch(
+            "INSERT INTO credential_scan_state (session_id, project_path, ruleset_version, scanned_at)
+             VALUES ('s1', '/a', 1, 'now'), ('s1', '/b', 1, 'now');
+             INSERT INTO credential_findings (session_id, project_path, rule_id, confidence,
+                 masked_snippet, location_start, location_end, ruleset_version, detected_at)
+             VALUES ('s1', '/a', 'aws-access-key', 'high', 'AKIA****', 10, 30, 1, 'now');
+             INSERT INTO credential_whitelist (rule_id, created_at) VALUES ('aws-access-key', 'now');",
+        )
+        .expect("seed");
+
+        let status: String = conn
+            .query_row("SELECT status FROM credential_findings", [], |row| {
+                row.get(0)
+            })
+            .expect("status");
+        assert_eq!(status, "open");
+
+        let duplicate = conn.execute(
+            "INSERT INTO credential_findings (session_id, project_path, rule_id, confidence,
+                 masked_snippet, location_start, location_end, ruleset_version, detected_at)
+             VALUES ('s1', '/a', 'aws-access-key', 'high', 'AKIA****', 10, 30, 1, 'later')",
+            [],
+        );
+        assert!(
+            duplicate.is_err(),
+            "the same match must not be stored twice"
+        );
+    }
+
     /// Idempotence, which is what makes a second process safe to run at all.
     #[test]
     fn applying_twice_is_a_no_op() {
@@ -558,7 +601,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 40);
+        assert_eq!(current_version(&conn).expect("version"), 41);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -666,7 +709,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 40);
+        assert_eq!(current_version(&conn).expect("version"), 41);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -675,7 +718,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 40);
+        assert_eq!(recorded, 41);
     }
 
     #[test]
