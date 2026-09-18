@@ -188,10 +188,11 @@ const RULES: &[Rule] = &[
         paired_with: None,
     },
     // `scheme://user:password@host`. A template (`${DB_PASSWORD}`,
-    // `<password>`) cannot match the password class; a Python `%(password)s`
-    // one and the placeholder words docs and compose files use are refused by
-    // `real_db_password`. `%` itself is allowed, because a password holding
-    // `@`, `/` or `:` can only be written percent-encoded.
+    // `<password>`) cannot match the password class. `%` can, because a
+    // password holding `@`, `/` or `:` only travels percent-encoded; so
+    // `real_db_password` credits a `%` only as an escape (`%40`), refusing
+    // format strings (`%s`, `%(pw)s`) and batch variables (`%VAR%`), along with
+    // the placeholder words docs and compose files use.
     Rule {
         id: "database-url-credentials",
         provider: "Postgres/MySQL",
