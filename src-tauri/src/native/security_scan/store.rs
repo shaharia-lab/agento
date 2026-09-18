@@ -135,8 +135,10 @@ pub fn is_whitelisted(conn: &Connection, rule_id: &str, match_hash: &str) -> Res
 ///
 /// A rescan of the same match is an upsert on the table's UNIQUE key, not a
 /// failure. The update refreshes what a new ruleset may change and **keeps
-/// `status` and `detected_at`**: a finding the user marked `false_positive`
-/// stays marked, and "detected" means first detected.
+/// `detected_at`**, since "detected" means first detected. It keeps `status`
+/// too — a finding the user marked `false_positive` stays marked — with one
+/// exception: a `whitelisted` row whose match no entry covers any more (a new
+/// ruleset changed its bytes, and so its hash) goes back to `open`.
 ///
 /// **The call is the session's whole scan, so it decides which rows still
 /// exist**: an `open` or `whitelisted` finding of this session that this scan
@@ -188,43 +190,63 @@ pub fn record_scan(
             (mask(matched), hash_match(matched))
         };
         if is_whitelisted(&tx, f.rule_id, &hash)? {
-            // Never written as `open`. A row this match already has stays, and
-            // is made `whitelisted` if it was somehow still `open`.
+            // Never written as `open`: no insert. A row this match already has
+            // is refreshed like any rescan, and made `whitelisted` if it was
+            // somehow still `open`.
             tx.execute(
-                "UPDATE credential_findings SET status = 'whitelisted'
+                "UPDATE credential_findings SET
+                     confidence = ?5, masked_snippet = ?6, location_end = ?7,
+                     ruleset_version = ?8, match_hash = ?9,
+                     status = CASE status WHEN 'open' THEN 'whitelisted' ELSE status END
                   WHERE session_id = ?1 AND project_path = ?2 AND rule_id = ?3
-                    AND location_start = ?4 AND status = 'open'",
-                params![session_id, project_path, f.rule_id, f.start as i64],
+                    AND location_start = ?4",
+                params![
+                    session_id,
+                    project_path,
+                    f.rule_id,
+                    f.start as i64,
+                    f.confidence.as_str(),
+                    masked,
+                    f.end as i64,
+                    ruleset_version,
+                    hash,
+                ],
             )
             .map_err(|e| format!("suppressing a {} finding for {session_id}: {e}", f.rule_id))?;
             written.insert((f.rule_id, f.start as i64));
             continue;
         }
+        // Not whitelisted, so a row left `whitelisted` from an earlier scan —
+        // its match has since changed under a new ruleset, and with it the
+        // hash its entry covered — goes back to `open`. `false_positive` stays.
         let mut stmt = tx
             .prepare_cached(
                 "INSERT INTO credential_findings
-                     (session_id, project_path, rule_id, confidence, masked_snippet,
-                      location_start, location_end, ruleset_version, detected_at, match_hash)
+                     (session_id, project_path, rule_id, location_start, confidence,
+                      masked_snippet, location_end, ruleset_version, match_hash, detected_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(session_id, project_path, rule_id, location_start) DO UPDATE SET
                      confidence = excluded.confidence,
                      masked_snippet = excluded.masked_snippet,
                      location_end = excluded.location_end,
                      ruleset_version = excluded.ruleset_version,
-                     match_hash = excluded.match_hash",
+                     match_hash = excluded.match_hash,
+                     status = CASE credential_findings.status
+                                  WHEN 'whitelisted' THEN 'open'
+                                  ELSE credential_findings.status END",
             )
             .map_err(|e| format!("preparing the finding upsert: {e}"))?;
         stmt.execute(params![
             session_id,
             project_path,
             f.rule_id,
+            f.start as i64,
             f.confidence.as_str(),
             masked,
-            f.start as i64,
             f.end as i64,
             ruleset_version,
-            now,
             hash,
+            now,
         ])
         .map_err(|e| format!("writing a {} finding for {session_id}: {e}", f.rule_id))?;
         written.insert((f.rule_id, f.start as i64));
@@ -852,6 +874,59 @@ mod tests {
             .map(|(rule, status, _)| (rule, status))
             .collect();
         assert_eq!(statuses, vec![("rule-b".into(), "open".into())]);
+    }
+
+    #[test]
+    fn a_rescan_that_changes_a_whitelisted_matchs_hash_reopens_it() {
+        let mut conn = db();
+        record_scan(&mut conn, "s1", "/a", 1, TEXT, &[alpha()]).expect("record");
+        add_whitelist_entry(
+            &mut conn,
+            &WhitelistTarget::Hash(hash_match("leaked-value-alpha-0001")),
+            None,
+        )
+        .expect("whitelist");
+
+        // v2 tightens the rule: same start, shorter match, so a new hash that
+        // no entry covers.
+        let tightened = finding("rule-a", "leaked-value-alpha");
+        record_scan(&mut conn, "s1", "/a", 2, TEXT, &[tightened]).expect("rescan");
+        assert_eq!(
+            stored(&conn),
+            vec![(
+                "rule-a".into(),
+                "open".into(),
+                Some(hash_match("leaked-value-alpha"))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_still_whitelisted_match_is_refreshed_by_a_rescan() {
+        let mut conn = db();
+        record_scan(&mut conn, "s1", "/a", 1, TEXT, &[alpha()]).expect("record");
+        add_whitelist_entry(&mut conn, &WhitelistTarget::Rule("rule-a".into()), None)
+            .expect("whitelist");
+
+        let tightened = finding("rule-a", "leaked-value-alpha");
+        record_scan(&mut conn, "s1", "/a", 2, TEXT, &[tightened]).expect("rescan");
+        let row: (String, i64, i64, String) = conn
+            .query_row(
+                "SELECT status, location_end, ruleset_version, match_hash
+                   FROM credential_findings",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!(
+            row,
+            (
+                "whitelisted".into(),
+                tightened.end as i64,
+                2,
+                hash_match("leaked-value-alpha")
+            )
+        );
     }
 
     #[test]
