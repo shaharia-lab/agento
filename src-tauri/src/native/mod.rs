@@ -52,6 +52,7 @@ pub mod scanner;
 pub mod schedule;
 pub mod search;
 pub mod security;
+pub mod security_scan;
 pub mod sessions;
 pub mod settings;
 pub mod tasks;
