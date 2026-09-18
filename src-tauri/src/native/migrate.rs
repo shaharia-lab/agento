@@ -34,7 +34,9 @@
 //! (`model`, `working_directory`, `settings_profile_id`, `permission_mode`,
 //! `timeout_minutes`), the `inbound_*` state columns on `integrations`, and the
 //! `inbound_threads` / `slack_processed_events` tables the Slack inbound half
-//! reads and writes (#563, epic #562).
+//! reads and writes (#563, epic #562). Migration **40** is the tenth:
+//! `job_history.pid` and `job_history.pid_started_at`, the OS process a run
+//! spawned and when, so something outside the run can find it (#594, epic #593).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -266,8 +268,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 39, "expected 39 migrations");
-        assert_eq!(expected_version(), 39);
+        assert_eq!(all.len(), 40, "expected 40 migrations");
+        assert_eq!(expected_version(), 40);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -361,7 +363,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 39);
+        assert_eq!(current_version(&conn).expect("version"), 40);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -521,6 +523,34 @@ mod tests {
     }
 
     /// Idempotence, which is what makes a second process safe to run at all.
+    /// **Migration 40's two columns are nullable, and absent is `NULL`** (#594).
+    ///
+    /// Unlike 30, 37, 38 and 39 they are not `NOT NULL DEFAULT`: a pid of 0 is
+    /// a real signal target — `kill(0, …)` signals the caller's own process
+    /// group — so "no process was recorded" must not share a spelling with any
+    /// pid. Every row written before this migration, and every run that failed
+    /// before it spawned, reads back as `NULL`.
+    #[test]
+    fn a_job_row_with_no_recorded_process_reads_back_null() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        apply(&mut conn).expect("apply");
+        conn.execute_batch(
+            "INSERT INTO scheduled_tasks (id, name, prompt) VALUES ('t1', 'T', 'p');
+             INSERT INTO job_history (id, task_id, task_name, started_at)
+             VALUES ('j1', 't1', 'T', '2026-01-01 00:00:00 +0000 UTC');",
+        )
+        .expect("seed");
+        let (pid, started): (Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT pid, pid_started_at FROM job_history WHERE id = 'j1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!((pid, started), (None, None));
+    }
+
     #[test]
     fn applying_twice_is_a_no_op() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
@@ -528,7 +558,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 39);
+        assert_eq!(current_version(&conn).expect("version"), 40);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -636,7 +666,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 39);
+        assert_eq!(current_version(&conn).expect("version"), 40);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -645,7 +675,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 39);
+        assert_eq!(recorded, 40);
     }
 
     #[test]

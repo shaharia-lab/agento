@@ -326,7 +326,7 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
         agent,
     } = ready;
 
-    let result = run_agent(&db_path, &task, agent, &prompt).await;
+    let result = run_agent(&db_path, &task, &job.id, agent, &prompt).await;
 
     let recorded = {
         let (scheduler, session) = (Arc::clone(scheduler), chat_session_id.clone());
@@ -675,9 +675,14 @@ fn resolve_agent(db_path: &std::path::Path, task: &ScheduledTask) -> Result<Agen
 ///
 /// The run itself is shared with the trigger dispatcher (#319) — see that
 /// module for why the one-shot `query` rather than a `Session` is not a detail.
+///
+/// `job_id` is the running row [`prepare`] wrote. The CLI's pid lands on it
+/// before the run produces anything (#594), so a run whose process outlives
+/// the app still leaves a row that names the process to check.
 async fn run_agent(
     db_path: &std::path::Path,
     task: &ScheduledTask,
+    job_id: &str,
     agent: Agent,
     prompt: &str,
 ) -> Result<RunResult, String> {
@@ -698,7 +703,39 @@ async fn run_agent(
     let timeout = std::time::Duration::from_secs(
         u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
     );
-    crate::native::agent_run::run_headless(&spec, prompt, timeout).await
+    crate::native::agent_run::run_headless(
+        &spec,
+        prompt,
+        timeout,
+        Some(record_process(db_path, job_id)),
+    )
+    .await
+}
+
+/// The spawn hook that writes a run's pid onto its job row.
+///
+/// Awaited by the spawn before the handshake, so the write is finished before
+/// anything is read from the child. A failed write is logged and the run goes
+/// on: the pid is for finding a process that outlived its run, and failing a
+/// run that is otherwise fine over it would be the worse outcome.
+fn record_process(db_path: &std::path::Path, job_id: &str) -> crate::claude::SpawnHook {
+    let (db_path, job_id) = (db_path.to_path_buf(), job_id.to_string());
+    Arc::new(move |spawned: crate::claude::Spawned| {
+        let (db_path, job_id) = (db_path.clone(), job_id.clone());
+        Box::pin(async move {
+            let started_at = crate::native::gotime::GoTime::from_utc(
+                chrono::DateTime::<Utc>::from(spawned.started_at),
+            );
+            db::blocking("task run process record", move || {
+                if let Err(e) =
+                    tasks::record_job_process(&db_path, &job_id, spawned.pid, started_at)
+                {
+                    log::error!("failed to record the run's process job_id={job_id:?} error={e}");
+                }
+            })
+            .await;
+        })
+    })
 }
 
 /// `saveSessionResults`: the run's totals onto the chat row, then the two

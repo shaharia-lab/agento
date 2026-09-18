@@ -94,7 +94,7 @@ pub use messages::{
 pub use options::{
     effort, permission_mode, setting_source, thinking, AgentDefinition, McpHttpServer,
     McpSseServer, McpStdioServer, Options, OutputFormat, SandboxSettings, SdkPluginConfig,
-    SystemPromptPreset, ToolsPreset,
+    SpawnFuture, SpawnHook, Spawned, SystemPromptPreset, ToolsPreset,
 };
 pub use permissions::{
     ElicitationHandler, PermissionContext, PermissionHandler, PermissionResult, PermissionUpdate,

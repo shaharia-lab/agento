@@ -53,10 +53,14 @@ pub struct RunResult {
 /// wrapping everything, because `Stream` has no `Drop`: cancelling a future that
 /// owns one abandons the subprocess instead of stopping it, so `close()` has to
 /// stay reachable.
+///
+/// `on_spawn` is told the CLI's pid before a byte of its output is read — the
+/// scheduler records it on the job row (#594). The other callers pass `None`.
 pub async fn run_headless(
     spec: &RunSpec,
     prompt: &str,
     timeout: std::time::Duration,
+    on_spawn: Option<crate::claude::SpawnHook>,
 ) -> Result<RunResult, String> {
     // `resolveSystemPrompt`, which Go calls inside `RunAgent` — so it applies to
     // **every** caller, and returning its error unwrapped is what makes an agent
@@ -77,11 +81,12 @@ pub async fn run_headless(
     // The refusal this port has that Go does not — an agent whose tools cannot
     // be hosted here. The caller decides what to do with it; both callers
     // record it rather than dropping it.
-    let (options, tool_servers, hosted_tools) =
+    let (mut options, tool_servers, hosted_tools) =
         tokio::time::timeout_at(deadline, runner::build_options(spec, None))
             .await
             .map_err(|_| DEADLINE_EXCEEDED.to_string())?
             .map_err(|e| format!("agent setup: {e}"))?;
+    options.on_spawn = on_spawn;
 
     let mut stream = match tokio::time::timeout_at(
         deadline,
@@ -311,7 +316,7 @@ pub async fn run_resumed(
     };
 
     let spec = resume_spec(db_path, &row, agent, settings);
-    let result = run_headless(&spec, prompt, timeout).await;
+    let result = run_headless(&spec, prompt, timeout, None).await;
 
     let result = match result {
         Ok(result) => result,

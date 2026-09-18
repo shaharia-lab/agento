@@ -183,7 +183,7 @@ async fn run_the_rule(db: &Path) -> Result<agento_lib::native::agent_run::RunRes
     // `execute_and_reply` calls, so a dispatcher that stopped passing the rule's
     // settings fails here rather than staying green.
     let (spec, timeout) = dispatcher::run_inputs(db, agent(), rule);
-    agento_lib::native::agent_run::run_headless(&spec, "hello", timeout).await
+    agento_lib::native::agent_run::run_headless(&spec, "hello", timeout, None).await
 }
 
 /// A rule's working directory, model and permission mode reach the process.

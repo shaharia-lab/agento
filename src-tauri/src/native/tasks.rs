@@ -1834,6 +1834,35 @@ pub fn update_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String
     Ok(())
 }
 
+/// Records the OS process a run spawned on its job row (#594).
+///
+/// Its own statement rather than a field of [`JobHistory`]: the pid is written
+/// once, between the insert and the finish, and the wire type is the API's —
+/// neither `GET` answers it, so adding it there would change a frozen response
+/// to carry something no reader of the API asked for. Neither the insert nor
+/// [`update_job_history`] names these columns, so nothing else overwrites them.
+///
+/// A zero-row update is not an error, for `update_job_history`'s reason: the
+/// initial insert may have failed and been logged, and the run goes on.
+pub fn record_job_process(
+    db_path: &Path,
+    job_id: &str,
+    pid: u32,
+    started_at: GoTime,
+) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "UPDATE job_history SET pid = ?1, pid_started_at = ?2 WHERE id = ?3",
+        rusqlite::params![
+            i64::from(pid),
+            super::gotime::to_go_string_utc(started_at),
+            job_id
+        ],
+    )
+    .map_err(|e| format!("recording the process of job {job_id:?}: {e}"))?;
+    Ok(())
+}
+
 // ─── The task writes (#275) ───────────────────────────────────────────────────
 
 /// `CreateTaskRequest` and `UpdateTaskRequest` (`internal/api/types.go`).

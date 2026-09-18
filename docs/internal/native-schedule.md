@@ -347,3 +347,21 @@ Two more the vectors pin, both invisible in UTC:
 `chrono`'s calendar arithmetic — robfig resets the lower fields with
 `time.Date`, which *normalizes* a wall clock a DST gap removed instead of
 failing, and that normalization is the answer on the spring-forward day.
+
+**A run's CLI leads its own process group, and its pid is on the job row before
+the run produces anything** (#594, migration 40). `claude/process.rs` spawns
+every CLI — chat and headless alike — with `process_group(0)` on Unix and
+`CREATE_NEW_PROCESS_GROUP` on Windows, so a signal to `-pid` reaches the MCP
+servers and tool children the CLI started, not just the CLI. The executor
+passes `run_headless` a `SpawnHook` that writes `job_history.pid` and
+`pid_started_at` through `tasks::record_job_process`; the spawn **awaits** it
+before the initialize handshake, which is what makes "written before any output
+is read" a property rather than a race. `pid_started_at` is the wall-clock time
+of the spawn, there because a pid alone stops being an identity once the OS
+reuses it: whatever signals a stored pid must check the live process's start
+time first. Both columns are nullable — `kill(0, …)` signals the caller's own
+group, so "no process" cannot share a spelling with a pid — and neither is on
+the `JobHistory` wire type, so no `GET` changed. The run's own shutdown still
+signals the pid alone; this adds ownership, not termination. Chat turns write
+no `job_history` row, so they get the group but no recorded pid. Pinned by
+`scheduled_run.rs`'s `a_run_records_the_pid_of_a_process_group_leader_before_its_output_is_read`.
