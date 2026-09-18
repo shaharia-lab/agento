@@ -81,6 +81,16 @@
   printable sentinel a transcript could contain.
 - **Cache invalidation is multi-dimensional**: TTL (1h), `scanner_version`,
   pricing revision fingerprint, and idle-threshold drift each force a re-read.
+- **Session export is a Tauri command, not an `/api` route, and it reads the
+  transcript rather than the detail** (#591). `export_session` writes Markdown,
+  JSONL or text straight to the path the native Save-As dialog returned, the
+  `export_logs` shape. `GET /api/claude-sessions/{id}` is lossy on purpose —
+  no `system` events, no image blocks, tool results capped at 2000 characters —
+  so `native/sessions/export.rs` walks the JSONL itself and uses the detail read
+  only for the metadata header. An unfiltered JSONL line is written byte for
+  byte and a filtered one is re-assembled in key order; binary content is never
+  inlined in Markdown or text, it is decoded into `<stem>-attachments/`. What
+  each toggle governs is that module's `//!` doc.
 
 ## Three read-path rules that make a wrong implementation look right
 

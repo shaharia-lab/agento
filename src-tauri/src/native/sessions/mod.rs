@@ -28,6 +28,7 @@
 pub mod continue_chat;
 pub mod corpus;
 pub mod detail;
+pub mod export;
 pub mod journey;
 pub mod page;
 pub mod projects;
