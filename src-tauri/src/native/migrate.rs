@@ -522,7 +522,6 @@ mod tests {
         assert_eq!(timeout, 0);
     }
 
-    /// Idempotence, which is what makes a second process safe to run at all.
     /// **Migration 40's two columns are nullable, and absent is `NULL`** (#594).
     ///
     /// Unlike 30, 37, 38 and 39 they are not `NOT NULL DEFAULT`: a pid of 0 is
@@ -551,6 +550,7 @@ mod tests {
         assert_eq!((pid, started), (None, None));
     }
 
+    /// Idempotence, which is what makes a second process safe to run at all.
     #[test]
     fn applying_twice_is_a_no_op() {
         let file = tempfile::NamedTempFile::new().expect("temp file");

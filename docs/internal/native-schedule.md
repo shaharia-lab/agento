@@ -362,6 +362,12 @@ reuses it: whatever signals a stored pid must check the live process's start
 time first. Both columns are nullable — `kill(0, …)` signals the caller's own
 group, so "no process" cannot share a spelling with a pid — and neither is on
 the `JobHistory` wire type, so no `GET` changed. The run's own shutdown still
-signals the pid alone; this adds ownership, not termination. Chat turns write
-no `job_history` row, so they get the group but no recorded pid. Pinned by
+signals the pid alone. One termination path is lost rather than added: a
+terminal's Ctrl-C and hangup go to its foreground group, so an Agento started
+from a shell no longer takes its runs down with it — an orphan the app-exit
+hook (#595) has to cover. **On Windows the flag is set but nothing kills the
+group**: `CREATE_NEW_PROCESS_GROUP` scopes console control events only, and
+terminating the whole tree there needs a Job Object — deferred to #595/#596.
+Chat turns write no `job_history` row, so they get the group but no recorded
+pid. Pinned by
 `scheduled_run.rs`'s `a_run_records_the_pid_of_a_process_group_leader_before_its_output_is_read`.

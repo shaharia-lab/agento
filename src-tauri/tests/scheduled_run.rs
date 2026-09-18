@@ -860,7 +860,7 @@ async fn a_run_records_the_pid_of_a_process_group_leader_before_its_output_is_re
             }
         }
     }
-    let _reap = Reap(grandchild);
+    let reap = Reap(grandchild);
 
     assert_eq!(
         seen["pgid"].as_i64(),
@@ -905,4 +905,6 @@ async fn a_run_records_the_pid_of_a_process_group_leader_before_its_output_is_re
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    // Reaped, so the pid is free for the OS to reuse: never signal it again.
+    std::mem::forget(reap);
 }

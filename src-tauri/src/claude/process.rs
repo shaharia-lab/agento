@@ -194,8 +194,12 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
     // started: its MCP servers, its Bash tool's children. Without it they share
     // Agento's group, and there is no signal that names the run's tree alone.
     //
-    // The shutdown path below still signals the pid, not the group: this
-    // change adds ownership, not new termination behaviour.
+    // The shutdown path below still signals the pid, not the group. One
+    // termination path does go: a terminal's Ctrl-C and hangup reach its
+    // foreground group, so an Agento started from a shell (`npm run app`) no
+    // longer takes its runs down with it — the orphan the app-exit hook (#595)
+    // has to cover. On Windows the flag groups the tree for console control
+    // events only; killing it whole needs a Job Object, which is #595's too.
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
