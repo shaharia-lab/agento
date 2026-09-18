@@ -138,6 +138,13 @@ pub fn is_whitelisted(conn: &Connection, rule_id: &str, match_hash: &str) -> Res
 /// `status` and `detected_at`**: a finding the user marked `false_positive`
 /// stays marked, and "detected" means first detected.
 ///
+/// **The call is the session's whole scan, so it is authoritative for `open`
+/// rows**: an `open` finding of this session that this scan did not write —
+/// a rule retired or tightened by a ruleset bump, or a match now whitelisted —
+/// is deleted. `whitelisted` and `false_positive` rows are kept, since they
+/// carry a verdict the user made. It follows that `text` must be the whole
+/// transcript the offsets index into, never one chunk of it.
+///
 /// A finding whose range does not lie on character boundaries of `text` fails
 /// the whole call and writes nothing — it means the caller passed the wrong
 /// text, and a masked snippet of the wrong bytes would be a silent lie.
@@ -164,6 +171,8 @@ pub fn record_scan(
     )
     .map_err(|e| format!("recording the scan state for {session_id}: {e}"))?;
 
+    // What this scan wrote, keyed the way the table's UNIQUE key is.
+    let mut written: std::collections::HashSet<(&str, i64)> = std::collections::HashSet::new();
     for f in findings {
         // The only place the matched bytes exist; both redacted forms are
         // computed and the slice goes out of scope with this block.
@@ -206,6 +215,26 @@ pub fn record_scan(
             hash,
         ])
         .map_err(|e| format!("writing a {} finding for {session_id}: {e}", f.rule_id))?;
+        written.insert((f.rule_id, f.start as i64));
+    }
+
+    let stale: Vec<(i64, String, i64)> = tx
+        .prepare(
+            "SELECT id, rule_id, location_start FROM credential_findings
+              WHERE session_id = ?1 AND project_path = ?2 AND status = 'open'",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![session_id, project_path], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect()
+        })
+        .map_err(|e| format!("reading {session_id}'s open findings: {e}"))?;
+    for (id, rule_id, start) in stale {
+        if !written.contains(&(rule_id.as_str(), start)) {
+            tx.execute("DELETE FROM credential_findings WHERE id = ?1", params![id])
+                .map_err(|e| format!("retracting a stale finding for {session_id}: {e}"))?;
+        }
     }
 
     tx.commit()
@@ -292,18 +321,40 @@ pub fn add_whitelist_entry(
     Ok(id)
 }
 
-/// Delete one whitelist entry. Answers whether a row was deleted.
+/// Delete one whitelist entry, and re-open what it alone was suppressing.
+/// Answers whether a row was deleted.
 ///
-/// Findings it suppressed stay `whitelisted`: a finding is re-evaluated only
-/// when it is rescanned, and restoring `open` here would have to guess whether
-/// another entry still covers it.
-pub fn remove_whitelist_entry(conn: &Connection, id: i64) -> Result<bool, String> {
-    conn.execute(
-        "DELETE FROM credential_whitelist WHERE id = ?1",
-        params![id],
-    )
-    .map(|n| n > 0)
-    .map_err(|e| format!("removing whitelist entry {id}: {e}"))
+/// A `whitelisted` finding goes back to `open` in the same transaction unless a
+/// remaining entry still covers it by rule id or by hash — every finding stores
+/// both, so that is an exact check, not a guess. This is what makes a whitelist
+/// action reversible from Settings (design doc §5.3). `false_positive` rows are
+/// the user's own verdict and are not touched.
+pub fn remove_whitelist_entry(conn: &mut Connection, id: i64) -> Result<bool, String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("starting the whitelist removal: {e}"))?;
+    let removed = tx
+        .execute(
+            "DELETE FROM credential_whitelist WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("removing whitelist entry {id}: {e}"))?;
+    if removed > 0 {
+        tx.execute(
+            "UPDATE credential_findings SET status = 'open'
+              WHERE status = 'whitelisted'
+                AND NOT EXISTS (
+                    SELECT 1 FROM credential_whitelist w
+                     WHERE w.rule_id = credential_findings.rule_id
+                        OR w.match_hash = credential_findings.match_hash
+                )",
+            [],
+        )
+        .map_err(|e| format!("re-opening findings after removing whitelist entry {id}: {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("committing the whitelist removal: {e}"))?;
+    Ok(removed > 0)
 }
 
 /// Every whitelist entry, oldest first.
@@ -668,13 +719,88 @@ mod tests {
         assert_eq!(all[1].id, b);
         assert_eq!(all[1].rule_id.as_deref(), Some("rule-b"));
 
-        assert!(remove_whitelist_entry(&conn, a).expect("remove"));
-        assert!(!remove_whitelist_entry(&conn, a).expect("remove again"));
+        assert!(remove_whitelist_entry(&mut conn, a).expect("remove"));
+        assert!(!remove_whitelist_entry(&mut conn, a).expect("remove again"));
         assert_eq!(list_whitelist(&conn).expect("list").len(), 1);
 
         // With the entry gone, the value is no longer suppressed at write time.
         assert!(!is_whitelisted(&conn, "rule-a", &hash).expect("check"));
         assert!(is_whitelisted(&conn, "rule-b", &hash).expect("check"));
+    }
+
+    #[test]
+    fn removing_a_whitelist_entry_reopens_only_what_nothing_else_covers() {
+        let mut conn = db();
+        record_scan(&mut conn, "s1", "/a", 1, TEXT, &[alpha(), bravo()]).expect("record");
+        conn.execute(
+            "UPDATE credential_findings SET status = 'false_positive' WHERE rule_id = 'rule-b'",
+            [],
+        )
+        .expect("mark");
+
+        // Two entries both covering alpha, and one covering the marked bravo.
+        let by_hash = add_whitelist_entry(
+            &mut conn,
+            &WhitelistTarget::Hash(hash_match("leaked-value-alpha-0001")),
+            None,
+        )
+        .expect("by hash");
+        let by_rule = add_whitelist_entry(&mut conn, &WhitelistTarget::Rule("rule-a".into()), None)
+            .expect("by rule");
+        let rule_b = add_whitelist_entry(&mut conn, &WhitelistTarget::Rule("rule-b".into()), None)
+            .expect("rule b");
+
+        let statuses = |conn: &Connection| -> Vec<String> {
+            stored(conn)
+                .into_iter()
+                .map(|(_, status, _)| status)
+                .collect()
+        };
+        assert_eq!(statuses(&conn), vec!["whitelisted", "false_positive"]);
+
+        // The rule entry still covers alpha.
+        assert!(remove_whitelist_entry(&mut conn, by_hash).expect("remove"));
+        assert_eq!(statuses(&conn), vec!["whitelisted", "false_positive"]);
+
+        // Nothing covers it now; the user's false_positive is left alone.
+        assert!(remove_whitelist_entry(&mut conn, by_rule).expect("remove"));
+        assert!(remove_whitelist_entry(&mut conn, rule_b).expect("remove"));
+        assert_eq!(statuses(&conn), vec!["open", "false_positive"]);
+    }
+
+    #[test]
+    fn a_rescan_retracts_open_findings_it_no_longer_produces() {
+        let mut conn = db();
+        record_scan(&mut conn, "s1", "/a", 1, TEXT, &[alpha(), bravo()]).expect("record");
+        // Another session's findings are not this scan's to retract.
+        record_scan(&mut conn, "s1", "/b", 1, TEXT, &[bravo()]).expect("record");
+        conn.execute(
+            "UPDATE credential_findings SET status = 'false_positive'
+              WHERE project_path = '/a' AND rule_id = 'rule-a'",
+            [],
+        )
+        .expect("mark");
+
+        // Under v2 neither rule fires: the verdict survives, the open row goes.
+        record_scan(&mut conn, "s1", "/a", 2, TEXT, &[]).expect("rescan");
+
+        let rows: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT project_path, rule_id, status FROM credential_findings
+                 ORDER BY project_path, rule_id",
+            )
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("/a".into(), "rule-a".into(), "false_positive".into()),
+                ("/b".into(), "rule-b".into(), "open".into()),
+            ]
+        );
     }
 
     #[test]

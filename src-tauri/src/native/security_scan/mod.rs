@@ -1,4 +1,4 @@
-//! The Credentials Checker's detection core (#597, #599).
+//! The Credentials Checker (#597): its detection core (#599) and its store.
 //!
 //! The detection half is two parts, and **both are pure** — no I/O, no
 //! database, no state beyond the compiled rule table:
@@ -8,8 +8,8 @@
 //! - [`scan`] runs every rule over a piece of text and answers the matches as
 //!   byte ranges.
 //!
-//! - [`store`] is the persistence over migration 41's tables: what needs
-//!   (re)scanning, the whitelist-aware write, and the whitelist itself (#602).
+//! [`store`] is the persistence over migration 41's tables: what needs
+//! (re)scanning, the whitelist-aware write, and the whitelist itself (#602).
 //!
 //! The background worker and the `/api` surface are later issues (#603, #604)
 //! and build on the rule ids and tiers defined here. This module is
