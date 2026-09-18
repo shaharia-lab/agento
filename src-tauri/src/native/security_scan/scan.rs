@@ -134,11 +134,7 @@ mod tests {
     fn assert_finds(rule: &str, secret: &str) {
         let text = cat(&["output: ", secret, " (done)\n"]);
         let found = scan(&text);
-        assert_eq!(
-            found.iter().map(|f| f.rule_id).collect::<Vec<_>>(),
-            [rule],
-            "in {text:?}"
-        );
+        assert_eq!(found.iter().map(|f| f.rule_id).collect::<Vec<_>>(), [rule]);
         let f = found[0];
         assert_eq!(&text[f.start..f.end], secret);
     }
@@ -184,7 +180,7 @@ mod tests {
             assert_eq!(
                 found.iter().map(|f| f.rule_id).collect::<Vec<_>>(),
                 ["aws-access-key-id", "aws-secret-access-key"],
-                "in {text:?}"
+                "form {a:?}"
             );
             assert_eq!(&text[found[1].start..found[1].end], secret);
         }
@@ -453,6 +449,11 @@ mod tests {
             cat(&["DATABASE_URL=postgres://", "app:${DB_PASSWORD}@db:5432/app"]),
             cat(&["mysql://", "root:<password>@127.0.0.1"]),
             cat(&["DSN = 'postgresql://", "app:%(password)s@db/app' % cfg"]),
+            cat(&["\"postgresql://", "app:%s@localhost:5432/app\" % pw"]),
+            cat(&["fmt.Sprintf(\"postgres://", "app:%v@db:5432/app\", pw)"]),
+            cat(&["set DSN=postgres://", "app:%DB_PASSWORD%@db/app"]),
+            cat(&["postgres://", "postgres:mysecretpassword@localhost/postgres"]),
+            cat(&["mysql://", "app:your_password@localhost/app"]),
             // A PEM header with no key body, as in documentation
             cat(&["-----BEGIN RSA ", "PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"]),
             // A public key and a certificate are not secrets
@@ -461,8 +462,14 @@ mod tests {
             "the task-runner and disk-usage-monitor-daemon tools".to_string(),
             cat(&["mask_live_", &body(ALNUM, 30)]),
         ];
-        for s in &shapes {
-            assert!(scan(s).is_empty(), "false positive {:?} in {s:?}", ids(s));
+        // Failure messages name the shape by index, never the text: a scanner
+        // reading a failing log should not see a credential-shaped string.
+        for (i, s) in shapes.iter().enumerate() {
+            assert!(
+                scan(s).is_empty(),
+                "false positive {:?} in shape #{i}",
+                ids(s)
+            );
         }
     }
 

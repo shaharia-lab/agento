@@ -246,7 +246,7 @@ fn aws_secret_shape(s: &str) -> bool {
         && s.bytes().any(|b| b.is_ascii_digit())
 }
 
-/// Refuses the password words examples use in place of a real one.
+/// Refuses templated passwords and the words examples use in place of one.
 fn real_db_password(url: &str) -> bool {
     let Some(rest) = url.split_once("://").map(|(_, r)| r) else {
         return false;
@@ -257,12 +257,35 @@ fn real_db_password(url: &str) -> bool {
     let Some((_user, password)) = userinfo.split_once(':') else {
         return false;
     };
-    if password.starts_with("%(") {
+    // A `%` is credited only as a percent-escape (`%40`), so a format string
+    // (`%s`, `%v`, `%(pw)s`) or a batch variable (`%DB_PASSWORD%`) is not.
+    let escapes_only = password
+        .split('%')
+        .skip(1)
+        .all(|s| s.len() >= 2 && s.as_bytes()[..2].iter().all(u8::is_ascii_hexdigit));
+    if !escapes_only {
         return false;
     }
     const PLACEHOLDERS: &[&str] = &[
-        "password", "passwd", "pass", "pwd", "secret", "changeme", "example", "xxx", "xxxx",
-        "xxxxxxxx", "***", "****", "********", "user", "username",
+        "password",
+        "passwd",
+        "pass",
+        "pwd",
+        "secret",
+        "changeme",
+        "example",
+        "xxx",
+        "xxxx",
+        "xxxxxxxx",
+        "***",
+        "****",
+        "********",
+        "user",
+        "username",
+        "your_password",
+        "your-password",
+        "yourpassword",
+        "mysecretpassword",
     ];
     !PLACEHOLDERS
         .iter()
