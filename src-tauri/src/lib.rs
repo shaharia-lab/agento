@@ -638,13 +638,20 @@ pub fn run() {
                     app.exit(code.unwrap_or(0));
                 });
             }
-            // Every path out ends here, including the two the hook above cannot
+            // Every path out ends here, including the ones the hook above cannot
             // defer: a restart (`prevent_exit` is ignored for one — it is the
-            // updater's) and an exit that raced it. Blocking is fine: the window
-            // is gone and the runtime's workers, which reap the children, are
-            // not this thread.
+            // updater's), and a quit that skips `ExitRequested`. The stop runs
+            // on the async runtime and this thread waits on a channel, bounded
+            // — never `block_on`, which panics if this thread is ever inside an
+            // async context, and a panic here would take the updater's relaunch
+            // down with it.
             tauri::RunEvent::Exit if !EXIT.runs_stopped.swap(true, Ordering::SeqCst) => {
-                tauri::async_runtime::block_on(stop_in_flight_runs());
+                let (done, stopped) = std::sync::mpsc::channel();
+                tauri::async_runtime::spawn(async move {
+                    stop_in_flight_runs().await;
+                    let _ = done.send(());
+                });
+                let _ = stopped.recv_timeout(exit_bound());
             }
             _ => {}
         });
@@ -668,6 +675,13 @@ static EXIT: ExitState = ExitState {
 /// when it runs out is left for the startup reaper (#596).
 const EXIT_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The most [`stop_in_flight_runs`] may take: one second over its two waits,
+/// so the bound is the backstop and not the thing that ends an ordinary slow
+/// exit.
+fn exit_bound() -> std::time::Duration {
+    crate::claude::process::SIGKILL_GRACE + EXIT_ROW_GRACE + std::time::Duration::from_secs(1)
+}
+
 /// Stops every in-flight agent run before Agento exits (#595).
 ///
 /// A GUI quit runs no destructors, so without this each CLI a run started —
@@ -681,10 +695,7 @@ const EXIT_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// **Bounded as a whole**, so a child that will not die, or a row write stuck
 /// behind a lock, delays quitting by seconds and never wedges it.
 async fn stop_in_flight_runs() {
-    // One second over the two waits, so the bound is the backstop and not
-    // the thing that ends an ordinary slow exit.
-    let bound =
-        crate::claude::process::SIGKILL_GRACE + EXIT_ROW_GRACE + std::time::Duration::from_secs(1);
+    let bound = exit_bound();
     let stop = async {
         let done = crate::claude::process::terminate_all_runs().await;
         if done.signalled > 0 {

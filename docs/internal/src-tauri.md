@@ -318,10 +318,13 @@ reading it (#593). `lib.rs` builds the app and runs it with an event closure:
   `app.exit(code)` with the code the request carried. `EXIT.runs_stopped` lets
   that second request through; `EXIT.stopping` makes a repeated quit wait on the
   first rather than start a second stop.
-- **`RunEvent::Exit`** is the backstop, and blocks on the same function when the
+- **`RunEvent::Exit`** is the backstop, and waits on the same function when the
   above did not run: a **restart** ignores `prevent_exit` (it is how the updater
   relaunches — `RESTART_EXIT_CODE` is excluded from the first arm for that
-  reason), and an exit that raced the hook. Blocking there is safe because the
+  reason), and a quit that skips `ExitRequested`. It spawns the stop on the
+  async runtime and waits on a channel with `recv_timeout` — **never
+  `block_on`**, which panics when called inside an async context, and a panic
+  there would break the updater's relaunch. Waiting there is safe because the
   children are reaped by runtime workers, not by the main thread.
 
 `stop_in_flight_runs` calls `claude::process::terminate_all_runs`: every CLI
