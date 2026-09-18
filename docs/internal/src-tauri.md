@@ -306,6 +306,46 @@ user-authored path segments the access line already accepts (an agent slug, a
 settings-profile id), which is the same trade recorded above.
 
 
+## Quitting stops in-flight runs
+
+**Every agent run is stopped before the process exits, and the exit is bounded**
+(#595). A GUI quit runs no destructors — `kill_on_drop` and `Stream::drop` never
+fire — so before this each CLI a run had started outlived the app with nobody
+reading it (#593). `lib.rs` builds the app and runs it with an event closure:
+
+- **`RunEvent::ExitRequested`** (window close, ⌘Q, the menu's Quit):
+  `api.prevent_exit()`, then `stop_in_flight_runs` on the async runtime, then
+  `app.exit(code)` with the code the request carried. `EXIT.runs_stopped` lets
+  that second request through; `EXIT.stopping` makes a repeated quit wait on the
+  first rather than start a second stop.
+- **`RunEvent::Exit`** is the backstop, and blocks on the same function when the
+  above did not run: a **restart** ignores `prevent_exit` (it is how the updater
+  relaunches — `RESTART_EXIT_CODE` is excluded from the first arm for that
+  reason), and an exit that raced the hook. Blocking there is safe because the
+  children are reaped by runtime workers, not by the main thread.
+
+`stop_in_flight_runs` calls `claude::process::terminate_all_runs`: every CLI
+`spawn_and_stream` started and has not yet reaped is in `process::LIVE`, entered
+at spawn and left the instant the reader's `wait()` returns, so a pid in it can
+never have been reused. Each group gets SIGTERM and, after `SIGKILL_GRACE` (5 s,
+the grace a turn's own shutdown allows), SIGKILL; on Windows both steps are
+`taskkill /PID <pid> /T /F`. Scheduled, manual, trigger and chat runs are all
+covered, because all of them spawn there. It then waits up to `EXIT_ROW_GRACE`
+(2 s) for the scheduler to finish writing the killed runs' rows (see
+`docs/internal/native-schedule.md`). The whole of it sits under one timeout of
+grace + row grace + 1 s: a child stuck in an uninterruptible syscall delays
+quitting by seconds and never wedges it.
+
+`group_id` refuses pids 0 and 1, whose negations are Agento's own group and
+every process the user owns. Pinned by `process::tests`'
+`terminate_all_stops_every_tree_that_honours_sigterm` (which fails if the SIGTERM
+goes to the pid rather than the group),
+`terminate_all_kills_a_tree_that_ignores_sigterm_after_the_grace` and
+`nothing_registers_once_terminate_all_has_begun`. The event closure itself has
+no automated test — a Tauri event loop does not run under `cargo test` — so
+verify a change to it by hand: start a long manual run, quit, and check with
+`ps -eo pid,pgid,args | grep claude` that nothing survives.
+
 ## Packaging
 
 `npm run app:build` produces the native format for the host platform

@@ -365,9 +365,23 @@ the `JobHistory` wire type, so no `GET` changed. The run's own shutdown still
 signals the pid alone. One termination path is lost rather than added: a
 terminal's Ctrl-C and hangup go to its foreground group, so an Agento started
 from a shell no longer takes its runs down with it — an orphan the app-exit
-hook (#595) has to cover. **On Windows the flag is set but nothing kills the
-group**: `CREATE_NEW_PROCESS_GROUP` scopes console control events only, and
-terminating the whole tree there needs a Job Object — deferred to #595/#596.
-Chat turns write no `job_history` row, so they get the group but no recorded
-pid. Pinned by
+hook (#595) covers. **On Windows the flag groups nothing killable**:
+`CREATE_NEW_PROCESS_GROUP` scopes console control events only, so the exit hook
+kills the tree with `taskkill /T /F` instead, and a run's own shutdown there
+still reaches the CLI alone. Chat turns write no `job_history` row, so they get
+the group but no recorded pid. Pinned by
 `scheduled_run.rs`'s `a_run_records_the_pid_of_a_process_group_leader_before_its_output_is_read`.
+
+**Quitting the app stops every in-flight run and fails its row** (#595). The
+exit hook in `lib.rs` (described in `docs/internal/src-tauri.md`, *Quitting
+stops in-flight runs*) signals each un-reaped CLI's group; the run's
+`run_headless` then fails, and `executor::finish` writes the row `failed` with
+the error message **`terminated: app quit`** (`process::APP_QUIT`) instead of
+whatever the signal made of the exit status — `failure_message`, pinned by
+`a_run_stopped_by_app_quit_says_so_on_its_row`. A run that tries to spawn once
+the hook has begun is refused with the same reason, so a timer firing inside the
+exit window cannot start a run nobody will stop. The hook waits for
+`Scheduler::has_runs_in_flight` to clear — the `RunGuard` is released only after
+the row is written — for at most two seconds; a row still `running` past that is
+the startup reaper's (#596). Manual runs take the same path; nothing here is
+specific to a timer's fire.
