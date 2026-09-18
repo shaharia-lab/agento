@@ -581,15 +581,21 @@ mod tests {
             .expect("status");
         assert_eq!(status, "open");
 
-        let duplicate = conn.execute(
-            "INSERT INTO credential_findings (session_id, project_path, rule_id, confidence,
-                 masked_snippet, location_start, location_end, ruleset_version, detected_at)
-             VALUES ('s1', '/a', 'aws-access-key', 'high', 'AKIA****', 10, 30, 1, 'later')",
-            [],
-        );
+        // Asserted on the message, not merely on `is_err`: a typo in this
+        // statement would also fail, and would pass without the key existing.
+        let duplicate = conn
+            .execute(
+                "INSERT INTO credential_findings (session_id, project_path, rule_id, confidence,
+                     masked_snippet, location_start, location_end, ruleset_version, detected_at)
+                 VALUES ('s1', '/a', 'aws-access-key', 'high', 'AKIA****', 10, 30, 1, 'later')",
+                [],
+            )
+            .expect_err("the same match must not be stored twice");
         assert!(
-            duplicate.is_err(),
-            "the same match must not be stored twice"
+            duplicate
+                .to_string()
+                .contains("UNIQUE constraint failed: credential_findings."),
+            "{duplicate}"
         );
     }
 
