@@ -385,3 +385,27 @@ exit window cannot start a run nobody will stop. The hook waits for
 the row is written — for at most two seconds; a row still `running` past that is
 the startup reaper's (#596). Manual runs take the same path; nothing here is
 specific to a timer's fire.
+
+**A previous session's `running` rows are reaped at startup** (#596).
+`Scheduler::reap_stale_runs` is the rows' counterpart to `reconcile`'s timers:
+it fails every `job_history` row still `running` that a *previous* process left
+— a `SIGKILL`, a crash, a power loss, an update replacing the binary, or a row
+the exit hook's two seconds did not see written. A row whose recorded pid is
+alive **and** whose live start time (`ps -o etime=`, within five seconds) matches
+`pid_started_at` is an orphan still at work: its group gets the exit hook's
+SIGTERM-then-SIGKILL (`process::stop_orphan`) and the row reads **`orphaned:
+recovered on startup`**. Every other row — exited, pre-migration-40, or a pid
+now naming a stranger — is failed without a signal as **`orphaned: app did not
+exit cleanly`**. Windows has no start-time probe here, so there it only marks.
+Three rules make it safe. It touches only rows that started before the
+scheduler was built (`booted_at`) and whose pid is not an un-reaped child of
+this process (`process::is_live_run`), because it can run after this session's
+first runs. The write is guarded by `status = 'running'`, so a run finishing
+concurrently wins. And it is spawned beside the sweep in `start`, off the boot
+path, and retried on the sweep's interval until one pass succeeds — the same
+"armed before the first read can fail" rule. **It releases no `in_flight` slot,
+and must not**: that map and the semaphore are this process's memory and start
+empty, so a previous session's row never held one, and decrementing would
+corrupt the count of a run this session owns. Pinned by `scheduled_run.rs`'s
+`the_startup_reaper_stops_a_surviving_orphan_and_fails_every_stale_row` and
+`a_task_whose_stale_run_was_reaped_fires_normally_afterwards`.

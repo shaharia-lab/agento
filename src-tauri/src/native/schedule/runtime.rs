@@ -146,6 +146,18 @@ pub struct Scheduler {
     /// [`Scheduler::try_mark_running`] can still see a scheduled run and answer
     /// the route's 409 honestly.
     in_flight: Mutex<HashMap<String, usize>>,
+    /// When this scheduler was built — the line between this session's runs
+    /// and the previous sessions' for [`Scheduler::reap_stale_runs`] (#596).
+    booted_at: DateTime<Utc>,
+}
+
+/// What one [`Scheduler::reap_stale_runs`] pass did, for its log line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Reaped {
+    /// Rows whose CLI was still running and was stopped.
+    pub recovered: usize,
+    /// Rows whose CLI was gone, unrecorded, or no longer provably the CLI.
+    pub abandoned: usize,
 }
 
 /// A run's entry in [`Scheduler::in_flight`], removed when the run ends.
@@ -235,6 +247,93 @@ impl Scheduler {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_empty()
+    }
+
+    /// Fail every `job_history` row a **previous** session left `running`, and
+    /// stop the run's CLI if it is provably still alive (#596).
+    ///
+    /// Nothing else ever finishes such a row: the process that would have is
+    /// gone. That is a `SIGKILL`, a crash, a power loss, an update replacing the
+    /// binary mid-run, or a run the app-exit hook (#595) could not see written
+    /// within its two seconds.
+    ///
+    /// - A row with a recorded pid whose live process started when the row says
+    ///   is an orphan still at work: its group is stopped exactly as the exit
+    ///   hook would have, and the row reads `orphaned: recovered on startup`.
+    /// - Anything else — the process exited, the row predates the pid column,
+    ///   or the pid now names a process that started at another time — is
+    ///   failed without a signal, reading `orphaned: app did not exit cleanly`.
+    ///
+    /// **Only a previous session's rows.** A row that started at or after this
+    /// scheduler was built, or whose pid is a CLI this process spawned and has
+    /// not reaped, belongs to a run in flight here and is left alone — the
+    /// reaper is retried after boot (see [`start`]), when runs of this session
+    /// may already exist, and a clock stepped back must not make one look old.
+    ///
+    /// **There is no `in_flight` slot to release.** [`Self::in_flight`] and the
+    /// semaphore are this process's memory and start empty, so a previous
+    /// session's row never held either; a reaped task fires on its next due
+    /// time like any other. Decrementing here would instead corrupt the count
+    /// of a run this session owns.
+    ///
+    /// Blocking — SQLite, `ps`, and up to [`crate::claude::process::SIGKILL_GRACE`]
+    /// per surviving orphan — so it runs on the blocking pool. `Err` when the
+    /// rows could not be read or any row could not be written; the caller
+    /// retries, and a row already failed is not seen again.
+    pub fn reap_stale_runs(&self) -> Result<Reaped, String> {
+        use crate::claude::process::{self, Orphan};
+
+        let jobs = crate::native::tasks::list_running_jobs(self.db_path())?;
+        let mut reaped = Reaped::default();
+        let mut first_error = None;
+        for job in jobs {
+            let started = job.started_at.instant();
+            if started >= self.booted_at || job.pid.is_some_and(process::is_live_run) {
+                continue;
+            }
+            let outcome = match (job.pid, job.pid_started_at) {
+                (Some(pid), Some(at)) => {
+                    process::stop_orphan(pid, at.instant().into(), process::SIGKILL_GRACE)
+                }
+                _ => Orphan::NotOurs,
+            };
+            let reason = match outcome {
+                Orphan::Stopped { .. } => process::ORPHAN_RECOVERED,
+                Orphan::NotOurs => process::ORPHAN_UNCLEAN_EXIT,
+            };
+            let now = Utc::now();
+            match crate::native::tasks::reap_job_history(
+                self.db_path(),
+                &job.id,
+                crate::native::gotime::GoTime::from_utc(now),
+                (now - started).num_milliseconds(),
+                reason,
+            ) {
+                Ok(true) => {
+                    match outcome {
+                        Orphan::Stopped { .. } => reaped.recovered += 1,
+                        Orphan::NotOurs => reaped.abandoned += 1,
+                    }
+                    log::info!(
+                        "task scheduler: reaped a stale run job_id={:?} task_id={:?} \
+                         pid={:?} outcome={outcome:?}",
+                        job.id,
+                        job.task_id,
+                        job.pid
+                    );
+                }
+                // Finished by its own run between the read and the write.
+                Ok(false) => {}
+                Err(e) => {
+                    log::warn!("task scheduler: {e}");
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(reaped),
+        }
     }
 
     /// Whether a run of `task_id` is in flight in this process.
@@ -567,6 +666,7 @@ pub fn start(db_path: PathBuf) {
         swept: Mutex::new(HashMap::new()),
         semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
         in_flight: Mutex::new(HashMap::new()),
+        booted_at: Utc::now(),
     });
     if RUNNING.set(Arc::clone(&scheduler)).is_err() {
         log::warn!("task scheduler already started; ignoring a second start");
@@ -596,6 +696,34 @@ pub fn start(db_path: PathBuf) {
             {
                 log::warn!("task scheduler: a reconcile pass panicked");
             }
+        }
+    });
+
+    // The startup reaper (#596), armed alongside the sweep and for the same
+    // reason: a transient `SQLITE_BUSY` at boot must not leave a previous
+    // session's `running` rows unrecoverable until the next restart. It retries
+    // on the sweep's interval until one pass has read and written everything,
+    // and runs off the boot path — a surviving orphan costs up to the SIGKILL
+    // grace to stop.
+    let reaper = Arc::clone(&scheduler);
+    tokio::spawn(async move {
+        loop {
+            let pass = Arc::clone(&reaper);
+            match tokio::task::spawn_blocking(move || pass.reap_stale_runs()).await {
+                Ok(Ok(reaped)) => {
+                    if reaped != Reaped::default() {
+                        log::info!(
+                            "task scheduler: reaped stale runs recovered={} abandoned={}",
+                            reaped.recovered,
+                            reaped.abandoned
+                        );
+                    }
+                    return;
+                }
+                Ok(Err(e)) => log::warn!("task scheduler: reaping stale runs failed: {e}"),
+                Err(_) => log::warn!("task scheduler: a reaper pass panicked"),
+            }
+            tokio::time::sleep(RECONCILE_INTERVAL).await;
         }
     });
 
@@ -642,6 +770,7 @@ pub fn detached(db_path: impl Into<PathBuf>) -> Arc<Scheduler> {
         swept: Mutex::new(HashMap::new()),
         semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
         in_flight: Mutex::new(HashMap::new()),
+        booted_at: Utc::now(),
     })
 }
 
@@ -757,6 +886,7 @@ mod tests {
             swept: Mutex::new(HashMap::new()),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
             in_flight: Mutex::new(HashMap::new()),
+            booted_at: Utc::now(),
         });
         let task = ScheduledTask {
             id: "legacy".to_string(),

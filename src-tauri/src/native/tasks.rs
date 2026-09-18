@@ -1863,6 +1863,79 @@ pub fn record_job_process(
     Ok(())
 }
 
+/// A `job_history` row still marked `running`, as the startup reaper (#596)
+/// needs it: when it started, and the process it recorded, if any.
+#[derive(Debug, Clone)]
+pub struct RunningJob {
+    pub id: String,
+    pub task_id: String,
+    pub started_at: GoTime,
+    /// `None` for a row written before migration 40, or whose run failed
+    /// before it spawned — and for a stored value that is no pid at all.
+    pub pid: Option<u32>,
+    pub pid_started_at: Option<GoTime>,
+}
+
+/// Every row still marked `running`, oldest first.
+pub fn list_running_jobs(db_path: &Path) -> Result<Vec<RunningJob>, String> {
+    let conn = db::open_read_only(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, task_id, started_at, pid, pid_started_at FROM job_history
+             WHERE status = 'running' ORDER BY started_at",
+        )
+        .map_err(|e| format!("listing running jobs: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(RunningJob {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                started_at: timestamp(row, 2)?,
+                pid: row
+                    .get::<_, Option<i64>>(3)?
+                    .and_then(|pid| u32::try_from(pid).ok()),
+                pid_started_at: nullable_timestamp(row, 4)?,
+            })
+        })
+        .map_err(|e| format!("listing running jobs: {e}"))?;
+    let mut jobs = Vec::new();
+    for row in rows {
+        jobs.push(row.map_err(|e| format!("listing running jobs: {e}"))?);
+    }
+    Ok(jobs)
+}
+
+/// Fails a row a previous session left `running`, with `reason` as its error
+/// message. Answers whether the row was changed.
+///
+/// **Only while it is still `running`**: a run that finishes between the
+/// reaper's read and this write has written the truth, and it wins. The token
+/// totals and response are left as the row holds them — a run that never
+/// finished recorded none.
+pub fn reap_job_history(
+    db_path: &Path,
+    id: &str,
+    finished_at: GoTime,
+    duration_ms: i64,
+    reason: &str,
+) -> Result<bool, String> {
+    let conn = db::open_read_write(db_path)?;
+    let changed = conn
+        .execute(
+            "UPDATE job_history SET status = 'failed', finished_at = ?1, duration_ms = ?2,
+                error_message = ?3
+             WHERE id = ?4 AND status = 'running'",
+            rusqlite::params![
+                super::gotime::to_go_string_utc(finished_at),
+                duration_ms,
+                reason,
+                id
+            ],
+        )
+        .map_err(|e| format!("reaping job history {id:?}: {e}"))?;
+    Ok(changed > 0)
+}
+
 // ─── The task writes (#275) ───────────────────────────────────────────────────
 
 /// `CreateTaskRequest` and `UpdateTaskRequest` (`internal/api/types.go`).
