@@ -1282,12 +1282,7 @@ impl LiveProcesses {
     /// cannot happen for a group we created but is "alive" either way.
     #[cfg(unix)]
     fn group_alive(&self, pid: u32) -> bool {
-        let Some(pgid) = group_id(pid) else {
-            return false;
-        };
-        // SAFETY: signal 0 checks existence and permission and sends nothing.
-        let rc = unsafe { libc::kill(-pgid, 0) };
-        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        group_exists(pid)
     }
 
     /// Windows has no group to probe; the leader being un-reaped is the answer.
@@ -1300,6 +1295,12 @@ impl LiveProcesses {
 /// Whether the app is quitting, as far as the agent runs are concerned.
 pub(crate) fn app_quitting() -> bool {
     LIVE.quitting()
+}
+
+/// Whether `pid` is a CLI this process spawned and has not yet reaped — a run
+/// of *this* session, which the startup reaper (#596) must never touch.
+pub(crate) fn is_live_run(pid: u32) -> bool {
+    LIVE.lock().pids.contains(&pid)
 }
 
 /// Stops every in-flight CLI run of this process — scheduled, manual, trigger
@@ -1316,6 +1317,18 @@ pub(crate) async fn terminate_all_runs() -> Terminated {
 fn group_id(pid: u32) -> Option<libc::pid_t> {
     let pgid = libc::pid_t::try_from(pid).ok()?;
     (pgid > 1).then_some(pgid)
+}
+
+/// Whether any member of the group `pid` leads still exists. `EPERM` means it
+/// exists and is not ours to signal, which is "alive" either way.
+#[cfg(unix)]
+fn group_exists(pid: u32) -> bool {
+    let Some(pgid) = group_id(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 checks existence and permission and sends nothing.
+    let rc = unsafe { libc::kill(-pgid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(unix)]
@@ -1362,6 +1375,143 @@ fn kill_group(pid: u32) {
     {
         log::warn!("taskkill pid={pid}: {e}");
     }
+}
+
+// ─── Orphans of a previous session (#596) ────────────────────────────────────
+
+/// The reason the startup reaper writes on a row whose CLI it found still
+/// running and stopped.
+pub(crate) const ORPHAN_RECOVERED: &str = "orphaned: recovered on startup";
+
+/// The reason the startup reaper writes on a row whose CLI is gone — or was
+/// never recorded, or whose pid now names some other process.
+pub(crate) const ORPHAN_UNCLEAN_EXIT: &str = "orphaned: app did not exit cleanly";
+
+/// How far a live process's start time may sit from the spawn time a
+/// `job_history` row recorded and still be the process that row names.
+///
+/// The row's time is taken straight after `spawn()` returns, and `ps` reports
+/// elapsed time in whole seconds, so a match lands within about one second; the
+/// rest is headroom for a loaded machine. A pid reused by an unrelated process
+/// would have to have been started within the same few seconds as the CLI it
+/// replaced, which a pid space that wraps only after tens of thousands of
+/// spawns does not produce.
+#[cfg(unix)]
+const ORPHAN_START_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What [`stop_orphan`] found at a recorded pid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Windows never stops an orphan, so `Stopped` is only matched there.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) enum Orphan {
+    /// Nothing there that is provably the recorded CLI: it has exited, or its
+    /// pid now names a process that started at another time. Nothing was
+    /// signalled.
+    NotOurs,
+    /// The recorded CLI was still running, and its process group was stopped —
+    /// by SIGTERM, or by SIGKILL once the grace ran out (`killed`).
+    Stopped { killed: bool },
+}
+
+/// Stops the process group a previous session's run left behind, **only if**
+/// `pid` is alive and started at `started_at` (within
+/// [`ORPHAN_START_TOLERANCE`]).
+///
+/// The identity check is the whole point: the previous session is gone, so
+/// nothing holds the pid, and the OS may have handed it to anything since. A
+/// pid alone is not an identity. The same two steps as the app-exit hook —
+/// SIGTERM to the group, SIGKILL to whatever is left after `grace` — and it
+/// blocks for up to `grace`, so it belongs on a blocking thread.
+///
+/// A leader that has exited is `NotOurs` even if its group lives on in
+/// grandchildren: with the leader gone there is no start time to check, and a
+/// group id can be reused once its last member exits.
+#[cfg(unix)]
+pub(crate) fn stop_orphan(
+    pid: u32,
+    started_at: std::time::SystemTime,
+    grace: std::time::Duration,
+) -> Orphan {
+    if group_id(pid).is_none() || !started_at_matches(pid, started_at) {
+        return Orphan::NotOurs;
+    }
+    terminate_group(pid);
+    let deadline = std::time::Instant::now() + grace;
+    while group_exists(pid) {
+        if std::time::Instant::now() >= deadline {
+            kill_group(pid);
+            return Orphan::Stopped { killed: true };
+        }
+        std::thread::sleep(LIVENESS_POLL);
+    }
+    Orphan::Stopped { killed: false }
+}
+
+/// Windows has no start-time probe here, so no recorded pid can be proven to
+/// still be the CLI, and nothing is signalled: an orphan there is only marked.
+#[cfg(not(unix))]
+pub(crate) fn stop_orphan(
+    _pid: u32,
+    _started_at: std::time::SystemTime,
+    _grace: std::time::Duration,
+) -> Orphan {
+    Orphan::NotOurs
+}
+
+/// Whether the live process `pid` started within [`ORPHAN_START_TOLERANCE`] of
+/// `started_at`. `false` when it does not exist or `ps` cannot say.
+///
+/// `ps -o etime=` rather than `/proc/<pid>/stat`, because it is the one probe
+/// Linux and macOS answer identically — so the Linux CI exercises the macOS
+/// path too.
+#[cfg(unix)]
+fn started_at_matches(pid: u32, started_at: std::time::SystemTime) -> bool {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    // `ps -p` exits 1 when there is no such process.
+    if !out.status.success() {
+        return false;
+    }
+    let Some(elapsed) = parse_etime(&String::from_utf8_lossy(&out.stdout)) else {
+        return false;
+    };
+    let Some(live_start) = std::time::SystemTime::now().checked_sub(elapsed) else {
+        return false;
+    };
+    let gap = live_start
+        .duration_since(started_at)
+        .or_else(|_| started_at.duration_since(live_start))
+        .unwrap_or_default();
+    gap <= ORPHAN_START_TOLERANCE
+}
+
+/// `ps`'s `etime`: `[[dd-]hh:]mm:ss`, padded with spaces.
+#[cfg(unix)]
+fn parse_etime(text: &str) -> Option<std::time::Duration> {
+    let text = text.trim();
+    let (days, clock) = match text.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, text),
+    };
+    let fields = clock
+        .split(':')
+        .map(|f| f.parse::<u64>().ok())
+        .collect::<Option<Vec<u64>>>()?;
+    let (hours, minutes, seconds) = match fields.as_slice() {
+        [m, s] => (0, *m, *s),
+        [h, m, s] => (*h, *m, *s),
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(
+        ((days * 24 + hours) * 60 + minutes) * 60 + seconds,
+    ))
 }
 
 #[cfg(test)]
@@ -1739,5 +1889,51 @@ mod tests {
         assert_eq!(group_id(1), None);
         assert_eq!(group_id(u32::MAX), None);
         assert_eq!(group_id(4242), Some(4242));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn etime_parses_every_width_ps_prints() {
+        let secs = |s: u64| Some(std::time::Duration::from_secs(s));
+        assert_eq!(parse_etime("      00:07\n"), secs(7));
+        assert_eq!(parse_etime("12:34"), secs(12 * 60 + 34));
+        assert_eq!(parse_etime("01:02:03"), secs(3600 + 2 * 60 + 3));
+        assert_eq!(
+            parse_etime("2-01:02:03"),
+            secs(2 * 86_400 + 3600 + 2 * 60 + 3)
+        );
+        assert_eq!(parse_etime(""), None);
+        assert_eq!(parse_etime("7"), None);
+        assert_eq!(parse_etime("a:b"), None);
+    }
+
+    /// A live pid whose start time is not the recorded one is some other
+    /// process that inherited the number, and must not be signalled.
+    #[cfg(unix)]
+    #[test]
+    fn an_orphan_is_stopped_only_when_its_start_time_matches() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let spawned = std::time::SystemTime::now();
+
+        let a_day_before = spawned - std::time::Duration::from_secs(86_400);
+        let grace = std::time::Duration::from_secs(5);
+        assert_eq!(stop_orphan(pid, a_day_before, grace), Orphan::NotOurs);
+        assert!(child.try_wait().expect("try_wait").is_none(), "left alone");
+
+        // Reaped concurrently, as init reaps a real orphan, so the group empties.
+        let waiter = std::thread::spawn(move || child.wait());
+        assert_eq!(
+            stop_orphan(pid, spawned, grace),
+            Orphan::Stopped { killed: false }
+        );
+        let status = waiter.join().expect("join").expect("wait");
+        assert!(!status.success(), "stopped by the signal: {status:?}");
+        assert!(!group_exists(pid));
     }
 }

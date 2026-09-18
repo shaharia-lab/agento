@@ -908,3 +908,192 @@ async fn a_run_records_the_pid_of_a_process_group_leader_before_its_output_is_re
     // Reaped, so the pid is free for the OS to reuse: never signal it again.
     std::mem::forget(reap);
 }
+
+/// A `job_history` row for the startup reaper to find (#596).
+fn seed_running_job(
+    path: &Path,
+    id: &str,
+    started_at: &str,
+    pid: Option<u32>,
+    pid_started_at: Option<std::time::SystemTime>,
+) {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    let spawned = pid_started_at.map(|at| {
+        agento_lib::native::gotime::to_go_string_utc(agento_lib::native::gotime::GoTime::from_utc(
+            at.into(),
+        ))
+    });
+    conn.execute(
+        "INSERT INTO job_history (id, task_id, task_name, status, started_at, pid, pid_started_at)
+         VALUES (?1, 'task-1', 'Nightly', 'running', ?2, ?3, ?4)",
+        rusqlite::params![id, started_at, pid.map(i64::from), spawned],
+    )
+    .expect("seed running job");
+}
+
+fn job_outcome(path: &Path, id: &str) -> (String, String, bool) {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.query_row(
+        "SELECT status, error_message, finished_at IS NOT NULL FROM job_history WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .expect("row")
+}
+
+/// The previous session's rows, one per case the reaper distinguishes — and
+/// one of this session's, which it must not touch (#596).
+#[cfg(unix)]
+#[test]
+fn the_startup_reaper_stops_a_surviving_orphan_and_fails_every_stale_row() {
+    use std::os::unix::process::CommandExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    migrated_with_task(&db, "cron", true);
+    let long_ago = "2026-01-01 00:00:00 +0000 UTC";
+
+    // The orphan: a CLI stand-in leading its own group, with a grandchild in it.
+    let mut orphan = std::process::Command::new("sh")
+        .args(["-c", "sleep 600 & wait"])
+        .process_group(0)
+        .spawn()
+        .expect("spawn the orphan");
+    let orphan_pid = orphan.id();
+    seed_running_job(
+        &db,
+        "j-orphan",
+        long_ago,
+        Some(orphan_pid),
+        Some(std::time::SystemTime::now()),
+    );
+    // Reaped as init would reap a real orphan, so its group can empty.
+    let orphan_waiter = std::thread::spawn(move || orphan.wait());
+
+    // A process that has already exited.
+    let mut gone = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let gone_pid = gone.id();
+    gone.wait().expect("wait true");
+    seed_running_job(
+        &db,
+        "j-gone",
+        long_ago,
+        Some(gone_pid),
+        Some(std::time::SystemTime::now()),
+    );
+
+    // A row written before the pid column existed.
+    seed_running_job(&db, "j-nopid", long_ago, None, None);
+
+    // A pid that is alive but is some other process: it started a day after
+    // the one the row recorded.
+    let mut stranger = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn the stranger");
+    seed_running_job(
+        &db,
+        "j-reused",
+        long_ago,
+        Some(stranger.id()),
+        Some(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400)),
+    );
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+
+    // A run of this session, started after the scheduler was built.
+    let later =
+        agento_lib::native::gotime::to_go_string_utc(agento_lib::native::gotime::GoTime::from_utc(
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        ));
+    seed_running_job(&db, "j-this-session", &later, None, None);
+
+    let reaped = scheduler.reap_stale_runs().expect("reap");
+    assert_eq!((reaped.recovered, reaped.abandoned), (1, 3), "{reaped:?}");
+
+    assert_eq!(
+        job_outcome(&db, "j-orphan"),
+        (
+            "failed".to_string(),
+            "orphaned: recovered on startup".to_string(),
+            true
+        )
+    );
+    let status = orphan_waiter.join().expect("join").expect("wait");
+    assert!(!status.success(), "the orphan was stopped: {status:?}");
+    // SAFETY: signal 0 only probes; the group was this test's orphan.
+    let group_left = unsafe { libc::kill(-(orphan_pid as libc::pid_t), 0) };
+    assert_ne!(group_left, 0, "the grandchild went with its group");
+
+    for id in ["j-gone", "j-nopid", "j-reused"] {
+        assert_eq!(
+            job_outcome(&db, id),
+            (
+                "failed".to_string(),
+                "orphaned: app did not exit cleanly".to_string(),
+                true
+            ),
+            "{id}"
+        );
+    }
+    assert!(
+        stranger.try_wait().expect("try_wait").is_none(),
+        "a reused pid is never signalled"
+    );
+    let _ = stranger.kill();
+    let _ = stranger.wait();
+
+    assert_eq!(
+        job_outcome(&db, "j-this-session"),
+        ("running".to_string(), String::new(), false),
+        "a run of this session is not the reaper's"
+    );
+
+    // A second pass finds nothing left to do.
+    let again = scheduler.reap_stale_runs().expect("reap again");
+    assert_eq!((again.recovered, again.abandoned), (0, 0));
+}
+
+/// A reaped task is not left blocked: nothing marks it in flight, so a manual
+/// run is accepted and its next fire runs normally (#596).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_task_whose_stale_run_was_reaped_fires_normally_afterwards() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    seed_running_job(&db, "j-stale", "2026-01-01 00:00:00 +0000 UTC", None, None);
+
+    let cli = fake_cli(
+        dir.path(),
+        r#"        raw('{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sdk-reaped","usage":{"input_tokens":1,"output_tokens":1}}')"#,
+    );
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    let pass = std::sync::Arc::clone(&scheduler);
+    tokio::task::spawn_blocking(move || pass.reap_stale_runs())
+        .await
+        .expect("join")
+        .expect("reap");
+
+    assert!(!scheduler.is_running(&task_id));
+    drop(
+        scheduler
+            .try_mark_running(&task_id)
+            .expect("a manual run is not refused with a 409"),
+    );
+
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert_eq!(jobs[0].0, "failed", "the stale row, reaped");
+    assert_eq!(jobs[1].0, "success", "the next fire, run: {:?}", jobs[1].1);
+}
