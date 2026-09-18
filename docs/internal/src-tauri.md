@@ -343,7 +343,8 @@ quitting by seconds and never wedges it.
 every process the user owns. Pinned by `process::tests`'
 `terminate_all_stops_every_tree_that_honours_sigterm` (which fails if the SIGTERM
 goes to the pid rather than the group),
-`terminate_all_kills_a_tree_that_ignores_sigterm_after_the_grace` and
+`terminate_all_kills_a_tree_that_ignores_sigterm_after_the_grace`,
+`terminate_all_kills_only_the_trees_still_alive_at_the_deadline` and
 `nothing_registers_once_terminate_all_has_begun`. The event closure itself has
 no automated test — a Tauri event loop does not run under `cargo test` — so
 verify a change to it by hand: start a long manual run, quit, and check with

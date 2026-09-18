@@ -1239,28 +1239,28 @@ impl LiveProcesses {
     /// pgid is never handed out while any member remains. A group that has
     /// emptied is dropped from the loop and never signalled again.
     pub(crate) async fn terminate_all(&self, grace: std::time::Duration) -> Terminated {
-        let pids: Vec<u32> = {
+        let mut alive: Vec<u32> = {
             let mut state = self.lock();
             state.quitting = true;
             state.pids.iter().copied().collect()
         };
-        if pids.is_empty() {
+        let signalled = alive.len();
+        if signalled == 0 {
             return Terminated::default();
         }
 
-        for &pid in &pids {
+        for &pid in &alive {
             terminate_group(pid);
         }
         let deadline = tokio::time::Instant::now() + grace;
         loop {
-            let alive: Vec<u32> = pids
-                .iter()
-                .copied()
-                .filter(|&pid| self.group_alive(pid))
-                .collect();
+            // Narrowed every pass, never re-derived from the snapshot: a group
+            // seen empty once may have had its pid reused since, and probing
+            // it again would find — and at the deadline kill — a stranger.
+            alive.retain(|&pid| self.group_alive(pid));
             if alive.is_empty() {
                 return Terminated {
-                    signalled: pids.len(),
+                    signalled,
                     killed: 0,
                 };
             }
@@ -1269,7 +1269,7 @@ impl LiveProcesses {
                     kill_group(pid);
                 }
                 return Terminated {
-                    signalled: pids.len(),
+                    signalled,
                     killed: alive.len(),
                 };
             }
@@ -1689,6 +1689,30 @@ mod tests {
             "unbounded: {took:?}"
         );
         wait_until_gone(&LIVE, pid).await;
+    }
+
+    /// A tree that honours SIGTERM beside one that does not: the first is gone
+    /// long before the deadline and only the second is killed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_all_kills_only_the_trees_still_alive_at_the_deadline() {
+        static LIVE: LiveProcesses = LiveProcesses::new();
+        let polite = spawn_registered(&LIVE, "sleep 60 & echo ready; wait").await;
+        let stubborn = spawn_registered(&LIVE, "trap '' TERM; sleep 60 & echo ready; wait").await;
+
+        let done = LIVE
+            .terminate_all(std::time::Duration::from_millis(500))
+            .await;
+
+        assert_eq!(
+            done,
+            Terminated {
+                signalled: 2,
+                killed: 1
+            }
+        );
+        assert!(!LIVE.group_alive(polite));
+        wait_until_gone(&LIVE, stubborn).await;
     }
 
     /// A child spawned after the hook took its snapshot would outlive it, so
