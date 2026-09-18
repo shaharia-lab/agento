@@ -168,6 +168,13 @@ chrono-tz = "0.10"
 # tree as a chrono `clock` dependency; named here because the code calls it.
 iana-time-zone = "0.1"
 form_urlencoded = "1.2.2"
+# The Credentials Checker's rule table (`native/security_scan/`, #599) — the
+# gitleaks rule shapes re-expressed as Rust regexes. `regex` rather than
+# `fancy-regex` on purpose: it has no backtracking engine, so search is linear
+# time and no transcript can make a rule catastrophically slow, at the cost of
+# look-arounds the rules do without. Already in the lock through the Tauri
+# tree; this names it directly.
+regex = "1"
 
 # SMTP, for the notification sender (#307). `POST /api/notifications/test` and
 # the task-completion emails behind it are the one thing in this shell that
