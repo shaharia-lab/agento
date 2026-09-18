@@ -12,8 +12,9 @@
 //!
 //! - **Bounded in cost.** The `regex` crate guarantees linear-time search — it
 //!   has no backtracking engine — so an adversarial transcript cannot make a
-//!   rule catastrophically slow. That is also why there are no look-arounds:
-//!   where a rule needs a delimiter it consumes it and reports a capture group.
+//!   rule catastrophically slow. The price is that there are no look-arounds:
+//!   where a rule needs to know what surrounds a match, its `accept` check
+//!   says so instead.
 //! - **One tier per rule, fixed.** The confidence a user sees is the rule's
 //!   tier plus its id, so a finding always traces back to the pattern that
 //!   fired (§4.2). The JWT rule is the only `medium` one.
@@ -57,10 +58,6 @@ pub struct Rule {
     pub provider: &'static str,
     pub confidence: Confidence,
     pattern: &'static str,
-    /// The capture group whose span is the finding; `0` is the whole match.
-    /// Non-zero where the pattern has to consume a delimiter it cannot
-    /// look around.
-    pub(super) group: usize,
     /// A second test on the reported text, for what a regex cannot say.
     pub(super) accept: Option<fn(&str) -> bool>,
     /// Only credited within [`PAIR_WINDOW`] bytes of a finding of this rule.
@@ -76,7 +73,6 @@ const RULES: &[Rule] = &[
         provider: "AWS",
         confidence: Confidence::High,
         pattern: r"\bAKIA[0-9A-Z]{16}\b",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -85,13 +81,18 @@ const RULES: &[Rule] = &[
     // (gitleaks needs an `aws … secret` keyword for the same reason). It counts
     // only beside an access-key-id, and only when it mixes cases and digits the
     // way a generated key does; a hex digest never has an upper-case letter.
+    //
+    // The pattern takes a whole run and `aws_secret_shape` keeps runs of
+    // exactly forty: with no look-around, bounding the run by consuming a
+    // delimiter would miss `KEY=<secret>` and a candidate one space after
+    // another. `=` is outside the run so `AWS_SECRET_ACCESS_KEY=` does not
+    // join it, and trails it so a padded base64 blob is refused whole.
     Rule {
         id: "aws-secret-access-key",
         provider: "AWS",
         confidence: Confidence::High,
-        pattern: r"(?:^|[^A-Za-z0-9/+=])([A-Za-z0-9/+]{40})(?:[^A-Za-z0-9/+=]|$)",
-        group: 1,
-        accept: Some(mixed_case_and_digit),
+        pattern: r"[A-Za-z0-9/+]{40,}={0,2}",
+        accept: Some(aws_secret_shape),
         paired_with: Some("aws-access-key-id"),
     },
     // The `private_key` member of a service-account key file. Matches both the
@@ -101,7 +102,6 @@ const RULES: &[Rule] = &[
         provider: "Google Cloud",
         confidence: Confidence::High,
         pattern: r#""private_key"\s*:\s*"-----BEGIN PRIVATE KEY-----[^"]{64,}?-----END PRIVATE KEY-----(?:\\n|\n)?""#,
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -112,7 +112,6 @@ const RULES: &[Rule] = &[
         provider: "Azure",
         confidence: Confidence::High,
         pattern: r"\b(?:AccountKey|SharedAccessKey)=[A-Za-z0-9+/]{40,}={0,2}",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -121,7 +120,6 @@ const RULES: &[Rule] = &[
         provider: "GitHub",
         confidence: Confidence::High,
         pattern: r"\bghp_[A-Za-z0-9]{36}\b",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -130,7 +128,6 @@ const RULES: &[Rule] = &[
         provider: "GitHub",
         confidence: Confidence::High,
         pattern: r"\bgho_[A-Za-z0-9]{36}\b",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -139,7 +136,6 @@ const RULES: &[Rule] = &[
         provider: "GitHub",
         confidence: Confidence::High,
         pattern: r"\bgithub_pat_[A-Za-z0-9_]{82}\b",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -151,7 +147,6 @@ const RULES: &[Rule] = &[
         provider: "Slack",
         confidence: Confidence::High,
         pattern: r"\bxox[baprs]-[0-9]{8,}-[A-Za-z0-9-]{8,}",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -160,7 +155,6 @@ const RULES: &[Rule] = &[
         provider: "Stripe",
         confidence: Confidence::High,
         pattern: r"\b(?:sk|rk)_live_[A-Za-z0-9]{24,}\b",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -172,7 +166,6 @@ const RULES: &[Rule] = &[
         provider: "OpenAI",
         confidence: Confidence::High,
         pattern: r"\bsk-(?:[A-Za-z0-9]{20,}|(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,})",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -183,7 +176,6 @@ const RULES: &[Rule] = &[
         provider: "Anthropic",
         confidence: Confidence::High,
         pattern: r"\bsk-ant-[a-z]+[0-9]{2}-[A-Za-z0-9_-]{20,}",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -192,19 +184,19 @@ const RULES: &[Rule] = &[
         provider: "npm",
         confidence: Confidence::High,
         pattern: r"\bnpm_[A-Za-z0-9]{36}\b",
-        group: 0,
         accept: None,
         paired_with: None,
     },
     // `scheme://user:password@host`. A template (`${DB_PASSWORD}`,
-    // `<password>`) cannot match the password class, and the placeholder words
-    // docs and compose files use are refused by `real_db_password`.
+    // `<password>`) cannot match the password class; a Python `%(password)s`
+    // one and the placeholder words docs and compose files use are refused by
+    // `real_db_password`. `%` itself is allowed, because a password holding
+    // `@`, `/` or `:` can only be written percent-encoded.
     Rule {
         id: "database-url-credentials",
         provider: "Postgres/MySQL",
         confidence: Confidence::High,
-        pattern: r#"\b(?:postgres(?:ql)?|mysql|mariadb)(?:\+[a-z0-9]+)?://[^:/@\s"'<>]+:[^@/\s"'<>$%{}]+@[A-Za-z0-9.-]+"#,
-        group: 0,
+        pattern: r#"\b(?:postgres(?:ql)?|mysql|mariadb)(?:\+[a-z0-9]+)?://[^:/@\s"'<>]+:[^@/\s"'<>${}]+@[A-Za-z0-9.-]+"#,
         accept: Some(real_db_password),
         paired_with: None,
     },
@@ -216,7 +208,6 @@ const RULES: &[Rule] = &[
         provider: "PEM",
         confidence: Confidence::High,
         pattern: r"-----BEGIN (?:(?:RSA|EC|DSA|OPENSSH|PGP|ENCRYPTED) )?PRIVATE KEY(?: BLOCK)?-----[A-Za-z0-9+/=\s\\:,.-]{64,}?-----END (?:(?:RSA|EC|DSA|OPENSSH|PGP|ENCRYPTED) )?PRIVATE KEY(?: BLOCK)?-----",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -228,7 +219,6 @@ const RULES: &[Rule] = &[
         provider: "JWT",
         confidence: Confidence::Medium,
         pattern: r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-        group: 0,
         accept: None,
         paired_with: None,
     },
@@ -249,8 +239,9 @@ pub fn compiled() -> &'static [(Rule, Regex)] {
     })
 }
 
-fn mixed_case_and_digit(s: &str) -> bool {
-    s.bytes().any(|b| b.is_ascii_uppercase())
+fn aws_secret_shape(s: &str) -> bool {
+    s.len() == 40
+        && s.bytes().any(|b| b.is_ascii_uppercase())
         && s.bytes().any(|b| b.is_ascii_lowercase())
         && s.bytes().any(|b| b.is_ascii_digit())
 }
@@ -266,6 +257,9 @@ fn real_db_password(url: &str) -> bool {
     let Some((_user, password)) = userinfo.split_once(':') else {
         return false;
     };
+    if password.starts_with("%(") {
+        return false;
+    }
     const PLACEHOLDERS: &[&str] = &[
         "password", "passwd", "pass", "pwd", "secret", "changeme", "example", "xxx", "xxxx",
         "xxxxxxxx", "***", "****", "********", "user", "username",

@@ -30,10 +30,7 @@ pub fn scan(text: &str) -> Vec<Finding> {
     let mut found: Vec<(usize, Finding)> = Vec::new();
 
     for (order, (rule, re)) in table.iter().enumerate() {
-        for caps in re.captures_iter(text) {
-            let Some(m) = caps.get(rule.group) else {
-                continue;
-            };
+        for m in re.find_iter(text) {
             if rule.accept.is_some_and(|accept| !accept(m.as_str())) {
                 continue;
             }
@@ -49,36 +46,64 @@ pub fn scan(text: &str) -> Vec<Finding> {
         }
     }
 
-    let partner_of = |f: &Finding| {
-        table
-            .iter()
-            .find(|(r, _)| r.id == f.rule_id)
-            .and_then(|(r, _)| r.paired_with)
-    };
-    let paired = |f: &Finding| match partner_of(f) {
-        None => true,
-        Some(partner) => found.iter().any(|(_, p)| {
-            p.rule_id == partner && p.start <= f.end + PAIR_WINDOW && f.start <= p.end + PAIR_WINDOW
-        }),
-    };
-    let found: Vec<(usize, Finding)> = found.iter().copied().filter(|(_, f)| paired(f)).collect();
-
-    let contained = |f: &Finding| {
-        found.iter().any(|(_, o)| {
-            o.rule_id != f.rule_id
-                && o.start <= f.start
-                && f.end <= o.end
-                && (o.start, o.end) != (f.start, f.end)
-        })
-    };
-    let mut found: Vec<(usize, Finding)> = found
-        .iter()
-        .copied()
-        .filter(|(_, f)| !contained(f))
-        .collect();
-
+    let found = keep_paired(table, found);
+    let mut found = drop_contained(found);
     found.sort_by_key(|(order, f)| (f.start, *order));
     found.into_iter().map(|(_, f)| f).collect()
+}
+
+/// Pass 2. One rule's matches never overlap (`find_iter`), so each rule's
+/// spans sorted by start are sorted by end too, and "is any partner within the
+/// window" is one binary search — the pass stays `O(F log F)` in findings.
+fn keep_paired(
+    table: &[(rules::Rule, regex::Regex)],
+    found: Vec<(usize, Finding)>,
+) -> Vec<(usize, Finding)> {
+    // Spans per rule, in `find_iter` order, i.e. ascending.
+    let mut spans: Vec<Vec<(usize, usize)>> = vec![Vec::new(); table.len()];
+    for (order, f) in &found {
+        spans[*order].push((f.start, f.end));
+    }
+    let partner: Vec<Option<usize>> = table
+        .iter()
+        .map(|(r, _)| {
+            r.paired_with
+                .and_then(|id| table.iter().position(|(p, _)| p.id == id))
+        })
+        .collect();
+
+    found
+        .into_iter()
+        .filter(|(order, f)| {
+            let Some(p) = partner[*order] else {
+                return true;
+            };
+            let near = &spans[p];
+            // The first partner that does not end before the window opens.
+            let i = near.partition_point(|&(_, end)| end + PAIR_WINDOW < f.start);
+            near.get(i)
+                .is_some_and(|&(start, _)| start <= f.end + PAIR_WINDOW)
+        })
+        .collect()
+}
+
+/// Pass 3: drop a finding lying wholly inside another, differently-spanned
+/// one. Sorted by start, then widest first, a finding is contained exactly
+/// when something before it reaches past its end — or reaches its end from an
+/// earlier start. Two rules matching the identical span are both kept.
+fn drop_contained(mut found: Vec<(usize, Finding)>) -> Vec<(usize, Finding)> {
+    found.sort_by_key(|(order, f)| (f.start, std::cmp::Reverse(f.end), *order));
+    // The furthest end seen, and the start of the first finding to reach it.
+    let mut reach: Option<(usize, usize)> = None;
+    found.retain(|(_, f)| {
+        let contained =
+            reach.is_some_and(|(end, start)| end > f.end || (end == f.end && start < f.start));
+        if reach.is_none_or(|(end, _)| f.end > end) {
+            reach = Some((f.end, f.start));
+        }
+        !contained
+    });
+    found
 }
 
 #[cfg(test)]
@@ -140,6 +165,49 @@ mod tests {
             ["aws-access-key-id", "aws-secret-access-key"]
         );
         assert_eq!(&text[found[1].start..found[1].end], secret);
+    }
+
+    #[test]
+    fn aws_secret_key_in_env_and_export_form() {
+        let id = cat(&["AK", "IA", "Q7ZX3MPLR2VN6TWB"]);
+        let secret = body("wJalrXUtnFEMI/K7MDENG+bPxRfiCY9z", 40);
+        for (a, b) in [
+            ("AWS_ACCESS_KEY_ID=", "\nAWS_SECRET_ACCESS_KEY="),
+            (
+                "export AWS_ACCESS_KEY_ID=",
+                "\nexport AWS_SECRET_ACCESS_KEY=",
+            ),
+            ("{\"AccessKeyId\":\"", "\",\"SecretAccessKey\":\""),
+        ] {
+            let text = cat(&[a, &id, b, &secret, "\"\n"]);
+            let found = scan(&text);
+            assert_eq!(
+                found.iter().map(|f| f.rule_id).collect::<Vec<_>>(),
+                ["aws-access-key-id", "aws-secret-access-key"],
+                "in {text:?}"
+            );
+            assert_eq!(&text[found[1].start..found[1].end], secret);
+        }
+    }
+
+    #[test]
+    fn aws_secret_one_space_after_another_candidate_is_still_found() {
+        let id = cat(&["AK", "IA", "Q7ZX3MPLR2VN6TWB"]);
+        let sha1 = body("3f786850e387550fdab836ed7e6dc881de23001b", 40);
+        let secret = body("wJalrXUtnFEMI/K7MDENG+bPxRfiCY9z", 40);
+        assert_eq!(
+            ids(&cat(&[&id, " ", &sha1, " ", &secret])),
+            ["aws-access-key-id", "aws-secret-access-key"]
+        );
+    }
+
+    #[test]
+    fn aws_secret_inside_a_longer_base64_run_is_not_credited() {
+        let id = cat(&["AK", "IA", "Q7ZX3MPLR2VN6TWB"]);
+        let long = body("wJalrXUtnFEMI/K7MDENG+bPxRfiCY9z", 41);
+        let padded = cat(&[&body("wJalrXUtnFEMI/K7MDENG+bPxRfiCY9z", 40), "=="]);
+        assert_eq!(ids(&cat(&[&id, " ", &long])), ["aws-access-key-id"]);
+        assert_eq!(ids(&cat(&[&id, " ", &padded])), ["aws-access-key-id"]);
     }
 
     #[test]
@@ -295,6 +363,11 @@ mod tests {
                 ]),
             );
         }
+        // `@`, `/` and `:` in a password can only travel percent-encoded.
+        assert_finds(
+            "database-url-credentials",
+            &cat(&["postgres://app:", "p%40ssW0rd9", "@db.example.com"]),
+        );
     }
 
     #[test]
@@ -379,6 +452,7 @@ mod tests {
             cat(&["DATABASE_URL=postgres://", "user:password@localhost:5432/app"]),
             cat(&["DATABASE_URL=postgres://", "app:${DB_PASSWORD}@db:5432/app"]),
             cat(&["mysql://", "root:<password>@127.0.0.1"]),
+            cat(&["DSN = 'postgresql://", "app:%(password)s@db/app' % cfg"]),
             // A PEM header with no key body, as in documentation
             cat(&["-----BEGIN RSA ", "PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"]),
             // A public key and a certificate are not secrets
@@ -412,5 +486,38 @@ mod tests {
         ]);
         let text = unit.repeat(2 * 1024 * 1024 / unit.len());
         assert!(scan(&text).is_empty());
+    }
+
+    #[test]
+    fn many_findings_stay_linearithmic() {
+        // The post-passes are per finding, so this is the input that would
+        // expose a quadratic one: tens of thousands of JWTs in ~3 MB, each
+        // beside an AWS-secret-shaped run that has to look for a partner.
+        let jwt = cat(&[
+            "ey",
+            "JhbGciOiJIUzI1NiJ9.",
+            "ey",
+            "JzdWIiOiIxMjM0In0.",
+            "SflKxwRJSMeKKF2QT4fw",
+        ]);
+        let unit = cat(&[
+            &jwt,
+            " ",
+            &body("wJalrXUtnFEMI/K7MDENG+bPxRfiCY9z", 40),
+            "\n",
+        ]);
+        let n = 3 * 1024 * 1024 / unit.len();
+        let text = unit.repeat(n);
+        let started = std::time::Instant::now();
+        let found = scan(&text);
+        assert_eq!(found.len(), n);
+        assert!(found.iter().all(|f| f.rule_id == "jwt"));
+        // Generous for an unoptimised build on a loaded runner; the quadratic
+        // passes this replaced took several seconds on this input.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
