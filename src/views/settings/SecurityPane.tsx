@@ -2,12 +2,16 @@ import { useCallback, useState } from "react";
 import { api } from "../../lib/api";
 import { CopyButton } from "../../components/CopyButton";
 import { TokenReveal } from "../../components/TokenReveal";
-import { Dropdown, Empty, FormRow } from "../../components/ui";
+import { Dropdown, Empty, FormRow, Switch } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
 import { dateTime, relativeTime, tildePath } from "../../lib/format";
 import { useHostInfo } from "../../lib/host";
-import type { ApiTokenRow, CreatedApiToken } from "../../lib/types";
+import type {
+  ApiTokenRow,
+  CreatedApiToken,
+  CredentialWhitelistEntry,
+} from "../../lib/types";
 import "../../styles/security.css";
 
 /* ============================================================================
@@ -32,6 +36,11 @@ import "../../styles/security.css";
    - **It uses no `window.confirm`.** That wedges the WebView (see `CLAUDE.md`),
      so revoke and regenerate are inline two-step confirmations like the profile
      deletes in the parent view.
+
+   The Credentials Checker (#606) is a section of this pane, not a second
+   "Security" tab. Its toggle is a field of `/api/settings`, so it is held in
+   the parent's settings draft and saved by the parent's `SaveBar` like every
+   other setting; the whitelist is its own resource and writes immediately.
    ========================================================================== */
 
 interface KeyInfo {
@@ -121,7 +130,21 @@ const SCOPE_BADGES: Record<string, string> = {
   llm: "badge badge--purple",
 };
 
-export function SecurityPane() {
+/**
+ * The Credentials Checker toggle, as the parent's settings draft holds it.
+ * `enabled` is `undefined` until `/api/settings` has loaded, and `error` says
+ * why it never will — this pane renders outside the settings form's gates, so
+ * it has to say so itself.
+ */
+export interface CheckerToggle {
+  enabled: boolean | undefined;
+  error?: string;
+  /** The environment variable that pinned the field, if one did. */
+  lock?: string;
+  onChange(v: boolean): void;
+}
+
+export function SecurityPane({ checker }: { checker: CheckerToggle }) {
   const host = useHostInfo();
   const keys = useResource<KeyInfo>(
     (signal) => api.get<KeyInfo>("/security/keys", signal),
@@ -465,6 +488,277 @@ export function SecurityPane() {
           </table>
         )}
       </div>
+
+      <div className="divider" />
+
+      <CredentialsCheckerSection checker={checker} />
+    </div>
+  );
+}
+
+/* ============================================================================
+   Credentials Checker (#606) — the toggle and the whitelist.
+
+   A whitelist entry names either a detection rule or one value. A value entry
+   is stored as the SHA-256 of the matched text, and the server never sends a
+   hash back, so the value typed here is hashed in this window and only the
+   hash leaves it. The other way to whitelist one value — from its finding —
+   is the Credentials Checker view's context menu (#605).
+   ========================================================================== */
+
+const WHITELIST_KINDS = [
+  { value: "rule", label: "Detection rule" },
+  { value: "value", label: "One value" },
+];
+
+/** SHA-256 of `text`, lowercase hex — `store::hash_match`'s scheme. */
+async function sha256Hex(text: string): Promise<string> {
+  if (!globalThis.crypto?.subtle) {
+    throw new Error(
+      "This window cannot hash a value. Whitelist it from its finding in the Credentials Checker instead."
+    );
+  }
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text)
+  );
+  return Array.from(new Uint8Array(digest), (b) =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+function CredentialsCheckerSection({ checker }: { checker: CheckerToggle }) {
+  const whitelist = useResource<CredentialWhitelistEntry[] | null>(
+    (signal) =>
+      api.get<CredentialWhitelistEntry[] | null>(
+        "/security-scan/whitelist",
+        signal
+      ),
+    []
+  );
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [confirmDelete, setConfirmDelete] = useState<number>();
+  const [kind, setKind] = useState("rule");
+  const [target, setTarget] = useState("");
+  const [reason, setReason] = useState("");
+
+  const run = useCallback(async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await fn();
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const rows = whitelist.data ?? [];
+
+  return (
+    <div className="formsec">
+      <div className="formsec__title">Credentials Checker</div>
+
+      <div className="grouplist">
+        <div className="grouplist__row">
+          <div className="col" style={{ flex: 1, gap: 1 }}>
+            <span style={{ fontWeight: 500 }}>Scan transcripts for credentials</span>
+            <span style={{ fontSize: "var(--text-sm)", color: "var(--fg-tertiary)" }}>
+              {checker.lock
+                ? `Set by ${checker.lock}. Unset it to change this here.`
+                : checker.error && checker.enabled === undefined
+                  ? `Settings unavailable: ${checker.error}`
+                  : "Looks for leaked secrets in Claude Code session transcripts, in the background. Findings are listed under Security → Credentials Checker."}
+            </span>
+          </div>
+          <Switch
+            on={checker.enabled ?? false}
+            disabled={checker.enabled === undefined || !!checker.lock}
+            onChange={checker.onChange}
+          />
+        </div>
+      </div>
+
+      {error && (
+        <div className="msgline msgline--error">
+          <Icon name="alert" size={14} className="msgline__icon" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      <FormRow
+        label="Whitelist"
+        help="A rule entry silences every finding of that rule. A value entry silences one credential wherever it appears."
+      >
+        <Dropdown
+          value={kind}
+          options={WHITELIST_KINDS}
+          onChange={(v) => {
+            setKind(v);
+            setTarget("");
+          }}
+        />
+      </FormRow>
+
+      {kind === "rule" ? (
+        <FormRow label="Rule ID" help="As shown on a finding.">
+          <input
+            className="field mono"
+            value={target}
+            placeholder="e.g. aws-access-key-id"
+            spellCheck={false}
+            onChange={(e) => setTarget(e.target.value)}
+          />
+        </FormRow>
+      ) : (
+        <FormRow
+          label="Value"
+          help="The exact credential text. It is hashed in this window and only the hash is sent and stored — the value itself goes nowhere."
+        >
+          <input
+            className="field mono"
+            type="password"
+            autoComplete="off"
+            value={target}
+            spellCheck={false}
+            onChange={(e) => setTarget(e.target.value)}
+          />
+        </FormRow>
+      )}
+
+      <FormRow label="Reason" help="Optional. Shown in the list below.">
+        <input
+          className="field"
+          value={reason}
+          placeholder="e.g. test fixture key"
+          onChange={(e) => setReason(e.target.value)}
+        />
+      </FormRow>
+
+      <FormRow label="">
+        <div className="row">
+          <button
+            className="btn btn--primary"
+            disabled={busy || !target.trim()}
+            onClick={() =>
+              run(async () => {
+                const body =
+                  kind === "rule"
+                    ? { rule_id: target.trim() }
+                    : { match_hash: await sha256Hex(target.trim()) };
+                await api.post<CredentialWhitelistEntry>(
+                  "/security-scan/whitelist",
+                  { ...body, reason: reason.trim() }
+                );
+                setTarget("");
+                setReason("");
+                whitelist.reload();
+              })
+            }
+          >
+            Create entry
+          </button>
+        </div>
+      </FormRow>
+
+      {whitelist.loading && !whitelist.data ? (
+        <Empty icon="shield" title="Loading" text="Reading the whitelist." />
+      ) : whitelist.error && !whitelist.data ? (
+        <Empty
+          icon="alert"
+          title="Whitelist unavailable"
+          text={whitelist.error}
+          action={
+            <button className="btn btn--lg" onClick={whitelist.reload}>
+              <Icon name="refresh" size={14} />
+              Retry
+            </button>
+          }
+        />
+      ) : rows.length === 0 ? (
+        <Empty
+          icon="shield"
+          title="No whitelist entries"
+          text="Every finding the checker makes is reported."
+        />
+      ) : (
+        <table className="kvtable">
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Target</th>
+              <th>Reason</th>
+              <th>Created</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((w) => (
+              <tr key={w.id}>
+                <td>
+                  <span className={w.kind === "rule" ? "badge" : "badge badge--purple"}>
+                    {w.kind}
+                  </span>
+                </td>
+                <td className="truncate" title={w.rule_id ?? undefined}>
+                  {w.rule_id ? (
+                    <span className="mono">{w.rule_id}</span>
+                  ) : (
+                    <span style={{ color: "var(--fg-tertiary)" }}>
+                      one value (hashed)
+                    </span>
+                  )}
+                </td>
+                <td className="truncate" title={w.reason ?? undefined}>
+                  {w.reason ?? ""}
+                </td>
+                <td title={dateTime(w.created_at)} style={{ whiteSpace: "nowrap" }}>
+                  {relativeTime(w.created_at)}
+                </td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  {confirmDelete === w.id ? (
+                    <span className="row">
+                      <span className="confirm">
+                        Delete this entry? Findings only it covers are reported
+                        again.
+                      </span>
+                      <button
+                        className="btn btn--ghost"
+                        onClick={() => setConfirmDelete(undefined)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn btn--danger"
+                        disabled={busy}
+                        onClick={() =>
+                          run(async () => {
+                            await api.del(`/security-scan/whitelist/${w.id}`);
+                            setConfirmDelete(undefined);
+                            whitelist.reload();
+                          })
+                        }
+                      >
+                        Delete
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      className="btn btn--ghost"
+                      onClick={() => setConfirmDelete(w.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

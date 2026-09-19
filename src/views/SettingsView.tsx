@@ -294,6 +294,41 @@ export function SettingsView({
 
   const loading = settings.loading && !settings.server;
 
+  // The save strip and its messages, shared by the settings form and the
+  // Security pane — whose Credentials Checker toggle (#606) is a field of the
+  // same draft, so it saves through the same bar.
+  const footer = (
+    <>
+      {error && (
+        <div className="msgline msgline--error">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>{error}</span>
+        </div>
+      )}
+      {notice && !dirty && (
+        <div className="msgline msgline--ok">
+          <span className="msgline__icon">
+            <Icon name="check" size={13} />
+          </span>
+          <span>{notice}</span>
+        </div>
+      )}
+
+      {dirty && (
+        <SaveBar
+          creating={false}
+          busy={saving}
+          canSubmit={idleGapError === undefined}
+          message={idleGapError ?? "You have unsaved changes."}
+          onDiscard={revertAll}
+          onSubmit={save}
+        />
+      )}
+    </>
+  );
+
   return (
     <div className="panes">
       <div className="pane-detail">
@@ -327,9 +362,19 @@ export function SettingsView({
              `GET /api/settings` fail — a credential this window can no longer
              present — is exactly what Regenerate is here to fix. Rendering it
              inside would replace it with "Settings unavailable" at the moment
-             it is the only page worth being on. */
+             it is the only page worth being on. The Credentials Checker
+             toggle is the one settings field it shows, so it degrades to a
+             disabled switch when the settings read fails. */
           <div className="scroll" style={{ flex: 1, padding: "var(--sp-9)" }}>
-            <SecurityPane />
+            <SecurityPane
+              checker={{
+                enabled: user?.credentials_checker_enabled,
+                error: settings.error,
+                lock: locked.credentials_checker_enabled,
+                onChange: (v) => patchUser({ credentials_checker_enabled: v }),
+              }}
+            />
+            <div className="form">{footer}</div>
           </div>
         ) : (
         <div className="scroll" style={{ flex: 1, padding: "var(--sp-9)" }}>
@@ -393,33 +438,7 @@ export function SettingsView({
                 <AdvancedPane user={user} onPatch={patchUser} monitoring={monitoring} />
               )}
 
-              {error && (
-                <div className="msgline msgline--error">
-                  <span className="msgline__icon">
-                    <Icon name="alert" size={13} />
-                  </span>
-                  <span>{error}</span>
-                </div>
-              )}
-              {notice && !dirty && (
-                <div className="msgline msgline--ok">
-                  <span className="msgline__icon">
-                    <Icon name="check" size={13} />
-                  </span>
-                  <span>{notice}</span>
-                </div>
-              )}
-
-              {dirty && (
-                <SaveBar
-                  creating={false}
-                  busy={saving}
-                  canSubmit={idleGapError === undefined}
-                  message={idleGapError ?? "You have unsaved changes."}
-                  onDiscard={revertAll}
-                  onSubmit={save}
-                />
-              )}
+              {footer}
             </div>
           )}
         </div>
