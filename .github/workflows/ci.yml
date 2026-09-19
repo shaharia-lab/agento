@@ -200,6 +200,10 @@ jobs:
   # the profile path guard. **Widening this needs those fixtures ported first**
   # — see `CLAUDE.md`'s *Known gaps*.
   #
+  # The two `claude::process` tests are the Windows start-time probe the
+  # startup reaper stops orphans with (#613) — Windows-only code, so this job
+  # is the only place they run.
+  #
   # The integration suites under `src-tauri/tests/` are a different and harder
   # case: `chat_turn.rs`, `claude_sdk.rs` and `scheduled_run.rs` drive a fake
   # Claude CLI that is a shebang'd Python script made executable through
@@ -241,7 +245,7 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --lib -- -D warnings
 
-      # Three filters, not the whole lib — see the comment above the job.
+      # Named filters, not the whole lib — see the comment above the job.
       #
       # **The floor is not decoration.** `cargo test` treats "the filter matched
       # nothing" as **success**, so an allowlist that goes stale — a module
@@ -260,6 +264,8 @@ jobs:
             native::gopath \
             native::sessions::projects \
             native::claude_settings::profiles::tests::a_windows_path_outside_the_dir_is_refused \
+            claude::process::tests::a_filetime_converts_to_system_time \
+            claude::process::tests::a_windows_orphan_is_stopped_only_when_its_start_time_matches \
             | tee filtered.log
           passed=$(grep -oE '^test result: ok\. [0-9]+ passed' filtered.log | grep -oE '[0-9]+' | head -1)
           echo "ran ${passed:-0} tests"

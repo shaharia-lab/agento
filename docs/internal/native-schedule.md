@@ -391,12 +391,14 @@ specific to a timer's fire.
 it fails every `job_history` row still `running` that a *previous* process left
 — a `SIGKILL`, a crash, a power loss, an update replacing the binary, or a row
 the exit hook's two seconds did not see written. A row whose recorded pid is
-alive **and** whose live start time (`ps -o etime=`, within five seconds) matches
-`pid_started_at` is an orphan still at work: its group gets the exit hook's
-SIGTERM-then-SIGKILL (`process::stop_orphan`) and the row reads **`orphaned:
-recovered on startup`**. Every other row — exited, pre-migration-40, or a pid
-now naming a stranger — is failed without a signal as **`orphaned: app did not
-exit cleanly`**. Windows has no start-time probe here, so there it only marks.
+alive **and** whose live start time (`ps -o etime=` on Unix, `GetProcessTimes`
+on Windows; within five seconds) matches `pid_started_at` is an orphan still at
+work: its group gets the exit hook's SIGTERM-then-SIGKILL
+(`process::stop_orphan`; on Windows the `taskkill /T /F` tree kill, through a
+process handle held from the check to the kill so the pid cannot be reused in
+between, #613) and the row reads **`orphaned: recovered on startup`**. Every other row —
+exited, pre-migration-40, or a pid now naming a stranger — is failed without a
+signal as **`orphaned: app did not exit cleanly`**.
 Three rules make it safe. It touches only rows that started before the
 scheduler was built (`booted_at`) and whose pid is not an un-reaped child of
 this process (`process::is_live_run`), because it can run after this session's
