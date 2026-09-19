@@ -309,6 +309,8 @@ export interface UserSettings {
   claude_config_dirs: string[] | null;
   /** An explicit path to the Claude Code CLI. Empty means "detect it" (#503). */
   claude_executable_path: string;
+  /** Whether the Credentials Checker scans transcripts (#601). Off by default. */
+  credentials_checker_enabled: boolean;
 }
 
 /**
@@ -868,6 +870,20 @@ export interface CredentialsCheckerStatus {
   findings: { open: number; whitelisted: number; false_positive: number };
   /** RFC 3339; `null` before the first scan. */
   last_scanned_at: string | null;
+}
+
+/**
+ * One entry from `GET /api/security-scan/whitelist`. `kind` says which target
+ * it names: a `"rule"` entry carries its `rule_id`, a `"value"` entry has
+ * `rule_id: null` — the value's hash is deliberately not on the wire.
+ */
+export interface CredentialWhitelistEntry {
+  id: number;
+  kind: "rule" | "value";
+  rule_id: string | null;
+  reason: string | null;
+  /** RFC 3339. */
+  created_at: string;
 }
 
 /* --- LLM Gateway (#421) — the control plane, /api/gateway/* --------------- */
