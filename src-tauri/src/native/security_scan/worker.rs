@@ -356,28 +356,34 @@ fn process_batch(db_path: &Path, batch: BTreeSet<Pending>, shared: &Shared) -> b
                             return;
                         }
                     }
-                    Err(e) => log::warn!(
-                        "credentials checker: skipping {} at {}: {e}",
-                        item.session_id,
-                        item.file_path
-                    ),
+                    // Named by its file path, never its session id — see the
+                    // note on the store failure below.
+                    Err(e) => log::warn!("credentials checker: skipping {}: {e}", item.file_path),
                 }
             });
         }
         // Only the readers' clones remain, so the loop ends when they do.
         drop(tx);
         for s in rx {
-            if let Err(e) = store::record_scan(
+            if store::record_scan(
                 &mut conn,
                 &s.item.session_id,
                 &s.item.project_path,
                 CURRENT_RULESET_VERSION,
                 &s.text,
                 &s.findings,
-            ) {
+            )
+            .is_err()
+            {
                 // Left pending: no scan-state row moved, so the next sweep
-                // retries it.
-                log::warn!("credentials checker: failed to store a scan: {e}");
+                // retries it. Named by its file path, and `record_scan`'s error
+                // is not logged: its text carries the session id, which
+                // CodeQL's cleartext-logging rule treats as sensitive in this
+                // module (PR #619), and the path already identifies the session.
+                log::warn!(
+                    "credentials checker: failed to store the scan of {}, leaving it pending",
+                    s.item.file_path
+                );
                 committed = false;
             }
         }
