@@ -108,7 +108,8 @@ fn worker() -> MutexGuard<'static, Option<Running>> {
 }
 
 /// Start or stop the worker to match the **stored**
-/// `credentials_checker_enabled` — at boot, and after a settings save flips it.
+/// `credentials_checker_enabled` — at boot, and after every settings save (a
+/// no-op unless the stored switch changed).
 ///
 /// The setting is read while [`WORKER`] is held, so two saves racing each
 /// other (on, then off) cannot apply their start and stop in the wrong order
