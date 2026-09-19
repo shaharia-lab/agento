@@ -3,10 +3,16 @@
  * in Claude session transcripts, grouped by session, and the three verdicts a
  * user can give a finding.
  *
- * Everything here is a read of `GET /api/security-scan/findings` plus three
- * writes (#604). The verdicts are instant — no confirmation — because a
- * whitelist entry is reversible from Settings, and "false positive" is the
- * user's own call about their own data.
+ * Two reads — `GET /api/security-scan/findings` and `…/status` — and three
+ * writes (#604). The verdicts are instant, with no confirmation, like every
+ * other row action in a context menu here. Nothing in this view undoes one:
+ * a false positive is permanent through the API, and a whitelist entry is
+ * removed with `DELETE /api/security-scan/whitelist/{id}`, whose UI is the
+ * Settings → Security whitelist (#606).
+ *
+ * The status read is what keeps the empty state honest: the checker is off by
+ * default, and "no findings" from a scan that never ran must not read as a
+ * clean result.
  *
  * The session is a `SessionLink` on the group's header rather than a column:
  * a left-click hands off to Sessions, and its right-click opens the session's
@@ -14,12 +20,18 @@
  */
 import { Fragment, useCallback, useMemo, useState } from "react";
 import { api } from "../lib/api";
-import type { CredentialFinding, CredentialFindingStatus } from "../lib/types";
+import type {
+  CredentialFinding,
+  CredentialFindingStatus,
+  CredentialsCheckerStatus,
+} from "../lib/types";
 import { describeError, useResource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath } from "../lib/format";
 import { Icon } from "../lib/icons";
 import { ContextMenu, Empty, type ContextMenuItem } from "../components/ui";
 import { SessionLink } from "./sessions/SessionLink";
+// `.statepane` and `.formerror` are declared there, as for `JobsView`.
+import "../styles/tasks.css";
 import "../styles/credentialschecker.css";
 
 const STATUS_LABEL: Record<CredentialFindingStatus, string> = {
@@ -45,13 +57,17 @@ function Confidence({ level }: { level: CredentialFinding["confidence"] }) {
 /**
  * Findings by session, in the order the server sent them (newest first), so a
  * group sits where its most recent finding would.
+ *
+ * Keyed on the id **and** the project path, as the store is: one session id can
+ * appear under two project paths, and those are two groups, not one.
  */
 function groupBySession(rows: CredentialFinding[]): [string, CredentialFinding[]][] {
   const groups = new Map<string, CredentialFinding[]>();
   for (const f of rows) {
-    const group = groups.get(f.session_id);
+    const key = `${f.session_id}\0${f.project_path}`;
+    const group = groups.get(key);
     if (group) group.push(f);
-    else groups.set(f.session_id, [f]);
+    else groups.set(key, [f]);
   }
   return [...groups];
 }
@@ -59,6 +75,10 @@ function groupBySession(rows: CredentialFinding[]): [string, CredentialFinding[]
 export function CredentialsCheckerView() {
   const findings = useResource<CredentialFinding[] | null>(
     (signal) => api.get("/security-scan/findings", signal),
+    []
+  );
+  const status = useResource<CredentialsCheckerStatus>(
+    (signal) => api.get("/security-scan/status", signal),
     []
   );
   const [selected, setSelected] = useState<number>();
@@ -78,13 +98,14 @@ export function CredentialsCheckerView() {
       try {
         await api.post<unknown>(path, body);
         findings.reload();
+        status.reload();
       } catch (err) {
         setActionError(describeError(err));
       } finally {
         setBusy(false);
       }
     },
-    [findings]
+    [findings, status]
   );
 
   const menuFinding = menu && rows.find((f) => f.id === menu.id);
@@ -100,7 +121,7 @@ export function CredentialsCheckerView() {
         },
         {
           label: "Whitelist this value",
-          icon: "shield",
+          icon: "key",
           disabled: busy,
           onSelect: () =>
             void act(`/security-scan/findings/${menuFinding.id}/whitelist`),
@@ -116,6 +137,12 @@ export function CredentialsCheckerView() {
     : [];
 
   const loading = findings.loading && !findings.data;
+  const off = status.data ? !status.data.enabled : undefined;
+
+  const refresh = () => {
+    findings.reload();
+    status.reload();
+  };
 
   return (
     <div className="panes">
@@ -124,10 +151,19 @@ export function CredentialsCheckerView() {
           <span className="toolbar__sub tnum">
             {rows.length} {rows.length === 1 ? "finding" : "findings"}
             {rows.length > 0 ? ` · ${openCount} open` : ""}
+            {off ? " · checker off" : ""}
+            {status.data?.last_scanned_at
+              ? ` · last scan ${relativeTime(status.data.last_scanned_at)}`
+              : ""}
           </span>
           <div className="spacer" />
           {actionError && <span className="formerror">{actionError}</span>}
-          <button className="iconbtn" title="Refresh" onClick={findings.reload}>
+          {status.error && (
+            <span className="formerror">
+              Couldn't read the checker's status: {status.error}
+            </span>
+          )}
+          <button className="iconbtn" title="Refresh" onClick={refresh}>
             <Icon name="refresh" size={14} />
           </button>
         </div>
@@ -140,12 +176,24 @@ export function CredentialsCheckerView() {
             title="Couldn't load findings"
             text={findings.error}
             action={
-              <button className="btn" onClick={findings.reload}>
+              <button className="btn" onClick={refresh}>
                 <Icon name="refresh" size={13} />
                 Retry
               </button>
             }
           />
+        ) : rows.length === 0 && off ? (
+          <Empty
+            icon="key"
+            title="The Credentials Checker is off"
+            text="The background scan is switched off, so no session has been checked for leaked credentials."
+          />
+        ) : rows.length === 0 && off === undefined ? (
+          // The status read failed or is still in flight: whether anything was
+          // scanned is unknown, and an empty list must not claim a clean result.
+          <div className="statepane">
+            {status.error ? "Couldn't tell whether the checker has run." : "Loading…"}
+          </div>
         ) : rows.length === 0 ? (
           <Empty
             icon="key"
@@ -165,14 +213,14 @@ export function CredentialsCheckerView() {
                 </tr>
               </thead>
               <tbody>
-                {groups.map(([sessionId, items]) => (
-                  <Fragment key={sessionId}>
+                {groups.map(([key, items]) => (
+                  <Fragment key={key}>
                     <tr className="rowgroup cc-group">
                       <td colSpan={5}>
                         <div className="cc-group__head">
                           <span className="cc-group__session">
                             <SessionLink
-                              sessionId={sessionId}
+                              sessionId={items[0].session_id}
                               projectPath={items[0].project_path || undefined}
                             />
                           </span>
