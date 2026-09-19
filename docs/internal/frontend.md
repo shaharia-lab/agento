@@ -145,7 +145,9 @@ src/
                  every run
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
-                 and revoking scoped API tokens (#405)
+                 and revoking scoped API tokens (#405); the Credentials
+                 Checker toggle, saved through the parent's settings draft
+                 and SaveBar, and its whitelist (#606)
     gateway/     the LLM Gateway section (#427) — its own sidebar section,
                  sharing nothing with Claude analytics or stats.ts
       OverviewView.tsx  status, the mint-once `llm` token, and the env snippets
