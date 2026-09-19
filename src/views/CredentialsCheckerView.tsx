@@ -152,6 +152,7 @@ export function CredentialsCheckerView() {
             {rows.length} {rows.length === 1 ? "finding" : "findings"}
             {rows.length > 0 ? ` · ${openCount} open` : ""}
             {off ? " · checker off" : ""}
+            {off === false && !status.data?.running ? " · scan not running" : ""}
             {status.data?.last_scanned_at
               ? ` · last scan ${relativeTime(status.data.last_scanned_at)}`
               : ""}
@@ -194,11 +195,25 @@ export function CredentialsCheckerView() {
           <div className="statepane">
             {status.error ? "Couldn't tell whether the checker has run." : "Loading…"}
           </div>
+        ) : rows.length === 0 && !status.data?.last_scanned_at ? (
+          <Empty
+            icon="key"
+            title="Not scanned yet"
+            text={
+              status.data?.running
+                ? "The first scan is running. Credentials it finds in Claude session transcripts land here, grouped by session."
+                : "The checker is on, but its background scan isn't running, so no session has been checked yet."
+            }
+          />
         ) : rows.length === 0 ? (
           <Empty
             icon="key"
             title="No findings"
-            text="Credentials the background scan finds in Claude session transcripts land here, grouped by session."
+            text={
+              status.data?.running
+                ? "Credentials the background scan finds in Claude session transcripts land here, grouped by session."
+                : `Nothing was found as of the last scan, ${relativeTime(status.data?.last_scanned_at)}. The background scan isn't running now, so newer sessions haven't been checked.`
+            }
           />
         ) : (
           <div className="scroll" style={{ flex: 1, minHeight: 0 }}>
