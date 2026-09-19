@@ -11,12 +11,18 @@
 //! equality, and every stored `DATETIME` goes out as RFC 3339 through
 //! `security::tokens::wire_time`.
 //!
-//! **A finding's `match_hash` is not on the wire.** It is a hash of a leaked
-//! secret — not the secret, but a value that confirms a guess of it — so the
-//! list omits it, and whitelisting one value goes through
-//! `POST …/findings/{id}/whitelist`, which reads the hash server-side. The
-//! direct `POST /api/security-scan/whitelist` still accepts a `match_hash` for a
-//! caller that already holds one.
+//! **No `match_hash` is ever on the wire** — not on a finding, not on a
+//! whitelist entry. It is a plain SHA-256 of a leaked secret: not the secret,
+//! but a value that confirms a guess of it. Whitelisting one value goes through
+//! `POST …/findings/{id}/whitelist`, which reads the hash server-side, and a
+//! value entry is listed by its `kind`, `reason` and date. The direct
+//! `POST /api/security-scan/whitelist` still accepts a `match_hash` (the
+//! issue's value-level entry), for a caller that computed one itself.
+//!
+//! **One entry per target.** Both whitelist writes go through
+//! `store::ensure_whitelist_entry`, so repeating one answers the existing entry
+//! with `200` instead of `201` and a second row; a rule-level entry must name a
+//! rule in `rules::compiled()`, or it would be stored and never match.
 //!
 //! `GET /api/security-scan/status` reports `enabled` from the stored setting and
 //! `running` from the worker itself: the two differ when the worker failed to
@@ -146,13 +152,13 @@ impl From<store::FindingRecord> for FindingRow {
     }
 }
 
-/// One whitelist entry on the wire. Exactly one of `rule_id` and `match_hash`
-/// is non-null.
+/// One whitelist entry on the wire. `kind` is `"rule"` (and `rule_id` names
+/// it) or `"value"` (and `rule_id` is `null`); the value's hash is not sent.
 #[derive(Debug, serde::Serialize)]
 struct WhitelistRow {
     id: i64,
+    kind: &'static str,
     rule_id: Option<String>,
-    match_hash: Option<String>,
     reason: Option<String>,
     /// RFC 3339.
     created_at: String,
@@ -162,8 +168,8 @@ impl From<store::WhitelistEntry> for WhitelistRow {
     fn from(e: store::WhitelistEntry) -> Self {
         Self {
             id: e.id,
+            kind: if e.rule_id.is_some() { "rule" } else { "value" },
             rule_id: e.rule_id,
-            match_hash: e.match_hash,
             reason: e.reason,
             created_at: wire_time(&e.created_at),
         }
@@ -275,9 +281,8 @@ fn reason_of(reason: Option<String>) -> Option<String> {
 /// `POST /api/security-scan/findings/{id}/whitelist` — whitelist the finding's
 /// value by its hash, which suppresses every finding of that value.
 ///
-/// The body is optional (`{"reason": …}`). A value that already has an entry is
-/// answered with that entry and `200` rather than a second one, so a repeated
-/// click does not leave two entries that each have to be deleted to re-open it.
+/// The body is optional (`{"reason": …}`). `201` with the new entry, or `200`
+/// with the one that already covers this value.
 fn whitelist_finding(
     db_path: &std::path::Path,
     raw_id: &str,
@@ -302,26 +307,14 @@ fn whitelist_finding(
         Some(Some(hash)) => hash,
     };
 
-    if let Some(existing) = store::list_whitelist(&conn)
-        .map_err(WriteError::Fallback)?
-        .into_iter()
-        .find(|e| e.match_hash.as_deref() == Some(hash.as_str()))
-    {
-        // The entry already suppressed this value's `open` findings when it
-        // was added, so a second one would change nothing but the delete count.
-        return Ok(Answer::json_status(
-            StatusCode::OK,
-            encode(&WhitelistRow::from(existing), "whitelist entry")
-                .map_err(WriteError::Fallback)?,
-        ));
-    }
-
     let reason = reason_of(req.reason);
-    let entry_id =
-        store::add_whitelist_entry(&mut conn, &WhitelistTarget::Hash(hash), reason.as_deref())
+    let (entry_id, created) =
+        store::ensure_whitelist_entry(&mut conn, &WhitelistTarget::Hash(hash), reason.as_deref())
             .map_err(WriteError::Fallback)?;
-    log::info!("credential finding whitelisted finding_id={id} entry_id={entry_id}");
-    created_entry(&conn, entry_id)
+    log::info!(
+        "credential finding whitelisted finding_id={id} entry_id={entry_id} created={created}"
+    );
+    entry_answer(&conn, entry_id, created)
 }
 
 /// `POST /api/security-scan/findings/{id}/false-positive`. `204`.
@@ -347,13 +340,22 @@ struct AddWhitelistRequest {
     reason: Option<String>,
 }
 
-/// `POST /api/security-scan/whitelist`. `201` with the new entry.
+/// `POST /api/security-scan/whitelist`. `201` with the new entry, or `200` with
+/// the one that already names this target.
 fn add_whitelist(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteError> {
     let req: AddWhitelistRequest = writes::decode_body(body)?;
     let rule_id = reason_of(req.rule_id);
     let match_hash = reason_of(req.match_hash);
     let target = match (rule_id, match_hash) {
-        (Some(rule), None) => WhitelistTarget::Rule(rule),
+        (Some(rule), None) => {
+            if !super::rules::compiled().iter().any(|(r, _)| r.id == rule) {
+                return Err(WriteError::validation(
+                    "rule_id",
+                    format!("no detection rule has the id {rule:?}"),
+                ));
+            }
+            WhitelistTarget::Rule(rule)
+        }
         (None, Some(hash)) => {
             if !store::is_match_hash(&hash) {
                 return Err(WriteError::validation(
@@ -373,21 +375,31 @@ fn add_whitelist(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, Write
 
     let mut conn = open_for_write(db_path)?;
     let reason = reason_of(req.reason);
-    let entry_id = store::add_whitelist_entry(&mut conn, &target, reason.as_deref())
+    let (entry_id, created) = store::ensure_whitelist_entry(&mut conn, &target, reason.as_deref())
         .map_err(WriteError::Fallback)?;
-    log::info!("credential whitelist entry added entry_id={entry_id}");
-    created_entry(&conn, entry_id)
+    log::info!("credential whitelist entry added entry_id={entry_id} created={created}");
+    entry_answer(&conn, entry_id, created)
 }
 
-/// `201` with the entry just written, read back so the answer is the stored row.
-fn created_entry(conn: &rusqlite::Connection, entry_id: i64) -> Result<Answer, WriteError> {
+/// The entry, read back so the answer is the stored row: `201` when this
+/// request created it, `200` when it already existed.
+fn entry_answer(
+    conn: &rusqlite::Connection,
+    entry_id: i64,
+    created: bool,
+) -> Result<Answer, WriteError> {
     let entry = store::list_whitelist(conn)
         .map_err(WriteError::Fallback)?
         .into_iter()
         .find(|e| e.id == entry_id)
         .ok_or_else(|| WriteError::Fallback(format!("whitelist entry {entry_id} vanished")))?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
     Ok(Answer::json_status(
-        StatusCode::CREATED,
+        status,
         encode(&WhitelistRow::from(entry), "whitelist entry").map_err(WriteError::Fallback)?,
     ))
 }
@@ -434,11 +446,11 @@ mod tests {
     }
 
     fn alpha() -> Finding {
-        finding("rule-a", "leaked-value-alpha-0001")
+        finding("github-pat", "leaked-value-alpha-0001")
     }
 
     fn bravo() -> Finding {
-        finding("rule-b", "leaked-value-bravo-0002")
+        finding("aws-access-key-id", "leaked-value-bravo-0002")
     }
 
     fn migrated() -> NamedTempFile {
@@ -582,25 +594,25 @@ mod tests {
     fn findings_are_listed_newest_first_filtered_and_without_their_hash() {
         let file = migrated();
         scan(&file, "s1", &[alpha(), bravo()]);
-        let a = id_of(&file, "s1", "rule-a");
-        let b = id_of(&file, "s1", "rule-b");
+        let a = id_of(&file, "s1", "github-pat");
+        let b = id_of(&file, "s1", "aws-access-key-id");
         store::mark_false_positive(&conn(&file), b).unwrap();
 
         // One scan stamps both rows alike, so `id` decides: newest first.
         assert_eq!(
             listed(&file, ""),
             vec![
-                (b, "rule-b".into(), "false_positive".into()),
-                (a, "rule-a".into(), "open".into())
+                (b, "aws-access-key-id".into(), "false_positive".into()),
+                (a, "github-pat".into(), "open".into())
             ]
         );
         assert_eq!(
             listed(&file, "status=open"),
-            vec![(a, "rule-a".into(), "open".into())]
+            vec![(a, "github-pat".into(), "open".into())]
         );
         assert_eq!(
             listed(&file, "status=false_positive"),
-            vec![(b, "rule-b".into(), "false_positive".into())]
+            vec![(b, "aws-access-key-id".into(), "false_positive".into())]
         );
         assert!(listed(&file, "status=whitelisted").is_empty());
 
@@ -659,20 +671,23 @@ mod tests {
         let file = migrated();
         scan(&file, "s1", &[alpha(), bravo()]);
         scan(&file, "s2", &[alpha()]);
-        let a1 = id_of(&file, "s1", "rule-a");
-        let a2 = id_of(&file, "s2", "rule-a");
-        let b1 = id_of(&file, "s1", "rule-b");
+        let a1 = id_of(&file, "s1", "github-pat");
+        let a2 = id_of(&file, "s2", "github-pat");
+        let b1 = id_of(&file, "s1", "aws-access-key-id");
 
         let path = format!("/api/security-scan/findings/{a1}/whitelist");
         let answer = call(&file, "POST", &path, "", r#"{"reason":"  test fixture  "}"#);
         assert_eq!(answer.status, StatusCode::CREATED);
         let entry = json(&answer);
-        assert_eq!(
-            entry["match_hash"],
-            store::hash_match("leaked-value-alpha-0001")
-        );
+        assert_eq!(entry["kind"], "value");
         assert_eq!(entry["rule_id"], Value::Null);
         assert_eq!(entry["reason"], "test fixture");
+        // The hash is resolved server-side and never answered, here or in
+        // the list.
+        let hash = store::hash_match("leaked-value-alpha-0001");
+        assert!(!std::str::from_utf8(answer.body.as_deref().unwrap())
+            .unwrap()
+            .contains(&hash));
 
         // The same value in another session went with it; another value did not.
         assert_eq!(status_of(&file, a1), "whitelisted");
@@ -691,13 +706,16 @@ mod tests {
         assert_eq!(json(&again)["id"], entry["id"]);
         let list = call(&file, "GET", "/api/security-scan/whitelist", "", "");
         assert_eq!(json(&list).as_array().unwrap().len(), 1);
+        assert!(!std::str::from_utf8(list.body.as_deref().unwrap())
+            .unwrap()
+            .contains(&hash));
     }
 
     #[test]
     fn whitelisting_needs_a_finding_with_a_hash() {
         let file = migrated();
         scan(&file, "s1", &[alpha()]);
-        let a = id_of(&file, "s1", "rule-a");
+        let a = id_of(&file, "s1", "github-pat");
 
         for path in [
             "/api/security-scan/findings/999/whitelist",
@@ -732,7 +750,7 @@ mod tests {
     fn a_false_positive_survives_a_rescan_and_the_whitelist() {
         let file = migrated();
         scan(&file, "s1", &[alpha()]);
-        let a = id_of(&file, "s1", "rule-a");
+        let a = id_of(&file, "s1", "github-pat");
 
         let path = format!("/api/security-scan/findings/{a}/false-positive");
         let answer = call(&file, "POST", &path, "", "");
@@ -747,7 +765,7 @@ mod tests {
             "POST",
             "/api/security-scan/whitelist",
             "",
-            r#"{"rule_id":"rule-a"}"#,
+            r#"{"rule_id":"github-pat"}"#,
         );
         assert_eq!(rule.status, StatusCode::CREATED);
         assert_eq!(status_of(&file, a), "false_positive");
@@ -769,11 +787,13 @@ mod tests {
         let file = migrated();
         let hash = store::hash_match("leaked-value-alpha-0001");
         for body in [
-            format!(r#"{{"rule_id":"rule-a","match_hash":"{hash}"}}"#),
+            format!(r#"{{"rule_id":"github-pat","match_hash":"{hash}"}}"#),
             "{}".to_string(),
             r#"{"rule_id":"  ","match_hash":null}"#.to_string(),
             r#"{"match_hash":"not-a-hash"}"#.to_string(),
             format!(r#"{{"match_hash":"{}"}}"#, hash.to_uppercase()),
+            // Not a rule: it would be stored and never suppress anything.
+            r#"{"rule_id":"github-pats"}"#.to_string(),
         ] {
             let answer = call(&file, "POST", "/api/security-scan/whitelist", "", &body);
             assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
@@ -794,22 +814,44 @@ mod tests {
         );
         assert_eq!(by_hash.status, StatusCode::CREATED);
         let entry = json(&by_hash);
-        assert_eq!(entry["match_hash"], hash);
+        assert_eq!(entry["kind"], "value");
         assert_eq!(entry["reason"], Value::Null);
         assert!(entry["created_at"].as_str().unwrap().contains('T'));
+
+        // Repeating either kind of entry answers the one that exists.
+        let body = r#"{"rule_id":"github-pat"}"#;
+        let by_rule = call(&file, "POST", "/api/security-scan/whitelist", "", body);
+        assert_eq!(by_rule.status, StatusCode::CREATED);
+        assert_eq!(json(&by_rule)["kind"], "rule");
+        assert_eq!(json(&by_rule)["rule_id"], "github-pat");
+        let again = call(&file, "POST", "/api/security-scan/whitelist", "", body);
+        assert_eq!(again.status, StatusCode::OK);
+        assert_eq!(json(&again)["id"], json(&by_rule)["id"]);
+        let hash_again = format!(r#"{{"match_hash":"{hash}"}}"#);
+        let again = call(
+            &file,
+            "POST",
+            "/api/security-scan/whitelist",
+            "",
+            &hash_again,
+        );
+        assert_eq!(again.status, StatusCode::OK);
+        assert_eq!(json(&again)["id"], entry["id"]);
+        let list = call(&file, "GET", "/api/security-scan/whitelist", "", "");
+        assert_eq!(json(&list).as_array().unwrap().len(), 2);
     }
 
     #[test]
     fn deleting_an_entry_reopens_what_it_suppressed() {
         let file = migrated();
         scan(&file, "s1", &[alpha()]);
-        let a = id_of(&file, "s1", "rule-a");
+        let a = id_of(&file, "s1", "github-pat");
         let added = call(
             &file,
             "POST",
             "/api/security-scan/whitelist",
             "",
-            r#"{"rule_id":"rule-a"}"#,
+            r#"{"rule_id":"github-pat"}"#,
         );
         let entry = json(&added)["id"].as_i64().unwrap();
         assert_eq!(status_of(&file, a), "whitelisted");
@@ -867,13 +909,13 @@ mod tests {
 
         scan(&file, "s2", &[alpha(), bravo()]);
         scan(&file, "s3", &[bravo()]);
-        store::mark_false_positive(&conn(&file), id_of(&file, "s3", "rule-b")).unwrap();
+        store::mark_false_positive(&conn(&file), id_of(&file, "s3", "aws-access-key-id")).unwrap();
         call(
             &file,
             "POST",
             "/api/security-scan/whitelist",
             "",
-            r#"{"rule_id":"rule-a"}"#,
+            r#"{"rule_id":"github-pat"}"#,
         );
         assert_eq!(
             status()["findings"],

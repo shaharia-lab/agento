@@ -332,7 +332,8 @@ pub struct WhitelistEntry {
 /// Add a whitelist entry and **retroactively** suppress what it matches: every
 /// existing `open` finding with that rule id, or that value hash, becomes
 /// `whitelisted` in the same transaction (design doc §6). Answers the new
-/// entry's id.
+/// entry's id — or, when an entry already names this target, that entry's id,
+/// with nothing inserted. See [`ensure_whitelist_entry`].
 ///
 /// Only `open` findings move. A `false_positive` is the user's own verdict and
 /// is not the whitelist's to overwrite.
@@ -345,6 +346,23 @@ pub fn add_whitelist_entry(
     target: &WhitelistTarget,
     reason: Option<&str>,
 ) -> Result<i64, String> {
+    ensure_whitelist_entry(conn, target, reason).map(|(id, _)| id)
+}
+
+/// [`add_whitelist_entry`], also answering whether the entry was created
+/// (`true`) or already existed (`false`, and `reason` is not applied).
+///
+/// **At most one entry per target** (#604): a second, identical entry would
+/// change nothing it suppresses, but deleting one would then no longer re-open
+/// anything, which reads as a broken delete. The lookup and the insert share
+/// one `IMMEDIATE` transaction, so two racing requests — a double click — take
+/// the write lock in turn and the second finds the first's row; a deferred one
+/// would let both read "absent" and one fail its lock upgrade.
+pub fn ensure_whitelist_entry(
+    conn: &mut Connection,
+    target: &WhitelistTarget,
+    reason: Option<&str>,
+) -> Result<(i64, bool), String> {
     let (match_hash, rule_id) = match target {
         WhitelistTarget::Hash(hash) => {
             if !is_match_hash(hash) {
@@ -364,15 +382,30 @@ pub fn add_whitelist_entry(
     };
 
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("starting the whitelist write: {e}"))?;
-    tx.execute(
-        "INSERT INTO credential_whitelist (match_hash, rule_id, reason, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![match_hash, rule_id, reason, gotime::now_go_text()],
-    )
-    .map_err(|e| format!("adding a whitelist entry: {e}"))?;
-    let id = tx.last_insert_rowid();
+    // Exactly one of the two is non-NULL, as below.
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM credential_whitelist
+              WHERE rule_id = ?1 OR match_hash = ?2 ORDER BY id LIMIT 1",
+            params![rule_id, match_hash],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("looking up a whitelist entry: {e}"))?;
+    let (id, created) = match existing {
+        Some(id) => (id, false),
+        None => {
+            tx.execute(
+                "INSERT INTO credential_whitelist (match_hash, rule_id, reason, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![match_hash, rule_id, reason, gotime::now_go_text()],
+            )
+            .map_err(|e| format!("adding a whitelist entry: {e}"))?;
+            (tx.last_insert_rowid(), true)
+        }
+    };
 
     // One of the two parameters is NULL, and `x = NULL` is never true, so this
     // matches on exactly the column the entry sets.
@@ -385,7 +418,7 @@ pub fn add_whitelist_entry(
 
     tx.commit()
         .map_err(|e| format!("committing the whitelist entry: {e}"))?;
-    Ok(id)
+    Ok((id, created))
 }
 
 /// Delete one whitelist entry, and re-open what it alone was suppressing.
@@ -780,6 +813,28 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("rows");
         assert_eq!(rows, vec![("false_positive".to_string(), 2)]);
+    }
+
+    #[test]
+    fn a_target_gets_one_whitelist_entry() {
+        let mut conn = db();
+        let hash = WhitelistTarget::Hash(hash_match("leaked-value-alpha-0001"));
+        let rule = WhitelistTarget::Rule("rule-a".into());
+        let (first, created) = ensure_whitelist_entry(&mut conn, &hash, Some("one")).unwrap();
+        assert!(created);
+        assert_eq!(
+            ensure_whitelist_entry(&mut conn, &hash, Some("two")).unwrap(),
+            (first, false)
+        );
+        assert_eq!(add_whitelist_entry(&mut conn, &hash, None).unwrap(), first);
+        // A rule entry is a different target, even for the same finding.
+        let (by_rule, created) = ensure_whitelist_entry(&mut conn, &rule, None).unwrap();
+        assert!(created);
+        assert_ne!(by_rule, first);
+
+        let all = list_whitelist(&conn).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].reason.as_deref(), Some("one"));
     }
 
     #[test]

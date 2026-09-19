@@ -212,14 +212,14 @@
       "route": "/api/security-scan/whitelist",
       "status": "native",
       "owner": "#604",
-      "reason": "the whitelist entries, oldest first; each suppresses one rule or one value hash"
+      "reason": "the whitelist entries, oldest first; each suppresses one rule or one value. A value entry is listed by kind, reason and date -- its match_hash is never on the wire"
     },
     {
       "method": "POST",
       "route": "/api/security-scan/whitelist",
       "status": "native",
       "owner": "#604",
-      "reason": "adds a rule-level or value-level entry -- exactly one of rule_id and match_hash, else 422 -- and applies it to existing open findings in the same transaction; 201 with the entry"
+      "reason": "adds a rule-level or value-level entry -- exactly one of rule_id and match_hash, else 422, and a rule_id must name a detection rule -- and applies it to existing open findings in the same transaction; 201 with the entry, or 200 with the existing one when an entry already names that target"
     },
     {
       "method": "DELETE",
