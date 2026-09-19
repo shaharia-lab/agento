@@ -16,6 +16,7 @@ export type ViewId =
   | "gateway-models"
   | "gateway-usage"
   | "gateway-settings"
+  | "credentials-checker"
   | "settings"
   | "about";
 
@@ -72,6 +73,13 @@ export const SECTIONS: NavSection[] = [
       { id: "gateway-settings", label: "Gateway Settings", icon: "gear" },
     ],
   },
+  // Leaked credentials found in Claude session transcripts (#597). Not the
+  // Settings → Security tab, which manages Agento's own API tokens — hence its
+  // own icon as well as its own section.
+  {
+    caption: "Security",
+    items: [{ id: "credentials-checker", label: "Credentials Checker", icon: "key" }],
+  },
 ];
 
 export const VIEW_TITLES: Record<ViewId, string> = {
@@ -89,6 +97,7 @@ export const VIEW_TITLES: Record<ViewId, string> = {
   "gateway-models": "Gateway Models",
   "gateway-usage": "Gateway Usage",
   "gateway-settings": "Gateway Settings",
+  "credentials-checker": "Credentials Checker",
   settings: "Settings",
   about: "About Agento",
 };

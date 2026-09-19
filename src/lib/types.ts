@@ -838,6 +838,38 @@ export interface CreatedApiToken extends ApiTokenRow {
   token: string;
 }
 
+/* --- Credentials Checker (#604) — /api/security-scan/* -------------------- */
+
+export type CredentialFindingStatus = "open" | "whitelisted" | "false_positive";
+
+/**
+ * One finding from `GET /api/security-scan/findings`, newest first. The value
+ * itself never leaves the server — `masked_snippet` is already redacted, and
+ * the value's hash is deliberately not on the wire either.
+ */
+export interface CredentialFinding {
+  id: number;
+  session_id: string;
+  project_path: string;
+  rule_id: string;
+  confidence: "high" | "medium";
+  masked_snippet: string;
+  status: CredentialFindingStatus;
+  /** RFC 3339. */
+  detected_at: string;
+}
+
+/** `GET /api/security-scan/status`. */
+export interface CredentialsCheckerStatus {
+  /** The stored setting — off by default. */
+  enabled: boolean;
+  /** Whether the worker is running now; differs from `enabled` when it failed to start. */
+  running: boolean;
+  findings: { open: number; whitelisted: number; false_positive: number };
+  /** RFC 3339; `null` before the first scan. */
+  last_scanned_at: string | null;
+}
+
 /* --- LLM Gateway (#421) — the control plane, /api/gateway/* --------------- */
 
 /**

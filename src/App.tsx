@@ -17,6 +17,7 @@ import { GatewayProvidersView } from "./views/gateway/ProvidersView";
 import { GatewayModelsView } from "./views/gateway/ModelsView";
 import { GatewayUsageView } from "./views/gateway/UsageView";
 import { GatewaySettingsView } from "./views/gateway/SettingsView";
+import { CredentialsCheckerView } from "./views/CredentialsCheckerView";
 import {
   NavProvider,
   SECTIONS,
@@ -462,6 +463,7 @@ export default function App() {
                 onNavigate={navigate}
               />
             )}
+            {view === "credentials-checker" && <CredentialsCheckerView />}
             {view === "settings" && (
               <SettingsView theme={theme} onThemeChange={setTheme} />
             )}
