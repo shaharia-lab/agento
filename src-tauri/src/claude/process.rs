@@ -1392,17 +1392,15 @@ pub(crate) const ORPHAN_UNCLEAN_EXIT: &str = "orphaned: app did not exit cleanly
 ///
 /// The row's time is taken straight after `spawn()` returns, and `ps` reports
 /// elapsed time in whole seconds, so a match lands within about one second; the
-/// rest is headroom for a loaded machine. A pid reused by an unrelated process
-/// would have to have been started within the same few seconds as the CLI it
-/// replaced, which a pid space that wraps only after tens of thousands of
-/// spawns does not produce.
-#[cfg(unix)]
+/// rest is headroom for a loaded machine. Windows reports the creation time to
+/// 100ns and shares the constant: the headroom is for the machine, not the
+/// probe. A pid reused by an unrelated process would have to have been started
+/// within the same few seconds as the CLI it replaced, which a pid space that
+/// wraps only after tens of thousands of spawns does not produce.
 const ORPHAN_START_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What [`stop_orphan`] found at a recorded pid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// Windows never stops an orphan, so `Stopped` is only matched there.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum Orphan {
     /// Nothing there that is provably the recorded CLI: it has exited, or its
     /// pid now names a process that started at another time. Nothing was
@@ -1447,15 +1445,146 @@ pub(crate) fn stop_orphan(
     Orphan::Stopped { killed: false }
 }
 
-/// Windows has no start-time probe here, so no recorded pid can be proven to
-/// still be the CLI, and nothing is signalled: an orphan there is only marked.
-#[cfg(not(unix))]
+/// Windows: the same identity check and the same two steps, by handle rather
+/// than by group (#613). `GetProcessTimes` is the start-time probe, and the
+/// handle it is read through is held until the end — an open handle keeps the
+/// process object, and so its pid, from being reused, which closes the window
+/// between the check and the `taskkill` that a pid alone would leave open.
+///
+/// Both steps are the tree kill (see [`terminate_group`]), so `killed` is only
+/// `true` when the first `taskkill` did not finish the leader within `grace`.
+/// As on Unix, a leader that has exited is `NotOurs`: with no process there is
+/// no creation time to check.
+#[cfg(windows)]
 pub(crate) fn stop_orphan(
-    _pid: u32,
-    _started_at: std::time::SystemTime,
-    _grace: std::time::Duration,
+    pid: u32,
+    started_at: std::time::SystemTime,
+    grace: std::time::Duration,
 ) -> Orphan {
-    Orphan::NotOurs
+    let Some(process) = win32::Process::open(pid) else {
+        return Orphan::NotOurs;
+    };
+    let matches = process.created_at().is_some_and(|live_start| {
+        let gap = live_start
+            .duration_since(started_at)
+            .or_else(|_| started_at.duration_since(live_start))
+            .unwrap_or_default();
+        gap <= ORPHAN_START_TOLERANCE
+    });
+    if !matches || process.has_exited() {
+        return Orphan::NotOurs;
+    }
+    terminate_group(pid);
+    if process.wait(grace) {
+        return Orphan::Stopped { killed: false };
+    }
+    kill_group(pid);
+    Orphan::Stopped { killed: true }
+}
+
+/// The four `kernel32` calls the Windows arm of [`stop_orphan`] needs, spelled
+/// out rather than taking a Windows API crate for them — the same choice as
+/// [`CREATE_NEW_PROCESS_GROUP`]. `std` already links `kernel32`.
+#[cfg(windows)]
+mod win32 {
+    use std::ffi::c_void;
+    use std::time::{Duration, SystemTime};
+
+    type Handle = *mut c_void;
+
+    /// `FILETIME`: 100ns intervals since 1601-01-01 UTC, split in two words.
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x0000_1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_OBJECT_0: u32 = 0;
+    /// `WaitForSingleObject`'s `INFINITE`; a finite wait stays below it.
+    const INFINITE: u32 = u32::MAX;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn GetProcessTimes(
+            process: Handle,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn WaitForSingleObject(handle: Handle, millis: u32) -> u32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    /// An open process handle, closed on drop.
+    pub(super) struct Process(Handle);
+
+    impl Process {
+        /// `None` when there is no such process or it is not ours to query —
+        /// either way it cannot be proven to be the recorded CLI.
+        pub(super) fn open(pid: u32) -> Option<Self> {
+            // SAFETY: plain FFI call; a null return is the failure we check.
+            let handle =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+            (!handle.is_null()).then_some(Self(handle))
+        }
+
+        /// When the process was created, or `None` if Windows will not say.
+        pub(super) fn created_at(&self) -> Option<SystemTime> {
+            let mut creation = FileTime::default();
+            let (mut exit, mut kernel, mut user) = Default::default();
+            // SAFETY: a live handle opened with the query right, and four
+            // out-pointers to locals that outlive the call.
+            let ok = unsafe {
+                GetProcessTimes(self.0, &mut creation, &mut exit, &mut kernel, &mut user)
+            };
+            if ok == 0 {
+                return None;
+            }
+            super::filetime_to_system_time(
+                (u64::from(creation.high) << 32) | u64::from(creation.low),
+            )
+        }
+
+        /// Whether the process has already exited — a handle outlives it.
+        pub(super) fn has_exited(&self) -> bool {
+            self.wait(Duration::ZERO)
+        }
+
+        /// Waits up to `timeout` for the process to exit; `true` if it did.
+        pub(super) fn wait(&self, timeout: Duration) -> bool {
+            let millis =
+                u32::try_from(timeout.as_millis()).map_or(INFINITE - 1, |ms| ms.min(INFINITE - 1));
+            // SAFETY: a live handle opened with `SYNCHRONIZE`.
+            unsafe { WaitForSingleObject(self.0, millis) == WAIT_OBJECT_0 }
+        }
+    }
+
+    impl Drop for Process {
+        fn drop(&mut self) {
+            // SAFETY: the handle is ours and closed exactly once.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+/// A Windows `FILETIME` — 100ns intervals since 1601-01-01 UTC — as a
+/// `SystemTime`. `None` for a time before the Unix epoch, which no process
+/// Agento started can have.
+#[cfg(any(windows, test))]
+fn filetime_to_system_time(intervals: u64) -> Option<std::time::SystemTime> {
+    /// Seconds from 1601-01-01 to 1970-01-01.
+    const EPOCH_GAP_SECS: u64 = 11_644_473_600;
+    let since_1601 = std::time::Duration::from_secs(intervals / 10_000_000)
+        + std::time::Duration::from_nanos(intervals % 10_000_000 * 100);
+    let since_1970 = since_1601.checked_sub(std::time::Duration::from_secs(EPOCH_GAP_SECS))?;
+    std::time::UNIX_EPOCH.checked_add(since_1970)
 }
 
 /// Whether the live process `pid` started within [`ORPHAN_START_TOLERANCE`] of
@@ -1935,5 +2064,53 @@ mod tests {
         let status = waiter.join().expect("join").expect("wait");
         assert!(!status.success(), "stopped by the signal: {status:?}");
         assert!(!group_exists(pid));
+    }
+
+    /// The Windows probe reads a `FILETIME`; its epoch is 1601, not 1970.
+    #[test]
+    fn a_filetime_converts_to_system_time() {
+        const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+        assert_eq!(
+            filetime_to_system_time(UNIX_EPOCH_AS_FILETIME),
+            Some(std::time::UNIX_EPOCH)
+        );
+        assert_eq!(
+            filetime_to_system_time(UNIX_EPOCH_AS_FILETIME + 15_000_001),
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(1_500_000_100))
+        );
+        assert_eq!(filetime_to_system_time(UNIX_EPOCH_AS_FILETIME - 1), None);
+        assert!(filetime_to_system_time(u64::MAX).is_some(), "no overflow");
+    }
+
+    /// The Windows arm of `an_orphan_is_stopped_only_when_its_start_time_matches`:
+    /// `GetProcessTimes` is the identity and `taskkill /T /F` the stop. Runs in
+    /// `ci.yml`'s `windows_rules`, the only place it can.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_orphan_is_stopped_only_when_its_start_time_matches() {
+        use std::os::windows::process::CommandExt;
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .expect("spawn ping");
+        let pid = child.id();
+        let spawned = std::time::SystemTime::now();
+
+        let a_day_before = spawned - std::time::Duration::from_secs(86_400);
+        let grace = std::time::Duration::from_secs(5);
+        assert_eq!(stop_orphan(pid, a_day_before, grace), Orphan::NotOurs);
+        assert!(child.try_wait().expect("try_wait").is_none(), "left alone");
+
+        assert_eq!(
+            stop_orphan(pid, spawned, grace),
+            Orphan::Stopped { killed: false }
+        );
+        let status = child.wait().expect("wait");
+        assert!(!status.success(), "stopped by taskkill: {status:?}");
+        assert_eq!(stop_orphan(pid, spawned, grace), Orphan::NotOurs, "gone");
     }
 }
