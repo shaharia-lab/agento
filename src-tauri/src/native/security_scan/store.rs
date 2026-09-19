@@ -34,7 +34,7 @@
 //! `insights::store`'s header gives: a corpus can hold one session id under two
 //! project paths.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::scan::Finding;
 use crate::native::gotime;
@@ -119,7 +119,7 @@ pub fn hash_match(matched: &str) -> String {
 }
 
 /// Whether `hash` has [`hash_match`]'s shape: 64 lowercase hex digits.
-fn is_match_hash(hash: &str) -> bool {
+pub fn is_match_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -449,6 +449,131 @@ pub fn list_whitelist(conn: &Connection) -> Result<Vec<WhitelistEntry>, String> 
         .map_err(|e| format!("reading the whitelist: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("reading the whitelist: {e}"))
+}
+
+/// One stored finding, as the `/api` surface reads it (#604).
+///
+/// `match_hash` is here so a caller can whitelist by value without ever seeing
+/// the value; `None` on a row written before migration 43 and not rescanned
+/// since. `detected_at` is the stored text, not the wire form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingRecord {
+    pub id: i64,
+    pub session_id: String,
+    pub project_path: String,
+    pub rule_id: String,
+    pub confidence: String,
+    pub masked_snippet: String,
+    pub status: String,
+    pub detected_at: String,
+    pub match_hash: Option<String>,
+}
+
+/// The three values `credential_findings.status` holds, in the order a reader
+/// scans them.
+pub const STATUSES: [&str; 3] = ["open", "whitelisted", "false_positive"];
+
+/// Every finding, or only those with `status`, newest first. `id` breaks a tie
+/// on `detected_at`, which one scan writes identically for every match it finds.
+pub fn list_findings(
+    conn: &Connection,
+    status: Option<&str>,
+) -> Result<Vec<FindingRecord>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, project_path, rule_id, confidence, masked_snippet,
+                    status, detected_at, match_hash
+               FROM credential_findings
+              WHERE ?1 IS NULL OR status = ?1
+              ORDER BY detected_at DESC, id DESC",
+        )
+        .map_err(|e| format!("preparing the findings read: {e}"))?;
+    let rows = stmt
+        .query_map(params![status], |row| {
+            Ok(FindingRecord {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                project_path: row.get(2)?,
+                rule_id: row.get(3)?,
+                confidence: row.get(4)?,
+                masked_snippet: row.get(5)?,
+                status: row.get(6)?,
+                detected_at: row.get(7)?,
+                match_hash: row.get(8)?,
+            })
+        })
+        .map_err(|e| format!("reading the findings: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("reading the findings: {e}"))
+}
+
+/// One finding's `match_hash`: `None` when no finding has that id, `Some(None)`
+/// when it has but its hash was never computed (a row older than migration 43).
+pub fn finding_match_hash(conn: &Connection, id: i64) -> Result<Option<Option<String>>, String> {
+    conn.query_row(
+        "SELECT match_hash FROM credential_findings WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(|e| format!("reading finding {id}: {e}"))
+}
+
+/// Mark one finding `false_positive`, whatever its status was. Answers whether
+/// the finding exists.
+///
+/// The verdict is the user's and outlives rescans: [`record_scan`] never moves a
+/// row out of `false_positive`, and neither whitelist write touches one.
+pub fn mark_false_positive(conn: &Connection, id: i64) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "UPDATE credential_findings SET status = 'false_positive' WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("marking finding {id} a false positive: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// What `GET /api/security-scan/status` reports from the tables.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub open: i64,
+    pub whitelisted: i64,
+    pub false_positive: i64,
+    /// The latest `credential_scan_state.scanned_at`, as stored; `None` before
+    /// the first scan.
+    pub last_scanned_at: Option<String>,
+}
+
+/// Finding counts by status, and when a session was last scanned.
+pub fn summary(conn: &Connection) -> Result<Summary, String> {
+    let mut out = Summary::default();
+    let mut stmt = conn
+        .prepare("SELECT status, COUNT(*) FROM credential_findings GROUP BY status")
+        .map_err(|e| format!("preparing the finding counts: {e}"))?;
+    let counts = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| format!("counting the findings: {e}"))?;
+    for count in counts {
+        let (status, n) = count.map_err(|e| format!("counting the findings: {e}"))?;
+        match status.as_str() {
+            "open" => out.open = n,
+            "whitelisted" => out.whitelisted = n,
+            "false_positive" => out.false_positive = n,
+            // Nothing this module writes; not a reason to fail the read.
+            _ => {}
+        }
+    }
+    out.last_scanned_at = conn
+        .query_row(
+            "SELECT MAX(scanned_at) FROM credential_scan_state",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| format!("reading the last scan time: {e}"))?;
+    Ok(out)
 }
 
 #[cfg(test)]
