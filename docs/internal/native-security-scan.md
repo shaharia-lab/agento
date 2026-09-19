@@ -14,10 +14,11 @@ statement; the rules below are the ones a change is most likely to break.
 ## The worker (#603)
 
 - **It runs only while `credentials_checker_enabled` is on.** `lib.rs` calls
-  `worker::start_if_enabled` at boot, and the settings `PUT` calls
-  `worker::apply_setting` on a flip — and only on a flip
-  (`only_a_flip_of_the_credentials_checker_reaches_its_worker`). Off means no
-  thread and nothing read.
+  `worker::sync` at boot, and the settings `PUT` calls it again on a flip — and
+  only on a flip (`only_a_flip_of_the_credentials_checker_reaches_its_worker`).
+  `sync` reads the *stored* flag under the worker lock, so racing saves cannot
+  leave a worker running under a stored "off". Off means no thread and nothing
+  read.
 - **It is stoppable, unlike `insights::worker`.** The running worker is a
   `Mutex<Option<..>>` rather than a `OnceLock`; `stop` sets the worker's
   `stopped` flag and drops its sender, and the loop checks the flag before
@@ -26,8 +27,13 @@ statement; the rules below are the ones a change is most likely to break.
   safe because `store::record_scan` is one idempotent transaction per session.
 - **Incremental and periodic, like insights.** `scan.rs` announces changed
   sessions to both workers from the same `outcome.notifications`; the
-  five-minute sweep over `store::needs_scanning` is what picks up a ruleset
-  bump and any overflowed announcement.
+  five-minute sweep over `store::needs_scanning` picks up a ruleset bump.
+- **A changed session is marked before it is announced.** `needs_scanning`
+  compares versions only, so `scan.rs` calls `store::mark_changed` (resets
+  `ruleset_version` to 0) on every changed session first — whether or not the
+  worker runs. Without it, an already-scanned session whose announcement was
+  dropped (full queue, checker off) is never rescanned
+  (`a_changed_session_whose_announcement_was_dropped_is_swept`).
 - **The scanned text is uncapped and nothing is dropped as injected** — unlike
   the search index, a leak detector cannot afford to miss text. Readers hand
   results to the single writer over a channel the size of the reader pool, so

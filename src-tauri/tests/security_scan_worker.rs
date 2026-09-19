@@ -1,5 +1,5 @@
 //! The Credentials Checker's worker, driven through its **real entry points**
-//! (#603): `start_if_enabled`, `start`, `stop` and `enqueue`.
+//! (#603): `sync`, `start`, `stop` and `enqueue`.
 //!
 //! ## This binary may contain exactly one test that starts the worker
 //!
@@ -131,7 +131,7 @@ fn the_worker_follows_the_setting_and_scans_the_corpus() {
 
     // 1. Off at boot: no thread, nothing touched.
     set_enabled(&db_path, false);
-    worker::start_if_enabled(db_path.clone());
+    worker::sync(db_path.clone());
     assert!(!worker::is_running(), "the checker is off");
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -142,7 +142,7 @@ fn the_worker_follows_the_setting_and_scans_the_corpus() {
 
     // 2. On at boot: the boot sweep scans the corpus with no announcement.
     set_enabled(&db_path, true);
-    worker::start_if_enabled(db_path.clone());
+    worker::sync(db_path.clone());
     assert!(worker::is_running());
     wait_for("the boot sweep's finding", || findings(&db_path, "s1") == 1);
 
@@ -154,16 +154,19 @@ fn the_worker_follows_the_setting_and_scans_the_corpus() {
         findings(&db_path, "s2") == 1
     });
 
-    // 4. Stopped: an announcement goes nowhere and the thread scans nothing.
-    worker::stop();
+    // 4. Switched off: `sync` stops it, an announcement goes nowhere and the
+    //    thread scans nothing.
+    set_enabled(&db_path, false);
+    worker::sync(db_path.clone());
     assert!(!worker::is_running());
     let s3 = seed_session(dir.path(), &db_path, "s3", 'c');
     worker::enqueue([s3]);
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(scan_states(&db_path, "s3"), 0, "a stopped worker scanned");
 
-    // 5. Started again: a fresh sweep picks up what was missed while stopped.
-    worker::start(db_path.clone());
+    // 5. Switched on again: a fresh sweep picks up what was missed while off.
+    set_enabled(&db_path, true);
+    worker::sync(db_path.clone());
     wait_for("the restarted sweep's finding", || {
         findings(&db_path, "s3") == 1
     });

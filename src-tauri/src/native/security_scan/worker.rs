@@ -38,10 +38,15 @@
 //! contents, and a search index can afford to miss text where a leak detector
 //! cannot. Image and other non-text blocks contribute nothing.
 //!
-//! A ruleset bump is noticed the way a `CURRENT_PROCESSOR_VERSION` bump is: by
-//! the periodic sweep, whose `store::needs_scanning` answers every session
-//! scanned under an older version. The incremental path only covers sessions
-//! the scan saw change.
+//! ## What makes a session pending
+//!
+//! A sweep scans what `store::needs_scanning` answers: no scan state, or state
+//! under an older ruleset. A ruleset bump is therefore noticed the way a
+//! `CURRENT_PROCESSOR_VERSION` bump is, by the periodic sweep. A *changed*
+//! session is made pending by `scan.rs` itself, which calls
+//! `store::mark_changed` on everything it announces before [`enqueue`] — so a
+//! change survives its announcement being dropped, by a full queue or by the
+//! checker being off, and the next sweep of any kind picks it up.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -101,36 +106,37 @@ fn worker() -> MutexGuard<'static, Option<Running>> {
     WORKER.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Start the worker if `credentials_checker_enabled` is on — the boot path.
+/// Start or stop the worker to match the **stored**
+/// `credentials_checker_enabled` — at boot, and after a settings save flips it.
 ///
-/// Off, or unreadable, means no thread and nothing touched: an unreadable
-/// setting is not a reason to start scanning a corpus the user may have kept
-/// the checker away from.
-pub fn start_if_enabled(db_path: PathBuf) {
+/// The setting is read while [`WORKER`] is held, so two saves racing each
+/// other (on, then off) cannot apply their start and stop in the wrong order
+/// and leave a worker running under a stored "off": whichever syncs last acts
+/// on the last value saved. Unreadable means off — an unreadable setting is not
+/// a reason to start scanning a corpus the user may have kept the checker away
+/// from.
+pub fn sync(db_path: PathBuf) {
+    let mut slot = worker();
     let enabled = match db::open_read_only(&db_path) {
         Ok(conn) => crate::native::settings::load_stored(&conn).credentials_checker_enabled,
         Err(e) => {
-            log::warn!("credentials checker: cannot read the setting, not starting: {e}");
-            return;
+            log::warn!("credentials checker: cannot read the setting, treating it as off: {e}");
+            false
         }
     };
     if enabled {
-        start(db_path);
-    }
-}
-
-/// Start or stop the worker to match a newly saved `credentials_checker_enabled`.
-pub fn apply_setting(enabled: bool, db_path: PathBuf) {
-    if enabled {
-        start(db_path);
+        start_locked(&mut slot, db_path);
     } else {
-        stop();
+        stop_locked(&mut slot);
     }
 }
 
 /// Start the worker: a boot sweep, then the queue. A no-op while one runs.
 pub fn start(db_path: PathBuf) {
-    let mut slot = worker();
+    start_locked(&mut worker(), db_path);
+}
+
+fn start_locked(slot: &mut Option<Running>, db_path: PathBuf) {
     if slot.is_some() {
         return;
     }
@@ -152,7 +158,11 @@ pub fn start(db_path: PathBuf) {
 /// Stop the worker. It finishes at most the batch it is writing; a no-op when
 /// none runs.
 pub fn stop() {
-    let Some(running) = worker().take() else {
+    stop_locked(&mut worker());
+}
+
+fn stop_locked(slot: &mut Option<Running>) {
+    let Some(running) = slot.take() else {
         return;
     };
     running.shared.stopped.store(true, Ordering::Release);
@@ -292,8 +302,9 @@ struct Scanned {
 /// it arrives.
 ///
 /// Readers hand results to this thread over a channel as small as the pool, so
-/// at most a few transcripts are in memory at once however large a batch is —
-/// the scanned text is uncapped, unlike a search document. Writes stay on this
+/// at most about twice the pool's worth of transcripts is in memory at once
+/// however large a batch is — the scanned text is uncapped, unlike a search
+/// document. Writes stay on this
 /// one thread, one `record_scan` transaction per session.
 ///
 /// Answers `false` only for a *database* failure. An unreadable transcript is
@@ -747,6 +758,34 @@ mod tests {
 
         sweep(&db_path, &Shared::default());
 
+        assert_eq!(findings(&db_path, "s1").len(), 1);
+    }
+
+    /// A session already scanned clean, then changed, is not pending by
+    /// version alone — `store::mark_changed`, which `scan.rs` calls on every
+    /// changed session, is what lets a sweep find it when its announcement was
+    /// dropped (a full queue, or the checker off).
+    #[test]
+    fn a_changed_session_whose_announcement_was_dropped_is_swept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let clean = seed_session(&dir, &db_path, "s1", "nothing secret here");
+        sweep(&db_path, &Shared::default());
+        assert!(scanned(&db_path, "s1") && findings(&db_path, "s1").is_empty());
+
+        // The transcript now leaks a token, and nothing announced it.
+        let line = json!({"type": "user", "message": {"role": "user", "content": token('h')}});
+        std::fs::write(&clean.file_path, format!("{line}\n")).expect("rewrite");
+        sweep(&db_path, &Shared::default());
+        assert!(
+            findings(&db_path, "s1").is_empty(),
+            "not pending by version"
+        );
+
+        let mut conn = db::open_read_write(&db_path).expect("open");
+        assert_eq!(store::mark_changed(&mut conn, &[clean]).expect("mark"), 1);
+        drop(conn);
+        sweep(&db_path, &Shared::default());
         assert_eq!(findings(&db_path, "s1").len(), 1);
     }
 

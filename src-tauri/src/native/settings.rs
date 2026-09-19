@@ -625,7 +625,7 @@ pub fn update(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> 
         db_path,
         body,
         super::scan::force_scan,
-        super::security_scan::worker::apply_setting,
+        super::security_scan::worker::sync,
     )
 }
 
@@ -642,7 +642,7 @@ fn update_with(
     db_path: &Path,
     body: &[u8],
     rescan: impl FnOnce(PathBuf),
-    credentials_checker: impl FnOnce(bool, PathBuf),
+    credentials_checker: impl FnOnce(PathBuf),
 ) -> Result<super::Answer, WriteError> {
     // Decoded first, exactly as Go does: a malformed body is a 400 before the
     // database is opened, let alone written.
@@ -671,7 +671,7 @@ fn update_with(
     // A flip starts or stops the worker (#603); a save that leaves the switch
     // where it was touches neither.
     if saved.credentials_checker_enabled != previous_checker {
-        credentials_checker(saved.credentials_checker_enabled, db_path.to_path_buf());
+        credentials_checker(db_path.to_path_buf());
     }
 
     // **The stored row, not a resolution of it.** `Update` assigns `incoming`
@@ -1655,18 +1655,18 @@ mod tests {
     }
 
     /// The same, also reporting what the save asked of the Credentials
-    /// Checker's worker: `Some(enabled)` on a flip, `None` otherwise.
+    /// Checker's worker: `Some(())` when the save asked it to sync.
     fn put_recording_effects(
         db: &std::path::Path,
         body: &str,
-    ) -> ((axum::http::StatusCode, String), bool, Option<bool>) {
+    ) -> ((axum::http::StatusCode, String), bool, Option<()>) {
         let mut rescanned = false;
         let mut checker = None;
         let result = update_with(
             db,
             body.as_bytes(),
             |_| rescanned = true,
-            |enabled, _| checker = Some(enabled),
+            |_| checker = Some(()),
         );
         let answered = match super::super::writes::finish(result) {
             Ok(answer) => (
@@ -1846,9 +1846,9 @@ mod tests {
         let on = r#"{"credentials_checker_enabled":true}"#;
         let off = r#"{"credentials_checker_enabled":false}"#;
 
-        assert_eq!(put_recording_effects(file.path(), on).2, Some(true));
+        assert_eq!(put_recording_effects(file.path(), on).2, Some(()));
         assert_eq!(put_recording_effects(file.path(), on).2, None, "already on");
-        assert_eq!(put_recording_effects(file.path(), off).2, Some(false));
+        assert_eq!(put_recording_effects(file.path(), off).2, Some(()));
         assert_eq!(
             put_recording_effects(file.path(), off).2,
             None,

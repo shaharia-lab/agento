@@ -562,15 +562,22 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
             file_path: n.file_path.to_string_lossy().into_owned(),
         }
     }));
-    // The same announcements, for the Credentials Checker (#603) — a no-op
-    // while the checker is off.
-    super::security_scan::worker::enqueue(outcome.notifications.iter().map(|n| {
-        super::security_scan::store::Pending {
+    // The same announcements, for the Credentials Checker (#603). Each changed
+    // session is marked for a rescan first, so a sweep finds it even when the
+    // announcement is dropped — a full queue, or the checker switched off.
+    let changed: Vec<super::security_scan::store::Pending> = outcome
+        .notifications
+        .iter()
+        .map(|n| super::security_scan::store::Pending {
             session_id: n.session_id.clone(),
             project_path: n.project_path.clone(),
             file_path: n.file_path.to_string_lossy().into_owned(),
-        }
-    }));
+        })
+        .collect();
+    if let Err(e) = super::security_scan::store::mark_changed(&mut conn, &changed) {
+        log::warn!("claude sessions: {e}");
+    }
+    super::security_scan::worker::enqueue(changed);
 
     state()
         .lock()

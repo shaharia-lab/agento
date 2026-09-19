@@ -79,6 +79,38 @@ pub fn needs_scanning(conn: &Connection, ruleset_version: i64) -> Result<Vec<Pen
         .map_err(|e| format!("reading needs_scanning: {e}"))
 }
 
+/// Mark sessions whose transcripts changed as needing a rescan, by resetting
+/// the `ruleset_version` of their `credential_scan_state` rows to 0 (#603).
+///
+/// The scan calls this for every session it saw change, **whether or not the
+/// worker is running**. [`needs_scanning`] compares versions only, so without
+/// this an already-scanned session whose announcement was dropped — the queue
+/// overflowed, or the checker was off — would never be rescanned by any sweep.
+/// A session with no row is already pending, so this only updates rows that
+/// exist; with the checker never enabled it changes nothing. One transaction.
+pub fn mark_changed(conn: &mut Connection, sessions: &[Pending]) -> Result<usize, String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("starting the credential rescan mark: {e}"))?;
+    let mut marked = 0;
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "UPDATE credential_scan_state SET ruleset_version = 0
+                  WHERE session_id = ?1 AND project_path = ?2",
+            )
+            .map_err(|e| format!("preparing the credential rescan mark: {e}"))?;
+        for p in sessions {
+            marked += stmt
+                .execute(params![p.session_id, p.project_path])
+                .map_err(|e| format!("marking {} for a credential rescan: {e}", p.session_id))?;
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("committing the credential rescan mark: {e}"))?;
+    Ok(marked)
+}
+
 /// The one hashing scheme `match_hash` uses on both tables: SHA-256 of the
 /// matched bytes, lowercase hex. See the module header.
 pub fn hash_match(matched: &str) -> String {

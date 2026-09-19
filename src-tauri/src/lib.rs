@@ -539,7 +539,7 @@ pub fn run() {
                     // terms — but only when the user has switched it on: off
                     // means no thread and nothing read. The settings `PUT`
                     // starts and stops it on a flip.
-                    crate::native::security_scan::worker::start_if_enabled(db.clone());
+                    crate::native::security_scan::worker::sync(db.clone());
 
                     crate::native::scan::ensure_scan(db);
                 }
