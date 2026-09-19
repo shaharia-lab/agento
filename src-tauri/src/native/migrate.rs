@@ -42,6 +42,9 @@
 //! tables, none of which may ever hold a raw secret (#600, epic #597).
 //! Migration **42** is the twelfth: `user_settings.credentials_checker_enabled`,
 //! the Credentials Checker's on/off switch, default off (#601, epic #597).
+//! Migration **43** is the thirteenth: `credential_findings.match_hash` and its
+//! index, so a whitelist entry added by value can suppress existing findings of
+//! that value retroactively (#602, epic #597).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -273,8 +276,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 42, "expected 42 migrations");
-        assert_eq!(expected_version(), 42);
+        assert_eq!(all.len(), 43, "expected 43 migrations");
+        assert_eq!(expected_version(), 43);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -368,7 +371,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 42);
+        assert_eq!(current_version(&conn).expect("version"), 43);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -609,7 +612,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 42);
+        assert_eq!(current_version(&conn).expect("version"), 43);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -717,7 +720,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 42);
+        assert_eq!(current_version(&conn).expect("version"), 43);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -726,7 +729,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 42);
+        assert_eq!(recorded, 43);
     }
 
     #[test]

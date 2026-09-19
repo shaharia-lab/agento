@@ -188,6 +188,10 @@
     {
       "version": 42,
       "sql": "\n-- Whether the Credentials Checker runs at all (#601, epic #597). Authored here\n-- like 31-41, and additive, so an older build opening this database applies\n-- nothing and simply never reads the column.\n--\n-- Default off: the checker reads every stored session transcript, so it runs\n-- only once the user has turned it on. While this is 0 the worker does not\n-- start and nothing reads the credential tables 41 created.\n--\n-- NOT NULL DEFAULT 0 rather than nullable, following 38: the one additive shape\n-- SQLite applies without rebuilding the table, and it leaves \"off\" a single\n-- spelling -- which is what every existing row necessarily meant.\nALTER TABLE user_settings ADD COLUMN credentials_checker_enabled INTEGER NOT NULL DEFAULT 0;\n"
+    },
+    {
+      "version": 43,
+      "sql": "\n-- `credential_findings.match_hash` (#602, epic #597). Authored here like 31-42,\n-- and additive: nullable, so a finding written before it simply has none, and\n-- an older build opening this database never reads it.\n--\n-- The same hash `credential_whitelist.match_hash` holds -- SHA-256 of the\n-- matched bytes, lowercase hex, computed only by security_scan::store -- so a\n-- whitelist entry added for one value can find every existing finding of that\n-- value without the value itself ever being stored. Indexed because that\n-- lookup is the whole reason the column exists.\nALTER TABLE credential_findings ADD COLUMN match_hash TEXT;\nCREATE INDEX idx_credential_findings_match_hash ON credential_findings(match_hash);\n"
     }
   ]
 }
