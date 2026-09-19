@@ -185,6 +185,55 @@
       "status": "native",
       "owner": "#566",
       "reason": "the Slack inbound on/off switch -- one route and one column, deliberately not a field on PUT /api/integrations/{id}, whose body is byte-exact against Go and whose three-valued credentials contract the UI would otherwise have to resend to flip a boolean. Refuses before it writes: 404 for an unknown id, 400 for any type but slack, and 422 naming credentials.app_token when enabling a row that stores no app-level token. Disabling is never refused on the credential axis, so a row whose credentials were scrubbed cannot get stuck on. The 400 is unconditional, so PUT /api/integrations/{id} clears inbound_enabled whenever it invalidates the switch -- a type change away from slack, or a replacing blob that drops the token -- rather than leaving a row nothing can turn off. It ends in a registry reload, which is what starts and stops the socket worker; inbound_status and inbound_error are the worker's to write and this route never touches them"
+    },
+    {
+      "method": "GET",
+      "route": "/api/security-scan/findings",
+      "status": "native",
+      "owner": "#604",
+      "reason": "the Credentials Checker's findings, newest first, optionally narrowed by ?status=open|whitelisted|false_positive; any other status value is a 400 rather than an empty list. Each carries the masked snippet only -- never the matched value, and not its match_hash either, which confirms a guess of the secret"
+    },
+    {
+      "method": "POST",
+      "route": "/api/security-scan/findings/{id}/whitelist",
+      "status": "native",
+      "owner": "#604",
+      "reason": "whitelists the finding's value by its stored match_hash, read server-side, which retroactively suppresses every open finding of that value; 201 with the new entry, 200 with the existing one when the value is already whitelisted, 404 for an unknown finding and 422 for a finding whose hash predates migration 43"
+    },
+    {
+      "method": "POST",
+      "route": "/api/security-scan/findings/{id}/false-positive",
+      "status": "native",
+      "owner": "#604",
+      "reason": "marks one finding false_positive, a verdict no rescan and no whitelist write ever overwrites; 204, or 404 for an unknown finding"
+    },
+    {
+      "method": "GET",
+      "route": "/api/security-scan/whitelist",
+      "status": "native",
+      "owner": "#604",
+      "reason": "the whitelist entries, oldest first; each suppresses one rule or one value. A value entry is listed by kind, reason and date -- its match_hash is never on the wire"
+    },
+    {
+      "method": "POST",
+      "route": "/api/security-scan/whitelist",
+      "status": "native",
+      "owner": "#604",
+      "reason": "adds a rule-level or value-level entry -- exactly one of rule_id and match_hash, else 422, and a rule_id must name a detection rule -- and applies it to existing open findings in the same transaction; 201 with the entry, or 200 with the existing one when an entry already names that target"
+    },
+    {
+      "method": "DELETE",
+      "route": "/api/security-scan/whitelist/{id}",
+      "status": "native",
+      "owner": "#604",
+      "reason": "deletes an entry and re-opens the findings it alone was suppressing; 204, or 404 for an unknown id"
+    },
+    {
+      "method": "GET",
+      "route": "/api/security-scan/status",
+      "status": "native",
+      "owner": "#604",
+      "reason": "enabled (the stored setting), running (the worker in this process), finding counts by status and the last scan time; read-scoped, because it names no finding"
     }
   ]
 }

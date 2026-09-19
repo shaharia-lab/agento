@@ -34,7 +34,7 @@
 //! `insights::store`'s header gives: a corpus can hold one session id under two
 //! project paths.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::scan::Finding;
 use crate::native::gotime;
@@ -119,7 +119,7 @@ pub fn hash_match(matched: &str) -> String {
 }
 
 /// Whether `hash` has [`hash_match`]'s shape: 64 lowercase hex digits.
-fn is_match_hash(hash: &str) -> bool {
+pub fn is_match_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -332,7 +332,8 @@ pub struct WhitelistEntry {
 /// Add a whitelist entry and **retroactively** suppress what it matches: every
 /// existing `open` finding with that rule id, or that value hash, becomes
 /// `whitelisted` in the same transaction (design doc §6). Answers the new
-/// entry's id.
+/// entry's id — or, when an entry already names this target, that entry's id,
+/// with nothing inserted. See [`ensure_whitelist_entry`].
 ///
 /// Only `open` findings move. A `false_positive` is the user's own verdict and
 /// is not the whitelist's to overwrite.
@@ -345,6 +346,23 @@ pub fn add_whitelist_entry(
     target: &WhitelistTarget,
     reason: Option<&str>,
 ) -> Result<i64, String> {
+    ensure_whitelist_entry(conn, target, reason).map(|(id, _)| id)
+}
+
+/// [`add_whitelist_entry`], also answering whether the entry was created
+/// (`true`) or already existed (`false`, and `reason` is not applied).
+///
+/// **At most one entry per target** (#604): a second, identical entry would
+/// change nothing it suppresses, but deleting one would then no longer re-open
+/// anything, which reads as a broken delete. The lookup and the insert share
+/// one `IMMEDIATE` transaction, so two racing requests — a double click — take
+/// the write lock in turn and the second finds the first's row; a deferred one
+/// would let both read "absent" and one fail its lock upgrade.
+pub fn ensure_whitelist_entry(
+    conn: &mut Connection,
+    target: &WhitelistTarget,
+    reason: Option<&str>,
+) -> Result<(i64, bool), String> {
     let (match_hash, rule_id) = match target {
         WhitelistTarget::Hash(hash) => {
             if !is_match_hash(hash) {
@@ -364,15 +382,30 @@ pub fn add_whitelist_entry(
     };
 
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("starting the whitelist write: {e}"))?;
-    tx.execute(
-        "INSERT INTO credential_whitelist (match_hash, rule_id, reason, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![match_hash, rule_id, reason, gotime::now_go_text()],
-    )
-    .map_err(|e| format!("adding a whitelist entry: {e}"))?;
-    let id = tx.last_insert_rowid();
+    // Exactly one of the two is non-NULL, as below.
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM credential_whitelist
+              WHERE rule_id = ?1 OR match_hash = ?2 ORDER BY id LIMIT 1",
+            params![rule_id, match_hash],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("looking up a whitelist entry: {e}"))?;
+    let (id, created) = match existing {
+        Some(id) => (id, false),
+        None => {
+            tx.execute(
+                "INSERT INTO credential_whitelist (match_hash, rule_id, reason, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![match_hash, rule_id, reason, gotime::now_go_text()],
+            )
+            .map_err(|e| format!("adding a whitelist entry: {e}"))?;
+            (tx.last_insert_rowid(), true)
+        }
+    };
 
     // One of the two parameters is NULL, and `x = NULL` is never true, so this
     // matches on exactly the column the entry sets.
@@ -385,7 +418,7 @@ pub fn add_whitelist_entry(
 
     tx.commit()
         .map_err(|e| format!("committing the whitelist entry: {e}"))?;
-    Ok(id)
+    Ok((id, created))
 }
 
 /// Delete one whitelist entry, and re-open what it alone was suppressing.
@@ -449,6 +482,131 @@ pub fn list_whitelist(conn: &Connection) -> Result<Vec<WhitelistEntry>, String> 
         .map_err(|e| format!("reading the whitelist: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("reading the whitelist: {e}"))
+}
+
+/// One stored finding, as the `/api` surface reads it (#604).
+///
+/// `match_hash` is here so a caller can whitelist by value without ever seeing
+/// the value; `None` on a row written before migration 43 and not rescanned
+/// since. `detected_at` is the stored text, not the wire form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingRecord {
+    pub id: i64,
+    pub session_id: String,
+    pub project_path: String,
+    pub rule_id: String,
+    pub confidence: String,
+    pub masked_snippet: String,
+    pub status: String,
+    pub detected_at: String,
+    pub match_hash: Option<String>,
+}
+
+/// The three values `credential_findings.status` holds, in the order a reader
+/// scans them.
+pub const STATUSES: [&str; 3] = ["open", "whitelisted", "false_positive"];
+
+/// Every finding, or only those with `status`, newest first. `id` breaks a tie
+/// on `detected_at`, which one scan writes identically for every match it finds.
+pub fn list_findings(
+    conn: &Connection,
+    status: Option<&str>,
+) -> Result<Vec<FindingRecord>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, project_path, rule_id, confidence, masked_snippet,
+                    status, detected_at, match_hash
+               FROM credential_findings
+              WHERE ?1 IS NULL OR status = ?1
+              ORDER BY detected_at DESC, id DESC",
+        )
+        .map_err(|e| format!("preparing the findings read: {e}"))?;
+    let rows = stmt
+        .query_map(params![status], |row| {
+            Ok(FindingRecord {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                project_path: row.get(2)?,
+                rule_id: row.get(3)?,
+                confidence: row.get(4)?,
+                masked_snippet: row.get(5)?,
+                status: row.get(6)?,
+                detected_at: row.get(7)?,
+                match_hash: row.get(8)?,
+            })
+        })
+        .map_err(|e| format!("reading the findings: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("reading the findings: {e}"))
+}
+
+/// One finding's `match_hash`: `None` when no finding has that id, `Some(None)`
+/// when it has but its hash was never computed (a row older than migration 43).
+pub fn finding_match_hash(conn: &Connection, id: i64) -> Result<Option<Option<String>>, String> {
+    conn.query_row(
+        "SELECT match_hash FROM credential_findings WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(|e| format!("reading finding {id}: {e}"))
+}
+
+/// Mark one finding `false_positive`, whatever its status was. Answers whether
+/// the finding exists.
+///
+/// The verdict is the user's and outlives rescans: [`record_scan`] never moves a
+/// row out of `false_positive`, and neither whitelist write touches one.
+pub fn mark_false_positive(conn: &Connection, id: i64) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "UPDATE credential_findings SET status = 'false_positive' WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("marking finding {id} a false positive: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// What `GET /api/security-scan/status` reports from the tables.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub open: i64,
+    pub whitelisted: i64,
+    pub false_positive: i64,
+    /// The latest `credential_scan_state.scanned_at`, as stored; `None` before
+    /// the first scan.
+    pub last_scanned_at: Option<String>,
+}
+
+/// Finding counts by status, and when a session was last scanned.
+pub fn summary(conn: &Connection) -> Result<Summary, String> {
+    let mut out = Summary::default();
+    let mut stmt = conn
+        .prepare("SELECT status, COUNT(*) FROM credential_findings GROUP BY status")
+        .map_err(|e| format!("preparing the finding counts: {e}"))?;
+    let counts = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| format!("counting the findings: {e}"))?;
+    for count in counts {
+        let (status, n) = count.map_err(|e| format!("counting the findings: {e}"))?;
+        match status.as_str() {
+            "open" => out.open = n,
+            "whitelisted" => out.whitelisted = n,
+            "false_positive" => out.false_positive = n,
+            // Nothing this module writes; not a reason to fail the read.
+            _ => {}
+        }
+    }
+    out.last_scanned_at = conn
+        .query_row(
+            "SELECT MAX(scanned_at) FROM credential_scan_state",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| format!("reading the last scan time: {e}"))?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -655,6 +813,28 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("rows");
         assert_eq!(rows, vec![("false_positive".to_string(), 2)]);
+    }
+
+    #[test]
+    fn a_target_gets_one_whitelist_entry() {
+        let mut conn = db();
+        let hash = WhitelistTarget::Hash(hash_match("leaked-value-alpha-0001"));
+        let rule = WhitelistTarget::Rule("rule-a".into());
+        let (first, created) = ensure_whitelist_entry(&mut conn, &hash, Some("one")).unwrap();
+        assert!(created);
+        assert_eq!(
+            ensure_whitelist_entry(&mut conn, &hash, Some("two")).unwrap(),
+            (first, false)
+        );
+        assert_eq!(add_whitelist_entry(&mut conn, &hash, None).unwrap(), first);
+        // A rule entry is a different target, even for the same finding.
+        let (by_rule, created) = ensure_whitelist_entry(&mut conn, &rule, None).unwrap();
+        assert!(created);
+        assert_ne!(by_rule, first);
+
+        let all = list_whitelist(&conn).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].reason.as_deref(), Some("one"));
     }
 
     #[test]

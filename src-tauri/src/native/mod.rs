@@ -308,6 +308,7 @@ const ENDPOINTS: &[Endpoint] = &[
     // a credential is verified against.
     security::ENDPOINT,
     gateway_api::ENDPOINT,
+    security_scan::api::ENDPOINT,
     // The two entries that are not under `/api` at all; see their `claims`.
     trigger::ENDPOINT,
     health::ENDPOINT,
@@ -829,8 +830,8 @@ mod tests {
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
         //
-        // The file has **four owners** since #566, so the claimed set is the
-        // union of all four modules' consts. A fifth owner appends here;
+        // The file has **five owners** since #604, so the claimed set is the
+        // union of all five modules' consts. A sixth owner appends here;
         // leaving it out would silently weaken the assertion from set equality
         // to "the owners I remembered", which is the one-directional property
         // this test exists to escape.
@@ -839,6 +840,7 @@ mod tests {
             .chain(gateway_api::ROUTES.iter())
             .chain(tasks::ROUTES.iter())
             .chain(integrations::ROUTES.iter())
+            .chain(security_scan::api::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(
@@ -1046,6 +1048,7 @@ mod tests {
             "/api/gateway/settings",
             "/api/gateway/providers",
             "/api/gateway/status",
+            "/api/security-scan/status",
             // Outside `/api`, and reached with no credential by design (#405).
             security::JWKS_PATH,
         ];

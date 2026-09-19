@@ -7,8 +7,9 @@
 
 Everything lives in `src-tauri/src/native/security_scan/`: `rules.rs` (the
 vendored rule table and `CURRENT_RULESET_VERSION`), `scan.rs` (pure
-`text -> Vec<Finding>`), `store.rs` (the whitelist-aware persistence) and
-`worker.rs` (the background loop). Each module's `//!` header is the full
+`text -> Vec<Finding>`), `store.rs` (the whitelist-aware persistence),
+`worker.rs` (the background loop) and `api.rs` (the `/api/security-scan/*`
+routes). Each module's `//!` header is the full
 statement; the rules below are the ones a change is most likely to break.
 
 ## The worker (#603)
@@ -40,3 +41,25 @@ statement; the rules below are the ones a change is most likely to break.
   memory is bounded by the pool, not the batch.
 - **One start-driving test per binary**: `tests/security_scan_worker.rs` runs
   the whole lifecycle as one test, because the worker is process-wide.
+
+## The `/api` surface (#604)
+
+- **Seven routes, desktop-only.** `api::ROUTES` is the fifth owner of
+  `parity/desktop_routes.json` (set equality), not a row in the frozen Go
+  route files. `/api/security-scan/` is not under `/api/security/`, so the
+  `GET`s need `read` and the writes `write`
+  (`the_reads_need_read_and_the_writes_need_write`).
+- **No `match_hash` on the wire, anywhere.** It is a plain SHA-256 of a leaked
+  value. A finding is whitelisted by value through
+  `POST …/findings/{id}/whitelist`, which reads the hash server-side; a value
+  entry is listed by `kind: "value"`, reason and date.
+- **One whitelist entry per target.** `store::ensure_whitelist_entry` looks up
+  and inserts in one `IMMEDIATE` transaction, so a repeat answers the existing
+  entry with `200` rather than adding a second row that would make a delete
+  appear not to re-open anything. A rule-level entry must name a rule in
+  `rules::compiled()` (else `422`).
+- **`false_positive` is permanent** through this surface: no rescan and no
+  whitelist write moves a row out of it, and no route re-opens one.
+- **`status` reports `enabled` and `running` separately** — the stored
+  setting and `worker::is_running()`. They differ when the worker failed to
+  spawn.
