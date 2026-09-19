@@ -8,21 +8,22 @@
 //! a `std::thread` for that module's reason: everything it does is blocking
 //! rusqlite plus transcript reads, so it is kept off the tokio runtime entirely
 //! rather than parking a runtime worker. No `db::blocking`, no `async`.
-//! `tests/security_scan_worker.rs` drives [`start`] itself.
+//! `tests/security_scan_worker.rs` drives [`sync`] itself.
 //!
 //! ## Unlike the insights worker, it can be stopped
 //!
 //! The checker is off by default and the user can flip it at any time, and a
 //! switched-off checker must read nothing (§6). So there is no `OnceLock`
 //! queue: [`WORKER`] is a `Mutex<Option<..>>` holding the running worker's
-//! sender and its shared flags. [`start`] fills it and spawns the thread (a
-//! no-op while one is running); [`stop`] empties it, sets the worker's
-//! `stopped` flag and drops the sender. The loop checks the flag before every
+//! sender and its shared flags. [`sync`] fills it and spawns the thread when the
+//! stored switch is on (a no-op while one is running); when it is off, it
+//! empties it, sets the worker's `stopped` flag and drops the sender. The loop
+//! checks the flag before every
 //! pass, after every `recv`, and between the batches of a sweep, so a stop
 //! costs at most the batch already being written — and dropping the last
 //! sender wakes a `recv_timeout` that would otherwise sleep for five minutes.
 //!
-//! **A stop is not a join.** [`stop`] is called from the settings `PUT`, which
+//! **A stop is not a join.** [`sync`] is called from the settings `PUT`, which
 //! must not wait for a batch to finish, so a `stop` then `start` can briefly
 //! overlap the old thread's last batch with the new thread's sweep. That is
 //! safe because [`store::record_scan`] is one transaction per session and is
@@ -131,11 +132,7 @@ pub fn sync(db_path: PathBuf) {
     }
 }
 
-/// Start the worker: a boot sweep, then the queue. A no-op while one runs.
-pub fn start(db_path: PathBuf) {
-    start_locked(&mut worker(), db_path);
-}
-
+/// Start the worker — a boot sweep, then the queue. A no-op while one runs.
 fn start_locked(slot: &mut Option<Running>, db_path: PathBuf) {
     if slot.is_some() {
         return;
@@ -177,7 +174,7 @@ pub fn is_running() -> bool {
 }
 
 /// Hand sessions to the worker. Never blocks, and is a no-op while it is
-/// stopped — the sweep [`start`] runs first covers anything dropped then.
+/// stopped — the sweep a started worker runs first covers anything dropped then.
 pub fn enqueue(items: impl IntoIterator<Item = Pending>) {
     // Cloned out so the lock is not held across the sends.
     let Some((tx, shared)) = worker()

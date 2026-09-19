@@ -14,13 +14,13 @@ statement; the rules below are the ones a change is most likely to break.
 ## The worker (#603)
 
 - **It runs only while `credentials_checker_enabled` is on.** `lib.rs` calls
-  `worker::sync` at boot, and the settings `PUT` calls it again on a flip — and
-  only on a flip (`only_a_flip_of_the_credentials_checker_reaches_its_worker`).
-  `sync` reads the *stored* flag under the worker lock, so racing saves cannot
-  leave a worker running under a stored "off". Off means no thread and nothing
-  read.
+  `worker::sync` at boot, and the settings `PUT` calls it after every save
+  (`every_save_syncs_the_credentials_checker_worker`). `sync` reads the
+  *stored* flag under the worker lock and is a no-op when already in step, so
+  racing saves cannot leave a worker running under a stored "off", and an
+  unrelated save restarts nothing. Off means no thread and nothing read.
 - **It is stoppable, unlike `insights::worker`.** The running worker is a
-  `Mutex<Option<..>>` rather than a `OnceLock`; `stop` sets the worker's
+  `Mutex<Option<..>>` rather than a `OnceLock`; stopping sets the worker's
   `stopped` flag and drops its sender, and the loop checks the flag before
   every pass, after every `recv` and between sweep chunks. A stop is not a
   join, so a quick stop-then-start can overlap two writers for one batch —

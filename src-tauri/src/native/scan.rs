@@ -986,6 +986,70 @@ mod tests {
             .expect("rows")
     }
 
+    /// A changed session's Credentials Checker state is reset for a rescan
+    /// (#603), with the checker off — so the change survives its announcement
+    /// going nowhere — and an unchanged session's state is left alone.
+    ///
+    /// This is the only test of `run_scan`'s `mark_changed` call: deleting it
+    /// leaves every other test green and an already-scanned session that
+    /// changed while its announcement was dropped is never rescanned.
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_session_is_marked_for_a_credentials_rescan() {
+        let _serialised = scan_state_lock();
+        let _env = crate::paths::tests::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_var = crate::paths::tests::EnvVar::set("HOME", home.path());
+        let _run_dir = crate::paths::tests::EnvVar::unset("CLAUDE_CONFIG_DIR");
+
+        let config_dir = home.path().join(".claude");
+        let changed = seed_transcript(&config_dir, "-tmp-alpha", "alpha");
+        seed_transcript(&config_dir, "-tmp-beta", "beta");
+        let file = migrated();
+        run_scan(file.path()).expect("the first scan");
+
+        let conn = super::super::db::open_read_write(file.path()).expect("open");
+        let cached = pairs(&conn, "claude_session_cache");
+        assert_eq!(cached.len(), 2, "{cached:?}");
+        let current = super::super::security_scan::rules::CURRENT_RULESET_VERSION;
+        for (session_id, project_path) in &cached {
+            conn.execute(
+                "INSERT INTO credential_scan_state (session_id, project_path, ruleset_version, scanned_at)
+                 VALUES (?1, ?2, ?3, '2026-03-15 12:00:00+00:00')",
+                rusqlite::params![session_id, project_path, current],
+            )
+            .expect("scan state");
+        }
+        drop(conn);
+
+        // Grow the transcript and move its mtime on, so the scan re-reads it.
+        let mut body = std::fs::read_to_string(&changed).expect("read");
+        body.push_str(
+            "{\"type\":\"user\",\"timestamp\":\"2026-03-15T12:02:00Z\",\
+              \"message\":{\"role\":\"user\",\"content\":\"one more\"}}\n",
+        );
+        std::fs::write(&changed, body).expect("rewrite");
+        std::fs::File::options()
+            .write(true)
+            .open(&changed)
+            .expect("open transcript")
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .expect("mtime");
+        run_scan(file.path()).expect("the second scan");
+
+        let conn = super::super::db::open_read_only(file.path()).expect("open");
+        let version = |session: &str| -> i64 {
+            conn.query_row(
+                "SELECT ruleset_version FROM credential_scan_state WHERE session_id = ?1",
+                [session],
+                |r| r.get(0),
+            )
+            .expect("version")
+        };
+        assert_eq!(version("alpha"), 0, "the changed session is pending again");
+        assert_eq!(version("beta"), current, "the unchanged one is not");
+    }
+
     /// A removed session loses its index row, and one under a config dir that
     /// could not be listed keeps both its rows.
     ///

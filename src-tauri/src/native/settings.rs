@@ -661,18 +661,16 @@ fn update_with(
         current.claude_config_dirs.as_deref().unwrap_or_default(),
     );
 
-    let previous_checker = current.credentials_checker_enabled;
-
     let saved = apply_update(incoming, &current)?;
     save(&conn, &saved).map_err(WriteError::Fallback)?;
     drop(conn);
 
     apply_data_settings(db_path, &saved, previous_idle_gap, &previous_dirs, rescan);
-    // A flip starts or stops the worker (#603); a save that leaves the switch
-    // where it was touches neither.
-    if saved.credentials_checker_enabled != previous_checker {
-        credentials_checker(db_path.to_path_buf());
-    }
+    // The Credentials Checker's worker follows the stored switch (#603).
+    // Synced after **every** save rather than on a flip this request saw: a
+    // flip judged against a value read before the save misses a racing save's
+    // change, and a sync already in step is a no-op.
+    credentials_checker(db_path.to_path_buf());
 
     // **The stored row, not a resolution of it.** `Update` assigns `incoming`
     // wholesale to `m.settings` and the handler answers `Get()`, so no default
@@ -1833,27 +1831,27 @@ mod tests {
         );
     }
 
-    /// A flip of the switch starts or stops the checker's worker (#603), and a
-    /// save that leaves it alone does neither — an unrelated settings save must
-    /// not restart a sweep.
+    /// Every save syncs the checker's worker with the stored switch (#603) —
+    /// not only one that saw a flip, which a racing save could make miss one.
+    /// An in-step sync is a no-op, so an unrelated save restarts nothing.
     #[test]
-    fn only_a_flip_of_the_credentials_checker_reaches_its_worker() {
+    fn every_save_syncs_the_credentials_checker_worker() {
         let _env = crate::paths::tests::env_lock();
         if !nothing_is_locked() {
             return;
         }
         let file = migrated_db();
-        let on = r#"{"credentials_checker_enabled":true}"#;
-        let off = r#"{"credentials_checker_enabled":false}"#;
-
-        assert_eq!(put_recording_effects(file.path(), on).2, Some(()));
-        assert_eq!(put_recording_effects(file.path(), on).2, None, "already on");
-        assert_eq!(put_recording_effects(file.path(), off).2, Some(()));
-        assert_eq!(
-            put_recording_effects(file.path(), off).2,
-            None,
-            "already off"
-        );
+        for body in [
+            r#"{"credentials_checker_enabled":true}"#,
+            r#"{"credentials_checker_enabled":true}"#,
+            r#"{"credentials_checker_enabled":false}"#,
+        ] {
+            assert_eq!(
+                put_recording_effects(file.path(), body).2,
+                Some(()),
+                "{body}"
+            );
+        }
     }
 
     /// Go's decoder is lenient about `null` and strict about everything else.

@@ -1,5 +1,5 @@
 //! The Credentials Checker's worker, driven through its **real entry points**
-//! (#603): `sync`, `start`, `stop` and `enqueue`.
+//! (#603): `sync`, `stop` and `enqueue`.
 //!
 //! ## This binary may contain exactly one test that starts the worker
 //!
@@ -10,7 +10,7 @@
 //! states the same rule for the insights worker.
 //!
 //! The loop's individual arms are unit-tested in `worker.rs`; what only this
-//! file can show is that `start` really spawns a thread that does the work, and
+//! file can show is that `sync` really spawns a thread that does the work, and
 //! that `stop` really ends it.
 
 use std::path::{Path, PathBuf};
