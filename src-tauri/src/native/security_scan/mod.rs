@@ -11,9 +11,10 @@
 //! [`store`] is the persistence over migration 41's tables: what needs
 //! (re)scanning, the whitelist-aware write, and the whitelist itself (#602).
 //!
-//! The background worker and the `/api` surface are later issues (#603, #604)
-//! and build on the rule ids and tiers defined here. This module is
-//! deliberately not in `native::ENDPOINTS` yet.
+//! [`worker`] is the background loop over the session corpus (#603): a boot
+//! sweep, then the changed sessions `scan.rs` announces, started and stopped by
+//! the `credentials_checker_enabled` setting. The `/api` surface is a later
+//! issue (#604); this module is deliberately not in `native::ENDPOINTS` yet.
 //!
 //! **A [`scan::Finding`] never holds the matched text** — only its byte range
 //! into the input. The store derives its masked snippet and hash from that
@@ -23,3 +24,4 @@
 pub mod rules;
 pub mod scan;
 pub mod store;
+pub mod worker;

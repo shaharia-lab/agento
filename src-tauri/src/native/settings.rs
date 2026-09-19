@@ -621,19 +621,28 @@ const MAX_IDLE_GAP_MINUTES: i64 = 240;
 /// with nothing written; the encode happens after the row is saved, which is
 /// harmless — a `PUT` replaces the whole row, so a retry is idempotent.
 pub fn update(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
-    update_with(db_path, body, super::scan::force_scan)
+    update_with(
+        db_path,
+        body,
+        super::scan::force_scan,
+        super::security_scan::worker::apply_setting,
+    )
 }
 
-/// The handler, with the rescan as a parameter.
+/// The handler, with the rescan and the Credentials Checker's start/stop as
+/// parameters.
 ///
 /// The seam exists for the tests: a scan walks the developer's real `~/.claude`,
 /// so a unit test of the *save* would otherwise spend minutes reading a corpus
 /// it has nothing to say about — and the trigger rules are worth asserting
-/// directly rather than inferring from a side effect.
+/// directly rather than inferring from a side effect. The checker is a seam for
+/// the same reason: its worker is process-wide, and a unit test starting it
+/// would leave a thread scanning for the rest of the binary.
 fn update_with(
     db_path: &Path,
     body: &[u8],
     rescan: impl FnOnce(PathBuf),
+    credentials_checker: impl FnOnce(bool, PathBuf),
 ) -> Result<super::Answer, WriteError> {
     // Decoded first, exactly as Go does: a malformed body is a 400 before the
     // database is opened, let alone written.
@@ -652,11 +661,18 @@ fn update_with(
         current.claude_config_dirs.as_deref().unwrap_or_default(),
     );
 
+    let previous_checker = current.credentials_checker_enabled;
+
     let saved = apply_update(incoming, &current)?;
     save(&conn, &saved).map_err(WriteError::Fallback)?;
     drop(conn);
 
     apply_data_settings(db_path, &saved, previous_idle_gap, &previous_dirs, rescan);
+    // A flip starts or stops the worker (#603); a save that leaves the switch
+    // where it was touches neither.
+    if saved.credentials_checker_enabled != previous_checker {
+        credentials_checker(saved.credentials_checker_enabled, db_path.to_path_buf());
+    }
 
     // **The stored row, not a resolution of it.** `Update` assigns `incoming`
     // wholesale to `m.settings` and the handler answers `Get()`, so no default
@@ -1634,8 +1650,24 @@ mod tests {
         db: &std::path::Path,
         body: &str,
     ) -> ((axum::http::StatusCode, String), bool) {
+        let (answered, rescanned, _) = put_recording_effects(db, body);
+        (answered, rescanned)
+    }
+
+    /// The same, also reporting what the save asked of the Credentials
+    /// Checker's worker: `Some(enabled)` on a flip, `None` otherwise.
+    fn put_recording_effects(
+        db: &std::path::Path,
+        body: &str,
+    ) -> ((axum::http::StatusCode, String), bool, Option<bool>) {
         let mut rescanned = false;
-        let result = update_with(db, body.as_bytes(), |_| rescanned = true);
+        let mut checker = None;
+        let result = update_with(
+            db,
+            body.as_bytes(),
+            |_| rescanned = true,
+            |enabled, _| checker = Some(enabled),
+        );
         let answered = match super::super::writes::finish(result) {
             Ok(answer) => (
                 answer.status,
@@ -1643,7 +1675,7 @@ mod tests {
             ),
             Err(reason) => panic!("forwarded rather than answered: {reason}"),
         };
-        (answered, rescanned)
+        (answered, rescanned, checker)
     }
 
     /// The whole happy path, byte for byte against Go.
@@ -1798,6 +1830,29 @@ mod tests {
         assert!(
             body.contains(r#""credentials_checker_enabled":false"#),
             "{body}"
+        );
+    }
+
+    /// A flip of the switch starts or stops the checker's worker (#603), and a
+    /// save that leaves it alone does neither — an unrelated settings save must
+    /// not restart a sweep.
+    #[test]
+    fn only_a_flip_of_the_credentials_checker_reaches_its_worker() {
+        let _env = crate::paths::tests::env_lock();
+        if !nothing_is_locked() {
+            return;
+        }
+        let file = migrated_db();
+        let on = r#"{"credentials_checker_enabled":true}"#;
+        let off = r#"{"credentials_checker_enabled":false}"#;
+
+        assert_eq!(put_recording_effects(file.path(), on).2, Some(true));
+        assert_eq!(put_recording_effects(file.path(), on).2, None, "already on");
+        assert_eq!(put_recording_effects(file.path(), off).2, Some(false));
+        assert_eq!(
+            put_recording_effects(file.path(), off).2,
+            None,
+            "already off"
         );
     }
 

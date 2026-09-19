@@ -562,6 +562,15 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
             file_path: n.file_path.to_string_lossy().into_owned(),
         }
     }));
+    // The same announcements, for the Credentials Checker (#603) — a no-op
+    // while the checker is off.
+    super::security_scan::worker::enqueue(outcome.notifications.iter().map(|n| {
+        super::security_scan::store::Pending {
+            session_id: n.session_id.clone(),
+            project_path: n.project_path.clone(),
+            file_path: n.file_path.to_string_lossy().into_owned(),
+        }
+    }));
 
     state()
         .lock()
