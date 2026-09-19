@@ -535,6 +535,12 @@ pub fn run() {
                     // scan's announcements have somewhere to land.
                     crate::native::insights::worker::start(db.clone());
 
+                    // The Credentials Checker's worker (#603), on the same
+                    // terms — but only when the user has switched it on: off
+                    // means no thread and nothing read. The settings `PUT`
+                    // syncs it again after every save.
+                    crate::native::security_scan::worker::sync(db.clone());
+
                     crate::native::scan::ensure_scan(db);
                 }
 
