@@ -9,7 +9,12 @@ import type {
   SettingsResponse,
   TaskRunStarted,
 } from "../lib/types";
-import { describeError, usePoll, useResource } from "../lib/hooks";
+import { describeError, fieldOf, usePoll, useResource } from "../lib/hooks";
+import {
+  loadTaskFormPrefs,
+  saveTaskFormPrefs,
+  type TaskFormSectionId,
+} from "../lib/taskFormPrefs";
 import { DESTROY, partnerLabel, submitLabel } from "../lib/formVerbs";
 import { dateTime, duration, relativeTime, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
@@ -19,6 +24,7 @@ import {
   Dropdown,
   Empty,
   FormRow,
+  FormSection,
   InspGroup,
   InspRow,
   Search,
@@ -102,6 +108,39 @@ function describeSchedule(t: ScheduledTask): string {
   }
 }
 
+/* --- Collapsed-section summaries (#631) ----------------------------------- */
+
+/** What the server stores for a `timeout_minutes` of 0 (`DEFAULT_TIMEOUT_MINUTES`
+ *  in `native/tasks.rs`), so the summary says what the run will actually get. */
+const DEFAULT_TIMEOUT_MINUTES = 30;
+
+/** Execution, collapsed: directory (when set) · model · timeout · output. */
+function executionSummary(t: ScheduledTask): string {
+  return [
+    t.working_directory,
+    t.model || "default model",
+    `${t.timeout_minutes || DEFAULT_TIMEOUT_MINUTES} min`,
+    t.save_output ? "output saved" : "output not saved",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Limits, collapsed: `no limit`, or whichever of the two limits is set. */
+function limitsSummary(t: ScheduledTask): string {
+  const parts = [
+    t.stop_after_count > 0 ? `stops after ${t.stop_after_count} run${t.stop_after_count === 1 ? "" : "s"}` : "",
+    t.stop_after_time ? `ends ${dateTime(t.stop_after_time)}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "no limit";
+}
+
+/** The fields each collapsible section owns — a 422 naming one opens it. */
+const SECTION_FIELDS: Record<TaskFormSectionId, readonly string[]> = {
+  execution: ["working_directory", "model", "timeout_minutes", "save_output"],
+  limits: ["stop_after_count", "stop_after_time"],
+};
+
 /* --- Local <-> RFC3339 for the native pickers ----------------------------- */
 
 function toLocalStamp(iso: string | null | undefined): string {
@@ -178,7 +217,7 @@ function blankTask(): ScheduledTask {
     working_directory: "",
     model: "",
     settings_profile_id: "",
-    timeout_minutes: 30,
+    timeout_minutes: DEFAULT_TIMEOUT_MINUTES,
     schedule_type: "interval",
     schedule_config: { every_hours: 24 },
     stop_after_count: 0,
@@ -267,6 +306,11 @@ export function TasksView({
    */
   const [startedJobId, setStartedJobId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string>();
+  /** Which collapsible sections are open, as the user left them. */
+  const [sections, setSections] = useState(loadTaskFormPrefs);
+  /** Set when the user closes a section an error forced open; any new error resets it. */
+  const [autoOpenDismissed, setAutoOpenDismissed] = useState(false);
+  useEffect(() => setAutoOpenDismissed(false), [actionError]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   /** See `LimitStash` — what the two Limits switches restore when flicked back on. */
   const lastLimits = useRef<LimitStash>({ id: "", count: 0, time: null });
@@ -340,6 +384,28 @@ export function TasksView({
 
   const enabled = filtered.filter((t) => t.status === "active");
   const paused = filtered.filter((t) => t.status !== "active");
+
+  /** The section the current error forces open, if any — until it is closed by hand. */
+  function forcedOpen(id: TaskFormSectionId): boolean {
+    const field = fieldOf(actionError);
+    return !autoOpenDismissed && !!field && SECTION_FIELDS[id].includes(field);
+  }
+
+  /** Open as stored, or forced open while the last error names a field in it.
+   *  Derived rather than written back, so a 422 never changes the preference. */
+  function isOpen(id: TaskFormSectionId): boolean {
+    return sections[id] || forcedOpen(id);
+  }
+
+  function toggleSection(id: TaskFormSectionId) {
+    const open = !isOpen(id);
+    // Closing a section the error forced open has to stick, or the click would
+    // do nothing visible while the error is still on screen.
+    if (!open && forcedOpen(id)) setAutoOpenDismissed(true);
+    const next = { ...sections, [id]: open };
+    setSections(next);
+    saveTaskFormPrefs(next);
+  }
 
   function edit(patch: Partial<ScheduledTask>) {
     setDraft((d) => (d ? { ...d, ...patch } : d));
@@ -708,8 +774,13 @@ export function TasksView({
 
                 <div className="divider" />
 
-                <div className="formsec">
-                  <div className="formsec__title">Execution</div>
+                <FormSection
+                  title="Execution"
+                  summary={executionSummary(draft)}
+                  collapsible
+                  open={isOpen("execution")}
+                  onToggle={() => toggleSection("execution")}
+                >
                   <FormRow label="Working directory">
                     <DirField
                       value={draft.working_directory}
@@ -750,12 +821,17 @@ export function TasksView({
                       onChange={(v) => edit({ save_output: v })}
                     />
                   </FormRow>
-                </div>
+                </FormSection>
 
                 <div className="divider" />
 
-                <div className="formsec">
-                  <div className="formsec__title">Limits</div>
+                <FormSection
+                  title="Limits"
+                  summary={limitsSummary(draft)}
+                  collapsible
+                  open={isOpen("limits")}
+                  onToggle={() => toggleSection("limits")}
+                >
                   {/* Both rows are a mode switch over one stored value, and
                       the *unset* value is never rendered as a value: a `0` in
                       a spinner reads as "zero runs" and an empty
@@ -885,7 +961,7 @@ export function TasksView({
                       )}
                     </div>
                   </FormRow>
-                </div>
+                </FormSection>
 
                 <div className="divider" />
 
