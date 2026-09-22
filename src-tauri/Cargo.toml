@@ -363,7 +363,7 @@ ring = "0.17"
 # artifact at the cost of a release process in a repo we own and are the only
 # consumer of. Revisit if `ferrox-providers` ever gains a consumer outside this
 # app, or if the tag is ever moved in anger.
-ferrox-providers = { git = "https://github.com/shaharia-lab/ferrox", tag = "providers-v0.1.0", default-features = false, features = [
+ferrox-providers = { git = "https://github.com/shaharia-lab/ferrox", tag = "providers-v0.2.0", default-features = false, features = [
     "anthropic",
     "openai",
     "gemini",
