@@ -709,21 +709,6 @@ export function TasksView({
                 <div className="divider" />
 
                 <div className="formsec">
-                  <div className="formsec__title">Instruction</div>
-                  <FormRow label="Prompt" help="Sent to the agent verbatim on every run.">
-                    <textarea
-                      className="field-area"
-                      rows={6}
-                      value={draft.prompt}
-                      onChange={(e) => edit({ prompt: e.target.value })}
-                      spellCheck={false}
-                    />
-                  </FormRow>
-                </div>
-
-                <div className="divider" />
-
-                <div className="formsec">
                   <div className="formsec__title">Execution</div>
                   <FormRow label="Working directory">
                     <DirField
@@ -899,6 +884,21 @@ export function TasksView({
                         </label>
                       )}
                     </div>
+                  </FormRow>
+                </div>
+
+                <div className="divider" />
+
+                <div className="formsec">
+                  <div className="formsec__title">Instruction</div>
+                  <FormRow label="Prompt" help="Sent to the agent verbatim on every run.">
+                    <textarea
+                      className="field-area"
+                      rows={6}
+                      value={draft.prompt}
+                      onChange={(e) => edit({ prompt: e.target.value })}
+                      spellCheck={false}
+                    />
                   </FormRow>
                 </div>
               </div>
