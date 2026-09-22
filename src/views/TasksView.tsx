@@ -6,6 +6,7 @@ import type {
   ScheduleConfig,
   ScheduleType,
   ScheduledTask,
+  SettingsResponse,
   TaskRunStarted,
 } from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
@@ -193,6 +194,16 @@ function blankTask(): ScheduledTask {
   };
 }
 
+/** The Model field's placeholder: the model the run will use when the field
+ *  is left empty. With no agent that is the Settings default model — the same
+ *  `settings::resolve` the executor's `TurnSettings::default_model` reads; with
+ *  an agent it is the agent's own model, which `run_agent` always applies. */
+function modelPlaceholder(slug: string, agents: Agent[], defaultModel: string): string {
+  if (!slug) return defaultModel ? `Default model (${defaultModel})` : "Default model";
+  const agent = agents.find((a) => a.slug === slug);
+  return agent?.model ? `Agent's model (${agent.model})` : "Agent default";
+}
+
 /* --- View ----------------------------------------------------------------- */
 
 export function TasksView({
@@ -218,6 +229,11 @@ export function TasksView({
     (signal) => api.get("/agents", signal),
     []
   );
+  const settingsRes = useResource<SettingsResponse | null>(
+    (signal) => api.get<SettingsResponse>("/settings", signal),
+    []
+  );
+  const defaultModel = settingsRes.data?.settings.default_model ?? "";
 
   const tasks = useMemo(() => tasksRes.data ?? [], [tasksRes.data]);
   const agents = useMemo(() => agentsRes.data ?? [], [agentsRes.data]);
@@ -648,13 +664,15 @@ export function TasksView({
                     help={
                       draft.agent_slug
                         ? undefined
-                        : "Runs Claude Code with the default model (or the one set below) and all built-in tools, no system prompt and no integrations. Permission prompts are skipped."
+                        : "Runs Claude Code with the default model (or the one set below) and all built-in tools, no system prompt and no integrations. Permission prompts are skipped." +
+                          (agentsRes.data && agents.length === 0
+                            ? " Create agents in Agents to give a task a system prompt and integrations."
+                            : "")
                     }
                   >
                     <AgentPicker
                       value={draft.agent_slug}
                       agents={agents}
-                      loading={agentsRes.loading && !agentsRes.data}
                       onChange={(slug) => edit({ agent_slug: slug })}
                     />
                   </FormRow>
@@ -721,7 +739,7 @@ export function TasksView({
                       <input
                         value={draft.model}
                         onChange={(e) => edit({ model: e.target.value })}
-                        placeholder="Agent default"
+                        placeholder={modelPlaceholder(draft.agent_slug, agents, defaultModel)}
                         spellCheck={false}
                       />
                     </label>
@@ -1076,12 +1094,10 @@ function statusDot(status: string): string {
 function AgentPicker({
   value,
   agents,
-  loading,
   onChange,
 }: {
   value: string;
   agents: Agent[];
-  loading: boolean;
   onChange(slug: string): void;
 }) {
   // A free-text slug box was the old answer here, on the reasoning that a task
@@ -1090,19 +1106,8 @@ function AgentPicker({
   // for is covered by the `(missing)` entry below, which keeps an unknown slug
   // selectable inside the dropdown. "No agent" (the empty slug) is always the
   // first option and the default for a new task: the executor then runs Claude
-  // Code with a stand-in agent (`resolve_agent` in `schedule/executor.rs`).
-  // The zero-agents branch below predates that option; #628 removes it.
-  if (!loading && agents.length === 0) {
-    return (
-      <div className="row" style={{ gap: "var(--sp-3)" }}>
-        <span className="badge">No agents configured</span>
-        <span className="formrow__help" style={{ margin: 0 }}>
-          Create one in Agents first.
-        </span>
-      </div>
-    );
-  }
-
+  // Code with a stand-in agent (`resolve_agent` in `schedule/executor.rs`), so
+  // the picker renders even with zero agents rather than blocking the form.
   const known = agents.some((a) => a.slug === value);
   return (
     <Picker

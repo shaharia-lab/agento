@@ -431,7 +431,9 @@ instead to run with its model, tools, system prompt and integrations.
 Other options:
 
 - **Working directory**: the folder the run happens in. **Browse…** picks one.
-- **Model**: override the agent's model for this task.
+- **Model**: the model a task with no agent runs on; leave it empty for the
+  Settings default model, which the field shows. A task with an agent runs on
+  that agent's model.
 - **Timeout**: runs longer than this are cancelled and recorded as failed.
 - **Save output**: keep the agent's reply in the run history.
 - **Stop after**: **No limit**, or a **Run limit** of N runs.
