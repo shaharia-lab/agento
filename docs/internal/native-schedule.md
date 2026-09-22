@@ -173,6 +173,22 @@ passes against a drain that never terminates on its own — the first version of
 that test did exactly that and went green against the hang. A real CLI in session
 mode stays alive; the fake has to as well.
 
+**The Tasks form's preview computes through `fire_times`, never a second
+implementation** (#633). `POST /api/tasks/preview` takes a draft `TaskRequest`
+and answers its next three fires from `schedule::fire_times` in
+`runtime::local_tz()` — the scheduler's own builder, `setup` and `next_runs`, so
+robfig's dialect, the DST traps and `run_immediately`'s `now + 2s` cannot drift
+from what will actually fire. The limits are then applied as `due_task` would
+to a task with `run_count` 0: fires are kept while `instant <= stop_after_time`
+(`should_auto_pause` is a strict `>`), and `stop_after_count > 0` caps the list.
+An unusable schedule is a `200` with `schedule_error` — the two cron sentences
+are `validate_task`'s — not a `422`, because a draft may be unfinished. The
+model and working directory come from `executor::effective_execution`, which
+shares `no_agent_model` with `resolve_agent`: an agent's model beats the
+task's, an agent with none runs on the CLI's default, and the directory falls
+back through `TurnSettings::default_working_dir`. It writes nothing
+(`the_preview_body_is_in_wire_order_and_writes_nothing`).
+
 **A run can also be started by a request, and the difference is one function
 call** (#541). `POST /api/tasks/{id}/run` goes through
 `executor::run_manual`, which is `execute_task` minus two things — and both

@@ -33,6 +33,13 @@
       "reason": "fires a configured task on demand -- the one thing the product could not do, since the only way to make a task run was to change its schedule type to run_immediately and so destroy the schedule being tested. Answers 202 with the job_history id the run will write rather than blocking for the run itself, which reaches 240 minutes; 409 when a run of that task is already in flight; and a PAUSED task is deliberately runnable, which is most of the point. It advances nothing the schedule owns -- not run_count, not next_run_at, not the stop_after_count budget"
     },
     {
+      "method": "POST",
+      "route": "/api/tasks/preview",
+      "status": "native",
+      "owner": "#633",
+      "reason": "the Tasks form's create-mode preview: the next three fires of a DRAFT task computed by the scheduler's own fire_times in the scheduler's own location, with stop_after_time and stop_after_count applied as the executor would, plus the model and working directory the run would really use and where each came from. Writes nothing and schedules nothing; an unusable schedule answers 200 with a schedule_error rather than 422, because a draft is allowed to be unfinished. POST because the input is a whole draft body; a GET, PUT or DELETE on the same path is still the unknown task id 'preview'"
+    },
+    {
       "method": "GET",
       "route": "/api/security/keys",
       "status": "native",

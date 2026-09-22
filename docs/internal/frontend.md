@@ -291,6 +291,13 @@ of its fields (`fieldOf` in `lib/hooks.ts` parses the wire's
 `validation error for "<field>":`); that is derived at render, never written
 back to the preference, and closing it by hand sticks until the next error.
 
+**The Tasks inspector previews an unsaved task** (#633): in create mode it
+renders `TaskPreviewBody` from `POST /api/tasks/preview`, requested through
+`useDebounced(draft, 250)` and `useResource`'s abort signal, and only while the
+inspector is open. It never parses a cron or does schedule arithmetic in the
+UI — the server answers with the scheduler's own fires. Edit mode keeps Timing,
+Reliability and Recent runs.
+
 **The session inspector is `views/sessions/SessionInspector.tsx`** (#538), not a
 private function in `SessionsView.tsx`, for the reason `SaveBar` is a component:
 a shape only one file can reach is a shape the next caller copies. It takes

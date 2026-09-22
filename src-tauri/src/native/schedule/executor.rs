@@ -633,6 +633,74 @@ fn prompt_preview(prompt: &str) -> String {
     format!("{}...", &prompt[..cut])
 }
 
+/// `model := task.Model; if model == "" { settingsMgr.Get().DefaultModel }` —
+/// the model a **no-agent** task runs on, and where it came from.
+///
+/// Shared by [`resolve_agent`] and [`effective_execution`], so the run and the
+/// Tasks form's preview (#633) read one rule.
+fn no_agent_model(db_path: &std::path::Path, task: &ScheduledTask) -> (String, &'static str) {
+    if !task.model.is_empty() {
+        return (task.model.clone(), "task");
+    }
+    let model = TurnSettings::from_db(db_path).default_model();
+    if model.is_empty() {
+        (model, "cli_default")
+    } else {
+        (model, "settings")
+    }
+}
+
+/// What a run of `task` will really execute as: the model and the working
+/// directory, each with where it came from (#633).
+///
+/// The precedence is not the obvious one, which is why it is computed here
+/// rather than in the UI. [`run_agent`] hands `headless_spec` only the task's
+/// working directory and settings profile, so **an agent's model beats the
+/// task's own**, and an agent with no model runs on the CLI's default rather
+/// than Settings'. The working directory falls back through
+/// [`TurnSettings::default_working_dir`], exactly as the runner's `cwd` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Execution {
+    pub model: String,
+    /// `agent`, `agent_missing`, `task`, `settings` or `cli_default`.
+    pub model_source: &'static str,
+    pub working_directory: String,
+    /// `task` or `settings`.
+    pub working_directory_source: &'static str,
+}
+
+/// [`Execution`] for `task`. An agent that cannot be *read* is an `Err`; one
+/// that does not exist is `agent_missing`, which is what the run would fail on.
+pub(crate) fn effective_execution(
+    db_path: &std::path::Path,
+    task: &ScheduledTask,
+) -> Result<Execution, String> {
+    let (model, model_source) = if task.agent_slug.is_empty() {
+        no_agent_model(db_path, task)
+    } else {
+        match agents::get(db_path, &task.agent_slug) {
+            Ok(Some(agent)) if agent.model.is_empty() => (String::new(), "cli_default"),
+            Ok(Some(agent)) => (agent.model, "agent"),
+            Ok(None) => (String::new(), "agent_missing"),
+            Err(e) => return Err(format!("loading agent {:?}: {e}", task.agent_slug)),
+        }
+    };
+    let (working_directory, working_directory_source) = if task.working_directory.is_empty() {
+        (
+            TurnSettings::from_db(db_path).default_working_dir(),
+            "settings",
+        )
+    } else {
+        (task.working_directory.clone(), "task")
+    };
+    Ok(Execution {
+        model,
+        model_source,
+        working_directory,
+        working_directory_source,
+    })
+}
+
 /// `resolveAgentConfig`.
 ///
 /// The no-agent branch returns a **synthesized** agent rather than `None`, and
@@ -650,11 +718,7 @@ fn resolve_agent(db_path: &std::path::Path, task: &ScheduledTask) -> Result<Agen
         };
     }
 
-    // `model := task.Model; if model == "" { settingsMgr.Get().DefaultModel }`.
-    let mut model = task.model.clone();
-    if model.is_empty() {
-        model = TurnSettings::from_db(db_path).default_model();
-    }
+    let (model, _) = no_agent_model(db_path, task);
     Ok(Agent {
         name: String::new(),
         slug: String::new(),
