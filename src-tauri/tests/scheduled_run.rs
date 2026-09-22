@@ -40,6 +40,10 @@ fn python3() -> Option<String> {
 
 /// A CLI that acknowledges `initialize` and then emits `emit` verbatim on the
 /// first user message.
+///
+/// It records what it was started with beside itself — its cwd in `cwd`, its
+/// argv in `argv` (read back by [`argv`]) and the `initialize` request in
+/// `initialize`, which is where the system prompt travels (#629).
 fn fake_cli(dir: &Path, emit: &str) -> PathBuf {
     let script = format!(
         r#"#!/usr/bin/env {python}
@@ -47,6 +51,8 @@ import json, os, sys
 
 with open({cwd}, "w") as _cwd:
     _cwd.write(os.getcwd())
+with open({argv}, "w") as _argv:
+    _argv.write(json.dumps(sys.argv))
 
 def say(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -73,6 +79,8 @@ for line in sys.stdin:
         continue
     req = msg.get("request") or {{}}
     if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        with open({initialize}, "w") as _init:
+            _init.write(json.dumps(req))
         ack(req.get("request_id") or msg.get("request_id"))
         continue
     if msg.get("type") == "user":
@@ -85,6 +93,8 @@ for line in sys.stdin:
 "#,
         python = python3().unwrap_or_else(|| "python3".into()),
         cwd = serde_json::to_string(&dir.join("cwd").to_string_lossy()).unwrap(),
+        argv = serde_json::to_string(&dir.join("argv").to_string_lossy()).unwrap(),
+        initialize = serde_json::to_string(&dir.join("initialize").to_string_lossy()).unwrap(),
         emit = emit,
     );
     let path = dir.join("fake-claude");
@@ -98,7 +108,24 @@ for line in sys.stdin:
     path
 }
 
+/// The argv the fake CLI was last started with, program name first.
+fn argv(dir: &Path) -> Vec<String> {
+    let raw = std::fs::read_to_string(dir.join("argv")).expect("the CLI ran");
+    serde_json::from_str(&raw).expect("argv is a JSON list")
+}
+
+/// The value following `flag` in `argv`, or `None` when the flag is absent.
+fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+    let i = argv.iter().position(|a| a == flag)?;
+    argv.get(i + 1).map(String::as_str)
+}
+
 /// A database with one active task, ready to fire.
+///
+/// The task has **no agent** — `agent_slug` is left at its `''` default — so
+/// every test built on it runs through the executor's stand-in agent.
+/// `a_task_with_no_agent_runs_on_the_default_model_with_every_built_in_tool`
+/// is the one that pins what that stand-in actually spawns.
 fn migrated_with_task(path: &Path, schedule_type: &str, save_output: bool) -> String {
     let mut conn = rusqlite::Connection::open(path).expect("open");
     agento_lib::native::migrate::apply(&mut conn).expect("migrate");
@@ -379,6 +406,120 @@ async fn a_manual_run_fires_a_paused_task_at_its_limit_and_moves_no_counter() {
 
     // The guard went with the run, so the task is runnable again.
     assert!(!scheduler.is_running(&task_id));
+}
+
+/// #629: what a task with **no agent** actually runs with, through the
+/// `POST /api/tasks/{id}/run` path.
+///
+/// The other tests here already run no-agent tasks, but only assert that they
+/// succeed. This one pins what the executor's stand-in agent hands the CLI: the
+/// Settings default model, every built-in tool, no system prompt, no MCP
+/// servers, and permissions bypassed. A `resolve_agent` that answered `None`
+/// instead would drop `--allowedTools` altogether and still pass the others.
+#[tokio::test]
+async fn a_task_with_no_agent_runs_on_the_default_model_with_every_built_in_tool() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute(
+            "INSERT INTO user_settings (id, default_model) VALUES (1, 'opus')",
+            [],
+        )
+        .expect("seed settings");
+
+    let cli = fake_cli(
+        dir.path(),
+        r#"        raw('{"type":"result","subtype":"success","is_error":false,"result":"no agent needed","session_id":"sdk-no-agent","usage":{"input_tokens":1,"output_tokens":1}}')"#,
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    // The stored model is the subject; either export beats it in
+    // `settings::resolve`.
+    std::env::remove_var("AGENTO_DEFAULT_MODEL");
+    std::env::remove_var("ANTHROPIC_DEFAULT_SONNET_MODEL");
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    let guard = scheduler
+        .try_mark_running(&task_id)
+        .expect("nothing is in flight");
+    agento_lib::native::schedule::executor::run_manual(
+        std::sync::Arc::clone(&scheduler),
+        agento_lib::native::tasks::get_task(&db, &task_id)
+            .expect("read")
+            .expect("row"),
+        "job-no-agent".to_string(),
+        guard,
+    )
+    .await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "the run is recorded: {jobs:?}");
+    assert_eq!(jobs[0].0, "success", "error was {:?}", jobs[0].1);
+    {
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        let job_agent: String = conn
+            .query_row("SELECT agent_slug FROM job_history", [], |r| r.get(0))
+            .expect("the job row");
+        assert_eq!(job_agent, "", "the job names no agent");
+        let chat_agent: String = conn
+            .query_row("SELECT agent_slug FROM chat_sessions", [], |r| r.get(0))
+            .expect("the session row");
+        assert_eq!(chat_agent, "", "nor does the chat it created");
+    }
+
+    let argv = argv(dir.path());
+    assert_eq!(
+        flag_value(&argv, "--model"),
+        Some("opus"),
+        "the Settings default model: {argv:?}"
+    );
+    assert_eq!(
+        flag_value(&argv, "--allowedTools"),
+        Some(
+            "Read,Write,Edit,Bash,Glob,Grep,WebFetch,WebSearch,Task,TaskOutput,TaskStop,NotebookEdit"
+        ),
+        "every built-in tool, in `ALL_BUILT_IN_TOOLS` order: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--mcp-config"),
+        "no MCP servers: {argv:?}"
+    );
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--system-prompt" || a == "--append-system-prompt"),
+        "no system prompt flag: {argv:?}"
+    );
+    // An empty `permission_mode` falls to the bypass arm of `build_options`.
+    assert_eq!(
+        flag_value(&argv, "--permission-mode"),
+        Some("bypassPermissions"),
+        "{argv:?}"
+    );
+    assert!(
+        argv.iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"),
+        "{argv:?}"
+    );
+
+    // The system prompt rides the `initialize` request, not the argv, so that
+    // is where its absence has to be read.
+    let init: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("initialize")).expect("initialized"),
+    )
+    .expect("initialize is JSON");
+    assert_eq!(init["systemPrompt"], "", "no system prompt: {init}");
+    assert_eq!(
+        init["appendSystemPrompt"], "",
+        "nor an appended one: {init}"
+    );
 }
 
 /// #541: a task deleted while its manual run waited for a permit is not run.

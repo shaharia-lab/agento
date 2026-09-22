@@ -83,7 +83,11 @@ while `buildRunOptions` sets neither session field, so the CLI generates one and
 `None`, and that is load-bearing rather than tidy: Go builds a non-nil
 `config.AgentConfig` there, and `resolveToolsAndMCP` gives a non-nil config with
 empty capabilities **all twelve built-in tools** while a nil config gets none.
-`None` would run a no-agent task with no `--allowedTools` argument at all.
+`None` would run a no-agent task with no `--allowedTools` argument at all. What
+that stand-in spawns — the Settings default model, all twelve tools in order, no
+system prompt, no MCP servers, permissions bypassed — is pinned by
+`a_task_with_no_agent_runs_on_the_default_model_with_every_built_in_tool` in
+`tests/scheduled_run.rs` (#629).
 
 **One deliberate divergence in the timer, and one rule that is not a divergence
 at all.** gocron parks for the whole interval; `sleep_until` wakes at most every
