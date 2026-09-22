@@ -129,7 +129,7 @@ function executionSummary(t: ScheduledTask): string {
 /** Limits, collapsed: `no limit`, or whichever of the two limits is set. */
 function limitsSummary(t: ScheduledTask): string {
   const parts = [
-    t.stop_after_count > 0 ? `stops after ${t.stop_after_count} runs` : "",
+    t.stop_after_count > 0 ? `stops after ${t.stop_after_count} run${t.stop_after_count === 1 ? "" : "s"}` : "",
     t.stop_after_time ? `ends ${dateTime(t.stop_after_time)}` : "",
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "no limit";
@@ -217,7 +217,7 @@ function blankTask(): ScheduledTask {
     working_directory: "",
     model: "",
     settings_profile_id: "",
-    timeout_minutes: 30,
+    timeout_minutes: DEFAULT_TIMEOUT_MINUTES,
     schedule_type: "interval",
     schedule_config: { every_hours: 24 },
     stop_after_count: 0,
