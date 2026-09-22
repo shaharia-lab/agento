@@ -166,14 +166,14 @@ function firstStopAfterTime(): string {
 
 /* --- New-task template ---------------------------------------------------- */
 
-function blankTask(agentSlug: string): ScheduledTask {
+function blankTask(): ScheduledTask {
   const now = new Date().toISOString();
   return {
     id: "",
     name: "New task",
     description: "",
     prompt: "",
-    agent_slug: agentSlug,
+    agent_slug: "",
     working_directory: "",
     model: "",
     settings_profile_id: "",
@@ -334,7 +334,7 @@ export function TasksView({
     setCreating(true);
     setConfirmDelete(false);
     setActionError(undefined);
-    setDraft(blankTask(agents[0]?.slug ?? ""));
+    setDraft(blankTask());
     lastLimits.current = { id: "", count: 0, time: null };
     setDirty(true);
   }
@@ -643,7 +643,14 @@ export function TasksView({
                       />
                     </label>
                   </FormRow>
-                  <FormRow label="Agent">
+                  <FormRow
+                    label="Agent"
+                    help={
+                      draft.agent_slug
+                        ? undefined
+                        : "Runs Claude Code with the default model (or the one set below) and all built-in tools, no system prompt and no integrations. Permission prompts are skipped."
+                    }
+                  >
                     <AgentPicker
                       value={draft.agent_slug}
                       agents={agents}
@@ -1081,9 +1088,10 @@ function AgentPicker({
   // whose agent was removed must stay repointable. It reads as "type the slug
   // from memory", which is not something anyone can do — and the case it was
   // for is covered by the `(missing)` entry below, which keeps an unknown slug
-  // selectable inside the dropdown. With genuinely no agents there is nothing
-  // to point at, so say so rather than offering an input that can only produce
-  // a 404 on save.
+  // selectable inside the dropdown. "No agent" (the empty slug) is always the
+  // first option and the default for a new task: the executor then runs Claude
+  // Code with a stand-in agent (`resolve_agent` in `schedule/executor.rs`).
+  // The zero-agents branch below predates that option; #628 removes it.
   if (!loading && agents.length === 0) {
     return (
       <div className="row" style={{ gap: "var(--sp-3)" }}>
@@ -1101,8 +1109,8 @@ function AgentPicker({
       value={value}
       onChange={onChange}
       options={[
+        { value: "", label: "No agent" },
         ...(value && !known ? [{ value, label: `${value} (missing)` }] : []),
-        ...(value ? [] : [{ value: "", label: "Select an agent…" }]),
         ...agents.map((a) => ({ value: a.slug, label: a.name || a.slug })),
       ]}
     />
