@@ -413,9 +413,11 @@ listed and its data is safe, but it cannot be edited or used.
 A scheduled task runs an agent on its own, on a schedule, and records what
 happened.
 
-Create one with a name, an agent and the **prompt** sent to that agent verbatim
-on every run. The agent is chosen from a list; if you have not created one yet
-the form says so, and the Agents section is where to start.
+Create one with a name and the **prompt** sent verbatim on every run. The agent
+is optional: **No agent** is the default, and runs Claude Code with the default
+model (or the task's own **Model**) and all built-in tools, no system prompt and
+no integrations, with permission prompts skipped. Pick an agent from the list
+instead to run with its model, tools, system prompt and integrations.
 
 **Schedules:**
 
