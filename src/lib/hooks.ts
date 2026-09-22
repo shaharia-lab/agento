@@ -66,6 +66,15 @@ export function describeError(err: unknown): string {
   return String(err);
 }
 
+/**
+ * The field a 422 names, or `undefined`. The wire carries it only inside the
+ * message — `validation error for "<field>": …` (`WriteError::validation`) — so it
+ * is parsed back out. A message that does not match names no field.
+ */
+export function fieldOf(message: string | undefined): string | undefined {
+  return message?.match(/^validation error for "([^"]+)":/)?.[1];
+}
+
 /** Debounce a rapidly-changing value, e.g. a search box driving a request. */
 export function useDebounced<T>(value: T, ms = 250): T {
   const [debounced, setDebounced] = useState(value);

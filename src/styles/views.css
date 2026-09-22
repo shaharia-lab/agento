@@ -721,6 +721,41 @@
   letter-spacing: -0.005em;
 }
 
+/* The same header when the section collapses (#631, opt-in) — the form's twin
+   of `.insp-group__title--toggle`, and for the same reasons only a box reset:
+   no `cursor: pointer`, no `:focus-visible` (see docs/internal/frontend.md).
+   The title never shrinks, the summary ellipsises, the chevron sits at the end. */
+.formsec__title--toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: 0;
+  text-align: left;
+}
+
+.formsec__title--toggle > span:first-child,
+.formsec__title--toggle > svg {
+  flex: none;
+}
+
+.formsec__title--toggle > svg {
+  margin-left: auto;
+  color: var(--fg-tertiary);
+}
+
+.formsec__title--toggle:hover > svg {
+  color: var(--fg-secondary);
+}
+
+.formsec__summary {
+  min-width: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-normal);
+  letter-spacing: normal;
+  color: var(--fg-tertiary);
+}
+
 /* Right-aligned labels in a two-column grid — a native preferences pane. */
 .formrow {
   display: grid;

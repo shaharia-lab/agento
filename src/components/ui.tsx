@@ -972,6 +972,55 @@ export function InspGroup({
   );
 }
 
+/**
+ * A form section: `InspGroup`'s opt-in, controlled collapsible on the form's
+ * own `.formsec__title` (#631). It deliberately does not reuse the
+ * `insp-group` classes — that title is the inspector's 11px uppercase label and
+ * would demote a form section's heading. Not `collapsible` → exactly the
+ * `formsec` markup every form already emits. Closed, the header shows
+ * `summary` beside the title so a non-default value is never hidden.
+ */
+export function FormSection({
+  title,
+  summary,
+  collapsible,
+  open = true,
+  onToggle,
+  children,
+}: {
+  title: string;
+  summary?: string;
+  collapsible?: boolean;
+  open?: boolean;
+  onToggle?: () => void;
+  children: React.ReactNode;
+}) {
+  if (!collapsible) {
+    return (
+      <div className="formsec">
+        <div className="formsec__title">{title}</div>
+        {children}
+      </div>
+    );
+  }
+  return (
+    <div className="formsec">
+      {/* A real button, as in `InspGroup`: Tab and Enter/Space come free. */}
+      <button
+        type="button"
+        className="formsec__title formsec__title--toggle"
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span>{open || !summary ? title : `${title}:`}</span>
+        {!open && summary && <span className="formsec__summary truncate">{summary}</span>}
+        <Icon name={open ? "chevronD" : "chevronR"} size={12} />
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
 export function InspRow({
   label,
   children,

@@ -60,6 +60,8 @@ src/
                  stable slug, never the rendered title (two of them carry a
                  count), with the ids and the shipped defaults pinned through
                  typeAssert.ts
+    taskFormPrefs.ts  which Tasks-form sections are open (#631) — the
+                 inspectorPrefs.ts shape under `agento.taskForm`
     logs.ts      the log commands, and the line parser (target before level)
     snippet.ts   the U+0001/U+0002 highlight sentinels, mirrored once from
                  native/search/mod.rs, and snippetParts() (#438). They are
@@ -271,6 +273,23 @@ Three properties of it worth keeping:
   because two of the session groups interpolate a count into their heading
   (`Sub-agents · 12`) — a title-keyed blob would store a new key per session and
   remember nothing, and a respelled id silently resets everyone's saved state.
+
+**`FormSection` is `InspGroup`'s collapsible for a form pane** (#631), in
+`components/ui.tsx`. Same contract — opt-in `collapsible`, controlled
+`open`/`onToggle`, a real `button` with `aria-expanded`, the chevron — and
+without `collapsible` it emits exactly the `<div className="formsec">` markup
+every form already had. It does **not** reuse the `insp-group` classes: that
+title is the inspector's 11px uppercase label and would demote a form heading
+below `.formsec__title`, so it adds `.formsec__title--toggle` and
+`.formsec__summary` instead. Closed, the header shows a `summary` of the
+section's values so a non-default one is never hidden. The Tasks form uses it
+for Execution and Limits, persisted by `lib/taskFormPrefs.ts` under
+`agento.taskForm` with the slugs `execution`/`limits` pinned the
+`inspectorPrefs.ts` way (a sibling module, so form sections never widen
+`InspectorGroupId`). A section also opens while the last save's 422 names one
+of its fields (`fieldOf` in `lib/hooks.ts` parses the wire's
+`validation error for "<field>":`); that is derived at render, never written
+back to the preference, and closing it by hand sticks until the next error.
 
 **The session inspector is `views/sessions/SessionInspector.tsx`** (#538), not a
 private function in `SessionsView.tsx`, for the reason `SaveBar` is a component:
