@@ -401,7 +401,7 @@ export function JobsView({
                       >
                         <td>{j.task_name || "—"}</td>
                         <td style={{ color: "var(--fg-secondary)" }}>
-                          {j.agent_slug || "—"}
+                          {j.agent_slug || "No agent"}
                         </td>
                         <td className="tnum" title={dateTime(j.started_at)}>
                           {relativeTime(j.started_at)}
@@ -454,7 +454,7 @@ export function JobsView({
                 <>
                   <InspGroup title="Overview">
                     <InspRow label="Task">{job.task_name || "—"}</InspRow>
-                    <InspRow label="Agent">{job.agent_slug || "—"}</InspRow>
+                    <InspRow label="Agent">{job.agent_slug || "No agent"}</InspRow>
                     <InspRow label="Model">{job.model || "—"}</InspRow>
                     <InspRow label="Status">
                       <StatusBadge status={job.status} />
