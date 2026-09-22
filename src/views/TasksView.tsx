@@ -701,7 +701,7 @@ export function TasksView({
               )}
             </div>
 
-            <div className="scroll" style={{ flex: 1, padding: "var(--sp-8)" }}>
+            <div className="scroll tasks-form" style={{ flex: 1, padding: "var(--sp-8)" }}>
               <div className="form">
                 {actionError && <div className="formerror">{actionError}</div>}
 
@@ -965,9 +965,15 @@ export function TasksView({
 
                 <div className="divider" />
 
-                <div className="formsec">
+                {/* Instruction is last so it can take the pane's remaining
+                    height; the flex chain is in tasks.css (#632). */}
+                <div className="formsec tasks-form__fill">
                   <div className="formsec__title">Instruction</div>
-                  <FormRow label="Prompt" help="Sent to the agent verbatim on every run.">
+                  <FormRow
+                    label="Prompt"
+                    help="Sent to the agent verbatim on every run."
+                    className="tasks-form__fillrow"
+                  >
                     <textarea
                       className="field-area"
                       rows={6}

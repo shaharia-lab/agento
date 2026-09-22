@@ -1041,14 +1041,16 @@ export function InspRow({
 export function FormRow({
   label,
   help,
+  className,
   children,
 }: {
   label: string;
   help?: string;
+  className?: string;
   children: React.ReactNode;
 }) {
   return (
-    <div className="formrow">
+    <div className={className ? `formrow ${className}` : "formrow"}>
       <div className="formrow__label">{label}</div>
       <div className="formrow__control">
         {children}

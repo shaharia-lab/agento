@@ -143,3 +143,55 @@
   gap: var(--sp-4);
   padding: var(--sp-6) 0 var(--sp-9);
 }
+
+/* --- The prompt fills the detail pane (#632) ------------------------------ */
+/* A pure-CSS flex chain from the scroller down to the textarea, so a window
+   resize or a section toggle resizes it live with nothing measured. Every
+   sibling of the Instruction section is `flex: none` — the trap in
+   docs/internal/frontend.md seen from the other side: a growing textarea
+   would otherwise squeeze a collapsible section to a sliver. The textarea's
+   explicit `min-height` is the floor once the sections above outgrow the pane;
+   past it the outer `.scroll` scrolls, and a long prompt scrolls inside the
+   textarea rather than growing the pane. */
+.tasks-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.tasks-form > .form {
+  flex: 1 0 auto;
+}
+
+.tasks-form > .form > * {
+  flex: none;
+}
+
+.tasks-form > .form > .tasks-form__fill {
+  flex: 1 0 auto;
+}
+
+/* Two classes, because `.formrow`'s own `align-items: start` is one and
+   views.css may load after this sheet. */
+.formrow.tasks-form__fillrow {
+  flex: 1 0 auto;
+  grid-template-rows: 1fr;
+  align-items: stretch;
+}
+
+.tasks-form__fillrow > .formrow__label {
+  align-self: start;
+}
+
+.tasks-form__fillrow > .formrow__control {
+  min-height: 0;
+}
+
+.tasks-form__fillrow textarea.field-area {
+  flex: 1;
+  min-height: 160px;
+  overflow-y: auto;
+}
+
+.tasks-form__fillrow .formrow__help {
+  flex: none;
+}
