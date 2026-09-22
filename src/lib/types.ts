@@ -271,6 +271,20 @@ export interface TaskRunStarted {
   task_id: string;
 }
 
+/**
+ * The `200` body of `POST /api/tasks/preview` (#633): a draft task's next
+ * fires, computed by the scheduler itself, and what the run would execute as.
+ * `next_runs` is empty (or `null`) whenever `schedule_error` is set.
+ */
+export interface TaskPreview {
+  next_runs: string[] | null;
+  schedule_error: string;
+  model: string;
+  model_source: "agent" | "agent_missing" | "task" | "settings" | "cli_default";
+  working_directory: string;
+  working_directory_source: "task" | "settings";
+}
+
 export interface JobHistory {
   id: string;
   task_id: string;

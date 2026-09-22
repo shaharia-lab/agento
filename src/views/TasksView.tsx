@@ -7,9 +7,16 @@ import type {
   ScheduleType,
   ScheduledTask,
   SettingsResponse,
+  TaskPreview,
   TaskRunStarted,
 } from "../lib/types";
-import { describeError, fieldOf, usePoll, useResource } from "../lib/hooks";
+import {
+  describeError,
+  fieldOf,
+  useDebounced,
+  usePoll,
+  useResource,
+} from "../lib/hooks";
 import {
   loadTaskFormPrefs,
   saveTaskFormPrefs,
@@ -19,6 +26,7 @@ import { DESTROY, partnerLabel, submitLabel } from "../lib/formVerbs";
 import { dateTime, duration, relativeTime, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
 import type { NavigateFn } from "../lib/nav";
+import { CopyButton } from "../components/CopyButton";
 import { DirField, useDirPicker } from "../components/DirField";
 import {
   Dropdown,
@@ -351,6 +359,19 @@ export function TasksView({
     [selectedId, creating]
   );
   usePoll(historyRes.reload, POLL_MS, !!selectedId && !creating);
+
+  // The create-mode inspector's preview (#633). The server computes it with
+  // the scheduler's own code, so nothing here parses a cron or does schedule
+  // arithmetic; this only debounces the draft and aborts a stale request.
+  const previewInput = useDebounced(creating ? draft : null, 250);
+  const previewKey = JSON.stringify(previewInput);
+  const previewRes = useResource<TaskPreview | null>(
+    (signal) =>
+      previewInput && inspectorOpen
+        ? api.post<TaskPreview>("/tasks/preview", previewInput, signal)
+        : Promise.resolve(null),
+    [previewKey, inspectorOpen]
+  );
 
   const startedJob = useMemo(
     () =>
@@ -995,10 +1016,15 @@ export function TasksView({
           <aside className="pane-inspector">
             <div className="inspector__head">Task</div>
             <div className="inspector__scroll scroll">
-              {!draft || creating ? (
-                <div className="statepane">
-                  {creating ? "Unsaved task" : "Nothing selected"}
-                </div>
+              {draft && creating ? (
+                <TaskPreviewBody
+                  draft={draft}
+                  preview={previewRes.data ?? null}
+                  loading={previewRes.loading && !previewRes.data}
+                  error={previewRes.error}
+                />
+              ) : !draft ? (
+                <div className="statepane">Nothing selected</div>
               ) : (
                 <>
                   <InspGroup title="Timing">
@@ -1053,6 +1079,89 @@ export function TasksView({
         </>
       )}
     </div>
+  );
+}
+
+/* --- Create-mode preview (#633) ------------------------------------------ */
+
+/** Where the run's model comes from, as a suffix; `agent_missing` is its own row. */
+const MODEL_SOURCE: Record<TaskPreview["model_source"], string> = {
+  agent: " · from agent",
+  agent_missing: "",
+  task: "",
+  settings: " · from Settings",
+  cli_default: "",
+};
+
+/**
+ * What an unsaved task will do: its next fires, and what it will run as. Every
+ * value comes from `POST /api/tasks/preview`, which uses the scheduler's and
+ * the executor's own rules — see `preview_task` in `native/tasks.rs`.
+ */
+function TaskPreviewBody({
+  draft,
+  preview,
+  loading,
+  error,
+}: {
+  draft: ScheduledTask;
+  preview: TaskPreview | null;
+  loading: boolean;
+  error?: string;
+}) {
+  const runs = preview?.next_runs ?? [];
+  return (
+    <>
+      <InspGroup title="Schedule">
+        <InspRow label="Repeat">{describeSchedule(draft)}</InspRow>
+        {error ? (
+          <div className="formerror">{error}</div>
+        ) : loading || !preview ? (
+          <InspRow label="Next runs">…</InspRow>
+        ) : preview.schedule_error ? (
+          <div className="formerror">{preview.schedule_error}</div>
+        ) : draft.schedule_type === "run_immediately" ? (
+          <InspRow label="Next run">As soon as it is saved</InspRow>
+        ) : runs.length === 0 ? (
+          <InspRow label="Next runs">None before the limits</InspRow>
+        ) : (
+          runs.map((t, i) => (
+            <InspRow key={t} label={i === 0 ? "Next runs" : ""}>
+              <span className="tnum" title={relativeTime(t)}>
+                {dateTime(t)}
+              </span>
+            </InspRow>
+          ))
+        )}
+      </InspGroup>
+
+      {preview && (
+        <InspGroup title="Runs as">
+          <InspRow label="Model">
+            {preview.model_source === "agent_missing"
+              ? "Agent not found"
+              : `${preview.model || "Claude Code default"}${MODEL_SOURCE[preview.model_source]}`}
+          </InspRow>
+          <InspRow label="Working dir">
+            <span className="row insp-row__copy">
+              <span
+                className="mono truncate"
+                title={preview.working_directory}
+              >
+                {preview.working_directory}
+              </span>
+              <CopyButton
+                text={preview.working_directory}
+                title="Copy the working directory"
+              />
+            </span>
+          </InspRow>
+          {preview.working_directory_source === "settings" && (
+            <InspRow label="">from Settings</InspRow>
+          )}
+        </InspGroup>
+      )}
+    </>
   );
 }
 

@@ -395,7 +395,10 @@ fn page_offset(query: &str) -> i64 {
 /// fails. Everything else this module claims came from Go and is recorded in
 /// `read_routes.json` / `write_routes.json`, which are frozen records of Go's
 /// surface and cannot carry a route Go never had.
-pub const ROUTES: &[(&str, &str)] = &[("POST", "/api/tasks/{id}/run")];
+pub const ROUTES: &[(&str, &str)] = &[
+    ("POST", "/api/tasks/{id}/run"),
+    ("POST", "/api/tasks/preview"),
+];
 
 /// This module's entry in `native::ENDPOINTS`.
 pub const ENDPOINT: super::Endpoint = super::Endpoint {
@@ -411,6 +414,10 @@ enum Route<'a> {
     TaskPause(&'a str),
     TaskResume(&'a str),
     TaskRun(&'a str),
+    /// `POST /api/tasks/preview` (#633). Only a `POST` is this route: every
+    /// other method on the path is `Task("preview")`, as it was before — see
+    /// [`route`].
+    TaskPreview,
     TaskJobHistory(&'a str),
     JobHistoryList,
     JobHistory(&'a str),
@@ -419,7 +426,7 @@ enum Route<'a> {
 fn claims(method: &Method, path: &str) -> bool {
     match *method {
         Method::GET => matches!(
-            route_of(path),
+            route(method, path),
             Some(Route::TaskList)
                 | Some(Route::Task(_))
                 | Some(Route::TaskJobHistory(_))
@@ -432,18 +439,30 @@ fn claims(method: &Method, path: &str) -> bool {
         // fired. It is here now, so the write and the registration are once
         // again the same edit.
         Method::POST => matches!(
-            route_of(path),
+            route(method, path),
             Some(Route::TaskList)
                 | Some(Route::TaskPause(_))
                 | Some(Route::TaskResume(_))
                 | Some(Route::TaskRun(_))
+                | Some(Route::TaskPreview)
         ),
-        Method::PUT => matches!(route_of(path), Some(Route::Task(_))),
+        Method::PUT => matches!(route(method, path), Some(Route::Task(_))),
         Method::DELETE => matches!(
-            route_of(path),
+            route(method, path),
             Some(Route::Task(_)) | Some(Route::JobHistoryList) | Some(Route::JobHistory(_))
         ),
         _ => false,
+    }
+}
+
+/// [`route_of`], with the one method-dependent path resolved: `preview` is the
+/// preview route only for a `POST`, and a task id for everything else — so a
+/// `GET /api/tasks/preview` is still an unknown task, exactly as it was before
+/// the route existed. (A real id is a UUID, so it can never be `preview`.)
+fn route<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
+    match route_of(path) {
+        Some(Route::TaskPreview) if *method != Method::POST => Some(Route::Task("preview")),
+        other => other,
     }
 }
 
@@ -476,6 +495,9 @@ fn route_of(path: &str) -> Option<Route<'_>> {
         if let Some(id) = rest.strip_suffix("/run") {
             return segment(id).map(Route::TaskRun);
         }
+        if rest == "preview" {
+            return Some(Route::TaskPreview);
+        }
         return segment(rest).map(Route::Task);
     }
     None
@@ -490,7 +512,7 @@ fn segment(value: &str) -> Option<&str> {
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     let db = &ctx.db_path;
-    match (req.method.clone(), route_of(req.path)) {
+    match (req.method.clone(), route(req.method, req.path)) {
         (Method::DELETE, Some(Route::JobHistory(id))) => finish(delete_job_history(db, id)),
         (Method::DELETE, Some(Route::JobHistoryList)) => {
             finish(bulk_delete_job_history(db, req.body))
@@ -500,6 +522,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         (Method::POST, Some(Route::TaskPause(id))) => finish(pause_task(db, id)),
         (Method::POST, Some(Route::TaskResume(id))) => finish(resume_task(db, id)),
         (Method::POST, Some(Route::TaskRun(id))) => finish(run_task_now(id)),
+        (Method::POST, Some(Route::TaskPreview)) => finish(preview_task(db, req.body)),
         (Method::PUT, Some(Route::Task(id))) => finish(update_task(db, id, req.body)),
         (Method::GET, _) => serve_read(ctx, req),
         _ => Err(format!("{} {} is not ported", req.method, req.path)),
@@ -508,7 +531,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
 
 fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     let db = &ctx.db_path;
-    let body = match route_of(req.path) {
+    let body = match route(req.method, req.path) {
         Some(Route::TaskList) => {
             super::gojson::to_vec(&list_tasks(db)?).map_err(|e| format!("encoding tasks: {e}"))?
         }
@@ -541,12 +564,14 @@ fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, S
             None => return Err(format!("job history {id:?} not found")),
         },
 
-        // The three POST-only paths reach `serve_read` from nowhere — `serve`
+        // The four POST-only paths reach `serve_read` from nowhere — `serve`
         // routes them by method first — so this arm is the same "not a read"
         // answer the `None` arm gives.
-        Some(Route::TaskPause(_)) | Some(Route::TaskResume(_)) | Some(Route::TaskRun(_)) | None => {
-            return Err(format!("{} is not a task read", req.path))
-        }
+        Some(Route::TaskPause(_))
+        | Some(Route::TaskResume(_))
+        | Some(Route::TaskRun(_))
+        | Some(Route::TaskPreview)
+        | None => return Err(format!("{} is not a task read", req.path)),
     };
     Ok(super::Answer::json(body))
 }
@@ -1635,6 +1660,288 @@ mod tests {
         bulk_delete_job_history(file.path(), br#"{"ids":["j2","j3"]}"#).expect("bulk");
         crate::native::writes::testlog::assert_info_present("job history bulk deleted count=2");
     }
+
+    // ─── The preview (#633) ───────────────────────────────────────────────────
+
+    fn berlin() -> chrono_tz::Tz {
+        "Europe/Berlin".parse().expect("zone")
+    }
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .expect("literal parses")
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn draft(body: &str) -> ScheduledTask {
+        let mut task = decode_body::<TaskRequest>(body.as_bytes())
+            .expect("decode")
+            .into_task();
+        if task.schedule_type.is_empty() {
+            task.schedule_type = "run_immediately".to_string();
+        }
+        task
+    }
+
+    /// What the scheduler itself computes for the same draft, rendered the way
+    /// the preview renders it.
+    fn scheduler_says(
+        task: &ScheduledTask,
+        loc: chrono_tz::Tz,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<String> {
+        let outcome = super::super::schedule::fire_times(
+            &task.schedule_type,
+            &task.schedule_config,
+            loc,
+            now,
+            PREVIEW_RUNS,
+        );
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        outcome
+            .next_runs
+            .into_iter()
+            // A zero time ends the list: a one-off has one fire.
+            .map_while(|f| f)
+            .map(|f| f.rfc3339())
+            .collect()
+    }
+
+    #[test]
+    fn the_preview_route_is_a_post_and_every_other_method_is_still_a_task_id() {
+        assert!(claims(&Method::POST, "/api/tasks/preview"));
+        assert!(matches!(
+            route(&Method::POST, "/api/tasks/preview"),
+            Some(Route::TaskPreview)
+        ));
+        for method in [Method::GET, Method::PUT, Method::DELETE] {
+            assert!(
+                matches!(
+                    route(&method, "/api/tasks/preview"),
+                    Some(Route::Task("preview"))
+                ),
+                "{method}"
+            );
+        }
+        // And a GET for it is the ordinary unknown task.
+        let file = migrated();
+        assert!(get_task(file.path(), "preview").expect("get").is_none());
+        assert!(!claims(&Method::POST, "/api/tasks/preview/x"));
+    }
+
+    #[test]
+    fn the_preview_lists_exactly_what_the_scheduler_would_fire() {
+        let loc = berlin();
+        let cases = [
+            // Across the 2026-03-29 spring-forward day in Berlin.
+            (
+                r#"{"schedule_type":"cron","schedule_config":{"expression":"0 9 * * *"}}"#,
+                "2026-03-28T10:00:00Z",
+            ),
+            (
+                r#"{"schedule_type":"interval","schedule_config":{"every_days":1,"at_time":"00:00"}}"#,
+                "2026-03-28T10:00:00Z",
+            ),
+            (
+                r#"{"schedule_type":"interval","schedule_config":{"every_hours":24}}"#,
+                "2026-03-28T10:00:00Z",
+            ),
+            (
+                r#"{"schedule_type":"one_off","schedule_config":{"run_at":"2026-05-01T09:30:00+02:00"}}"#,
+                "2026-03-28T10:00:00Z",
+            ),
+        ];
+        for (body, now) in cases {
+            let task = draft(body);
+            let (runs, error) = preview_runs(&task, loc, at(now));
+            assert_eq!(error, "", "{body}");
+            assert!(!runs.is_empty(), "{body}");
+            assert_eq!(runs, scheduler_says(&task, loc, at(now)), "{body}");
+        }
+
+        // The cron case really does cross the transition: 09:00 stays 09:00
+        // while the offset moves from +01:00 to +02:00.
+        let (runs, _) = preview_runs(
+            &draft(r#"{"schedule_type":"cron","schedule_config":{"expression":"0 9 * * *"}}"#),
+            loc,
+            at("2026-03-28T10:00:00Z"),
+        );
+        assert_eq!(
+            runs,
+            [
+                "2026-03-29T09:00:00+02:00",
+                "2026-03-30T09:00:00+02:00",
+                "2026-03-31T09:00:00+02:00"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_preview_honours_both_limits() {
+        let loc = berlin();
+        let now = at("2026-06-01T10:00:00Z");
+        let (runs, _) = preview_runs(
+            &draft(
+                r#"{"schedule_type":"cron","schedule_config":{"expression":"0 9 * * *"},
+                    "stop_after_time":"2026-06-03T06:00:00Z"}"#,
+            ),
+            loc,
+            now,
+        );
+        // 06:00Z is 08:00 in Berlin, an hour before the second fire.
+        assert_eq!(runs, ["2026-06-02T09:00:00+02:00"]);
+
+        let (runs, _) = preview_runs(
+            &draft(
+                r#"{"schedule_type":"cron","schedule_config":{"expression":"0 9 * * *"},
+                    "stop_after_count":2}"#,
+            ),
+            loc,
+            now,
+        );
+        assert_eq!(runs.len(), 2);
+
+        // A stop at exactly the fire still runs it: `should_auto_pause` is `>`.
+        let (runs, _) = preview_runs(
+            &draft(
+                r#"{"schedule_type":"cron","schedule_config":{"expression":"0 9 * * *"},
+                    "stop_after_time":"2026-06-02T07:00:00Z"}"#,
+            ),
+            loc,
+            now,
+        );
+        assert_eq!(runs, ["2026-06-02T09:00:00+02:00"]);
+    }
+
+    #[test]
+    fn run_immediately_previews_its_single_now_plus_two_seconds_fire() {
+        let now = at("2026-06-01T10:00:00Z");
+        for body in [r#"{"schedule_type":"run_immediately"}"#, "{}"] {
+            let (runs, error) = preview_runs(&draft(body), berlin(), now);
+            assert_eq!(error, "");
+            assert_eq!(runs, ["2026-06-01T12:00:02+02:00"], "{body}");
+        }
+    }
+
+    #[test]
+    fn an_unusable_schedule_is_an_answer_not_a_refusal() {
+        let now = at("2026-06-01T10:00:00Z");
+        for (body, want) in [
+            (
+                r#"{"schedule_type":"cron","schedule_config":{"expression":"not cron"}}"#,
+                "expression is not a valid cron schedule",
+            ),
+            (
+                r#"{"schedule_type":"cron","schedule_config":{"expression":"0 0 30 2 *"}}"#,
+                "expression is a valid cron schedule but will never fire",
+            ),
+            (
+                r#"{"schedule_type":"one_off","schedule_config":{"run_at":"2020-01-01T00:00:00Z"}}"#,
+                "The run time is in the past.",
+            ),
+            (r#"{"schedule_type":"one_off"}"#, "Choose a valid run time."),
+            (
+                r#"{"schedule_type":"interval"}"#,
+                "This schedule will not run.",
+            ),
+        ] {
+            let (runs, error) = preview_runs(&draft(body), berlin(), now);
+            assert!(runs.is_empty(), "{body}");
+            assert_eq!(error, want, "{body}");
+        }
+
+        // Through the handler: 200, not 422, and a draft with no name or prompt.
+        let file = migrated();
+        let answer = preview_task(
+            file.path(),
+            br#"{"schedule_type":"cron","schedule_config":{"expression":"nope"}}"#,
+        )
+        .expect("preview");
+        assert_eq!(answer.status, StatusCode::OK);
+        assert!(matches!(
+            preview_task(file.path(), b"[]"),
+            Err(WriteError::InvalidBody)
+        ));
+    }
+
+    #[test]
+    fn the_preview_body_is_in_wire_order_and_writes_nothing() {
+        let file = migrated();
+        let answer = preview_task(
+            file.path(),
+            br#"{"schedule_type":"cron","schedule_config":{"expression":"not cron"},
+                "model":"opus","working_directory":"/work"}"#,
+        )
+        .expect("preview");
+        assert_eq!(
+            String::from_utf8(answer.body.expect("a body")).expect("utf-8"),
+            r#"{"next_runs":[],"schedule_error":"expression is not a valid cron schedule","model":"opus","model_source":"task","working_directory":"/work","working_directory_source":"task"}"#.to_string() + "\n"
+        );
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let count = |table: &str| -> i64 {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .expect("count")
+        };
+        assert_eq!(count("scheduled_tasks"), 0);
+        assert_eq!(count("job_history"), 0);
+    }
+
+    #[test]
+    fn the_preview_resolves_the_model_and_directory_as_the_executor_does() {
+        use super::super::chat::runner::TurnSettings;
+        use super::super::schedule::executor::effective_execution;
+
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(
+            "INSERT INTO agents (slug, name, model, capabilities) VALUES ('with', 'With', 'haiku', '{}');
+             INSERT INTO agents (slug, name, model, capabilities) VALUES ('without', 'Without', '', '{}');",
+        )
+        .expect("seed agents");
+        let run = |body: &str| effective_execution(file.path(), &draft(body)).expect("resolve");
+        let src = |body: &str| {
+            let e = run(body);
+            (e.model, e.model_source)
+        };
+
+        // An agent's model beats the task's own; an agent without one is the
+        // CLI's default, not Settings'.
+        assert_eq!(
+            src(r#"{"agent_slug":"with","model":"opus"}"#),
+            ("haiku".to_string(), "agent")
+        );
+        assert_eq!(
+            src(r#"{"agent_slug":"without","model":"opus"}"#),
+            (String::new(), "cli_default")
+        );
+        assert_eq!(
+            src(r#"{"agent_slug":"gone"}"#),
+            (String::new(), "agent_missing")
+        );
+        // No agent: the task's, else Settings'.
+        assert_eq!(src(r#"{"model":"opus"}"#), ("opus".to_string(), "task"));
+        let settings_model = TurnSettings::from_db(file.path()).default_model();
+        assert!(!settings_model.is_empty());
+        assert_eq!(src("{}"), (settings_model, "settings"));
+        // An unreadable database has no Settings to read.
+        let nowhere = std::path::Path::new("/nonexistent/agento/definitely-not-a-db");
+        let e = effective_execution(nowhere, &draft("{}")).expect("resolve");
+        assert_eq!((e.model.as_str(), e.model_source), ("", "cli_default"));
+
+        // The working directory: the task's, else Settings' chain.
+        let e = run(r#"{"working_directory":"/srv/job"}"#);
+        assert_eq!(
+            (e.working_directory.as_str(), e.working_directory_source),
+            ("/srv/job", "task")
+        );
+        let e = run(r#"{"agent_slug":"with"}"#);
+        assert_eq!(
+            e.working_directory,
+            TurnSettings::from_db(file.path()).default_working_dir()
+        );
+        assert_eq!(e.working_directory_source, "settings");
+    }
 }
 
 // ─── Row writes shared with the scheduler (#275) ───────────────────────────────
@@ -2416,6 +2723,115 @@ fn start_manual_run(
 
     log::info!("task run started id={id:?} job_id={job_id:?}");
     Ok(super::Answer::json_status(StatusCode::ACCEPTED, body))
+}
+
+/// How many fires the preview lists.
+const PREVIEW_RUNS: usize = 3;
+
+/// `POST /api/tasks/preview` (#633): what a draft task *would* do, computed by
+/// the scheduler's own code and written nowhere.
+///
+/// **This route has no Go ancestor**; see `ROUTES`. It exists so the Tasks
+/// form's create-mode inspector never needs a second implementation of the
+/// schedule arithmetic — robfig's dialect, DST, gocron's `DailyJob` and the
+/// `run_immediately` `now + 2s` all come from [`super::schedule::fire_times`],
+/// in the location [`super::schedule::runtime::local_tz`] gives the scheduler.
+///
+/// - The body is a `TaskRequest`, so the same decode rules apply; a malformed
+///   one is `400`. There is **no** `validate_task`: a draft may have no name or
+///   prompt yet, and an unusable schedule is an answer (`200` with a
+///   `schedule_error` and no runs) rather than a `422`.
+/// - The limits are applied as the executor applies them to a new task
+///   (`run_count` 0): a fire after `stop_after_time` would auto-pause instead of
+///   running, and `stop_after_count` caps the list.
+/// - The model and working directory are
+///   [`super::schedule::executor::effective_execution`], the executor's own
+///   precedence.
+fn preview_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let mut task = decode_body::<TaskRequest>(body)?.into_task();
+    // `validate_task`'s one mutation that changes what is scheduled.
+    if task.schedule_type.is_empty() {
+        task.schedule_type = "run_immediately".to_string();
+    }
+    let loc = super::schedule::runtime::local_tz();
+    let (next_runs, schedule_error) = preview_runs(&task, loc, chrono::Utc::now());
+
+    let execution = super::schedule::executor::effective_execution(db_path, &task)
+        .map_err(WriteError::Fallback)?;
+    let body = super::gojson::to_vec(&TaskPreview {
+        next_runs,
+        schedule_error,
+        model: execution.model,
+        model_source: execution.model_source,
+        working_directory: execution.working_directory,
+        working_directory_source: execution.working_directory_source,
+    })
+    .map_err(|e| WriteError::Fallback(format!("encoding task preview: {e}")))?;
+    Ok(super::Answer::json(body))
+}
+
+/// The preview's fires, limits applied, as RFC 3339 in each fire's own offset —
+/// or the sentence that says why there are none.
+fn preview_runs(
+    task: &ScheduledTask,
+    loc: chrono_tz::Tz,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (Vec<String>, String) {
+    let outcome = super::schedule::fire_times(
+        &task.schedule_type,
+        &task.schedule_config,
+        loc,
+        now,
+        PREVIEW_RUNS,
+    );
+    if let Some(class) = outcome.error {
+        return (Vec::new(), schedule_error_sentence(class).to_string());
+    }
+    let cap = if task.stop_after_count > 0 {
+        usize::try_from(task.stop_after_count).unwrap_or(usize::MAX)
+    } else {
+        usize::MAX
+    };
+    let runs = outcome
+        .next_runs
+        .into_iter()
+        // A zero time is gocron's "no further run".
+        .map_while(|fire| fire)
+        // `should_auto_pause` pauses a task whose fire lands after the stop.
+        .take_while(|fire| {
+            task.stop_after_time
+                .as_ref()
+                .is_none_or(|stop| fire.instant <= stop.instant())
+        })
+        .take(cap)
+        .map(|fire| fire.rfc3339())
+        .collect();
+    (runs, String::new())
+}
+
+/// A human sentence for a `fire_times` error class.
+///
+/// The two cron sentences are `validate_task`'s own, so the preview and the
+/// save refuse an expression in the same words.
+fn schedule_error_sentence(class: &str) -> &'static str {
+    match class {
+        "schedule:cron_parse" => "expression is not a valid cron schedule",
+        "schedule:cron_invalid" => "expression is a valid cron schedule but will never fire",
+        "schedule:one_time_past" => "The run time is in the past.",
+        "build:run_at" => "Choose a valid run time.",
+        _ => "This schedule will not run.",
+    }
+}
+
+/// The `200` body of `POST /api/tasks/preview`, fields in wire order.
+#[derive(Serialize)]
+struct TaskPreview {
+    next_runs: Vec<String>,
+    schedule_error: String,
+    model: String,
+    model_source: &'static str,
+    working_directory: String,
+    working_directory_source: &'static str,
 }
 
 /// The `202` body of `POST /api/tasks/{id}/run`.
