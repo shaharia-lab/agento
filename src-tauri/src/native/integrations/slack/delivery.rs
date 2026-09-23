@@ -23,7 +23,7 @@
 use crate::claude::CancellationToken;
 use crate::native::trigger::dispatcher::NO_RESPONSE_REPLY;
 
-use super::client::Client;
+use super::client::{api_error_code, Client};
 use super::mrkdwn;
 
 /// What one run says to Slack. `body` is raw Markdown: the answer on a
@@ -184,11 +184,7 @@ pub(crate) fn format_duration(ms: i64) -> String {
 /// <code>`; known codes become advice, anything else — a rate limit, a failed
 /// request, an unknown code — passes through as the client wrote it.
 fn readable(e: &str) -> String {
-    let Some(code) = e
-        .strip_prefix("slack API error (")
-        .and_then(|rest| rest.split_once("): "))
-        .map(|(_, code)| code)
-    else {
+    let Some(code) = api_error_code(e) else {
         return e.to_string();
     };
     let sentence = match code {

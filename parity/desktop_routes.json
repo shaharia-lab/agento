@@ -195,6 +195,13 @@
     },
     {
       "method": "GET",
+      "route": "/api/integrations/{id}/slack/channels",
+      "status": "native",
+      "owner": "#641",
+      "reason": "the Tasks form's Slack channel picker: every page of conversations.list (public and private, archived excluded, at most 10 pages of 1000) projected to id, name, is_private and is_member, sorted by name then id. The token is the one delivery posts with, so is_member marks the channels a run would fail in with not_in_channel. 404 for an unknown id, 400 for a non-Slack, disabled or unconnected integration, 502 with a token-free sentence when Slack refuses or cannot be reached. Answered by the streaming registry because it calls Slack"
+    },
+    {
+      "method": "GET",
       "route": "/api/security-scan/findings",
       "status": "native",
       "owner": "#604",

@@ -249,6 +249,15 @@ export interface SlackDestinationConfig {
   channel_ids: string[] | null;
 }
 
+/** One channel from `GET /api/integrations/{id}/slack/channels` (#641);
+ *  `is_member` is relative to the token delivery posts with. */
+export interface SlackChannel {
+  id: string;
+  name: string;
+  is_private: boolean;
+  is_member: boolean;
+}
+
 /** Numeric chat ids only, as strings (#639). */
 export interface TelegramDestinationConfig {
   integration_id: string;

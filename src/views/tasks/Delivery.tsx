@@ -13,10 +13,21 @@
    * **Warnings wait for `/integrations`.** Until that list has loaded, no row
      can be judged, so none is — a slow fetch must not flash "missing". An
      email row (#640) waits the same way for the SMTP settings.
+
+   A Slack row with an integration chosen picks its channels from the
+   workspace's own list (#641); `SlackChannelPicker` falls back to the
+   comma-separated field when that list cannot be loaded.
    ========================================================================== */
 
-import { useEffect, useState } from "react";
-import type { DeliveryWhen, Integration, TaskDestination } from "../../lib/types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  DeliveryWhen,
+  Integration,
+  SlackChannel,
+  TaskDestination,
+} from "../../lib/types";
+import { api } from "../../lib/api";
+import { SlackChannelPicker } from "../../components/SlackChannelPicker";
 import { Dropdown, FormRow, FormSection, Segmented } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { connectionState } from "../integrations/catalog";
@@ -211,6 +222,22 @@ export function DeliverySection({
   onToggle(): void;
   onChange(next: TaskDestination[]): void;
 }) {
+  // One `conversations.list` walk per integration for as long as the form is
+  // open, shared by every row that picks it: Slack allows about 20 a minute.
+  // A failure is forgotten, so Retry asks again.
+  const channelCache = useRef(new Map<string, Promise<SlackChannel[] | null>>());
+  const loadChannels = useCallback((id: string) => {
+    const cache = channelCache.current;
+    let pending = cache.get(id);
+    if (!pending) {
+      pending = api.get<SlackChannel[] | null>(
+        `/integrations/${encodeURIComponent(id)}/slack/channels`
+      );
+      pending.catch(() => cache.delete(id));
+      cache.set(id, pending);
+    }
+    return pending;
+  }, []);
   const all = integrations ?? [];
   const hasTelegram = all.some(isUsableTelegram);
   // Slack stays offered whenever no other type is, which is the section as it
@@ -253,6 +280,7 @@ export function DeliverySection({
           candidates={all.filter((c) => c.type === dest.type)}
           loaded={integrations !== null}
           warning={destinationWarning(dest, integrations, smtpConfigured)}
+          loadChannels={loadChannels}
           onChange={(next) =>
             onChange(destinations.map((d, j) => (j === i ? next : d)))
           }
@@ -281,6 +309,7 @@ function DeliveryDestinationRow({
   candidates,
   loaded,
   warning,
+  loadChannels,
   onChange,
   onRemove,
 }: {
@@ -292,6 +321,7 @@ function DeliveryDestinationRow({
    *  "missing". */
   loaded: boolean;
   warning: string | null;
+  loadChannels(integrationId: string): Promise<SlackChannel[] | null>;
   onChange(next: TaskDestination): void;
   onRemove(): void;
 }) {
@@ -326,6 +356,21 @@ function DeliveryDestinationRow({
     );
   }
 
+  const idsField = (
+    <label className="field">
+      <input
+        className="mono"
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          patch({ ids: parseChannelIds(e.target.value) });
+        }}
+        placeholder={kind.placeholder}
+        spellCheck={false}
+      />
+    </label>
+  );
+
   return (
     <div className="delivery__dest">
       <FormRow label={kind.label}>
@@ -346,20 +391,24 @@ function DeliveryDestinationRow({
         </div>
         {warning && <div className="delivery__warning">{warning}</div>}
       </FormRow>
-      <FormRow label={kind.idsLabel} help={kind.help}>
-        <label className="field">
-          <input
-            className="mono"
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              patch({ ids: parseChannelIds(e.target.value) });
-            }}
-            placeholder={kind.placeholder}
-            spellCheck={false}
+      {dest.type === "slack" && id ? (
+        <FormRow
+          label="Channels"
+          help="Each channel gets the summary and a thread with the output. Invite the bot to each one."
+        >
+          <SlackChannelPicker
+            integrationId={id}
+            value={ids}
+            onChange={(next) => patch({ ids: next })}
+            load={loadChannels}
+            fallback={idsField}
           />
-        </label>
-      </FormRow>
+        </FormRow>
+      ) : (
+        <FormRow label={kind.idsLabel} help={kind.help}>
+          {idsField}
+        </FormRow>
+      )}
       <FormRow label="When">
         <Segmented<DeliveryWhen>
           value={dest.when || "success"}

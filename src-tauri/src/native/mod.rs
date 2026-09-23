@@ -252,7 +252,14 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 /// `spawn_blocking` is the wrong shape for. Returning a finished body from the
 /// async registry is a smaller change than putting a runtime in front of the
 /// blocking one; see `gateway_api::CATALOG_ROUTE`.
-const STREAM_ENDPOINTS: &[StreamEndpoint] = &[chat::ENDPOINT, gateway_api::STREAM_ENDPOINT];
+///
+/// #641 added a second: `GET /api/integrations/{id}/slack/channels` pages
+/// through Slack's `conversations.list` on the same terms.
+const STREAM_ENDPOINTS: &[StreamEndpoint] = &[
+    chat::ENDPOINT,
+    gateway_api::STREAM_ENDPOINT,
+    integrations::slack::channels::STREAM_ENDPOINT,
+];
 
 /// Whether this request is answered by a *streaming* native handler.
 pub fn claims_stream(method: &Method, path: &str) -> bool {

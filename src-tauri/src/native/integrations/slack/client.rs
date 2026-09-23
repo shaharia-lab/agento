@@ -303,6 +303,15 @@ pub(super) async fn read_capped(
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
+/// The Slack `error` code of an `ok: false` answer, as [`read_slack_response`]
+/// words it (`slack API error (<method>): <code>`), or `None` for any other
+/// failure — a rate limit, a failed request, a parse error.
+pub(super) fn api_error_code(e: &str) -> Option<&str> {
+    e.strip_prefix("slack API error (")
+        .and_then(|rest| rest.split_once("): "))
+        .map(|(_, code)| code)
+}
+
 /// The `<= 0 || > max` clamp all five paging tools apply, with a per-tool
 /// fallback and a per-tool ceiling — both of which differ between them, which is
 /// why neither is a constant here.

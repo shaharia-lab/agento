@@ -732,7 +732,13 @@ fn start_oauth(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 /// fails. Everything else this module claims came from Go and is recorded in
 /// `read_routes.json` / `write_routes.json`, which are frozen records of Go's
 /// surface and cannot carry a route Go never had.
-pub const ROUTES: &[(&str, &str)] = &[("PUT", "/api/integrations/{id}/inbound")];
+///
+/// `slack::channels::ROUTE` (#641) is recorded here too, though the streaming
+/// registry answers it: this module owns the `/api/integrations` prefix.
+pub const ROUTES: &[(&str, &str)] = &[
+    ("PUT", "/api/integrations/{id}/inbound"),
+    slack::channels::ROUTE,
+];
 
 /// This module's entry in `native::ENDPOINTS`.
 pub const ENDPOINT: super::Endpoint = super::Endpoint {
