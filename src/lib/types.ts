@@ -255,12 +255,18 @@ export interface TelegramDestinationConfig {
   chat_ids: string[] | null;
 }
 
+/** Sent through the SMTP server from Settings → Notifications (#640). */
+export interface EmailDestinationConfig {
+  recipients: string[] | null;
+}
+
 /** One place a task's output is delivered; one sub-object per `type`. */
 export interface TaskDestination {
-  type: "slack" | "telegram";
+  type: "slack" | "telegram" | "email";
   when: DeliveryWhen;
   slack?: SlackDestinationConfig;
   telegram?: TelegramDestinationConfig;
+  email?: EmailDestinationConfig;
 }
 
 export interface ScheduledTask {

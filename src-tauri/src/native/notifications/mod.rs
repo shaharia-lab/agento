@@ -46,6 +46,7 @@
 //!    that has never sent a notification gets `null` — which is most machines.
 //!    See [`list_log`].
 
+pub mod delivery;
 pub mod smtp;
 pub mod template;
 
@@ -948,6 +949,25 @@ pub fn handle(db_path: &Path, event_type: &str, payload: &[(&str, String)]) {
 fn get_stored_settings(db_path: &Path) -> Result<NotificationSettings, String> {
     let conn = db::open_read_only(db_path)?;
     decode_settings(&super::settings::load_stored(&conn).notification_settings)
+}
+
+/// The SMTP provider as a sender needs it — **unmasked**, for
+/// [`get_stored_settings`]'s reason — or `None` when it is not configured: a
+/// blank `host` or `from_address`, either of which makes every send fail.
+///
+/// Only the provider: the per-task email destination (#640) ignores `enabled`
+/// and the scheduled-task preferences, which govern the metadata notification
+/// [`handle`] sends, not a destination the user added to one task.
+pub(crate) fn stored_provider(db_path: &Path) -> Result<Option<SmtpConfig>, String> {
+    let provider = get_stored_settings(db_path)?.provider.0;
+    Ok((!provider.host.is_empty() && !provider.from_address.is_empty()).then_some(provider))
+}
+
+/// The subject of a task's output email (#640):
+/// `Agento Notification - <task name>: <Completed|Failed>`.
+pub(crate) fn task_output_subject(task_name: &str, succeeded: bool) -> String {
+    let outcome = if succeeded { "Completed" } else { "Failed" };
+    template::build_subject(&format!("{task_name}: {outcome}"))
 }
 
 /// `SQLiteNotificationStore.LogNotification`.

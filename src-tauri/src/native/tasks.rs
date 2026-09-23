@@ -94,8 +94,9 @@ pub struct ScheduleConfig {
 ///
 /// **Typed, with one sub-object per type keyed by the type's name**, so a new
 /// destination type is a new optional field here and needs no migration:
-/// `{"type":"slack","when":"success","slack":{...}}`. `slack` (#637) and
-/// `telegram` (#639) exist; [`validate_destinations`] refuses any other `type`,
+/// `{"type":"slack","when":"success","slack":{...}}`. `slack` (#637),
+/// `telegram` (#639) and `email` (#640) exist; [`validate_destinations`]
+/// refuses any other `type`,
 /// and a sub-object belonging to a type other than the entry's own.
 ///
 /// Stored whole as a JSON array in `scheduled_tasks.destinations` and decoded
@@ -118,6 +119,8 @@ pub struct TaskDestination {
     pub slack: Option<super::gojson::GoStruct<SlackDestination>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram: Option<super::gojson::GoStruct<TelegramDestination>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<super::gojson::GoStruct<EmailDestination>>,
 }
 
 /// A Slack destination's configuration: which connected Slack integration posts,
@@ -148,6 +151,17 @@ pub struct TelegramDestination {
     pub integration_id: String,
     #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub chat_ids: super::gojson::GoList<String>,
+}
+
+/// An email destination's configuration (#640): who receives the run's output.
+///
+/// The SMTP server is not here: it is the one configured in Settings →
+/// Notifications, shared by every task, so a task never stores a second copy of
+/// the password. One message per destination, every recipient on `To`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailDestination {
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
+    pub recipients: super::gojson::GoList<String>,
 }
 
 /// One scheduled task. Mirrors `storage.ScheduledTask`.
@@ -1759,8 +1773,8 @@ mod tests {
         };
         let cases = [
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"email"}]}"#.to_string(),
-                r#"validation error for "destinations[0].type": type must be slack or telegram"#,
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"pigeon"}]}"#.to_string(),
+                r#"validation error for "destinations[0].type": type must be slack, telegram or email"#,
             ),
             (
                 r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","when":"sometimes","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]}"#.to_string(),
@@ -1931,6 +1945,86 @@ mod tests {
         );
     }
 
+    const ONE_EMAIL_DESTINATION: &str = r#"{"name":"N","prompt":"p",
+        "destinations":[{"type":"email","when":"always","email":{
+            "recipients":["a@example.com","boss@example.com"]}}]}"#;
+
+    #[test]
+    fn an_email_destination_round_trips_in_wire_order() {
+        let file = migrated_with_integrations();
+        let task = created(&file, ONE_EMAIL_DESTINATION);
+        let want = r#""destinations":[{"type":"email","when":"always","email":{"recipients":["a@example.com","boss@example.com"]}}],"#;
+        let one = encoded(&get_task(file.path(), &task.id).expect("get").expect("task"));
+        assert!(one.contains(want), "{one}");
+        assert_eq!(
+            stored_destinations(&file, &task.id),
+            r#"[{"type":"email","when":"always","email":{"recipients":["a@example.com","boss@example.com"]}}]"#
+        );
+
+        // Recipients are trimmed and blanks dropped, as the send splits them.
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","destinations":[{"type":"email","email":{"recipients":[" a@example.com ",""]}}]}"#,
+        );
+        assert_eq!(
+            stored_destinations(&file, &task.id),
+            r#"[{"type":"email","when":"success","email":{"recipients":["a@example.com"]}}]"#
+        );
+    }
+
+    #[test]
+    fn every_email_destination_rule_is_a_422() {
+        let file = migrated_with_integrations();
+        let email = |email: &str| {
+            format!(
+                r#"{{"name":"N","prompt":"p","destinations":[{{"type":"email","email":{email}}}]}}"#
+            )
+        };
+        let cases = [
+            (
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"email"}]}"#.to_string(),
+                r#"validation error for "destinations[0].email": email is required for email destinations"#,
+            ),
+            (
+                email(r#"{"recipients":[]}"#),
+                r#"validation error for "destinations[0].email.recipients": recipients is required for email destinations"#,
+            ),
+            (
+                email(r#"{"recipients":null}"#),
+                r#"validation error for "destinations[0].email.recipients": recipients is required for email destinations"#,
+            ),
+            (
+                email(r#"{"recipients":["  "]}"#),
+                r#"validation error for "destinations[0].email.recipients": recipients is required for email destinations"#,
+            ),
+            (
+                email(r#"{"recipients":["a@example.com","not-an-address"]}"#),
+                r#"validation error for "destinations[0].email.recipients": recipient "not-an-address" is not a valid email address"#,
+            ),
+            (
+                email(r#"{"recipients":["a@example.com","a@example.com"]}"#),
+                r#"validation error for "destinations[0].email.recipients": recipient "a@example.com" is listed more than once"#,
+            ),
+            (
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]},"email":{"recipients":["a@example.com"]}}]}"#.to_string(),
+                r#"validation error for "destinations[0].email": email is only allowed on email destinations"#,
+            ),
+        ];
+        for (body, want) in &cases {
+            let err = create_task(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), *want, "create {body}");
+            assert_eq!(
+                err.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "create {body}"
+            );
+        }
+        assert!(
+            list_tasks(file.path()).expect("list").is_empty(),
+            "no row written"
+        );
+    }
+
     #[test]
     fn a_deleted_telegram_integration_is_grandfathered_on_put() {
         let file = migrated_with_integrations();
@@ -2010,7 +2104,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err.message(),
-            r#"validation error for "destinations[0].type": type must be slack or telegram"#
+            r#"validation error for "destinations[0].type": type must be slack, telegram or email"#
         );
         // Wrong container shapes are a 400, not a zero value.
         for body in [
@@ -3486,10 +3580,10 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
 fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), WriteError> {
     for (i, dest) in destinations.iter_mut().enumerate() {
         let field = |name: &str| format!("destinations[{i}].{name}");
-        if dest.r#type != "slack" && dest.r#type != "telegram" {
+        if !matches!(dest.r#type.as_str(), "slack" | "telegram" | "email") {
             return Err(WriteError::validation(
                 &field("type"),
-                "type must be slack or telegram",
+                "type must be slack, telegram or email",
             ));
         }
         match dest.when.as_str() {
@@ -3506,6 +3600,7 @@ fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), Wri
         for (name, present) in [
             ("slack", dest.slack.is_some()),
             ("telegram", dest.telegram.is_some()),
+            ("email", dest.email.is_some()),
         ] {
             if present && dest.r#type != name {
                 return Err(WriteError::validation(
@@ -3516,6 +3611,10 @@ fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), Wri
         }
         if dest.r#type == "telegram" {
             validate_telegram(dest.telegram.as_deref(), &field)?;
+            continue;
+        }
+        if dest.r#type == "email" {
+            validate_email(dest.email.as_deref_mut(), &field)?;
             continue;
         }
         let Some(slack) = dest.slack.as_deref() else {
@@ -3596,6 +3695,53 @@ fn validate_telegram(
             ));
         }
     }
+    Ok(())
+}
+
+/// An `email` entry's sub-object (#640): at least one recipient, and every one
+/// an address `lettre` will put on `To` — the parse the send itself makes, so a
+/// stored address can never fail there.
+///
+/// **It mutates**: each recipient is trimmed and blanks are dropped, the rule
+/// `smtp::build_message` applies to the settings' recipient field, so what is
+/// stored is what is sent.
+fn validate_email(
+    email: Option<&mut EmailDestination>,
+    field: &dyn Fn(&str) -> String,
+) -> Result<(), WriteError> {
+    let Some(email) = email else {
+        return Err(WriteError::validation(
+            &field("email"),
+            "email is required for email destinations",
+        ));
+    };
+    let recipients: Vec<String> = email
+        .recipients
+        .iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    if recipients.is_empty() {
+        return Err(WriteError::validation(
+            &field("email.recipients"),
+            "recipients is required for email destinations",
+        ));
+    }
+    for (j, recipient) in recipients.iter().enumerate() {
+        if recipient.parse::<lettre::Address>().is_err() {
+            return Err(WriteError::validation(
+                &field("email.recipients"),
+                format!("recipient {recipient:?} is not a valid email address"),
+            ));
+        }
+        if recipients[..j].contains(recipient) {
+            return Err(WriteError::validation(
+                &field("email.recipients"),
+                format!("recipient {recipient:?} is listed more than once"),
+            ));
+        }
+    }
+    email.recipients = super::gojson::GoList(recipients);
     Ok(())
 }
 

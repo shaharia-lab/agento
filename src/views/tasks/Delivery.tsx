@@ -11,7 +11,8 @@
      round-trips it unchanged. Filtering it out would delete the user's
      configuration on the next save, silently.
    * **Warnings wait for `/integrations`.** Until that list has loaded, no row
-     can be judged, so none is — a slow fetch must not flash "missing".
+     can be judged, so none is — a slow fetch must not flash "missing". An
+     email row (#640) waits the same way for the SMTP settings.
    ========================================================================== */
 
 import { useEffect, useState } from "react";
@@ -28,8 +29,11 @@ const KINDS: Record<
   DestinationType,
   {
     label: string;
+    /** Whether the type delivers through an integration; email sends through
+     *  the SMTP server from Settings → Notifications instead. */
+    integration: boolean;
     /** The ids field inside the type's sub-object. */
-    ids: "channel_ids" | "chat_ids";
+    ids: "channel_ids" | "chat_ids" | "recipients";
     idsLabel: string;
     noun: string;
     help: string;
@@ -41,6 +45,7 @@ const KINDS: Record<
 > = {
   slack: {
     label: "Slack",
+    integration: true,
     ids: "channel_ids",
     idsLabel: "Channel IDs",
     noun: "channel",
@@ -50,11 +55,22 @@ const KINDS: Record<
   },
   telegram: {
     label: "Telegram",
+    integration: true,
     ids: "chat_ids",
     idsLabel: "Chat IDs",
     noun: "chat",
     help: "Comma-separated numeric chat IDs, e.g. -1001234567890 for a channel. The bot can only message a chat someone there has started it in, or that it was added to.",
     placeholder: "-1001234567890, 123456789",
+    needsAuth: false,
+  },
+  email: {
+    label: "Email",
+    integration: false,
+    ids: "recipients",
+    idsLabel: "Recipients",
+    noun: "recipient",
+    help: "Comma-separated addresses. Sent with the SMTP server from Settings → Notifications as one message; all recipients see each other.",
+    placeholder: "alice@example.com, bob@example.com",
     needsAuth: false,
   },
 };
@@ -87,19 +103,30 @@ export function parseChannelIds(text: string): string[] {
 
 /** The entry's own sub-object, whichever type it is. */
 function config(dest: TaskDestination): { integration_id: string; ids: string[] } {
+  if (dest.type === "email") {
+    return { integration_id: "", ids: dest.email?.recipients ?? [] };
+  }
   const sub = dest.type === "telegram" ? dest.telegram : dest.slack;
   const ids = dest.type === "telegram" ? dest.telegram?.chat_ids : dest.slack?.channel_ids;
   return { integration_id: sub?.integration_id ?? "", ids: ids ?? [] };
 }
 
+/** The one sentence for an email destination with no SMTP server to send
+ *  through — the reason a run records, too. */
+export const SMTP_MISSING =
+  "SMTP is not configured, so nothing is sent until it is set up in Settings → Notifications.";
+
 /**
  * Why a stored destination will not deliver, or `null` when it will (or when
- * that cannot be told yet). `integrations` is `null` until the list loads.
+ * that cannot be told yet). `integrations` is `null` until the list loads, and
+ * `smtpConfigured` until the notification settings do.
  */
 export function destinationWarning(
   dest: TaskDestination,
-  integrations: Integration[] | null
+  integrations: Integration[] | null,
+  smtpConfigured: boolean | null = null
 ): string | null {
+  if (dest.type === "email") return smtpConfigured === false ? SMTP_MISSING : null;
   const kind = KINDS[dest.type] ?? KINDS.slack;
   const id = config(dest).integration_id;
   if (!integrations || !id) return null;
@@ -128,7 +155,8 @@ function plural(n: number, noun: string): string {
  *  header. */
 export function deliverySummary(
   dests: TaskDestination[],
-  integrations: Integration[] | null
+  integrations: Integration[] | null,
+  smtpConfigured: boolean | null = null
 ): string {
   if (dests.length === 0) return "none";
   const types = (Object.keys(KINDS) as DestinationType[]).filter((t) =>
@@ -142,7 +170,7 @@ export function deliverySummary(
       .reduce((sum, d) => sum + config(d).ids.length, 0);
     parts.push(plural(n, KINDS[t].noun));
   }
-  if (dests.some((d) => destinationWarning(d, integrations))) parts.push("⚠");
+  if (dests.some((d) => destinationWarning(d, integrations, smtpConfigured))) parts.push("⚠");
   return parts.join(" · ");
 }
 
@@ -151,6 +179,7 @@ function blankDestination(
   type: DestinationType,
   integrations: Integration[] | null
 ): TaskDestination {
+  if (type === "email") return { type, when: "success", email: { recipients: [] } };
   const usable = type === "telegram" ? isUsableTelegram : isUsableSlack;
   const integration_id = integrations?.find(usable)?.id ?? "";
   return type === "telegram"
@@ -167,6 +196,7 @@ export function DeliverySection({
   destinations,
   integrations,
   integrationsError,
+  smtpConfigured = null,
   open,
   onToggle,
   onChange,
@@ -175,6 +205,8 @@ export function DeliverySection({
   /** `null` while `/integrations` is loading or failed to load. */
   integrations: Integration[] | null;
   integrationsError?: string;
+  /** Whether Settings → Notifications has an SMTP server; `null` until known. */
+  smtpConfigured?: boolean | null;
   open: boolean;
   onToggle(): void;
   onChange(next: TaskDestination[]): void;
@@ -186,11 +218,12 @@ export function DeliverySection({
   const addable: DestinationType[] = [
     ...(all.some(isUsableSlack) || !hasTelegram ? (["slack"] as const) : []),
     ...(hasTelegram ? (["telegram"] as const) : []),
+    ...(smtpConfigured ? (["email"] as const) : []),
   ];
   return (
     <FormSection
       title="Delivery"
-      summary={deliverySummary(destinations, integrations)}
+      summary={deliverySummary(destinations, integrations, smtpConfigured)}
       collapsible
       open={open}
       onToggle={onToggle}
@@ -199,8 +232,14 @@ export function DeliverySection({
         Agento keeps each run's output as usual (see Save output); every
         destination gets a copy. Slack posts go to shared channels, so everyone
         in them sees the output, and the bot has to be invited to each channel.
-        Telegram messages go to each chat, as plain text.
+        Telegram messages go to each chat, as plain text. Email goes to every
+        recipient as one message.
       </div>
+      {smtpConfigured === false && !destinations.some((d) => d.type === "email") && (
+        <div className="formrow__help">
+          To deliver by email, set up an SMTP server in Settings → Notifications.
+        </div>
+      )}
       {integrationsError && (
         <div className="formerror">Couldn't load integrations: {integrationsError}</div>
       )}
@@ -212,7 +251,7 @@ export function DeliverySection({
           dest={dest}
           candidates={all.filter((c) => c.type === dest.type)}
           loaded={integrations !== null}
-          warning={destinationWarning(dest, integrations)}
+          warning={destinationWarning(dest, integrations, smtpConfigured)}
           onChange={(next) =>
             onChange(destinations.map((d, j) => (j === i ? next : d)))
           }
@@ -278,9 +317,11 @@ function DeliveryDestinationRow({
     const integration_id = next.integration_id ?? id;
     const list = next.ids ?? ids;
     onChange(
-      dest.type === "telegram"
-        ? { ...dest, telegram: { integration_id, chat_ids: list } }
-        : { ...dest, slack: { integration_id, channel_ids: list } }
+      dest.type === "email"
+        ? { ...dest, email: { recipients: list } }
+        : dest.type === "telegram"
+          ? { ...dest, telegram: { integration_id, chat_ids: list } }
+          : { ...dest, slack: { integration_id, channel_ids: list } }
     );
   }
 
@@ -288,12 +329,16 @@ function DeliveryDestinationRow({
     <div className="delivery__dest">
       <FormRow label={kind.label}>
         <div className="delivery__head">
-          <Dropdown
-            className="delivery__pick"
-            value={id}
-            options={options}
-            onChange={(integration_id) => patch({ integration_id })}
-          />
+          {kind.integration ? (
+            <Dropdown
+              className="delivery__pick"
+              value={id}
+              options={options}
+              onChange={(integration_id) => patch({ integration_id })}
+            />
+          ) : (
+            <span className="delivery__via">Sent with the SMTP server from Settings → Notifications</span>
+          )}
           <button type="button" className="btn btn--ghost" onClick={onRemove}>
             Remove
           </button>

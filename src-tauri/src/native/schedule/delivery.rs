@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 use crate::native::db;
 use crate::native::gotime::GoTime;
 use crate::native::tasks::{
-    self, JobDelivery, SlackDestination, TaskDestination, TelegramDestination, DELIVERY_FAILED,
-    DELIVERY_PENDING, DELIVERY_SENT, DELIVERY_SKIPPED,
+    self, EmailDestination, JobDelivery, SlackDestination, TaskDestination, TelegramDestination,
+    DELIVERY_FAILED, DELIVERY_PENDING, DELIVERY_SENT, DELIVERY_SKIPPED,
 };
 
 /// Everything a destination may say about one run, owned, because it outlives
@@ -98,6 +98,7 @@ const SKIPPED_UNKNOWN_TYPE: &str = "unknown destination type";
 enum Destination {
     Slack(SlackDestination),
     Telegram(TelegramDestination),
+    Email(EmailDestination),
     /// Test-only. `type` `fake` sends, `fake-fail` fails, `fake-hang` never
     /// finishes; each records the report it was handed (see [`fake_received`]).
     #[cfg(any(test, feature = "test-hooks"))]
@@ -123,6 +124,9 @@ impl Destination {
             "telegram" => Some(Self::Telegram(
                 config.telegram.as_deref().cloned().unwrap_or_default(),
             )),
+            "email" => Some(Self::Email(
+                config.email.as_deref().cloned().unwrap_or_default(),
+            )),
             #[cfg(any(test, feature = "test-hooks"))]
             "fake" => Some(Self::Fake(FakeMode::Send)),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -136,10 +140,13 @@ impl Destination {
     /// One entry per channel or recipient, each of which gets its own row.
     ///
     /// The Slack target is the bare channel id; the Telegram one the chat id.
+    /// An email destination is **one** target, its recipients joined by `, `:
+    /// it sends one message to all of them (#640), so it gets one row.
     fn targets(&self) -> Vec<String> {
         match self {
             Self::Slack(slack) => slack.channel_ids.iter().cloned().collect(),
             Self::Telegram(telegram) => telegram.chat_ids.iter().cloned().collect(),
+            Self::Email(email) => vec![email.recipients.join(", ")],
             #[cfg(any(test, feature = "test-hooks"))]
             Self::Fake(_) => vec!["fake".to_string()],
         }
@@ -153,6 +160,7 @@ impl Destination {
             Self::Telegram(telegram) => {
                 deliver_telegram(db_path, &telegram.integration_id, target, report).await
             }
+            Self::Email(email) => deliver_email(db_path, &email.recipients, report).await,
             #[cfg(any(test, feature = "test-hooks"))]
             Self::Fake(mode) => {
                 fake_record(report);
@@ -252,6 +260,39 @@ async fn deliver_telegram(
     match delivery::deliver_chat(&token, chat_id, &run).await {
         Ok(()) => Outcome::Sent,
         Err(e) => Outcome::Failed(e),
+    }
+}
+
+/// One email destination (#640): every recipient on one message, through the
+/// SMTP provider from Settings → Notifications. No provider is `skipped` with a
+/// pointer to it. The send is lettre's blocking transport, so the whole arm runs
+/// on the blocking pool.
+async fn deliver_email(db_path: &Path, recipients: &[String], report: &DeliveryReport) -> Outcome {
+    use crate::native::notifications::delivery::{self, EmailOutcome};
+
+    let path = db_path.to_path_buf();
+    let recipients = recipients.to_vec();
+    let run = delivery::RunSummary {
+        task_name: report.task_name.clone(),
+        succeeded: report.run_ok(),
+        duration_ms: report.duration_ms,
+        model: report.model.clone(),
+        chat_session_id: report.chat_session_id.clone(),
+        body: if report.run_ok() {
+            report.answer.clone()
+        } else {
+            report.error.clone().unwrap_or_default()
+        },
+    };
+    match db::blocking("email delivery", move || {
+        delivery::deliver(&path, &recipients, &run)
+    })
+    .await
+    {
+        Some(EmailOutcome::Sent) => Outcome::Sent,
+        Some(EmailOutcome::Skipped(reason)) => Outcome::Skipped(reason),
+        Some(EmailOutcome::Failed(e)) => Outcome::Failed(e),
+        None => Outcome::Failed("the email send did not finish".to_string()),
     }
 }
 
@@ -389,6 +430,7 @@ pub(crate) mod tests {
             when: when.to_string(),
             slack: None,
             telegram: None,
+            email: None,
         }
     }
 
@@ -459,6 +501,7 @@ pub(crate) mod tests {
                 ]),
             })),
             telegram: None,
+            email: None,
         };
         deliver_all(
             file.path(),
@@ -519,6 +562,7 @@ pub(crate) mod tests {
                 channel_ids: crate::native::gojson::GoList(vec!["C0123ABCD".into()]),
             })),
             telegram: None,
+            email: None,
         };
         deliver_all(file.path(), &[slack], &report("j-slack-off", "success")).await;
         assert_eq!(
@@ -596,6 +640,36 @@ pub(crate) mod tests {
         );
     }
 
+    /// One row per email destination, not per recipient — it is one message —
+    /// and no SMTP provider is `skipped` with the pointer to set one up (#640).
+    #[tokio::test]
+    async fn an_email_destination_without_smtp_is_one_skipped_row() {
+        let file = with_job("j-email");
+        let email = TaskDestination {
+            r#type: "email".into(),
+            when: "always".into(),
+            slack: None,
+            telegram: None,
+            email: Some(crate::native::gojson::GoStruct(EmailDestination {
+                recipients: crate::native::gojson::GoList(vec![
+                    "a@example.com".into(),
+                    "b@example.com".into(),
+                ]),
+            })),
+        };
+        deliver_all(file.path(), &[email], &report("j-email", "success")).await;
+        assert_eq!(
+            rows(file.path(), "j-email"),
+            vec![(
+                0,
+                "email".into(),
+                "a@example.com, b@example.com".into(),
+                "skipped".into(),
+                crate::native::notifications::delivery::SKIPPED_NO_SMTP.into()
+            )]
+        );
+    }
+
     fn telegram(integration_id: &str, chats: &[&str]) -> TaskDestination {
         TaskDestination {
             r#type: "telegram".into(),
@@ -607,6 +681,7 @@ pub(crate) mod tests {
                     chats.iter().map(ToString::to_string).collect(),
                 ),
             })),
+            email: None,
         }
     }
 

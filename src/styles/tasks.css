@@ -226,6 +226,13 @@
   white-space: nowrap;
 }
 
+/* An email row has no integration to pick; it names where it sends from. */
+.delivery__via {
+  min-width: 0;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
 .delivery__head > .btn {
   flex: none;
   margin-left: auto;
