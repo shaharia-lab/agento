@@ -569,7 +569,7 @@ export function JobsView({
   );
 }
 
-/* --- The run's Claude session --------------------------------------------- */
+/* --- The run's deliveries (#638) ----------------------------------------- */
 
 /** A delivery status's badge; `failed` is the one that needs attention. */
 const DELIVERY_BADGE: Record<DeliveryStatus, { label: string; tone: string }> = {
@@ -608,6 +608,8 @@ function RunDeliveries({ deliveries }: { deliveries: JobDelivery[] }) {
     </>
   );
 }
+
+/* --- The run's Claude session --------------------------------------------- */
 
 /**
  * The Claude session a run produced, as a control rather than a string (#542).
