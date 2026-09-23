@@ -432,7 +432,7 @@ corrupt the count of a run this session owns. Pinned by `scheduled_run.rs`'s
 `the_startup_reaper_stops_a_surviving_orphan_and_fails_every_stale_row` and
 `a_task_whose_stale_run_was_reaped_fires_normally_afterwards`.
 
-**Delivery destinations are stored, not yet delivered** (#634, epic #626).
+**Delivery destinations are stored on the task** (#634, epic #626).
 `scheduled_tasks.destinations` (migration 44) holds a JSON array of typed
 entries, `{"type":"slack","when":"success","slack":{"integration_id":…,"channel_ids":[…]}}`,
 one sub-object per type keyed by the type's name, so a new type is a new
@@ -471,3 +471,32 @@ the reap rather than resurrecting it. The three job reads attach the rows as
 `deliveries`, the **last** key, omitted when empty, with one batched lookup per
 page. Pinned by `tasks.rs`'s delivery tests and `scheduled_run.rs`'s
 `the_startup_reaper_stops_a_surviving_orphan_and_fails_every_stale_row`.
+
+**Delivery: where a run's output leaves Agento** (#636, epic #626).
+`schedule/delivery.rs` is the post-run step, and its `//!` header states its
+three rules. **Dispatch sits beside every `publish_task_*` call in
+`executor::run_task`, not only after `finish`**: the three `prepare` failures
+(prompt interpolation, session creation, agent resolution) return before
+`finish` exists, and a `when: always` destination must hear about them too, on
+the job id the run was started under. A panic in either section dispatches
+nothing, as it publishes nothing. `delivery::dispatch` **`tokio::spawn`s and
+returns `()`**, so the run cannot await it while it holds its permit and
+`RunGuard`; it is an async task rather than a `spawn_blocking` one because a
+post is async `reqwest`, every database touch in it goes through `db::blocking`,
+and a blocking destination wraps its own send. Each target (one per channel or
+recipient) is written `pending`, delivered, then finished; a `success`-only
+destination on a failed run is finished `skipped` (`run failed; this destination
+delivers on success only`), and a stored `type` this build does not know is
+finished `skipped` too, so every configured destination shows up. **The
+delivered answer is `RunResult::answer`, not `response_text`**, so a task with
+`save_output` off still delivers its reply while the job row stores `""`; the
+form's *Save output* hint says so. The destinations are the task snapshot the
+run started with — the write-back copies only counters onto it — so an edit
+landing mid-run applies from the next run. Until #637 the Slack arm finishes
+`skipped` with `slack delivery is not available in this build`. A new type is
+one `Destination` variant and its arms; the executor does not change. Tests
+drive a `Fake` variant (types `fake`, `fake-fail`, `fake-hang`) compiled under
+`cfg(test)` or the `test-hooks` feature. Pinned by `delivery.rs`'s tests, the
+executor's `a_prepare_failure_delivers_to_always_and_skips_success_only`, and
+`scheduled_run.rs`'s `a_hanging_destination_does_not_hold_the_run_or_its_permit`
+and `a_run_delivers_its_unsaved_answer_the_same_way_timed_or_manual`.

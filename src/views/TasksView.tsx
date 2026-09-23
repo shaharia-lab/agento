@@ -836,7 +836,10 @@ export function TasksView({
                       <span className="inline__label">minutes</span>
                     </div>
                   </FormRow>
-                  <FormRow label="Save output" help="Keep the agent's reply in the run history.">
+                  <FormRow
+                    label="Save output"
+                    help="Keep the agent's reply in the run history. Delivery destinations receive it either way."
+                  >
                     <Switch
                       on={draft.save_output}
                       onChange={(v) => edit({ save_output: v })}
