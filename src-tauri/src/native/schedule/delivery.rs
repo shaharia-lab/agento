@@ -153,10 +153,26 @@ impl Destination {
         }
     }
 
-    async fn deliver_one(&self, db_path: &Path, target: &str, report: &DeliveryReport) -> Outcome {
+    /// `slack_thread_mapped` is shared by every target of one run: the first
+    /// Slack summary that posts maps its thread to the run's chat, and nothing
+    /// after it tries (#642).
+    async fn deliver_one(
+        &self,
+        db_path: &Path,
+        target: &str,
+        report: &DeliveryReport,
+        slack_thread_mapped: &mut bool,
+    ) -> Outcome {
         match self {
             Self::Slack(slack) => {
-                deliver_slack(db_path, &slack.integration_id, target, report).await
+                deliver_slack(
+                    db_path,
+                    &slack.integration_id,
+                    target,
+                    report,
+                    slack_thread_mapped,
+                )
+                .await
             }
             Self::Telegram(telegram) => {
                 deliver_telegram(db_path, &telegram.integration_id, target, report).await
@@ -182,11 +198,18 @@ impl Destination {
 /// then `slack::delivery`'s summary and thread. An integration that cannot post
 /// — deleted, not Slack, disabled, not connected, no token — is `skipped` with
 /// the reason, before any network call.
+///
+/// Until `thread_mapped` is set, the channel is offered the mapping of its
+/// summary's thread to the run's chat, so an `@app` reply there continues the
+/// session (#642). It is set once a summary has posted and the insert was
+/// attempted, whether or not the insert succeeded — `inbound_threads` holds one
+/// thread per chat. A run with no chat has nothing to continue and maps nothing.
 async fn deliver_slack(
     db_path: &Path,
     integration_id: &str,
     channel: &str,
     report: &DeliveryReport,
+    thread_mapped: &mut bool,
 ) -> Outcome {
     use crate::native::integrations::{registry, slack::delivery};
 
@@ -212,7 +235,18 @@ async fn deliver_slack(
             report.error.clone().unwrap_or_default()
         },
     };
-    match delivery::deliver_channel(&token, channel, &run).await {
+    let mut mapping =
+        (!*thread_mapped && !report.chat_session_id.is_empty()).then(|| delivery::ThreadMapping {
+            db_path: db_path.to_path_buf(),
+            integration_id: integration_id.to_string(),
+            chat_id: report.chat_session_id.clone(),
+        });
+    let offered = mapping.is_some();
+    let outcome = delivery::deliver_channel(&token, channel, &run, &mut mapping).await;
+    if offered && mapping.is_none() {
+        *thread_mapped = true;
+    }
+    match outcome {
         delivery::ChannelOutcome::Sent { .. } => Outcome::Sent,
         delivery::ChannelOutcome::Failed(e) => Outcome::Failed(e),
     }
@@ -320,6 +354,9 @@ pub fn dispatch(db_path: &Path, destinations: Vec<TaskDestination>, report: Deli
 }
 
 async fn deliver_all(db_path: &Path, destinations: &[TaskDestination], report: &DeliveryReport) {
+    // In destination order, then channel order: the first Slack summary that
+    // posts is the run's one continuable thread.
+    let mut slack_thread_mapped = false;
     for (position, config) in destinations.iter().enumerate() {
         let destination = Destination::from_config(config);
         let targets = destination
@@ -336,7 +373,11 @@ async fn deliver_all(db_path: &Path, destinations: &[TaskDestination], report: &
                 Some(_) if !should_deliver(&config.when, report.run_ok()) => {
                     Outcome::Skipped(SKIPPED_RUN_FAILED.to_string())
                 }
-                Some(destination) => destination.deliver_one(db_path, &target, report).await,
+                Some(destination) => {
+                    destination
+                        .deliver_one(db_path, &target, report, &mut slack_thread_mapped)
+                        .await
+                }
             };
             record_outcome(db_path, id, outcome).await;
         }

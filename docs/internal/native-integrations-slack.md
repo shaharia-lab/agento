@@ -390,6 +390,37 @@ Pinned by `slack/delivery.rs`'s tests (against a recording fake, in the library
 for the reason above) and `registry.rs`'s
 `slack_delivery_token_refuses_every_row_it_cannot_post_with`.
 
+### A delivered thread continues the run's chat (#642)
+
+After the first summary that posts — in destination order, then channel order —
+and **before** its replies, `slack/delivery.rs::map_thread` writes
+`(integration, channel, summary ts, run's chat_session_id, permalink)` to
+`inbound_threads` through `inbound::insert_thread`, the same insert an inbound
+start makes. A later `app_mention` in that thread is then an ordinary resume in
+`Inbound::turn`: rule selection, filters, the FIFO and the busy lock are
+unchanged, and "ignore threads Agento did not start" still holds because only
+threads Agento posted are mapped.
+
+- **One thread per run.** `inbound_threads` is `UNIQUE (chat_id)` and
+  `chats.rs`'s one-row join relies on it, so the mapping is an
+  `Option<ThreadMapping>` that `deliver_channel` *takes* when it tries, and
+  `schedule/delivery.rs` carries one `slack_thread_mapped` flag across every
+  target of the run. Later channels are posted to and never mapped; a failed
+  first channel hands the mapping to the next.
+- **A failed insert is a `warn`**, never a failed delivery, and is not retried
+  on the next channel. A run with no chat (a `prepare` failure) maps nothing.
+- **The working directory is not pinned on resume.** The issue proposed making
+  the chat's own `working_directory` beat the rule's when resuming, on the
+  premise that `claude --resume` cannot find a session from another directory.
+  Claude Code 2.1.280 does find it (it resumed a session from `/tmp` and
+  appended to the transcript under its original project), so `resume_spec` is
+  unchanged and the rule's directory applies as for any resumed Slack chat.
+
+Pinned by `slack/delivery.rs`'s `only_the_first_channel_is_mapped_and_before_its_replies`,
+`a_failed_first_channel_hands_the_mapping_to_the_next` and
+`a_failed_mapping_never_fails_the_delivery_or_moves_on`, and end to end by
+`slack/inbound/tests.rs`'s `a_reply_in_a_delivered_task_thread_resumes_the_tasks_chat`.
+
 ## Channel list route (#641)
 
 `GET /api/integrations/{id}/slack/channels` feeds the Tasks form's channel

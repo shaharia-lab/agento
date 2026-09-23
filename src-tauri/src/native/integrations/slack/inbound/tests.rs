@@ -837,6 +837,114 @@ async fn a_second_mention_in_the_thread_queues_and_resumes_the_same_chat() {
     );
 }
 
+/// A thread a scheduled task's Slack delivery mapped (#642) is a thread Agento
+/// started: a reply in it resumes the **task's** chat — its stored session id,
+/// its own message history, its `[Task]` title — and a reply in the thread of a
+/// second channel the delivery posted to but did not map is silence.
+#[tokio::test]
+async fn a_reply_in_a_delivered_task_thread_resumes_the_tasks_chat() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-task");
+    seed_rule(
+        &db,
+        "s-task",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+    );
+    // The chat as `executor::write_session_results` leaves it: the run's session
+    // id and both messages, whatever `save_output` was.
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    conn.execute_batch(
+        "INSERT INTO chat_sessions
+            (id, title, agent_slug, sdk_session_id, working_directory, created_at, updated_at)
+         VALUES ('task-chat', '[Task] Daily brief', '', 'task-sess', '',
+                 '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC');
+         INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
+         VALUES ('task-chat', 'user', 'write the brief', '[]', '2026-01-01 00:00:00 +0000 UTC'),
+                ('task-chat', 'assistant', 'the brief', '[]', '2026-01-01 00:00:01 +0000 UTC');",
+    )
+    .expect("seed the task chat");
+    drop(conn);
+    // Exactly the row the delivery writes for the channel it mapped.
+    super::insert_thread(
+        &db,
+        "s-task",
+        CHANNEL,
+        "1700000000.000100",
+        "task-chat",
+        "https://slack.example/p/1",
+    )
+    .expect("map the delivered thread");
+    let cli = fake_cli(dir.path(), "dug into item {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler(&db, "s-task", "xoxb-t");
+    finish(handler(mention(
+        "<@U0BOT> dig into item 3",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-task",
+    )))
+    .await;
+    // The same summary, posted to a second channel's thread, was not mapped.
+    finish(handler(mention(
+        "<@U0BOT> and here?",
+        "1700000000.000500",
+        "1700000000.000400",
+        "s-task",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    let argv = spawns(dir.path());
+    assert_eq!(argv.len(), 1, "one run: the unmapped thread ran nothing");
+    assert_eq!(
+        flag(&argv[0].0, "--resume"),
+        Some("task-sess"),
+        "the reply resumes the task run's own session"
+    );
+    assert_eq!(
+        slack.posted(),
+        vec![(
+            "1700000000.000100".to_string(),
+            "dug into item 1".to_string()
+        )],
+        "answered in the delivered thread and nowhere else"
+    );
+    assert_eq!(
+        messages(&db, "task-chat")
+            .iter()
+            .map(|(role, content)| format!("{role}:{content}"))
+            .collect::<Vec<_>>(),
+        vec![
+            "user:write the brief".to_string(),
+            "assistant:the brief".to_string(),
+            "user:dig into item 3".to_string(),
+            "assistant:dug into item 1".to_string(),
+        ],
+        "the follow-up is appended to the task's chat"
+    );
+    assert_eq!(chat_title(&db, "task-chat"), "[Task] Daily brief");
+    assert_eq!(threads(&db).len(), 1, "no new thread, no new chat");
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    let chats: i64 = conn
+        .query_row("SELECT count(*) FROM chat_sessions", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(chats, 1);
+}
+
 /// The prefix decides on a run, and it decides on **every** message in the
 /// channel — including a reply inside the thread that run opened.
 ///
