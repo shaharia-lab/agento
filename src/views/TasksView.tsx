@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type {
   Agent,
+  Integration,
   JobHistory,
   ScheduleConfig,
   ScheduleType,
@@ -40,6 +41,7 @@ import {
   Splitter,
   Switch,
 } from "../components/ui";
+import { DeliverySection, isUsableSlack } from "./tasks/Delivery";
 import "../styles/tasks.css";
 
 const POLL_MS = 10_000;
@@ -147,7 +149,14 @@ function limitsSummary(t: ScheduledTask): string {
 const SECTION_FIELDS: Record<TaskFormSectionId, readonly string[]> = {
   execution: ["working_directory", "model", "timeout_minutes", "save_output"],
   limits: ["stop_after_count", "stop_after_time"],
+  delivery: ["destinations"],
 };
+
+/** Whether a 422's field is `owned` or inside it — `destinations[0].slack.channel_ids`
+ *  belongs to `destinations`. */
+function fieldWithin(field: string, owned: string): boolean {
+  return field === owned || field.startsWith(`${owned}[`) || field.startsWith(`${owned}.`);
+}
 
 /* --- Local <-> RFC3339 for the native pickers ----------------------------- */
 
@@ -281,6 +290,14 @@ export function TasksView({
     []
   );
   const defaultModel = settingsRes.data?.settings.default_model ?? "";
+  // For the Delivery section (#638): `null` until loaded, so no destination is
+  // judged "missing" against a list that has not arrived yet.
+  const integrationsRes = useResource<Integration[] | null>(
+    (signal) => api.get("/integrations", signal),
+    []
+  );
+  const integrations =
+    integrationsRes.data === undefined ? null : integrationsRes.data ?? [];
 
   const tasks = useMemo(() => tasksRes.data ?? [], [tasksRes.data]);
   const agents = useMemo(() => agentsRes.data ?? [], [agentsRes.data]);
@@ -409,7 +426,11 @@ export function TasksView({
   /** The section the current error forces open, if any — until it is closed by hand. */
   function forcedOpen(id: TaskFormSectionId): boolean {
     const field = fieldOf(actionError);
-    return !autoOpenDismissed && !!field && SECTION_FIELDS[id].includes(field);
+    return (
+      !autoOpenDismissed &&
+      !!field &&
+      SECTION_FIELDS[id].some((owned) => fieldWithin(field, owned))
+    );
   }
 
   /** Open as stored, or forced open while the last error names a field in it.
@@ -989,6 +1010,24 @@ export function TasksView({
 
                 <div className="divider" />
 
+                {/* Hidden while no Slack integration could deliver, unless the
+                    task already has a destination — a stored one always shows,
+                    with its warning, and rides in the draft either way. */}
+                {((integrations ?? []).some(isUsableSlack) ||
+                  (draft.destinations?.length ?? 0) > 0) && (
+                  <>
+                    <DeliverySection
+                      destinations={draft.destinations ?? []}
+                      integrations={integrations}
+                      integrationsError={integrationsRes.error}
+                      open={isOpen("delivery")}
+                      onToggle={() => toggleSection("delivery")}
+                      onChange={(destinations) => edit({ destinations })}
+                    />
+                    <div className="divider" />
+                  </>
+                )}
+
                 {/* Instruction is last so it can take the pane's remaining
                     height; the flex chain is in tasks.css (#632). */}
                 <div className="formsec tasks-form__fill">
@@ -1267,6 +1306,11 @@ function RecentRuns({
         >
           <span className={`dot ${statusDot(j.status)}`} />
           <span className="runrow__when">{relativeTime(j.started_at)}</span>
+          {j.deliveries?.some((d) => d.status === "failed") && (
+            <span className="runrow__warn" title="Delivery failed: open this run">
+              <Icon name="alert" size={12} />
+            </span>
+          )}
           <span className="runrow__val">
             {j.status === "running" ? "running" : duration(j.duration_ms)}
           </span>

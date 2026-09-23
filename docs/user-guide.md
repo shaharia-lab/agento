@@ -441,6 +441,27 @@ Other options:
   date* clears a date you already chose.
 - **Enabled**: pause without deleting.
 
+### Delivery
+
+A task can also send each run's output to Slack. The **Delivery** section
+appears once a Slack integration is enabled and connected (see
+[Integrations](#integrations)), and on any task that already has a destination.
+
+- **+ Add Slack destination** adds a row: pick the Slack integration, type the
+  **Channel IDs** (comma-separated, such as `C0123ABCD`), and choose **When** —
+  **On success** or **Always**. **Remove** takes a row off the task; nothing
+  changes until you save.
+- The output is still kept in Agento as usual (subject to **Save output**);
+  delivery sends a copy. Slack channels are shared, so everyone in them sees the
+  output. Invite the bot to each channel, or Slack refuses the post.
+- Closed, the header summarises it — `Delivery: Slack · 2 channels`. A
+  destination whose integration was deleted, disabled or disconnected stays on
+  the task with a warning on its row and `⚠` in the header; it is never dropped.
+
+Each run's delivery results — sent, failed or skipped, with Slack's error — are
+in **Job history**, and a run whose delivery failed is marked in the task's
+**Recent runs**.
+
 The inspector shows the next run, the last run, the total number of runs and the
 last outcome.
 
@@ -473,7 +494,9 @@ task, when it started, how long it
 took, whether it succeeded, the tokens and cost, and the output if you asked for
 it to be saved.
 
-Failed runs carry the reason. A run that hit its timeout says so.
+Failed runs carry the reason. A run that hit its timeout says so. A run that
+delivered its output somewhere lists each channel under **Delivery**, with
+whether it was sent, failed or skipped, and why.
 
 Select one run or several and delete them.
 

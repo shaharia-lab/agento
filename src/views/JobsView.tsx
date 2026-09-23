@@ -10,6 +10,8 @@ import { ApiError, api, qs } from "../lib/api";
 import type {
   ChatDetailResponse,
   ClaudeSessionSummary,
+  DeliveryStatus,
+  JobDelivery,
   JobHistory,
   JobStatus,
 } from "../lib/types";
@@ -536,6 +538,12 @@ export function JobsView({
                     </InspGroup>
                   )}
 
+                  {job.deliveries?.length ? (
+                    <InspGroup title="Delivery">
+                      <RunDeliveries deliveries={job.deliveries} />
+                    </InspGroup>
+                  ) : null}
+
                   {job.chat_session_id && (
                     <InspGroup title="Session">
                       <RunSession
@@ -558,6 +566,46 @@ export function JobsView({
         </>
       )}
     </div>
+  );
+}
+
+/* --- The run's deliveries (#638) ----------------------------------------- */
+
+/** A delivery status's badge; `failed` is the one that needs attention. */
+const DELIVERY_BADGE: Record<DeliveryStatus, { label: string; tone: string }> = {
+  sent: { label: "Sent", tone: "badge--green" },
+  failed: { label: "Failed", tone: "badge--red" },
+  skipped: { label: "Skipped", tone: "" },
+  pending: { label: "Pending", tone: "" },
+};
+
+/**
+ * Where a run's output was delivered (#635, #638): one entry per target, i.e.
+ * per Slack channel, with the error or the skip reason beneath it.
+ */
+function RunDeliveries({ deliveries }: { deliveries: JobDelivery[] }) {
+  return (
+    <>
+      {deliveries.map((d) => {
+        const badge = DELIVERY_BADGE[d.status] ?? { label: d.status, tone: "" };
+        const when = d.finished_at ?? d.created_at;
+        return (
+          <Fragment key={d.id}>
+            <InspRow label={d.type === "slack" ? "Slack" : d.type}>
+              <span className="row delivery__result" title={`${dateTime(when)} (${relativeTime(when)})`}>
+                <span className="mono truncate">{d.target || "—"}</span>
+                <span className={`badge ${badge.tone}`}>{badge.label}</span>
+              </span>
+            </InspRow>
+            {d.error && (
+              <div className={d.status === "failed" ? "logblock logblock--error" : "logblock"}>
+                {d.error}
+              </div>
+            )}
+          </Fragment>
+        );
+      })}
+    </>
   );
 }
 

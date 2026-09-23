@@ -16,13 +16,15 @@ import type { Eq, Expect } from "./typeAssert";
 /**
  * The collapsible sections and what they ship as.
  *
- * Both start collapsed — most tasks never change either, and the collapsed
+ * All start collapsed — most tasks never change them, and the collapsed
  * header summarises the values so a non-default one is never hidden. Task,
- * Schedule and Instruction are not here: they do not collapse.
+ * Schedule and Instruction are not here: they do not collapse. `delivery` is
+ * #638's.
  */
 export const DEFAULT_OPEN = {
   execution: false,
   limits: false,
+  delivery: false,
 } as const;
 
 /**
@@ -31,13 +33,16 @@ export const DEFAULT_OPEN = {
  * See `lib/typeAssert.ts`.
  */
 export type PinDefaultOpen = Expect<
-  Eq<typeof DEFAULT_OPEN, { readonly execution: false; readonly limits: false }>
+  Eq<
+    typeof DEFAULT_OPEN,
+    { readonly execution: false; readonly limits: false; readonly delivery: false }
+  >
 >;
 
 /** A collapsible section's stable id. Derived from the defaults so the two cannot drift. */
 export type TaskFormSectionId = keyof typeof DEFAULT_OPEN;
 
-export type PinSectionIds = Expect<Eq<TaskFormSectionId, "execution" | "limits">>;
+export type PinSectionIds = Expect<Eq<TaskFormSectionId, "execution" | "limits" | "delivery">>;
 
 export type TaskFormPrefs = Record<TaskFormSectionId, boolean>;
 

@@ -195,3 +195,56 @@
 .tasks-form__fillrow .formrow__help {
   flex: none;
 }
+
+/* --- Delivery section (#638) --------------------------------------------- */
+.delivery__dest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  padding-bottom: var(--sp-5);
+  border-bottom: var(--hairline) solid var(--line);
+}
+
+/* The picker shrinks and truncates rather than wrapping Remove onto its own
+   line: a stored-but-missing integration shows its raw id, which is long. */
+.delivery__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.select.delivery__pick {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.delivery__pick .select__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delivery__head > .btn {
+  flex: none;
+  margin-left: auto;
+}
+
+.delivery__warning {
+  margin-top: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--amber);
+}
+
+.runrow__warn {
+  flex: none;
+  display: inline-flex;
+  color: var(--amber);
+}
+
+/* One delivery result in the Jobs inspector: the channel, then its badge. */
+.delivery__result {
+  gap: var(--sp-3);
+  min-width: 0;
+}
