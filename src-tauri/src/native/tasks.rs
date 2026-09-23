@@ -199,7 +199,57 @@ pub struct JobHistory {
     pub total_cache_creation_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub response_text: String,
+    /// Where the run's output was delivered and how each went (#635), read
+    /// from `job_deliveries`. **Last, and absent when empty** rather than `[]`,
+    /// so a job with no deliveries keeps the bytes it had before the field
+    /// existed. Never folded into `status` or `error_message`: a failed
+    /// delivery does not fail the run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deliveries: Vec<JobDelivery>,
 }
+
+/// One delivery of a run's output to one channel (#635) — a `job_deliveries`
+/// row. One per channel rather than per destination entry, so a destination
+/// posting to two channels can succeed in one and fail in the other.
+#[derive(Debug, Clone, Serialize)]
+pub struct JobDelivery {
+    pub id: String,
+    /// The `job_history` row this belongs to. Not on the wire: it is nested
+    /// under that row.
+    #[serde(skip)]
+    pub job_id: String,
+    /// The entry's index in the task's `destinations` at dispatch time — the
+    /// sort key, not on the wire.
+    #[serde(skip)]
+    pub position: i64,
+    /// `"slack"`, as `TaskDestination::r#type`.
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Human-readable and denormalised — e.g. `Acme Slack · C0123ABCD` — so the
+    /// history reads the same after the integration is deleted or the task
+    /// edited.
+    pub target: String,
+    /// [`DELIVERY_PENDING`], [`DELIVERY_SENT`], [`DELIVERY_FAILED`] or
+    /// [`DELIVERY_SKIPPED`].
+    pub status: String,
+    pub error: String,
+    pub created_at: GoTime,
+    /// Absent while the delivery is still pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<GoTime>,
+}
+
+/// A delivery dispatched and not yet finished. Needed on top of the three
+/// outcomes because delivery outlives the run's `RunGuard`: a post lost to the
+/// app quitting must still leave a row, which startup then fails.
+pub const DELIVERY_PENDING: &str = "pending";
+pub const DELIVERY_SENT: &str = "sent";
+pub const DELIVERY_FAILED: &str = "failed";
+pub const DELIVERY_SKIPPED: &str = "skipped";
+
+/// The error a previous session's still-`pending` delivery is failed with at
+/// startup by [`reap_pending_deliveries`].
+pub const DELIVERY_INTERRUPTED: &str = "interrupted: app did not finish the delivery";
 
 fn is_zero(value: &i64) -> bool {
     *value == 0
@@ -270,6 +320,7 @@ pub fn list_task_job_history(
     for row in rows {
         history.push(row.map_err(|e| format!("listing job history for task {task_id:?}: {e}"))?);
     }
+    attach_deliveries(&conn, &mut history)?;
     Ok(history)
 }
 
@@ -292,6 +343,7 @@ pub fn list_all_job_history(
     for row in rows {
         history.push(row.map_err(|e| format!("listing all job history: {e}"))?);
     }
+    attach_deliveries(&conn, &mut history)?;
     Ok(history)
 }
 
@@ -299,9 +351,91 @@ pub fn list_all_job_history(
 pub fn get_job_history(db_path: &Path, id: &str) -> Result<Option<JobHistory>, String> {
     let conn = db::open_read_only(db_path)?;
     let sql = format!("{JOB_COLUMNS} WHERE id = ?");
-    conn.query_row(&sql, [id], scan_job)
+    let mut job = conn
+        .query_row(&sql, [id], scan_job)
         .optional()
-        .map_err(|e| format!("getting job history {id:?}: {e}"))
+        .map_err(|e| format!("getting job history {id:?}: {e}"))?;
+    if let Some(found) = job.as_mut() {
+        attach_deliveries(&conn, std::slice::from_mut(found))?;
+    }
+    Ok(job)
+}
+
+/// The most job ids one delivery lookup binds. The page limit is capped at
+/// [`MAX_QUERY_LIMIT`], so a page is always one statement; the chunking only
+/// keeps a larger caller under SQLite's bound-variable limit.
+const DELIVERY_LOOKUP_CHUNK: usize = 500;
+
+/// Fills each job's `deliveries` with **one** batched query per page rather
+/// than one per job (#635), in `position` then `created_at` order.
+fn attach_deliveries(conn: &rusqlite::Connection, jobs: &mut [JobHistory]) -> Result<(), String> {
+    attach_deliveries_with(jobs, |ids| list_deliveries_for_jobs(conn, ids))
+}
+
+/// [`attach_deliveries`] with the lookup injected, so a test can count it.
+fn attach_deliveries_with(
+    jobs: &mut [JobHistory],
+    mut load: impl FnMut(&[String]) -> Result<Vec<JobDelivery>, String>,
+) -> Result<(), String> {
+    if jobs.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = jobs.iter().map(|job| job.id.clone()).collect();
+    let deliveries = load(&ids)?;
+    let mut by_job: std::collections::HashMap<String, Vec<JobDelivery>> =
+        std::collections::HashMap::new();
+    for delivery in deliveries {
+        by_job
+            .entry(delivery.job_id.clone())
+            .or_default()
+            .push(delivery);
+    }
+    for job in jobs {
+        if let Some(found) = by_job.remove(&job.id) {
+            job.deliveries = found;
+        }
+    }
+    Ok(())
+}
+
+/// Every delivery of the given jobs, grouped by job and in `position` then
+/// `created_at` order within each.
+pub fn list_deliveries_for_jobs(
+    conn: &rusqlite::Connection,
+    job_ids: &[String],
+) -> Result<Vec<JobDelivery>, String> {
+    let mut deliveries = Vec::new();
+    for chunk in job_ids.chunks(DELIVERY_LOOKUP_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT id, job_id, position, type, target, status, error, created_at, finished_at
+             FROM job_deliveries
+             WHERE job_id IN ({placeholders})
+             ORDER BY job_id, position, created_at, id"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("listing job deliveries: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(chunk), |row| {
+                Ok(JobDelivery {
+                    id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    position: row.get(2)?,
+                    r#type: row.get(3)?,
+                    target: row.get(4)?,
+                    status: row.get(5)?,
+                    error: row.get(6)?,
+                    created_at: timestamp(row, 7)?,
+                    finished_at: nullable_timestamp(row, 8)?,
+                })
+            })
+            .map_err(|e| format!("listing job deliveries: {e}"))?;
+        for row in rows {
+            deliveries.push(row.map_err(|e| format!("listing job deliveries: {e}"))?);
+        }
+    }
+    Ok(deliveries)
 }
 
 fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
@@ -389,6 +523,7 @@ fn scan_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobHistory> {
         total_cache_creation_tokens: row.get(14)?,
         total_cache_read_tokens: row.get(15)?,
         response_text: row.get(16)?,
+        deliveries: Vec::new(),
     })
 }
 
@@ -769,6 +904,17 @@ mod tests {
             total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             total_cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
             response_text               TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE job_deliveries (
+            id          TEXT PRIMARY KEY,
+            job_id      TEXT NOT NULL REFERENCES job_history(id) ON DELETE CASCADE,
+            position    INTEGER NOT NULL,
+            type        TEXT NOT NULL,
+            target      TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL,
+            error       TEXT NOT NULL DEFAULT '',
+            created_at  DATETIME NOT NULL,
+            finished_at DATETIME
         );";
 
     /// One fully-populated task and one left at its defaults, plus a finished
@@ -885,6 +1031,253 @@ mod tests {
             encoded(&history[1]),
             r#"{"id":"job-old","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"success","started_at":"2026-08-14T02:00:00.123456789Z","finished_at":"2026-08-14T02:04:31.5Z","duration_ms":271500,"chat_session_id":"chat-1","model":"claude-opus-4-1","prompt_preview":"summarise \u003cb\u003efast\u003c/b\u003e","error_message":"","total_input_tokens":1200,"total_output_tokens":340,"total_cache_creation_tokens":90,"total_cache_read_tokens":7700,"response_text":"done \u0026 dusted"}"#
         );
+    }
+
+    // ─── Delivery results (#635) ──────────────────────────────────────────────
+
+    fn delivery(id: &str, job_id: &str, position: i64, created_at: &str) -> JobDelivery {
+        JobDelivery {
+            id: id.to_string(),
+            job_id: job_id.to_string(),
+            position,
+            r#type: "slack".to_string(),
+            target: "Acme Slack · C0123ABCD".to_string(),
+            status: DELIVERY_PENDING.to_string(),
+            error: String::new(),
+            created_at: GoTime::parse_go_string(created_at).expect("time"),
+            finished_at: None,
+        }
+    }
+
+    fn delivery_row(path: &Path, id: &str) -> (String, String, bool) {
+        let conn = rusqlite::Connection::open(path).expect("open");
+        conn.query_row(
+            "SELECT status, error, finished_at IS NOT NULL FROM job_deliveries WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("delivery row")
+    }
+
+    fn delivery_count(path: &Path) -> i64 {
+        let conn = rusqlite::Connection::open(path).expect("open");
+        conn.query_row("SELECT COUNT(*) FROM job_deliveries", [], |r| r.get(0))
+            .expect("count")
+    }
+
+    /// The pre-#635 bytes, on all three reads: no `deliveries` key at all, not
+    /// `[]` and not `null`. The exact bytes are pinned by
+    /// `job_history_is_newest_first_and_omits_an_unfinished_run`.
+    #[test]
+    fn a_job_with_no_deliveries_ships_no_deliveries_key_on_any_read() {
+        let file = fixture();
+        let mut reads = list_all_job_history(file.path(), 50, 0).expect("all");
+        reads.extend(list_task_job_history(file.path(), "full", 50).expect("task"));
+        reads.push(
+            get_job_history(file.path(), "job-old")
+                .expect("get")
+                .expect("job"),
+        );
+        assert_eq!(reads.len(), 5);
+        for job in &reads {
+            assert!(!encoded(job).contains("deliveries"), "{}", encoded(job));
+        }
+    }
+
+    #[test]
+    fn deliveries_ship_last_in_position_order_on_all_three_reads() {
+        let file = fixture();
+        // Inserted out of order: position decides, then created_at.
+        let mut sent = delivery("d-sent", "job-old", 1, "2026-08-14 02:04:33 +0000 UTC");
+        sent.status = DELIVERY_SENT.to_string();
+        sent.finished_at =
+            Some(GoTime::parse_go_string("2026-08-14 02:04:34.25 +0000 UTC").unwrap());
+        insert_pending_delivery(file.path(), &sent).expect("insert");
+        insert_pending_delivery(
+            file.path(),
+            &delivery("d-pending", "job-old", 0, "2026-08-14 02:04:32 +0000 UTC"),
+        )
+        .expect("insert");
+        let mut failed = delivery("d-failed", "job-old", 0, "2026-08-14 02:04:31.9 +0000 UTC");
+        failed.status = DELIVERY_FAILED.to_string();
+        failed.error = "channel_not_found <C0>".to_string();
+        failed.finished_at =
+            Some(GoTime::parse_go_string("2026-08-14 02:04:35 +0000 UTC").unwrap());
+        insert_pending_delivery(file.path(), &failed).expect("insert");
+
+        let want = r#""response_text":"done \u0026 dusted","deliveries":[{"id":"d-failed","type":"slack","target":"Acme Slack · C0123ABCD","status":"failed","error":"channel_not_found \u003cC0\u003e","created_at":"2026-08-14T02:04:31.9Z","finished_at":"2026-08-14T02:04:35Z"},{"id":"d-pending","type":"slack","target":"Acme Slack · C0123ABCD","status":"pending","error":"","created_at":"2026-08-14T02:04:32Z"},{"id":"d-sent","type":"slack","target":"Acme Slack · C0123ABCD","status":"sent","error":"","created_at":"2026-08-14T02:04:33Z","finished_at":"2026-08-14T02:04:34.25Z"}]}"#;
+        let all = list_all_job_history(file.path(), 50, 0).expect("all");
+        let task = list_task_job_history(file.path(), "full", 50).expect("task");
+        let one = get_job_history(file.path(), "job-old")
+            .expect("get")
+            .expect("job");
+        for job in [&all[1], &task[1], &one] {
+            assert!(encoded(job).ends_with(want), "{}", encoded(job));
+        }
+        // The other job on the same page is untouched.
+        assert!(!encoded(&all[0]).contains("deliveries"));
+    }
+
+    /// One lookup for a whole 50-row page, not one per job.
+    #[test]
+    fn a_page_of_jobs_loads_its_deliveries_in_one_query() {
+        let file = migrated_with_history();
+        {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            for i in 0..50 {
+                conn.execute(
+                    "INSERT INTO job_history (id, task_id, task_name, started_at)
+                     VALUES (?1, 't1', 'T', '2026-02-01 00:00:00 +0000 UTC')",
+                    [format!("p{i:02}")],
+                )
+                .expect("job");
+            }
+        }
+        for i in 0..50 {
+            insert_pending_delivery(
+                file.path(),
+                &delivery(
+                    &format!("d{i:02}"),
+                    &format!("p{i:02}"),
+                    0,
+                    "2026-02-01 00:00:01 +0000 UTC",
+                ),
+            )
+            .expect("delivery");
+        }
+
+        let conn = db::open_read_only(file.path()).expect("open");
+        let sql = format!("{JOB_COLUMNS}\nWHERE id LIKE 'p%'\nORDER BY id");
+        let mut jobs: Vec<JobHistory> = conn
+            .prepare(&sql)
+            .expect("prepare")
+            .query_map([], scan_job)
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        assert_eq!(jobs.len(), 50);
+        // Each call is one statement: the whole page fits one chunk.
+        let mut lookups = Vec::new();
+        attach_deliveries_with(&mut jobs, |ids| {
+            lookups.push(ids.len());
+            list_deliveries_for_jobs(&conn, ids)
+        })
+        .expect("attach");
+        assert_eq!(
+            lookups,
+            vec![50],
+            "one lookup for the page, not one per job"
+        );
+        for (i, job) in jobs.iter().enumerate() {
+            assert_eq!(job.deliveries.len(), 1, "{}", job.id);
+            assert_eq!(job.deliveries[0].id, format!("d{i:02}"));
+        }
+    }
+
+    fn migrated_with_deliveries() -> tempfile::NamedTempFile {
+        let file = migrated_with_history();
+        for (id, job) in [("d1", "j1"), ("d2", "j2"), ("d3", "j3")] {
+            insert_pending_delivery(
+                file.path(),
+                &delivery(id, job, 0, "2026-01-01 00:00:01 +0000 UTC"),
+            )
+            .expect("delivery");
+        }
+        file
+    }
+
+    #[test]
+    fn deleting_a_job_or_its_task_takes_its_deliveries_with_it() {
+        let file = migrated_with_deliveries();
+        // Not `j1`: `the_job_history_deletes_log_their_entity_and_outcome`
+        // asserts that id's delete line appears exactly once in the shared log.
+        delete_job_history(file.path(), "j3").expect("delete");
+        assert_eq!(delivery_count(file.path()), 2);
+        bulk_delete_job_history(file.path(), br#"{"ids":["j2"]}"#).expect("bulk");
+        assert_eq!(delivery_count(file.path()), 1);
+        delete_task(file.path(), "t1").expect("delete task");
+        assert_eq!(delivery_count(file.path()), 0);
+    }
+
+    /// A failed delivery is not a failed run: the #556 tools notice on a
+    /// `success` row survives it untouched.
+    #[test]
+    fn a_failed_delivery_leaves_the_runs_status_and_error_alone() {
+        let file = migrated_with_deliveries();
+        {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            conn.execute(
+                "UPDATE job_history SET status = 'success', error_message = 'tools notice' WHERE id = 'j1'",
+                [],
+            )
+            .expect("seed");
+        }
+        assert!(
+            finish_delivery(file.path(), "d1", DELIVERY_FAILED, "not_in_channel").expect("finish")
+        );
+        let job = get_job_history(file.path(), "j1")
+            .expect("get")
+            .expect("job");
+        assert_eq!(
+            (job.status.as_str(), job.error_message.as_str()),
+            ("success", "tools notice")
+        );
+        assert_eq!(job.deliveries[0].status, "failed");
+        assert_eq!(job.deliveries[0].error, "not_in_channel");
+        assert!(job.deliveries[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn a_delivery_finishes_once_and_a_reaped_one_cannot_be_resurrected() {
+        let file = migrated_with_deliveries();
+        assert!(finish_delivery(file.path(), "d1", DELIVERY_SENT, "").expect("finish"));
+        assert!(!finish_delivery(file.path(), "d1", DELIVERY_FAILED, "late").expect("again"));
+        assert_eq!(
+            delivery_row(file.path(), "d1"),
+            ("sent".to_string(), String::new(), true)
+        );
+
+        let booted = GoTime::parse_go_string("2026-06-01 00:00:00 +0000 UTC").unwrap();
+        assert_eq!(
+            reap_pending_deliveries(file.path(), booted, DELIVERY_INTERRUPTED).expect("reap"),
+            2
+        );
+        assert!(!finish_delivery(file.path(), "d2", DELIVERY_SENT, "").expect("late finish"));
+        assert_eq!(
+            delivery_row(file.path(), "d2"),
+            ("failed".to_string(), DELIVERY_INTERRUPTED.to_string(), true)
+        );
+        assert_eq!(
+            delivery_row(file.path(), "d1").0,
+            "sent",
+            "a finished row is not reaped"
+        );
+    }
+
+    #[test]
+    fn the_reap_spares_deliveries_created_at_or_after_boot() {
+        let file = migrated_with_history();
+        let booted = "2026-01-01 00:00:01 +0000 UTC";
+        for (id, created) in [
+            ("before", "2026-01-01 00:00:00.999 +0000 UTC"),
+            ("at", booted),
+            ("after", "2026-01-01 00:00:01.5 +0000 UTC"),
+        ] {
+            insert_pending_delivery(file.path(), &delivery(id, "j1", 0, created)).expect("insert");
+        }
+        let reaped = reap_pending_deliveries(
+            file.path(),
+            GoTime::parse_go_string(booted).unwrap(),
+            DELIVERY_INTERRUPTED,
+        )
+        .expect("reap");
+        assert_eq!(reaped, 1);
+        assert_eq!(delivery_row(file.path(), "before").0, "failed");
+        assert_eq!(
+            delivery_row(file.path(), "at"),
+            ("pending".to_string(), String::new(), false)
+        );
+        assert_eq!(delivery_row(file.path(), "after").0, "pending");
     }
 
     #[test]
@@ -2623,6 +3016,103 @@ pub fn reap_job_history(
         )
         .map_err(|e| format!("reaping job history {id:?}: {e}"))?;
     Ok(changed > 0)
+}
+
+// ─── Delivery results (#635) ──────────────────────────────────────────────────
+//
+// Written through these three narrow functions and never through
+// `update_job_history`, following #594's `record_job_process`: the run's finish
+// cannot overwrite a delivery result, and a delivery result cannot touch the
+// run's `status` or `error_message`.
+
+/// Records a delivery as dispatched, before its post is attempted, so a post
+/// lost to the app quitting still leaves a row for startup to fail.
+pub fn insert_pending_delivery(db_path: &Path, delivery: &JobDelivery) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "INSERT INTO job_deliveries
+            (id, job_id, position, type, target, status, error, created_at, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            delivery.id,
+            delivery.job_id,
+            delivery.position,
+            delivery.r#type,
+            delivery.target,
+            delivery.status,
+            delivery.error,
+            super::gotime::to_go_string_utc(delivery.created_at),
+            nullable_time(delivery.finished_at.as_ref()),
+        ],
+    )
+    .map_err(|e| format!("recording delivery {:?}: {e}", delivery.id))?;
+    Ok(())
+}
+
+/// Finishes a pending delivery with its outcome. Answers whether the row
+/// changed.
+///
+/// **Only while it is still `pending`**: a second finish is a no-op, and a
+/// delivery startup already failed as interrupted cannot be flipped to `sent`
+/// by a late finish — the reap wins, the same shape as [`reap_job_history`].
+pub fn finish_delivery(
+    db_path: &Path,
+    id: &str,
+    status: &str,
+    error: &str,
+) -> Result<bool, String> {
+    let conn = db::open_read_write(db_path)?;
+    let changed = conn
+        .execute(
+            "UPDATE job_deliveries SET status = ?1, error = ?2, finished_at = ?3
+             WHERE id = ?4 AND status = 'pending'",
+            rusqlite::params![status, error, super::gotime::now_go_text(), id],
+        )
+        .map_err(|e| format!("finishing delivery {id:?}: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// Fails every delivery a previous session left `pending`, with `reason` as its
+/// error. Answers how many rows changed.
+///
+/// **Only a previous session's rows**: one created at or after `booted_at`
+/// belongs to a delivery this session is still sending and is left alone. The
+/// comparison is on parsed instants rather than the stored text, as
+/// `Scheduler::reap_stale_runs` does for runs.
+pub fn reap_pending_deliveries(
+    db_path: &Path,
+    booted_at: GoTime,
+    reason: &str,
+) -> Result<usize, String> {
+    let conn = db::open_read_write(db_path)?;
+    let stale = {
+        let mut stmt = conn
+            .prepare("SELECT id, created_at FROM job_deliveries WHERE status = 'pending'")
+            .map_err(|e| format!("listing pending deliveries: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, timestamp(row, 1)?)))
+            .map_err(|e| format!("listing pending deliveries: {e}"))?;
+        let mut stale = Vec::new();
+        for row in rows {
+            let (id, created_at) = row.map_err(|e| format!("listing pending deliveries: {e}"))?;
+            if created_at.instant() < booted_at.instant() {
+                stale.push(id);
+            }
+        }
+        stale
+    };
+    let finished_at = super::gotime::now_go_text();
+    let mut reaped = 0;
+    for id in stale {
+        reaped += conn
+            .execute(
+                "UPDATE job_deliveries SET status = 'failed', error = ?1, finished_at = ?2
+                 WHERE id = ?3 AND status = 'pending'",
+                rusqlite::params![reason, finished_at, id],
+            )
+            .map_err(|e| format!("reaping delivery {id:?}: {e}"))?;
+    }
+    Ok(reaped)
 }
 
 // ─── The task writes (#275) ───────────────────────────────────────────────────

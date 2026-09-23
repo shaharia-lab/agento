@@ -320,6 +320,21 @@ export interface JobHistory {
   total_cache_creation_tokens: number;
   total_cache_read_tokens: number;
   response_text: string;
+  /** Omitted when the run delivered nowhere (#635). */
+  deliveries?: JobDelivery[] | null;
+}
+
+export type DeliveryStatus = "pending" | "sent" | "failed" | "skipped";
+
+/** One channel a run's output was delivered to (#635). */
+export interface JobDelivery {
+  id: string;
+  type: string;
+  target: string;
+  status: DeliveryStatus;
+  error: string;
+  created_at: string;
+  finished_at?: string | null;
 }
 
 /* --- Settings (internal/config/settings.go) ------------------------------ */

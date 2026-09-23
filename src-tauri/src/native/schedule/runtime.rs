@@ -336,6 +336,22 @@ impl Scheduler {
         }
     }
 
+    /// Fails every delivery (#635) a previous session left `pending` — a post
+    /// the app quit or crashed in the middle of — as
+    /// [`crate::native::tasks::DELIVERY_INTERRUPTED`], so a report nobody
+    /// received never stays silent.
+    ///
+    /// **Only a previous session's rows**, by the same [`Self::booted_at`] line
+    /// as [`Self::reap_stale_runs`]: a delivery this session dispatched is still
+    /// being sent. Run beside that reaper by [`start`] and retried with it.
+    pub fn reap_pending_deliveries(&self) -> Result<usize, String> {
+        crate::native::tasks::reap_pending_deliveries(
+            self.db_path(),
+            crate::native::gotime::GoTime::from_utc(self.booted_at),
+            crate::native::tasks::DELIVERY_INTERRUPTED,
+        )
+    }
+
     /// Whether a run of `task_id` is in flight in this process.
     pub fn is_running(&self, task_id: &str) -> bool {
         self.in_flight
@@ -705,12 +721,21 @@ pub fn start(db_path: PathBuf) {
     // on the sweep's interval until one pass has read and written everything,
     // and runs off the boot path — a surviving orphan costs up to the SIGKILL
     // grace to stop.
+    //
+    // A previous session's `pending` deliveries (#635) are failed by the same
+    // loop and under the same rule: it ends only once both passes have
+    // succeeded, and a pass that already succeeded is simply a no-op when
+    // repeated.
     let reaper = Arc::clone(&scheduler);
     tokio::spawn(async move {
         loop {
             let pass = Arc::clone(&reaper);
-            match tokio::task::spawn_blocking(move || pass.reap_stale_runs()).await {
-                Ok(Ok(reaped)) => {
+            let outcome = tokio::task::spawn_blocking(move || {
+                (pass.reap_stale_runs(), pass.reap_pending_deliveries())
+            })
+            .await;
+            match outcome {
+                Ok((Ok(reaped), Ok(deliveries))) => {
                     if reaped != Reaped::default() {
                         log::info!(
                             "task scheduler: reaped stale runs recovered={} abandoned={}",
@@ -718,9 +743,21 @@ pub fn start(db_path: PathBuf) {
                             reaped.abandoned
                         );
                     }
+                    if deliveries > 0 {
+                        log::info!(
+                            "task scheduler: failed interrupted deliveries count={deliveries}"
+                        );
+                    }
                     return;
                 }
-                Ok(Err(e)) => log::warn!("task scheduler: reaping stale runs failed: {e}"),
+                Ok((runs, deliveries)) => {
+                    if let Err(e) = runs {
+                        log::warn!("task scheduler: reaping stale runs failed: {e}");
+                    }
+                    if let Err(e) = deliveries {
+                        log::warn!("task scheduler: reaping pending deliveries failed: {e}");
+                    }
+                }
                 Err(_) => log::warn!("task scheduler: a reaper pass panicked"),
             }
             tokio::time::sleep(RECONCILE_INTERVAL).await;
