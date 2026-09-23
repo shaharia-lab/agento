@@ -19,12 +19,23 @@
 //!   decide over the HTTP status. Nothing is retried in v1.
 //! - **No token in any result.** Results are built from Slack's error code and
 //!   the client's token-free messages alone.
+//! - **One thread per run continues the run's chat (#642).** After the first
+//!   summary that posts, and *before* its replies, the thread is written to
+//!   `inbound_threads` against the run's chat, so an `@app` reply there resumes
+//!   the session through the inbound handler. The mapping is a [`ThreadMapping`]
+//!   the caller offers through `&mut Option`, and [`deliver_channel`] takes it
+//!   when it tries — so a later channel, or a later Slack destination, is never
+//!   offered it again and never trips `inbound_threads`'s `UNIQUE (chat_id)`. A
+//!   failed insert is a `warn`, never a failed delivery.
+
+use std::path::PathBuf;
 
 use crate::claude::CancellationToken;
+use crate::native::db;
 use crate::native::trigger::dispatcher::NO_RESPONSE_REPLY;
 
 use super::client::{api_error_code, Client};
-use super::mrkdwn;
+use super::{inbound, mrkdwn};
 
 /// What one run says to Slack. `body` is raw Markdown: the answer on a
 /// successful run, the failure message on a failed one.
@@ -39,7 +50,9 @@ pub struct RunSummary {
 }
 
 /// How one channel's post ended. `Sent` carries the summary's `ts`, which is
-/// the thread the output landed in (#642 records it).
+/// the thread the output landed in. The `inbound_threads` row for that thread
+/// (#642) is written inside [`deliver_channel`], before the replies, not from
+/// this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelOutcome {
     Sent { ts: String },
@@ -53,21 +66,43 @@ pub struct ChannelResult {
     pub outcome: ChannelOutcome,
 }
 
+/// The `inbound_threads` row a delivered summary's thread becomes: the
+/// integration that posted it and the chat the run wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadMapping {
+    pub db_path: PathBuf,
+    pub integration_id: String,
+    pub chat_id: String,
+}
+
 /// Post `run` to every channel in turn. A failure on one channel never stops
-/// the next.
-pub async fn deliver(token: &str, channel_ids: &[String], run: &RunSummary) -> Vec<ChannelResult> {
+/// the next; `mapping` goes to the first channel whose summary posts.
+pub async fn deliver(
+    token: &str,
+    channel_ids: &[String],
+    run: &RunSummary,
+    mapping: &mut Option<ThreadMapping>,
+) -> Vec<ChannelResult> {
     let mut out = Vec::with_capacity(channel_ids.len());
     for channel in channel_ids {
         out.push(ChannelResult {
             channel_id: channel.clone(),
-            outcome: deliver_channel(token, channel, run).await,
+            outcome: deliver_channel(token, channel, run, mapping).await,
         });
     }
     out
 }
 
 /// The summary, then the output in its thread, to one channel.
-pub async fn deliver_channel(token: &str, channel: &str, run: &RunSummary) -> ChannelOutcome {
+///
+/// When the summary posts and `mapping` is `Some`, it is taken and the thread
+/// mapped before any reply is sent; see the module header.
+pub async fn deliver_channel(
+    token: &str,
+    channel: &str,
+    run: &RunSummary,
+    mapping: &mut Option<ThreadMapping>,
+) -> ChannelOutcome {
     let client = Client::new(token);
     // Nothing cancels a delivery but the client's own 60s timeout per call.
     let ct = CancellationToken::new();
@@ -84,6 +119,12 @@ pub async fn deliver_channel(token: &str, channel: &str, run: &RunSummary) -> Ch
         },
         Err(e) => return ChannelOutcome::Failed(readable(&e)),
     };
+
+    // Before the replies, so a reply typed while the output is still posting
+    // already finds its thread mapped.
+    if let Some(mapping) = mapping.take() {
+        map_thread(&client, channel, &ts, mapping).await;
+    }
 
     let chunks = mrkdwn::split(
         &mrkdwn::to_mrkdwn(&thread_body(run)),
@@ -106,6 +147,35 @@ pub async fn deliver_channel(token: &str, channel: &str, run: &RunSummary) -> Ch
         }
     }
     ChannelOutcome::Sent { ts }
+}
+
+/// Write the thread under the summary `ts` to `inbound_threads`. Loud rather
+/// than fatal, as `Inbound::start_chat` treats the same insert: the output is
+/// still delivered, and only the reply-to-continue is lost.
+async fn map_thread(client: &Client, channel: &str, ts: &str, mapping: ThreadMapping) {
+    let permalink = inbound::permalink(client, channel, ts).await;
+    let (channel, ts) = (channel.to_string(), ts.to_string());
+    let chat_id = mapping.chat_id.clone();
+    match db::blocking("slack delivery thread map", move || {
+        inbound::insert_thread(
+            &mapping.db_path,
+            &mapping.integration_id,
+            &channel,
+            &ts,
+            &mapping.chat_id,
+            &permalink,
+        )
+    })
+    .await
+    {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            log::warn!(
+                "failed to map a delivered slack thread to its chat chat_id={chat_id:?}: {e}"
+            );
+        }
+        None => log::warn!("the slack delivery thread map did not finish chat_id={chat_id:?}"),
+    }
 }
 
 async fn post(
@@ -228,6 +298,8 @@ mod tests {
     struct Fake {
         posts: Arc<Mutex<Vec<Post>>>,
         auth: Arc<Mutex<Vec<String>>>,
+        /// Every method called, in order, `chat.getPermalink` included.
+        methods: Arc<Mutex<Vec<String>>>,
         reply: Reply,
     }
 
@@ -243,6 +315,16 @@ mod tests {
         uri: Uri,
         body: String,
     ) -> axum::response::Response {
+        state
+            .methods
+            .lock()
+            .expect("lock")
+            .push(uri.path().trim_start_matches('/').to_string());
+        if uri.path() == "/chat.getPermalink" {
+            return axum::response::IntoResponse::into_response(axum::Json(
+                serde_json::json!({"ok": true, "permalink": "https://slack.example/p/1"}),
+            ));
+        }
         assert_eq!(uri.path(), "/chat.postMessage");
         let payload: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
         let field = |k: &str| payload[k].as_str().unwrap_or_default().to_string();
@@ -274,6 +356,7 @@ mod tests {
         let state = Fake {
             posts: Arc::default(),
             auth: Arc::default(),
+            methods: Arc::default(),
             reply,
         };
         let app = axum::Router::new()
@@ -319,7 +402,7 @@ mod tests {
         let _guard = api_base_lock().await;
         let fake = fake(ok).await;
         let long = "word ".repeat(2000);
-        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run(&long)).await;
+        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run(&long), &mut None).await;
         set_api_base(None);
 
         let expected = mrkdwn::split(&mrkdwn::to_mrkdwn(&long), mrkdwn::MAX_MESSAGE_CHARS);
@@ -368,6 +451,7 @@ mod tests {
             TOKEN,
             &channels(&["C1"]),
             &run("hey <!channel> and <!here>, also [](!channel)"),
+            &mut None,
         )
         .await;
         set_api_base(None);
@@ -382,7 +466,7 @@ mod tests {
     async fn an_empty_answer_still_posts_a_reply() {
         let _guard = api_base_lock().await;
         let fake = fake(ok).await;
-        deliver(TOKEN, &channels(&["C1"]), &run("")).await;
+        deliver(TOKEN, &channels(&["C1"]), &run(""), &mut None).await;
         set_api_base(None);
         assert_eq!(fake.posts()[1].2, NO_RESPONSE_REPLY);
     }
@@ -402,7 +486,7 @@ mod tests {
             }
         })
         .await;
-        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run("hi")).await;
+        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run("hi"), &mut None).await;
         set_api_base(None);
 
         let ChannelOutcome::Failed(e) = &results[0].outcome else {
@@ -431,7 +515,7 @@ mod tests {
             )
         })
         .await;
-        let results = deliver(TOKEN, &channels(&["C9"]), &run("hi")).await;
+        let results = deliver(TOKEN, &channels(&["C9"]), &run("hi"), &mut None).await;
         set_api_base(None);
         assert_eq!(
             results[0].outcome,
@@ -455,7 +539,7 @@ mod tests {
             (429, headers, String::new())
         })
         .await;
-        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run("hi")).await;
+        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run("hi"), &mut None).await;
         set_api_base(None);
         assert_eq!(
             results[0].outcome,
@@ -475,7 +559,7 @@ mod tests {
     async fn ok_decides_over_the_http_status() {
         let _guard = api_base_lock().await;
         let _fake = fake(|_, _, _| (500, vec![], format!(r#"{{"ok":true,"ts":"{TS}"}}"#))).await;
-        let results = deliver(TOKEN, &channels(&["C1"]), &run("hi")).await;
+        let results = deliver(TOKEN, &channels(&["C1"]), &run("hi"), &mut None).await;
         set_api_base(None);
         assert_eq!(results[0].outcome, ChannelOutcome::Sent { ts: TS.into() });
     }
@@ -484,7 +568,7 @@ mod tests {
     async fn a_summary_without_a_ts_is_a_failure() {
         let _guard = api_base_lock().await;
         let fake = fake(|_, _, _| (200, vec![], r#"{"ok":true}"#.into())).await;
-        let results = deliver(TOKEN, &channels(&["C1"]), &run("hi")).await;
+        let results = deliver(TOKEN, &channels(&["C1"]), &run("hi"), &mut None).await;
         set_api_base(None);
         assert_eq!(
             results[0].outcome,
@@ -506,7 +590,7 @@ mod tests {
         .await;
         let long = "word ".repeat(2000);
         let n = mrkdwn::split(&mrkdwn::to_mrkdwn(&long), mrkdwn::MAX_MESSAGE_CHARS).len();
-        let results = deliver(TOKEN, &channels(&["C1"]), &run(&long)).await;
+        let results = deliver(TOKEN, &channels(&["C1"]), &run(&long), &mut None).await;
         set_api_base(None);
         assert_eq!(
             results[0].outcome,
@@ -517,6 +601,163 @@ mod tests {
         );
         assert_eq!(fake.posts().len(), 3, "nothing after the failed reply");
         assert_no_token(&results);
+    }
+
+    // ─── The thread mapping (#642) ──────────────────────────────────────────
+
+    /// Every post answers `ok` with a `ts` of its own, so two summaries never
+    /// share a thread.
+    fn ok_distinct(n: usize, _: &str, _: &str) -> (u16, Vec<(&'static str, &'static str)>, String) {
+        (
+            200,
+            vec![],
+            format!(r#"{{"ok":true,"ts":"1700000000.{n:06}"}}"#),
+        )
+    }
+
+    /// A migrated database holding integration `s1` and chats `chat-a`, `chat-b`.
+    fn mapped_db() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp db");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute_batch(
+            "INSERT INTO integrations
+                (id, name, type, enabled, credentials, services, created_at, updated_at)
+             VALUES ('s1', 'Slack', 'slack', 1, '{}', '{}', '', '');
+             INSERT INTO chat_sessions (id, agent_slug, created_at, updated_at)
+             VALUES ('chat-a', '', '', ''), ('chat-b', '', '', '');",
+        )
+        .expect("seed");
+        file
+    }
+
+    fn mapping(file: &tempfile::NamedTempFile, chat_id: &str) -> Option<ThreadMapping> {
+        Some(ThreadMapping {
+            db_path: file.path().to_path_buf(),
+            integration_id: "s1".into(),
+            chat_id: chat_id.into(),
+        })
+    }
+
+    /// `(channel_id, thread_ts, chat_id, permalink)` for every mapped thread.
+    fn mapped(file: &tempfile::NamedTempFile) -> Vec<(String, String, String, String)> {
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel_id, thread_ts, chat_id, permalink FROM inbound_threads
+                 ORDER BY rowid",
+            )
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .expect("query");
+        rows.map(|r| r.expect("row")).collect()
+    }
+
+    fn row(channel: &str, ts: &str, chat: &str) -> (String, String, String, String) {
+        (
+            channel.into(),
+            ts.into(),
+            chat.into(),
+            "https://slack.example/p/1".into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn only_the_first_channel_is_mapped_and_before_its_replies() {
+        let _guard = api_base_lock().await;
+        let fake = fake(ok_distinct).await;
+        let db = mapped_db();
+        let mut map = mapping(&db, "chat-a");
+        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run("hi"), &mut map).await;
+        assert!(results
+            .iter()
+            .all(|r| matches!(r.outcome, ChannelOutcome::Sent { .. })));
+        assert!(map.is_none(), "the mapping was taken");
+        assert_eq!(
+            mapped(&db),
+            vec![row("C1", "1700000000.000000", "chat-a")],
+            "the second channel is posted to and never mapped"
+        );
+        assert_eq!(
+            *fake.methods.lock().expect("lock"),
+            vec![
+                "chat.postMessage",
+                "chat.getPermalink",
+                "chat.postMessage",
+                "chat.postMessage",
+                "chat.postMessage",
+            ],
+            "mapped between the summary and its first reply, and only once"
+        );
+
+        // A second run maps its own chat to its own thread.
+        let mut map = mapping(&db, "chat-b");
+        deliver(TOKEN, &channels(&["C1"]), &run("hi"), &mut map).await;
+        set_api_base(None);
+        assert_eq!(
+            mapped(&db),
+            vec![
+                row("C1", "1700000000.000000", "chat-a"),
+                row("C1", "1700000000.000004", "chat-b"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_channel_hands_the_mapping_to_the_next() {
+        let _guard = api_base_lock().await;
+        let _fake = fake(|n, channel, thread| {
+            if channel == "C1" {
+                (
+                    200,
+                    vec![],
+                    r#"{"ok":false,"error":"not_in_channel"}"#.into(),
+                )
+            } else {
+                ok_distinct(n, channel, thread)
+            }
+        })
+        .await;
+        let db = mapped_db();
+        let mut map = mapping(&db, "chat-a");
+        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run("hi"), &mut map).await;
+        set_api_base(None);
+        assert!(matches!(results[0].outcome, ChannelOutcome::Failed(_)));
+        assert_eq!(mapped(&db), vec![row("C2", "1700000000.000001", "chat-a")]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_mapping_never_fails_the_delivery_or_moves_on() {
+        let _guard = api_base_lock().await;
+        let fake = fake(ok_distinct).await;
+        let db = mapped_db();
+        // The chat already holds a thread, so `UNIQUE (chat_id)` refuses.
+        rusqlite::Connection::open(db.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO inbound_threads (integration_id, channel_id, thread_ts, chat_id)
+                 VALUES ('s1', 'C0', '1.0', 'chat-a')",
+                [],
+            )
+            .expect("seed a thread");
+        let mut map = mapping(&db, "chat-a");
+        let results = deliver(TOKEN, &channels(&["C1", "C2"]), &run("hi"), &mut map).await;
+        set_api_base(None);
+        assert!(results
+            .iter()
+            .all(|r| matches!(r.outcome, ChannelOutcome::Sent { .. })));
+        assert_eq!(mapped(&db).len(), 1, "nothing was added");
+        assert_eq!(
+            fake.methods
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|m| *m == "chat.getPermalink")
+                .count(),
+            1,
+            "the failed insert is not retried on the second channel"
+        );
     }
 
     #[test]

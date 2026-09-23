@@ -458,6 +458,13 @@ connected (see [Integrations](#integrations)) or an SMTP server is set up in
   `channels:read` scope, and `groups:read` as well — the list includes private
   channels. If the list cannot be loaded, the row falls back to typing
   comma-separated **Channel IDs** such as `C0123ABCD`.
+- **Continue a run from Slack.** Mention the app in the thread under a run's
+  summary — `@agento dig into item 3` — and the run's own chat picks it up with
+  its context, answering in the same thread. This needs Socket Mode on for the
+  integration (see [Slack Socket Mode](#slack-socket-mode)) and a trigger rule
+  covering the channel, whose prefix and keywords apply to the reply as to any
+  mention. Only the **first** channel whose summary posted is linked; a mention
+  in another channel's thread is ignored.
 - **+ Add Telegram destination** works the same way with **Chat IDs**: numeric
   ids such as `123456789`, or `-1001234567890` for a group or channel. Each chat
   gets a short header (task, status, duration) and then the output as plain

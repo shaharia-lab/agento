@@ -15,7 +15,12 @@
 //!    a new thread. A mention inside a thread is a **resume** when
 //!    `(integration, channel, thread_ts)` is in `inbound_threads`, and is
 //!    ignored at `debug` when it is not — Agento answers in threads it started
-//!    and nowhere else (epic #562, decision 1).
+//!    and nowhere else (epic #562, decision 1). A row is written by exactly two
+//!    things: an inbound start ([`Inbound::start_chat`]) and a scheduled task's
+//!    Slack delivery (`slack::delivery`, #642), which maps the thread under the
+//!    run's summary to the run's chat. Both are threads Agento posted, so the
+//!    rule holds; a delivery maps **one** thread per run, because the table is
+//!    `UNIQUE (chat_id)`.
 //! 2. **Which rule.** [`select_rule_for_channel`] — most specific first, and a
 //!    *disabled* channel-specific rule is that channel's off switch rather than
 //!    a fall-through to the workspace default (#565). No rule at all is silence.
@@ -488,22 +493,7 @@ impl Inbound {
 
     /// `chat.getPermalink` for the thread's first message; `""` on any failure.
     async fn permalink(&self, channel: &str, message_ts: &str) -> String {
-        let ct = CancellationToken::new();
-        let mut values = Values::new();
-        values.set("channel", channel);
-        values.set("message_ts", message_ts);
-        self.client
-            .call_form(&ct, "chat.getPermalink", values.encode())
-            .await
-            .ok()
-            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-            .and_then(|value| {
-                value
-                    .get("permalink")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_default()
+        permalink(&self.client, channel, message_ts).await
     }
 
     /// The reply, in the thread, as consecutive messages.
@@ -538,6 +528,30 @@ impl Inbound {
             }
         }
     }
+}
+
+/// `chat.getPermalink` for `message_ts`; `""` on any failure.
+///
+/// Best-effort for every caller: the permalink is what #570 shows beside the
+/// chat, and a Slack that will not produce one is not a reason to refuse a run
+/// or a mapping.
+pub(crate) async fn permalink(client: &Client, channel: &str, message_ts: &str) -> String {
+    let ct = CancellationToken::new();
+    let mut values = Values::new();
+    values.set("channel", channel);
+    values.set("message_ts", message_ts);
+    client
+        .call_form(&ct, "chat.getPermalink", values.encode())
+        .await
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .and_then(|value| {
+            value
+                .get("permalink")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
 }
 
 /// What a finished run answers with.
@@ -709,7 +723,10 @@ fn find_thread(
     }
 }
 
-fn insert_thread(
+/// Map `(integration, channel, thread_ts)` to `chat_id`. Blocking; callers go
+/// through [`db::blocking`]. Fails on either `UNIQUE` — the thread already
+/// mapped, or the chat already holding a thread.
+pub(crate) fn insert_thread(
     db_path: &Path,
     integration_id: &str,
     channel_id: &str,

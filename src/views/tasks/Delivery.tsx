@@ -36,6 +36,12 @@ type DestinationType = TaskDestination["type"];
 
 /** What differs between the destination types, and nothing else — the row,
  *  the warning and the summary are one implementation over this table. */
+/** When a reply in a delivered thread continues the run's chat (#642): the
+ *  inbound handler has to be listening, a rule has to want the channel, and
+ *  `inbound_threads` holds one thread per chat. */
+const SLACK_CONTINUE_HELP =
+  "Mention @app in the posted thread to continue this run's chat. This needs inbound enabled on the integration and a trigger rule for the channel; only the first channel's thread is linked.";
+
 const KINDS: Record<
   DestinationType,
   {
@@ -60,7 +66,7 @@ const KINDS: Record<
     ids: "channel_ids",
     idsLabel: "Channel IDs",
     noun: "channel",
-    help: "Comma-separated channel IDs, e.g. C0123ABCD. Invite the bot to each channel.",
+    help: `Comma-separated channel IDs, e.g. C0123ABCD. Invite the bot to each channel. ${SLACK_CONTINUE_HELP}`,
     placeholder: "C0123ABCD, C0456EFGH",
     needsAuth: true,
   },
@@ -394,7 +400,7 @@ function DeliveryDestinationRow({
       {dest.type === "slack" && id ? (
         <FormRow
           label="Channels"
-          help="Each channel gets the summary and a thread with the output. Invite the bot to each one."
+          help={`Each channel gets the summary and a thread with the output. Invite the bot to each one. ${SLACK_CONTINUE_HELP}`}
         >
           <SlackChannelPicker
             integrationId={id}
