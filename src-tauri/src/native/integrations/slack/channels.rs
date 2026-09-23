@@ -32,7 +32,7 @@ use crate::native::gourl::Values;
 use crate::native::integrations::registry::{self, SlackUnavailable};
 use crate::native::{self, Answer, BoxFuture, StreamEndpoint, StreamRequest};
 
-use super::client::Client;
+use super::client::{api_error_code, Client};
 
 /// The route, recorded in `integrations::ROUTES` and so in
 /// `parity/desktop_routes.json`.
@@ -190,11 +190,7 @@ pub(crate) async fn list_all(token: &str, max_pages: usize) -> Result<Vec<SlackC
 /// Known `error` codes become advice; anything else — a rate limit the client
 /// already worded, a failed request, an unknown code — passes through.
 fn readable(e: &str) -> String {
-    let Some(code) = e
-        .strip_prefix("slack API error (")
-        .and_then(|rest| rest.split_once("): "))
-        .map(|(_, code)| code)
-    else {
+    let Some(code) = api_error_code(e) else {
         return e.to_string();
     };
     let sentence = match code {
@@ -491,10 +487,12 @@ mod tests {
         set_api_base(None);
     }
 
-    /// Every refusal happens before any network call — the API base is left
-    /// pointing nowhere, so a call would fail differently.
+    /// Every refusal happens before any network call: the API base points at a
+    /// closed port, so a call would answer 502 rather than the 404 or 400.
     #[tokio::test]
     async fn an_unusable_integration_is_refused_before_slack_is_asked() {
+        let _guard = api_base_lock().await;
+        set_api_base(Some("http://127.0.0.1:1".to_string()));
         let file = db();
         let cases = [
             ("nope", StatusCode::NOT_FOUND),
@@ -507,5 +505,6 @@ mod tests {
             assert_eq!(answer.status, status, "{id}: {}", body_of(&answer));
             assert!(!body_of(&answer).contains(TOKEN));
         }
+        set_api_base(None);
     }
 }

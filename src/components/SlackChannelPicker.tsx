@@ -47,7 +47,9 @@ export function SlackChannelPicker({
   const res = useResource(() => load(integrationId), [integrationId]);
   const [query, setQuery] = useState("");
 
-  const channels = res.data;
+  // Nothing while a fetch is in flight, so a switch of integration never
+  // judges the new ids against the old list; a `null` answer is an empty one.
+  const channels = res.loading || res.error ? undefined : (res.data ?? []);
   const byId = useMemo(
     () => new Map((channels ?? []).map((c) => [c.id, c])),
     [channels]
