@@ -203,13 +203,13 @@ function DeliveryDestinationRow({
   return (
     <div className="delivery__dest">
       <FormRow label="Slack">
-        <div className="inline">
+        <div className="delivery__head">
           <Dropdown
+            className="delivery__pick"
             value={id}
             options={options}
             onChange={(integration_id) => setSlack({ integration_id })}
           />
-          <div className="spacer" />
           <button type="button" className="btn btn--ghost" onClick={onRemove}>
             Remove
           </button>

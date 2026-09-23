@@ -571,6 +571,44 @@ export function JobsView({
 
 /* --- The run's Claude session --------------------------------------------- */
 
+/** A delivery status's badge; `failed` is the one that needs attention. */
+const DELIVERY_BADGE: Record<DeliveryStatus, { label: string; tone: string }> = {
+  sent: { label: "Sent", tone: "badge--green" },
+  failed: { label: "Failed", tone: "badge--red" },
+  skipped: { label: "Skipped", tone: "" },
+  pending: { label: "Pending", tone: "" },
+};
+
+/**
+ * Where a run's output was delivered (#635, #638): one entry per target, i.e.
+ * per Slack channel, with the error or the skip reason beneath it.
+ */
+function RunDeliveries({ deliveries }: { deliveries: JobDelivery[] }) {
+  return (
+    <>
+      {deliveries.map((d) => {
+        const badge = DELIVERY_BADGE[d.status] ?? { label: d.status, tone: "" };
+        const when = d.finished_at ?? d.created_at;
+        return (
+          <Fragment key={d.id}>
+            <InspRow label={d.type === "slack" ? "Slack" : d.type}>
+              <span className="row delivery__result" title={`${dateTime(when)} (${relativeTime(when)})`}>
+                <span className="mono truncate">{d.target || "—"}</span>
+                <span className={`badge ${badge.tone}`}>{badge.label}</span>
+              </span>
+            </InspRow>
+            {d.error && (
+              <div className={d.status === "failed" ? "logblock logblock--error" : "logblock"}>
+                {d.error}
+              </div>
+            )}
+          </Fragment>
+        );
+      })}
+    </>
+  );
+}
+
 /**
  * The Claude session a run produced, as a control rather than a string (#542).
  *
@@ -600,44 +638,6 @@ export function JobsView({
  * `sdk_session_id` is one, and a failed request is not — reporting a transient
  * error as "no session" states something untrue about the user's data.
  */
-/** A delivery status's badge; `failed` is the one that needs attention. */
-const DELIVERY_BADGE: Record<DeliveryStatus, { label: string; tone: string }> = {
-  sent: { label: "Sent", tone: "badge--green" },
-  failed: { label: "Failed", tone: "badge--red" },
-  skipped: { label: "Skipped", tone: "" },
-  pending: { label: "Pending", tone: "" },
-};
-
-/**
- * Where a run's output was delivered (#635, #638): one entry per target, i.e.
- * per Slack channel, with the error or the skip reason beneath it.
- */
-function RunDeliveries({ deliveries }: { deliveries: JobDelivery[] }) {
-  return (
-    <>
-      {deliveries.map((d) => {
-        const badge = DELIVERY_BADGE[d.status] ?? { label: d.status, tone: "" };
-        const when = d.finished_at ?? d.created_at;
-        return (
-          <Fragment key={d.id}>
-            <InspRow label={`${d.type === "slack" ? "Slack" : d.type} · ${d.target || "—"}`}>
-              <span className="row" title={dateTime(when)}>
-                <span className={`badge ${badge.tone}`}>{badge.label}</span>
-                <span className="runrow__val">{relativeTime(when)}</span>
-              </span>
-            </InspRow>
-            {d.error && (
-              <div className={d.status === "failed" ? "logblock logblock--error" : "logblock"}>
-                {d.error}
-              </div>
-            )}
-          </Fragment>
-        );
-      })}
-    </>
-  );
-}
-
 function RunSession({
   chatId,
   runStatus,
