@@ -457,6 +457,9 @@ are authored there directly.
   measured it (#264).
 - **`inbound` is omitted, not `null`**, and it is the last key — so a chat with
   no mapping row is byte-identical to pre-#570. Why: `ChatSession::inbound`.
+- **A task's `destinations` is omitted, not `[]`**, when it has none — so a
+  task without delivery destinations is byte-identical to pre-#634. The column
+  stores `[]`; only the wire drops it. Why: `ScheduledTask::destinations`.
 - **A `json.RawMessage` re-encodes through Go's `compact`**, which strips
   whitespace outside strings and HTML-escapes, but **preserves the stored key
   order and number spelling**. A tool_use `input` of `{"z":1.50,"a":1}` ships

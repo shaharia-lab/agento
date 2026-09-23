@@ -192,6 +192,10 @@
     {
       "version": 43,
       "sql": "\n-- `credential_findings.match_hash` (#602, epic #597). Authored here like 31-42,\n-- and additive: nullable, so a finding written before it simply has none, and\n-- an older build opening this database never reads it.\n--\n-- The same hash `credential_whitelist.match_hash` holds -- SHA-256 of the\n-- matched bytes, lowercase hex, computed only by security_scan::store -- so a\n-- whitelist entry added for one value can find every existing finding of that\n-- value without the value itself ever being stored. Indexed because that\n-- lookup is the whole reason the column exists.\nALTER TABLE credential_findings ADD COLUMN match_hash TEXT;\nCREATE INDEX idx_credential_findings_match_hash ON credential_findings(match_hash);\n"
+    },
+    {
+      "version": 44,
+      "sql": "\n-- `scheduled_tasks.destinations` (#634, epic #626). Authored here like 31-43,\n-- and additive, so an older build opening this database applies nothing and\n-- simply never reads the column.\n--\n-- A JSON array of typed delivery destinations -- where a task's output is sent\n-- after a run -- rather than a side table: the list is always read and written\n-- whole, never queried by content, and each type's config is JSON anyway, as\n-- `schedule_config` already is on this table. A new destination type is a new\n-- optional key inside an entry and needs no migration.\n--\n-- NOT NULL DEFAULT '[]' rather than nullable, following 38 and 42: every\n-- existing task necessarily had no destinations, and that leaves \"none\" a\n-- single spelling. The integration an entry names is deliberately not a foreign\n-- key: deleting the integration keeps the task's configuration.\nALTER TABLE scheduled_tasks ADD COLUMN destinations TEXT NOT NULL DEFAULT '[]';\n"
     }
   ]
 }

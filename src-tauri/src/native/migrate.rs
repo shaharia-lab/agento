@@ -44,7 +44,9 @@
 //! the Credentials Checker's on/off switch, default off (#601, epic #597).
 //! Migration **43** is the thirteenth: `credential_findings.match_hash` and its
 //! index, so a whitelist entry added by value can suppress existing findings of
-//! that value retroactively (#602, epic #597).
+//! that value retroactively (#602, epic #597). Migration **44** is the
+//! fourteenth: `scheduled_tasks.destinations`, the JSON list of where a task's
+//! output is delivered after a run (#634, epic #626).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -276,8 +278,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 43, "expected 43 migrations");
-        assert_eq!(expected_version(), 43);
+        assert_eq!(all.len(), 44, "expected 44 migrations");
+        assert_eq!(expected_version(), 44);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -371,7 +373,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 43);
+        assert_eq!(current_version(&conn).expect("version"), 44);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -392,6 +394,14 @@ mod tests {
             )
             .expect("renamed column");
         assert_eq!(renamed, 1);
+        let destinations: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('scheduled_tasks') WHERE name = 'destinations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("destinations");
+        assert_eq!(destinations, 1);
         let old: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('session_insights') WHERE name = 'thinking_time_ms'",
@@ -612,7 +622,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 43);
+        assert_eq!(current_version(&conn).expect("version"), 44);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -720,7 +730,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 43);
+        assert_eq!(current_version(&conn).expect("version"), 44);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -729,7 +739,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 43);
+        assert_eq!(recorded, 44);
     }
 
     #[test]
