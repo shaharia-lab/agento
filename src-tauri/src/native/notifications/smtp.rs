@@ -69,6 +69,24 @@ pub fn send(config: &SmtpConfig, mail: &Mail) -> Result<(), String> {
         .map_err(|e| format!("sending mail: {e}"))
 }
 
+/// [`send`], to `recipients` rather than the settings' `to_addresses` — the
+/// per-task email destination (#640), which reuses the provider and nothing
+/// else of the notification settings.
+///
+/// It goes through [`send`] on a clone with `to_addresses` replaced, so
+/// [`build_message`]'s split, trim and skip-blanks rules stay the only
+/// recipient parser.
+pub fn send_to(config: &SmtpConfig, recipients: &[String], mail: &Mail) -> Result<(), String> {
+    send(&with_recipients(config, recipients), mail)
+}
+
+fn with_recipients(config: &SmtpConfig, recipients: &[String]) -> SmtpConfig {
+    SmtpConfig {
+        to_addresses: recipients.join(", "),
+        ..config.clone()
+    }
+}
+
 /// The `mail.Msg` go-mail assembles: a plain-text body with the branded HTML as
 /// an alternative, so a client that renders neither still shows the text.
 ///
@@ -162,7 +180,7 @@ fn tls_policy(encryption: &str, host: &str) -> Result<Tls, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn config() -> SmtpConfig {
@@ -209,6 +227,27 @@ mod tests {
         let message = build_message(&cfg, &test_mail()).expect("message");
         let envelope = message.envelope();
         assert_eq!(envelope.to().len(), 2);
+    }
+
+    /// The per-task destination's recipients replace the settings' own, and
+    /// nothing else of the config changes (#640).
+    #[test]
+    fn send_to_addresses_exactly_the_given_recipients() {
+        let cfg = with_recipients(
+            &config(),
+            &["a@example.com".to_string(), "b@example.com".to_string()],
+        );
+        assert_eq!(cfg.from_address, config().from_address);
+        let message = build_message(&cfg, &test_mail()).expect("message");
+        let to: Vec<String> = message
+            .envelope()
+            .to()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(to, ["a@example.com", "b@example.com"]);
+        let raw = String::from_utf8(message.formatted()).expect("utf-8");
+        assert!(!raw.contains("one@example.com"), "{raw}");
     }
 
     /// Nothing to send to is not something to dial for.
@@ -266,7 +305,7 @@ mod tests {
     /// function. Without it, "we build a plausible message" and "a server
     /// accepts it" are two different claims and only the first is tested — and
     /// the second is the one a user notices.
-    fn serve_one_session(listener: TcpListener) -> std::thread::JoinHandle<String> {
+    pub(crate) fn serve_one_session(listener: TcpListener) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
             let mut writer = stream.try_clone().expect("clone");

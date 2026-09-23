@@ -443,10 +443,10 @@ Other options:
 
 ### Delivery
 
-A task can also send each run's output to Slack or Telegram. The **Delivery**
-section appears once a Slack or Telegram integration is enabled and connected
-(see [Integrations](#integrations)), and on any task that already has a
-destination.
+A task can also send each run's output to Slack, Telegram or email. The
+**Delivery** section appears once a Slack or Telegram integration is enabled and
+connected (see [Integrations](#integrations)) or an SMTP server is set up in
+**Settings → Notifications**, and on any task that already has a destination.
 
 - **+ Add Slack destination** adds a row: pick the Slack integration, type the
   **Channel IDs** (comma-separated, such as `C0123ABCD`), and choose **When** —
@@ -457,6 +457,13 @@ destination.
   gets a short header (task, status, duration) and then the output as plain
   text. The bot can only message a chat where someone has started it, or that it
   was added to; a channel's `@username` is not accepted — use its numeric id.
+- **+ Add Email destination** takes **Recipients** (comma-separated addresses)
+  and **When**. It is offered once an SMTP server is set up in **Settings →
+  Notifications**, and sends through that server as one message to every
+  recipient, so they see each other. The subject is `Agento Notification -
+  <task>: Completed` (or `Failed`), and the body is a short header followed by
+  the full output. It is sent whether or not notifications are switched on,
+  because adding the destination is the opt-in.
 - The output is still kept in Agento as usual (subject to **Save output**);
   delivery sends a copy. Slack channels are shared, so everyone in them sees the
   output. Invite the bot to each channel, or Slack refuses the post.

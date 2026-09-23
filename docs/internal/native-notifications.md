@@ -42,3 +42,14 @@ are load-bearing:
 **The subscriber is wired** (#275): `notifications::handle(db_path, event,
 payload)` is called directly by the scheduler's executor when a task finishes.
 One publisher, one subscriber, no event bus between two functions.
+
+**The per-task email destination reuses the provider and nothing else** (#640).
+`notifications::delivery::deliver` sends a run's output through
+`stored_provider` (the unmasked SMTP config, `None` without a `host` or
+`from_address`) and `smtp::send_to`, which swaps `to_addresses` for the task's
+recipients on a clone so `build_message` stays the only recipient parser. It
+ignores `enabled` and the `scheduled_tasks` preferences — those govern the
+metadata notification `handle` sends — sends one message per destination with
+every recipient on `To`, and writes no `notification_log` row: the outcome is
+the destination's `job_deliveries` row. It is blocking, so
+`schedule::delivery::deliver_email` runs it through `db::blocking`.

@@ -298,6 +298,19 @@ export function TasksView({
   );
   const integrations =
     integrationsRes.data === undefined ? null : integrationsRes.data ?? [];
+  // Whether an email destination (#640) has a provider to send through: the
+  // masked read is enough to tell. `null` until loaded or when it failed, so
+  // no hint or warning is shown against an answer that has not arrived.
+  const notificationsRes = useResource<{
+    provider?: { host?: string; from_address?: string } | null;
+  } | null>((signal) => api.get("/notifications/settings", signal), []);
+  const smtpConfigured =
+    notificationsRes.data == null
+      ? null
+      : Boolean(
+          notificationsRes.data.provider?.host &&
+            notificationsRes.data.provider?.from_address
+        );
 
   const tasks = useMemo(() => tasksRes.data ?? [], [tasksRes.data]);
   const agents = useMemo(() => agentsRes.data ?? [], [agentsRes.data]);
@@ -1010,16 +1023,19 @@ export function TasksView({
 
                 <div className="divider" />
 
-                {/* Hidden while no integration could deliver, unless the
-                    task already has a destination — a stored one always shows,
-                    with its warning, and rides in the draft either way. */}
+                {/* Hidden while nothing could deliver — no usable integration
+                    and no SMTP server — unless the task already has a
+                    destination: a stored one always shows, with its warning,
+                    and rides in the draft either way. */}
                 {((integrations ?? []).some(isUsableDestination) ||
+                  smtpConfigured === true ||
                   (draft.destinations?.length ?? 0) > 0) && (
                   <>
                     <DeliverySection
                       destinations={draft.destinations ?? []}
                       integrations={integrations}
                       integrationsError={integrationsRes.error}
+                      smtpConfigured={smtpConfigured}
                       open={isOpen("delivery")}
                       onToggle={() => toggleSection("delivery")}
                       onChange={(destinations) => edit({ destinations })}
