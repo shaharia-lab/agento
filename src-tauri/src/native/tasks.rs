@@ -351,13 +351,14 @@ pub fn list_all_job_history(
 pub fn get_job_history(db_path: &Path, id: &str) -> Result<Option<JobHistory>, String> {
     let conn = db::open_read_only(db_path)?;
     let sql = format!("{JOB_COLUMNS} WHERE id = ?");
-    let job = conn
+    let mut job = conn
         .query_row(&sql, [id], scan_job)
         .optional()
         .map_err(|e| format!("getting job history {id:?}: {e}"))?;
-    let mut jobs: Vec<JobHistory> = job.into_iter().collect();
-    attach_deliveries(&conn, &mut jobs)?;
-    Ok(jobs.pop())
+    if let Some(found) = job.as_mut() {
+        attach_deliveries(&conn, std::slice::from_mut(found))?;
+    }
+    Ok(job)
 }
 
 /// The most job ids one delivery lookup binds. The page limit is capped at
