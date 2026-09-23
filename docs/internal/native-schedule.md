@@ -431,3 +431,21 @@ empty, so a previous session's row never held one, and decrementing would
 corrupt the count of a run this session owns. Pinned by `scheduled_run.rs`'s
 `the_startup_reaper_stops_a_surviving_orphan_and_fails_every_stale_row` and
 `a_task_whose_stale_run_was_reaped_fires_normally_afterwards`.
+
+**Delivery destinations are stored, not yet delivered** (#634, epic #626).
+`scheduled_tasks.destinations` (migration 44) holds a JSON array of typed
+entries, `{"type":"slack","when":"success","slack":{"integration_id":…,"channel_ids":[…]}}`,
+one sub-object per type keyed by the type's name, so a new type is a new
+optional field on `tasks::TaskDestination` and needs no migration. On the wire
+the list sits between `save_output` and `status` and is **omitted when empty**,
+so a task without destinations keeps its pre-#634 bytes. `PUT` replaces it like
+every other field (absent, `null` and `[]` all clear it). Shape is checked in the
+pure `validate_destinations` (an empty `when` becomes `success`; channel ids
+match `^[CGD][A-Z0-9]{8,}$`, no duplicates); the integration's type is checked
+in `check_destination_integrations`, inside the write's transaction. **An
+`integration_id` that names nothing is refused on a create but grandfathered
+when the task already stores it**, because a deleted integration keeps the
+task's configuration and the form posts the whole task back on every edit. Every
+other task write — pause, resume, the run's write-back — goes through
+`update_task_in` on a re-read row and carries the list unchanged
+(`the_runs_write_back_keeps_the_tasks_destinations`).

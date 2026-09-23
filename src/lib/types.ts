@@ -241,6 +241,21 @@ export interface ScheduleConfig {
   expression?: string;
 }
 
+/** When a destination receives a run's output (#634). */
+export type DeliveryWhen = "success" | "always";
+
+export interface SlackDestinationConfig {
+  integration_id: string;
+  channel_ids: string[] | null;
+}
+
+/** One place a task's output is delivered; one sub-object per `type`. */
+export interface TaskDestination {
+  type: "slack";
+  when: DeliveryWhen;
+  slack?: SlackDestinationConfig;
+}
+
 export interface ScheduledTask {
   id: string;
   name: string;
@@ -256,6 +271,8 @@ export interface ScheduledTask {
   stop_after_count: number;
   stop_after_time?: string | null;
   save_output: boolean;
+  /** Omitted when the task has none (#634). */
+  destinations?: TaskDestination[] | null;
   status: TaskStatus;
   run_count: number;
   last_run_at?: string | null;

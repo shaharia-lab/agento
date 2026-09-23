@@ -90,6 +90,47 @@ pub struct ScheduleConfig {
     pub expression: String,
 }
 
+/// One place a task's output is delivered after a run (#634, epic #626).
+///
+/// **Typed, with one sub-object per type keyed by the type's name**, so a new
+/// destination type is a new optional field here and needs no migration:
+/// `{"type":"slack","when":"success","slack":{...}}`. Only `slack` exists yet;
+/// [`validate_destinations`] refuses any other `type`.
+///
+/// Stored whole as a JSON array in `scheduled_tasks.destinations` and decoded
+/// from request bodies, so every scalar carries `null_is_zero_value` and the
+/// nested object is a [`GoStruct`](super::gojson::GoStruct) — a type, never a
+/// `deserialize_with` over a container.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDestination {
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
+    pub r#type: String,
+    /// `success` or `always`; an empty value is defaulted to `success` by
+    /// validation, so a stored entry always carries one of the two.
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
+    pub when: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack: Option<super::gojson::GoStruct<SlackDestination>>,
+}
+
+/// A Slack destination's configuration: which connected Slack integration posts,
+/// and to which channels.
+///
+/// `integration_id` is deliberately not a foreign key: a deleted integration
+/// leaves the task's configuration in place (see
+/// [`check_destination_integrations`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlackDestination {
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
+    pub integration_id: String,
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
+    pub channel_ids: super::gojson::GoList<String>,
+}
+
 /// One scheduled task. Mirrors `storage.ScheduledTask`.
 ///
 /// Field order is the Go struct's declaration order, which here happens to
@@ -112,6 +153,11 @@ pub struct ScheduledTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_after_time: Option<GoTime>,
     pub save_output: bool,
+    /// Where the output goes after a run (#634). **Omitted when empty**, not
+    /// `[]` and not `null`, so a task without destinations keeps exactly the
+    /// bytes it had before the field existed — the `inbound` precedent (#570).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<TaskDestination>,
     /// "active" or "paused".
     pub status: String,
     pub run_count: i64,
@@ -163,7 +209,7 @@ const TASK_COLUMNS: &str =
     "SELECT id, name, description, prompt, agent_slug, working_directory, model,
        settings_profile_id, timeout_minutes, schedule_type, schedule_config,
        stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
-       last_run_status, next_run_at, created_at, updated_at
+       last_run_status, next_run_at, created_at, updated_at, destinations
 FROM scheduled_tasks";
 
 const JOB_COLUMNS: &str =
@@ -260,6 +306,7 @@ pub fn get_job_history(db_path: &Path, id: &str) -> Result<Option<JobHistory>, S
 
 fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
     let config: String = row.get(10)?;
+    let destinations: Option<String> = row.get(21)?;
     Ok(ScheduledTask {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -294,6 +341,13 @@ fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
         stop_after_count: row.get(11)?,
         stop_after_time: nullable_timestamp(row, 12)?,
         save_output: row.get(13)?,
+        destinations: decode_destinations(destinations.as_deref()).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                21,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(e)),
+            )
+        })?,
         status: row.get(14)?,
         run_count: row.get(15)?,
         last_run_at: nullable_timestamp(row, 16)?,
@@ -302,6 +356,18 @@ fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
         created_at: timestamp(row, 19)?,
         updated_at: timestamp(row, 20)?,
     })
+}
+
+/// The stored `destinations` column. The same policy as `schedule_config`: a
+/// `NULL`, empty or JSON `null` value is an empty list, and anything unparsable
+/// fails the read rather than serving a task whose delivery is unknown.
+fn decode_destinations(stored: Option<&str>) -> Result<Vec<TaskDestination>, String> {
+    match stored.map(str::trim) {
+        None | Some("") => Ok(Vec::new()),
+        Some(text) => serde_json::from_str::<Option<Vec<TaskDestination>>>(text)
+            .map(Option::unwrap_or_default)
+            .map_err(|e| format!("parsing destinations: {e}")),
+    }
 }
 
 fn scan_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobHistory> {
@@ -682,7 +748,8 @@ mod tests {
             next_run_at         DATETIME,
             created_at          DATETIME NOT NULL,
             updated_at          DATETIME NOT NULL,
-            save_output         INTEGER NOT NULL DEFAULT 0
+            save_output         INTEGER NOT NULL DEFAULT 0,
+            destinations        TEXT NOT NULL DEFAULT '[]'
         );
         CREATE TABLE job_history (
             id                          TEXT PRIMARY KEY,
@@ -1173,6 +1240,308 @@ mod tests {
             list_tasks(file.path()).expect("list").is_empty(),
             "a rejected create stores nothing"
         );
+    }
+
+    // ─── Delivery destinations (#634) ───────────────────────────────────────
+
+    /// A migrated database with one Slack and one Telegram integration.
+    fn migrated_with_integrations() -> tempfile::NamedTempFile {
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(
+            "INSERT INTO integrations (id, name, type, enabled, created_at, updated_at) VALUES
+                ('slack-1', 'Team Slack', 'slack', 1,
+                 '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC'),
+                ('tg-1', 'Bot', 'telegram', 1,
+                 '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC');",
+        )
+        .expect("seed integrations");
+        file
+    }
+
+    const ONE_SLACK_DESTINATION: &str = r#"{"name":"N","prompt":"p",
+        "destinations":[{"type":"slack","slack":{"integration_id":"slack-1",
+            "channel_ids":["C0123ABCD","C0456EFGH"]}}]}"#;
+
+    fn stored_destinations(file: &tempfile::NamedTempFile, id: &str) -> String {
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.query_row(
+            "SELECT destinations FROM scheduled_tasks WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .expect("read destinations")
+    }
+
+    #[test]
+    fn a_slack_destination_round_trips_byte_identically_in_wire_order() {
+        let file = migrated_with_integrations();
+        let answer = create_task(file.path(), ONE_SLACK_DESTINATION.as_bytes()).expect("create");
+        let body = answer.body.expect("a body");
+        let created: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let id = created["id"].as_str().expect("id").to_string();
+
+        // Key order `type, when, slack` then `integration_id, channel_ids`, the
+        // list between `save_output` and `status`, and an omitted `when`
+        // defaulted to `success`.
+        let want = r#""save_output":false,"destinations":[{"type":"slack","when":"success","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0456EFGH"]}}],"status":"active","#;
+        let one = encoded(&get_task(file.path(), &id).expect("get").expect("task"));
+        assert!(one.contains(want), "{one}");
+        let listed = encoded(&list_tasks(file.path()).expect("list")[0]);
+        assert_eq!(one, listed, "the list and the single read agree");
+        assert_eq!(
+            String::from_utf8(body).expect("utf-8").trim_end(),
+            one,
+            "the create answers the bytes a read returns"
+        );
+        assert_eq!(
+            stored_destinations(&file, &id),
+            r#"[{"type":"slack","when":"success","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0456EFGH"]}}]"#
+        );
+    }
+
+    #[test]
+    fn a_task_without_destinations_ships_no_key_and_stores_an_empty_array() {
+        let file = migrated();
+        let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let bytes = encoded(&get_task(file.path(), &task.id).expect("get").expect("task"));
+        assert!(!bytes.contains("destinations"), "{bytes}");
+        assert!(
+            bytes.contains(r#""save_output":false,"status":"active","#),
+            "{bytes}"
+        );
+        assert_eq!(stored_destinations(&file, &task.id), "[]");
+    }
+
+    #[test]
+    fn a_put_with_destinations_omitted_null_or_empty_clears_them() {
+        let file = migrated_with_integrations();
+        for body in [
+            r#"{"name":"N","prompt":"p"}"#,
+            r#"{"name":"N","prompt":"p","destinations":null}"#,
+            r#"{"name":"N","prompt":"p","destinations":[]}"#,
+        ] {
+            let task = created(&file, ONE_SLACK_DESTINATION);
+            assert_eq!(task.destinations.len(), 1);
+            update_task(file.path(), &task.id, body.as_bytes()).expect("update");
+            let stored = get_task(file.path(), &task.id).expect("get").expect("task");
+            assert!(stored.destinations.is_empty(), "for {body}");
+            assert_eq!(stored_destinations(&file, &task.id), "[]", "for {body}");
+        }
+    }
+
+    #[test]
+    fn every_destination_rule_is_a_422_and_writes_nothing() {
+        let file = migrated_with_integrations();
+        let existing = created(&file, ONE_SLACK_DESTINATION);
+        let before = encoded(
+            &get_task(file.path(), &existing.id)
+                .expect("get")
+                .expect("task"),
+        );
+
+        let slack = |slack: &str| {
+            format!(
+                r#"{{"name":"N","prompt":"p","destinations":[{{"type":"slack","slack":{slack}}}]}}"#
+            )
+        };
+        let cases = [
+            (
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"email"}]}"#.to_string(),
+                r#"validation error for "destinations[0].type": type must be slack"#,
+            ),
+            (
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","when":"sometimes","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]}"#.to_string(),
+                r#"validation error for "destinations[0].when": when must be success or always"#,
+            ),
+            (
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"slack"}]}"#.to_string(),
+                r#"validation error for "destinations[0].slack": slack is required for slack destinations"#,
+            ),
+            (
+                slack(r#"{"channel_ids":["C0123ABCD"]}"#),
+                r#"validation error for "destinations[0].slack.integration_id": integration_id is required for slack destinations"#,
+            ),
+            (
+                slack(r#"{"integration_id":"slack-1","channel_ids":[]}"#),
+                r#"validation error for "destinations[0].slack.channel_ids": channel_ids is required for slack destinations"#,
+            ),
+            (
+                slack(r##"{"integration_id":"slack-1","channel_ids":["#general"]}"##),
+                r##"validation error for "destinations[0].slack.channel_ids": channel id "#general" is not a Slack channel id"##,
+            ),
+            (
+                slack(r#"{"integration_id":"slack-1","channel_ids":["c0123abcd"]}"#),
+                r#"validation error for "destinations[0].slack.channel_ids": channel id "c0123abcd" is not a Slack channel id"#,
+            ),
+            (
+                slack(r#"{"integration_id":"slack-1","channel_ids":["C0123"]}"#),
+                r#"validation error for "destinations[0].slack.channel_ids": channel id "C0123" is not a Slack channel id"#,
+            ),
+            (
+                slack(r#"{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0123ABCD"]}"#),
+                r#"validation error for "destinations[0].slack.channel_ids": channel id "C0123ABCD" is listed more than once"#,
+            ),
+            (
+                slack(r#"{"integration_id":"tg-1","channel_ids":["C0123ABCD"]}"#),
+                r#"validation error for "destinations[0].slack.integration_id": integration_id is not a Slack integration"#,
+            ),
+            (
+                slack(r#"{"integration_id":"gone","channel_ids":["C0123ABCD"]}"#),
+                r#"validation error for "destinations[0].slack.integration_id": integration_id does not name an integration"#,
+            ),
+        ];
+        for (body, want) in &cases {
+            let err = create_task(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), *want, "create {body}");
+            assert_eq!(
+                err.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "create {body}"
+            );
+
+            let err = update_task(file.path(), &existing.id, body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), *want, "update {body}");
+            assert_eq!(
+                err.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "update {body}"
+            );
+        }
+        assert_eq!(
+            list_tasks(file.path()).expect("list").len(),
+            1,
+            "no row written"
+        );
+        let after = encoded(
+            &get_task(file.path(), &existing.id)
+                .expect("get")
+                .expect("task"),
+        );
+        assert_eq!(before, after, "no row changed");
+    }
+
+    #[test]
+    fn the_index_in_a_field_path_names_the_offending_entry() {
+        let file = migrated_with_integrations();
+        let err = create_task(
+            file.path(),
+            br#"{"name":"N","prompt":"p","destinations":[
+                {"type":"slack","when":"always","slack":{"integration_id":"slack-1","channel_ids":["G0123ABCD"]}},
+                {"type":"slack","slack":{"integration_id":"slack-1","channel_ids":["D01"]}}]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message(),
+            r#"validation error for "destinations[1].slack.channel_ids": channel id "D01" is not a Slack channel id"#
+        );
+    }
+
+    #[test]
+    fn a_deleted_integration_is_grandfathered_on_put_and_refused_on_post() {
+        let file = migrated_with_integrations();
+        let task = created(&file, ONE_SLACK_DESTINATION);
+        {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            conn.execute("DELETE FROM integrations WHERE id = 'slack-1'", [])
+                .expect("delete integration");
+        }
+
+        // The form posts the whole task back: the stale entry must not make the
+        // task uneditable.
+        update_task(
+            file.path(),
+            &task.id,
+            ONE_SLACK_DESTINATION
+                .replace(r#""prompt":"p""#, r#""prompt":"edited""#)
+                .as_bytes(),
+        )
+        .expect("an edit keeping the stored destination is accepted");
+        let stored = get_task(file.path(), &task.id).expect("get").expect("task");
+        assert_eq!(stored.prompt, "edited");
+        assert_eq!(stored.destinations, task.destinations);
+
+        // …but the same id is new to a create, and to a task that never had it.
+        let err = create_task(file.path(), ONE_SLACK_DESTINATION.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let other = created(&file, r#"{"name":"O","prompt":"p"}"#);
+        let err =
+            update_task(file.path(), &other.id, ONE_SLACK_DESTINATION.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(get_task(file.path(), &other.id)
+            .expect("get")
+            .expect("task")
+            .destinations
+            .is_empty());
+    }
+
+    #[test]
+    fn destinations_decode_by_the_go_list_and_struct_rules() {
+        let file = migrated_with_integrations();
+        // A `null` element is the zero entry, which validation then refuses.
+        let err = create_task(
+            file.path(),
+            br#"{"name":"N","prompt":"p","destinations":[null]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message(),
+            r#"validation error for "destinations[0].type": type must be slack"#
+        );
+        // Wrong container shapes are a 400, not a zero value.
+        for body in [
+            r#"{"name":"N","prompt":"p","destinations":{}}"#,
+            r#"{"name":"N","prompt":"p","destinations":[[]]}"#,
+            r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","slack":[]}]}"#,
+        ] {
+            let err = create_task(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "for {body}");
+        }
+        assert!(list_tasks(file.path()).expect("list").is_empty());
+        // Null scalars inside an entry are zero values, not type errors.
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","when":null,
+                "slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]}"#,
+        );
+        assert_eq!(task.destinations[0].when, "success");
+    }
+
+    #[test]
+    fn a_stored_empty_or_null_destinations_value_is_an_empty_list() {
+        let file = migrated();
+        let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        for stored in ["", "null"] {
+            conn.execute(
+                "UPDATE scheduled_tasks SET destinations = ?1 WHERE id = ?2",
+                [stored, task.id.as_str()],
+            )
+            .expect("seed");
+            let read = get_task(file.path(), &task.id).expect("get").expect("task");
+            assert!(read.destinations.is_empty(), "for {stored:?}");
+        }
+        conn.execute(
+            "UPDATE scheduled_tasks SET destinations = 'not json' WHERE id = ?1",
+            [&task.id],
+        )
+        .expect("seed");
+        assert!(
+            get_task(file.path(), &task.id).is_err(),
+            "an unparsable list fails the read"
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_leave_destinations_intact() {
+        let file = migrated_with_integrations();
+        let task = created(&file, ONE_SLACK_DESTINATION);
+        pause_task(file.path(), &task.id).expect("pause");
+        let paused = get_task(file.path(), &task.id).expect("get").expect("task");
+        assert_eq!(paused.destinations, task.destinations);
+        resume_task(file.path(), &task.id).expect("resume");
+        let resumed = get_task(file.path(), &task.id).expect("get").expect("task");
+        assert_eq!(resumed.destinations, task.destinations);
     }
 
     /// #330. Before this check the expression was inspected only at *schedule*
@@ -1960,6 +2329,15 @@ pub fn marshal_schedule_config(cfg: &ScheduleConfig) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("marshaling schedule config: {e}"))
 }
 
+/// The JSON stored in the `destinations` column: `[]` for none, never `null`,
+/// so the column keeps the one spelling its `DEFAULT` gave every existing row.
+/// `to_vec_marshal` for the same reason as [`marshal_schedule_config`].
+fn marshal_destinations(destinations: &[TaskDestination]) -> Result<String, String> {
+    let bytes = super::gojson::to_vec_marshal(&destinations)
+        .map_err(|e| format!("marshaling destinations: {e}"))?;
+    String::from_utf8(bytes).map_err(|e| format!("marshaling destinations: {e}"))
+}
+
 /// A nullable DATETIME as the driver writes one: the Go string rendering, or
 /// SQL `NULL` for a nil `*time.Time`.
 fn nullable_time(value: Option<&GoTime>) -> Option<String> {
@@ -1984,6 +2362,7 @@ pub fn update_task_row(db_path: &Path, task: &mut ScheduledTask) -> Result<(), S
 pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> Result<(), String> {
     let now = super::gotime::now_go_text();
     let config = marshal_schedule_config(&task.schedule_config)?;
+    let destinations = marshal_destinations(&task.destinations)?;
     let affected = conn
         .execute(
             "UPDATE scheduled_tasks SET
@@ -1992,8 +2371,8 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 timeout_minutes = ?8, schedule_type = ?9, schedule_config = ?10,
                 stop_after_count = ?11, stop_after_time = ?12, save_output = ?13, status = ?14,
                 run_count = ?15, last_run_at = ?16, last_run_status = ?17,
-                next_run_at = ?18, updated_at = ?19
-             WHERE id = ?20",
+                next_run_at = ?18, updated_at = ?19, destinations = ?20
+             WHERE id = ?21",
             rusqlite::params![
                 task.name,
                 task.description,
@@ -2014,6 +2393,7 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 task.last_run_status,
                 nullable_time(task.next_run_at.as_ref()),
                 now,
+                destinations,
                 task.id,
             ],
         )
@@ -2034,14 +2414,15 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
 /// has already stamped.
 pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Result<(), String> {
     let config = marshal_schedule_config(&task.schedule_config)?;
+    let destinations = marshal_destinations(&task.destinations)?;
     conn.execute(
         "INSERT INTO scheduled_tasks
             (id, name, description, prompt, agent_slug, working_directory, model,
              settings_profile_id, timeout_minutes, schedule_type, schedule_config,
              stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
-             last_run_status, next_run_at, created_at, updated_at)
+             last_run_status, next_run_at, created_at, updated_at, destinations)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20, ?21)",
+                 ?18, ?19, ?20, ?21, ?22)",
         rusqlite::params![
             task.id,
             task.name,
@@ -2064,6 +2445,7 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
             nullable_time(task.next_run_at.as_ref()),
             super::gotime::to_go_string_utc(task.created_at),
             super::gotime::to_go_string_utc(task.updated_at),
+            destinations,
         ],
     )
     .map_err(|e| format!("creating task: {e}"))?;
@@ -2314,11 +2696,17 @@ struct TaskRequest {
     /// value — see `docs/internal/native.md` → *They are types rather than
     /// `deserialize_with` functions*.
     stop_after_time: Option<GoTime>,
+    /// Delivery destinations (#634), replaced whole like every other field:
+    /// absent, `null` and `[]` all store an empty list. Each element is a
+    /// [`GoStruct`](super::gojson::GoStruct), so an array where an entry's
+    /// object belongs is a 400 rather than a zero entry, while a `null`
+    /// element is the zero entry — which validation then refuses by its type.
+    destinations: Option<super::gojson::GoList<super::gojson::GoStruct<TaskDestination>>>,
 }
 
 impl TaskRequest {
     /// The `storage.ScheduledTask` both handlers build from the request — the
-    /// fourteen fields they copy, and nothing else.
+    /// fifteen fields they copy (`destinations` since #634), and nothing else.
     ///
     /// The other seven are the row's own, and they split three ways. `id` is
     /// minted on a create and re-set from the URL on an update; `updated_at` is
@@ -2344,6 +2732,10 @@ impl TaskRequest {
             stop_after_count: self.stop_after_count,
             stop_after_time: self.stop_after_time,
             save_output: self.save_output,
+            destinations: self
+                .destinations
+                .map(|list| list.0.into_iter().map(|entry| entry.0).collect())
+                .unwrap_or_default(),
             status: self.status,
             run_count: 0,
             last_run_at: None,
@@ -2460,6 +2852,130 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
         }
         _ => {}
     }
+    validate_destinations(&mut task.destinations)
+}
+
+/// The shape of each delivery destination (#634) — everything decidable without
+/// the database; [`check_destination_integrations`] does the rest inside the
+/// write's transaction.
+///
+/// **It mutates**, like [`validate_task`]: an empty `when` becomes `success`,
+/// and the defaulted value is what is stored. Field paths are indexed
+/// (`destinations[0].slack.channel_ids`) so the form can point at the entry.
+fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), WriteError> {
+    for (i, dest) in destinations.iter_mut().enumerate() {
+        let field = |name: &str| format!("destinations[{i}].{name}");
+        if dest.r#type != "slack" {
+            return Err(WriteError::validation(&field("type"), "type must be slack"));
+        }
+        match dest.when.as_str() {
+            "success" | "always" => {}
+            "" => dest.when = "success".to_string(),
+            _ => {
+                return Err(WriteError::validation(
+                    &field("when"),
+                    "when must be success or always",
+                ))
+            }
+        }
+        let Some(slack) = dest.slack.as_deref() else {
+            return Err(WriteError::validation(
+                &field("slack"),
+                "slack is required for slack destinations",
+            ));
+        };
+        if slack.integration_id.is_empty() {
+            return Err(WriteError::validation(
+                &field("slack.integration_id"),
+                "integration_id is required for slack destinations",
+            ));
+        }
+        if slack.channel_ids.is_empty() {
+            return Err(WriteError::validation(
+                &field("slack.channel_ids"),
+                "channel_ids is required for slack destinations",
+            ));
+        }
+        for (j, channel) in slack.channel_ids.iter().enumerate() {
+            if !is_slack_channel_id(channel) {
+                return Err(WriteError::validation(
+                    &field("slack.channel_ids"),
+                    format!("channel id {channel:?} is not a Slack channel id"),
+                ));
+            }
+            if slack.channel_ids[..j].contains(channel) {
+                return Err(WriteError::validation(
+                    &field("slack.channel_ids"),
+                    format!("channel id {channel:?} is listed more than once"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `^[CGD][A-Z0-9]{8,}$`: a public channel, private group or DM id as Slack
+/// issues them. Spelled out rather than a regex because it is one character
+/// class and a length.
+fn is_slack_channel_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() >= 9
+        && matches!(bytes[0], b'C' | b'G' | b'D')
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// The one database-backed destination check: each `integration_id` must name
+/// a **Slack** integration. Runs inside the write's transaction, before the
+/// insert or update, so a refusal writes nothing.
+///
+/// **A missing integration is grandfathered when this task already stores it.**
+/// Deleting an integration keeps the task's configuration (the delivery shows a
+/// warning instead), and the form posts the whole task back on every edit — so
+/// a strict check would make such a task uneditable until the user noticed and
+/// removed the entry. `stored` is the task's list before this write (empty on
+/// a create), and a *new* id that names nothing is still refused. An
+/// integration that exists with another type is refused either way: that is not
+/// a stale reference but a wrong one.
+fn check_destination_integrations(
+    conn: &rusqlite::Connection,
+    destinations: &[TaskDestination],
+    stored: &[TaskDestination],
+) -> Result<(), WriteError> {
+    for (i, dest) in destinations.iter().enumerate() {
+        let Some(slack) = dest.slack.as_deref() else {
+            continue;
+        };
+        let id = &slack.integration_id;
+        let integration_type: Option<String> = conn
+            .query_row("SELECT type FROM integrations WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| WriteError::Fallback(format!("looking up integration {id:?}: {e}")))?;
+        let field = format!("destinations[{i}].slack.integration_id");
+        match integration_type.as_deref() {
+            Some("slack") => {}
+            Some(_) => {
+                return Err(WriteError::validation(
+                    &field,
+                    "integration_id is not a Slack integration",
+                ))
+            }
+            None => {
+                let already_stored = stored
+                    .iter()
+                    .any(|d| d.slack.as_deref().is_some_and(|s| s.integration_id == *id));
+                if !already_stored {
+                    return Err(WriteError::validation(
+                        &field,
+                        "integration_id does not name an integration",
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2497,6 +3013,7 @@ pub(crate) fn create_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, 
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| WriteError::Fallback(format!("begin task create: {e}")))?;
+    check_destination_integrations(&tx, &task.destinations, &[])?;
     insert_task_in(&tx, &task).map_err(WriteError::Fallback)?;
 
     // Everything fallible before the commit: an `Err` after it would answer
@@ -2547,6 +3064,7 @@ fn update_task(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, W
     task.created_at = existing.created_at;
 
     validate_task(&mut task)?;
+    check_destination_integrations(&tx, &task.destinations, &existing.destinations)?;
     if task.timeout_minutes == 0 {
         task.timeout_minutes = DEFAULT_TIMEOUT_MINUTES;
     }

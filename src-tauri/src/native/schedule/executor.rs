@@ -1402,6 +1402,50 @@ mod tests {
         assert!(stored.last_run_at.is_some());
     }
 
+    /// #634: the run's write-back re-reads the row, so the delivery
+    /// destinations the snapshot does not carry survive it.
+    #[test]
+    fn the_runs_write_back_keeps_the_tasks_destinations() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        let destinations = r#"[{"type":"slack","when":"always","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]"#;
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status, destinations,
+                 created_at, updated_at)
+             VALUES ('t1','T','p','interval','{\"every_minutes\":5}','active', ?1,
+                     '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+            [destinations],
+        )
+        .expect("seed");
+        drop(conn);
+
+        // The snapshot the timer loaded carries none of them.
+        let mut snapshot = sample_task();
+        snapshot.id = "t1".to_string();
+        snapshot.status = "active".to_string();
+        assert!(snapshot.destinations.is_empty());
+
+        let scheduler = test_scheduler(file.path());
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let stored: String = conn
+            .query_row(
+                "SELECT destinations FROM scheduled_tasks WHERE id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read");
+        assert_eq!(stored, destinations);
+        let task = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        assert_eq!(task.run_count, 1, "the run itself was recorded");
+        assert_eq!(task.destinations.len(), 1);
+    }
+
     #[test]
     fn a_one_shot_run_still_pauses_its_own_task() {
         // The other half of the same write: the run *does* own the pause when
@@ -1887,6 +1931,7 @@ mod tests {
             stop_after_count: 0,
             stop_after_time: None,
             save_output: false,
+            destinations: Vec::new(),
             status: "active".to_string(),
             run_count: 0,
             last_run_at: None,
