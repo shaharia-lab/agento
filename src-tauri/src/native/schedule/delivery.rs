@@ -18,7 +18,8 @@
 //! `tasks::finish_delivery` alone, so a failed post leaves `job_history.status`
 //! and `error_message` exactly as the run wrote them.
 //!
-//! **Every target ends in a row.** One row per channel or recipient, written
+//! **Every target ends in a row.** One row per channel, chat or email
+//! destination (an email is one message to all its recipients), written
 //! `pending` before the attempt and finished after it. A destination whose
 //! `when` is not met is finished `skipped` with the reason rather than left
 //! out, so the Jobs view lists every configured destination; a post lost to the
