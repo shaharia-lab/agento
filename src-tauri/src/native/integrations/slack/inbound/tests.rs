@@ -943,6 +943,20 @@ async fn a_reply_in_a_delivered_task_thread_resumes_the_tasks_chat() {
         .query_row("SELECT count(*) FROM chat_sessions", [], |row| row.get(0))
         .expect("count");
     assert_eq!(chats, 1);
+
+    // `GET /api/chats` shows the task chat with its Slack thread, through the
+    // same `chats.rs` join an inbound-started chat uses.
+    let listed = crate::native::chats::list(&db).expect("list chats");
+    let task = listed
+        .iter()
+        .find(|chat| chat.id == "task-chat")
+        .expect("the task chat is listed");
+    assert_eq!(task.title, "[Task] Daily brief");
+    let inbound = task.inbound.as_ref().expect("the chat carries its thread");
+    assert_eq!(
+        (inbound.channel_id.as_str(), inbound.thread_ts.as_str()),
+        (CHANNEL, "1700000000.000100")
+    );
 }
 
 /// The prefix decides on a run, and it decides on **every** message in the

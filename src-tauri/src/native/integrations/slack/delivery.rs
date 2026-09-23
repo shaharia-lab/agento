@@ -50,7 +50,9 @@ pub struct RunSummary {
 }
 
 /// How one channel's post ended. `Sent` carries the summary's `ts`, which is
-/// the thread the output landed in (#642 records it).
+/// the thread the output landed in. The `inbound_threads` row for that thread
+/// (#642) is written inside [`deliver_channel`], before the replies, not from
+/// this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelOutcome {
     Sent { ts: String },
