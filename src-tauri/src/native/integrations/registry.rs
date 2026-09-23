@@ -968,6 +968,56 @@ pub(super) fn resolve_slack_token(
     }
 }
 
+/// Why a task's Slack delivery could not get a token (#637). Every variant
+/// renders as a sentence for the delivery row, and none carries a token:
+/// `NoToken` holds [`resolve_slack_token`]'s message, which never interpolates
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SlackUnavailable {
+    NotFound,
+    NotSlack,
+    Disabled,
+    NotAuthenticated,
+    NoToken(String),
+}
+
+impl std::fmt::Display for SlackUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("the Slack integration was deleted"),
+            Self::NotSlack => f.write_str("the integration is not a Slack integration"),
+            Self::Disabled => f.write_str("the Slack integration is disabled"),
+            Self::NotAuthenticated => f.write_str("the Slack integration is not connected"),
+            Self::NoToken(reason) => write!(f, "no Slack token: {reason}"),
+        }
+    }
+}
+
+/// The bot token a task's Slack delivery posts with (#637): the same
+/// [`resolve_slack_token`] `start_slack` and the socket worker use, behind the
+/// same enabled-and-authenticated check `Start` applies.
+///
+/// The one exit for a token besides the starters, and it is a `String` for the
+/// same reason theirs is — nothing else of [`HostingRow`] leaves. Synchronous
+/// because it reads SQLite: callers on the runtime wrap it in `db::blocking`.
+pub(crate) fn slack_delivery_token(db_path: &Path, id: &str) -> Result<String, SlackUnavailable> {
+    let row = match get_for_hosting(db_path, id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return Err(SlackUnavailable::NotFound),
+        Err(e) => return Err(SlackUnavailable::NoToken(e)),
+    };
+    if row.integration_type != "slack" {
+        return Err(SlackUnavailable::NotSlack);
+    }
+    if !row.enabled {
+        return Err(SlackUnavailable::Disabled);
+    }
+    if !row.is_startable() {
+        return Err(SlackUnavailable::NotAuthenticated);
+    }
+    resolve_slack_token(&row.id, &row.credentials, &row.auth).map_err(SlackUnavailable::NoToken)
+}
+
 /// `telegram.Start`'s first two steps — the auth check and the credential parse
 /// — followed by the third, which `native/integrations/telegram` owns.
 ///
@@ -2867,5 +2917,69 @@ mod tests {
             r#"no starter registered for integration type "whatsapp""#
         );
         assert!(!can_host(file.path(), "wa-1").expect("can_host"));
+    }
+
+    /// A task's Slack delivery gets a token only from an enabled, authenticated
+    /// Slack row, and every refusal is a sentence with no token in it (#637).
+    #[test]
+    fn slack_delivery_token_refuses_every_row_it_cannot_post_with() {
+        let file = db();
+        let bot = r#"{"auth_mode":"bot_token","bot_token":"xoxb-delivery-secret"}"#;
+        insert(&file, "ok", "slack", true, Some("{}"), bot, "{}");
+        insert(&file, "tg", "telegram", true, Some("{}"), bot, "{}");
+        insert(&file, "off", "slack", false, Some("{}"), bot, "{}");
+        insert(&file, "unauth", "slack", true, None, bot, "{}");
+        insert(
+            &file,
+            "empty",
+            "slack",
+            true,
+            Some("{}"),
+            r#"{"auth_mode":"bot_token","bot_token":""}"#,
+            "{}",
+        );
+        insert(
+            &file,
+            "oauth",
+            "slack",
+            true,
+            Some(r#"{"access_token":"xoxb-from-oauth"}"#),
+            r#"{"auth_mode":"oauth"}"#,
+            "{}",
+        );
+
+        assert_eq!(
+            slack_delivery_token(file.path(), "ok").as_deref(),
+            Ok("xoxb-delivery-secret")
+        );
+        assert_eq!(
+            slack_delivery_token(file.path(), "oauth").as_deref(),
+            Ok("xoxb-from-oauth")
+        );
+        assert_eq!(
+            slack_delivery_token(file.path(), "gone"),
+            Err(SlackUnavailable::NotFound)
+        );
+        assert_eq!(
+            slack_delivery_token(file.path(), "tg"),
+            Err(SlackUnavailable::NotSlack)
+        );
+        assert_eq!(
+            slack_delivery_token(file.path(), "off"),
+            Err(SlackUnavailable::Disabled)
+        );
+        assert_eq!(
+            slack_delivery_token(file.path(), "unauth"),
+            Err(SlackUnavailable::NotAuthenticated)
+        );
+        let empty = slack_delivery_token(file.path(), "empty").expect_err("an empty bot token");
+        assert!(matches!(empty, SlackUnavailable::NoToken(_)), "{empty:?}");
+        for id in ["gone", "tg", "off", "unauth", "empty"] {
+            let reason = slack_delivery_token(file.path(), id)
+                .expect_err("refused")
+                .to_string();
+            assert!(!reason.is_empty());
+            assert!(!reason.contains("xoxb"), "{id}: {reason}");
+        }
     }
 }

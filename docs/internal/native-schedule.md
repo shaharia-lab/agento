@@ -492,8 +492,9 @@ delivered answer is `RunResult::answer`, not `response_text`**, so a task with
 `save_output` off still delivers its reply while the job row stores `""`; the
 form's *Save output* hint says so. The destinations are the task snapshot the
 run started with — the write-back copies only counters onto it — so an edit
-landing mid-run applies from the next run. Until #637 the Slack arm finishes
-`skipped` with `slack delivery is not available in this build`. A new type is
+landing mid-run applies from the next run. The Slack arm posts per channel
+through `integrations/slack/delivery.rs` (#637; see
+`docs/internal/native-integrations-slack.md`, *Task delivery*). A new type is
 one `Destination` variant and its arms; the executor does not change. Tests
 drive a `Fake` variant (types `fake`, `fake-fail`, `fake-hang`) compiled under
 `cfg(test)` or the `test-hooks` feature. Pinned by `delivery.rs`'s tests, the

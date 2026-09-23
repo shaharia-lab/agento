@@ -356,3 +356,36 @@ reason `tests/trigger_run.rs` stops one function short of Telegram's reply. So
 `slack/inbound/tests.rs` carries `tests/slack_socket.rs`'s fake-server half and
 `tests/headless_resume.rs`'s fake-CLI half together, and inherits the fake CLI's
 trap — **no exit after the result** — with a named deadline on every await.
+
+## Task delivery (#637)
+
+A scheduled task with a `slack` destination posts its output here after every
+run; `schedule/delivery.rs` calls `slack/delivery.rs::deliver_channel` once per
+configured channel. Four rules:
+
+- **The token comes from `registry::slack_delivery_token`**, which is
+  `resolve_slack_token` behind the same enabled-and-authenticated check
+  `start_slack` applies, so the `bot_token`, `oauth` and fallback arms all work.
+  A deleted row, a non-Slack row, a disabled one, an unconnected one, or one
+  with no resolvable token is recorded `skipped` with a sentence, and no HTTP
+  call is made. `SlackUnavailable` renders those sentences; none carries a token.
+- **Summary, then thread.** One top-level `chat.postMessage` (`*<task>* ·
+  succeeded · 3m 12s`, then `Job <id> · open Agento → Jobs`), whose `ts` is the
+  `thread_ts` of the replies. The replies are the answer — or the run's error,
+  or `NO_RESPONSE_REPLY` for an empty answer — through `to_mrkdwn` and then
+  `split(…, MAX_MESSAGE_CHARS)`, posted sequentially. The task name is escaped
+  with the same `&`/`<`/`>` rule. A failed summary attempts no replies; the
+  first failed reply stops the channel as `reply i of n failed`. Channels are
+  independent.
+- **Error codes become advice** (`readable`): `not_in_channel` says to invite
+  the bot, `channel_not_found`, `is_archived`, the rejected-token family
+  (`invalid_auth`, `token_revoked`, `account_inactive`, `not_authed`) and
+  `msg_too_long` get sentences with the code in parentheses. A rate limit keeps
+  the client's `slack rate limited …` sentence; anything unknown passes through.
+- **No retry in v1.** A rate limit or any other failure is recorded `failed`;
+  the scheduler's rule is "never silent", not "always delivered". The bot is
+  never auto-joined (`conversations.join`).
+
+Pinned by `slack/delivery.rs`'s tests (against a recording fake, in the library
+for the reason above) and `registry.rs`'s
+`slack_delivery_token_refuses_every_row_it_cannot_post_with`.
