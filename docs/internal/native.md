@@ -460,6 +460,9 @@ are authored there directly.
 - **A task's `destinations` is omitted, not `[]`**, when it has none — so a
   task without delivery destinations is byte-identical to pre-#634. The column
   stores `[]`; only the wire drops it. Why: `ScheduledTask::destinations`.
+- **A job's `deliveries` is omitted, not `[]`**, when it has none, and it is
+  the last key — so a job with no delivery rows is byte-identical to pre-#635
+  on all three job reads. Why: `JobHistory::deliveries`.
 - **A `json.RawMessage` re-encodes through Go's `compact`**, which strips
   whitespace outside strings and HTML-escapes, but **preserves the stored key
   order and number spelling**. A tool_use `input` of `{"z":1.50,"a":1}` ships

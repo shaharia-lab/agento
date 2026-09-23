@@ -1072,6 +1072,27 @@ fn seed_running_job(
     .expect("seed running job");
 }
 
+/// A `pending` `job_deliveries` row for the startup reaper to find (#635).
+fn seed_pending_delivery(path: &Path, id: &str, job_id: &str, created_at: &str) {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.execute(
+        "INSERT INTO job_deliveries (id, job_id, position, type, target, status, created_at)
+         VALUES (?1, ?2, 0, 'slack', 'Acme · C0123ABCD', 'pending', ?3)",
+        rusqlite::params![id, job_id, created_at],
+    )
+    .expect("seed pending delivery");
+}
+
+fn delivery_outcome(path: &Path, id: &str) -> (String, String, bool) {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.query_row(
+        "SELECT status, error, finished_at IS NOT NULL FROM job_deliveries WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .expect("delivery row")
+}
+
 fn job_outcome(path: &Path, id: &str) -> (String, String, bool) {
     let conn = rusqlite::Connection::open(path).expect("open");
     conn.query_row(
@@ -1151,6 +1172,11 @@ fn the_startup_reaper_stops_a_surviving_orphan_and_fails_every_stale_row() {
         ));
     seed_running_job(&db, "j-this-session", &later, None, None);
 
+    // A delivery the previous session dispatched and never finished (#635),
+    // and one this session has in flight.
+    seed_pending_delivery(&db, "d-stale", "j-gone", long_ago);
+    seed_pending_delivery(&db, "d-this-session", "j-this-session", &later);
+
     let reaped = scheduler.reap_stale_runs().expect("reap");
     assert_eq!((reaped.recovered, reaped.abandoned), (1, 3), "{reaped:?}");
 
@@ -1195,6 +1221,33 @@ fn the_startup_reaper_stops_a_surviving_orphan_and_fails_every_stale_row() {
     // A second pass finds nothing left to do.
     let again = scheduler.reap_stale_runs().expect("reap again");
     assert_eq!((again.recovered, again.abandoned), (0, 0));
+
+    // The deliveries: the stale one is failed, and the run it belongs to keeps
+    // the reaper's own reason — a delivery never rewrites its run's row.
+    assert_eq!(
+        scheduler
+            .reap_pending_deliveries()
+            .expect("reap deliveries"),
+        1
+    );
+    assert_eq!(
+        delivery_outcome(&db, "d-stale"),
+        (
+            "failed".to_string(),
+            "interrupted: app did not finish the delivery".to_string(),
+            true
+        )
+    );
+    assert_eq!(
+        delivery_outcome(&db, "d-this-session"),
+        ("pending".to_string(), String::new(), false),
+        "a delivery of this session is not the reaper's"
+    );
+    assert_eq!(
+        job_outcome(&db, "j-gone").1,
+        "orphaned: app did not exit cleanly"
+    );
+    assert_eq!(scheduler.reap_pending_deliveries().expect("again"), 0);
 }
 
 /// A reaped task is not left blocked: nothing marks it in flight, so a manual

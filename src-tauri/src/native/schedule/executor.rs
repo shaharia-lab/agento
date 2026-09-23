@@ -603,6 +603,7 @@ fn create_initial_job_history(
         total_cache_creation_tokens: 0,
         total_cache_read_tokens: 0,
         response_text: String::new(),
+        deliveries: Vec::new(),
     };
     if let Err(e) = tasks::insert_job_history(db_path, &job) {
         log::error!(
@@ -1081,6 +1082,7 @@ fn record_failed_run(
         total_cache_creation_tokens: 0,
         total_cache_read_tokens: 0,
         response_text: String::new(),
+        deliveries: Vec::new(),
     };
     if let Err(e) = tasks::insert_job_history(scheduler.db_path(), &job) {
         log::error!(

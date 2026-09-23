@@ -449,3 +449,25 @@ task's configuration and the form posts the whole task back on every edit. Every
 other task write — pause, resume, the run's write-back — goes through
 `update_task_in` on a re-read row and carries the list unchanged
 (`the_runs_write_back_keeps_the_tasks_destinations`).
+
+**Delivery results live in `job_deliveries`, never on the run's row** (#635,
+epic #626). Migration 45's table holds one row per *channel* a run's output was
+sent to — not per destination entry, so one Slack destination can succeed in one
+channel and fail in another — with `status` `pending`, `sent`, `failed` or
+`skipped`, an `error`, and a denormalised `target` so the history reads the
+same after the integration is deleted or the task edited. A delivery result
+**never touches `job_history.status` or `error_message`**: the run's outcome is
+the run's, and `error_message` already carries the #556 tools notice. The rows
+are written only through `tasks::insert_pending_delivery` and
+`tasks::finish_delivery`, never `update_job_history` (#594's shape), and they
+cascade with their job. **`pending` exists because delivery outlives the run's
+`RunGuard`**: the app-exit hook's `has_runs_in_flight` wait does not cover it,
+so a post lost to a quit must still leave a row. The startup reap,
+`Scheduler::reap_pending_deliveries`, runs in the same spawned, retried loop as
+`reap_stale_runs`, bounded by the same `booted_at`, and fails a previous
+session's `pending` rows as **`interrupted: app did not finish the delivery`**.
+`finish_delivery` is guarded by `status = 'pending'`, so a late finish loses to
+the reap rather than resurrecting it. The three job reads attach the rows as
+`deliveries`, the **last** key, omitted when empty, with one batched lookup per
+page. Pinned by `tasks.rs`'s delivery tests and `scheduled_run.rs`'s
+`the_startup_reaper_stops_a_surviving_orphan_and_fails_every_stale_row`.
