@@ -57,6 +57,7 @@
 //! every hosted type.
 
 pub mod client;
+pub mod delivery;
 pub mod inbound;
 pub mod messaging;
 pub mod mrkdwn;

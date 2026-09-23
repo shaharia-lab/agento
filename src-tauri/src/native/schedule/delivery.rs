@@ -90,9 +90,6 @@ impl Outcome {
 /// The reason a `success`-only destination records on a failed run.
 pub const SKIPPED_RUN_FAILED: &str = "run failed; this destination delivers on success only";
 
-/// What the Slack arm records until #637 lands the real post.
-pub const SKIPPED_SLACK_UNAVAILABLE: &str = "slack delivery is not available in this build";
-
 /// What a stored entry whose `type` this build does not know records.
 const SKIPPED_UNKNOWN_TYPE: &str = "unknown destination type";
 
@@ -134,8 +131,7 @@ impl Destination {
 
     /// One entry per channel or recipient, each of which gets its own row.
     ///
-    /// The Slack target is the bare channel id for now; #637 denormalises it to
-    /// `<integration name> · <channel>` when it resolves the integration.
+    /// The Slack target is the bare channel id.
     fn targets(&self) -> Vec<String> {
         match self {
             Self::Slack(slack) => slack.channel_ids.iter().cloned().collect(),
@@ -144,16 +140,11 @@ impl Destination {
         }
     }
 
-    // `report` is read only by the test Fake until #637's Slack post reads it.
-    #[cfg_attr(not(any(test, feature = "test-hooks")), allow(unused_variables))]
-    async fn deliver_one(
-        &self,
-        _db_path: &Path,
-        _target: &str,
-        report: &DeliveryReport,
-    ) -> Outcome {
+    async fn deliver_one(&self, db_path: &Path, target: &str, report: &DeliveryReport) -> Outcome {
         match self {
-            Self::Slack(_) => Outcome::Skipped(SKIPPED_SLACK_UNAVAILABLE.to_string()),
+            Self::Slack(slack) => {
+                deliver_slack(db_path, &slack.integration_id, target, report).await
+            }
             #[cfg(any(test, feature = "test-hooks"))]
             Self::Fake(mode) => {
                 fake_record(report);
@@ -167,6 +158,46 @@ impl Destination {
                 }
             }
         }
+    }
+}
+
+/// One Slack channel (#637): the token through `registry::slack_delivery_token`,
+/// then `slack::delivery`'s summary and thread. An integration that cannot post
+/// — deleted, not Slack, disabled, not connected, no token — is `skipped` with
+/// the reason, before any network call.
+async fn deliver_slack(
+    db_path: &Path,
+    integration_id: &str,
+    channel: &str,
+    report: &DeliveryReport,
+) -> Outcome {
+    use crate::native::integrations::{registry, slack::delivery};
+
+    let path = db_path.to_path_buf();
+    let id = integration_id.to_string();
+    let token = match db::blocking("slack delivery token", move || {
+        registry::slack_delivery_token(&path, &id)
+    })
+    .await
+    {
+        Some(Ok(token)) => token,
+        Some(Err(reason)) => return Outcome::Skipped(reason.to_string()),
+        None => return Outcome::Failed("could not read the Slack integration".to_string()),
+    };
+    let run = delivery::RunSummary {
+        task_name: report.task_name.clone(),
+        succeeded: report.run_ok(),
+        duration_ms: report.duration_ms,
+        job_id: report.job_id.clone(),
+        body: if report.run_ok() {
+            report.answer.clone()
+        } else {
+            report.error.clone().unwrap_or_default()
+        },
+    };
+    match delivery::deliver_channel(&token, channel, &run).await {
+        delivery::ChannelOutcome::Sent { .. } => Outcome::Sent,
+        delivery::ChannelOutcome::Failed(e) => Outcome::Failed(e),
     }
 }
 
@@ -395,16 +426,53 @@ pub(crate) mod tests {
                     "slack".into(),
                     "C0123ABCD".into(),
                     "skipped".into(),
-                    SKIPPED_SLACK_UNAVAILABLE.into()
+                    "the Slack integration was deleted".into()
                 ),
                 (
                     1,
                     "slack".into(),
                     "C0456EFGH".into(),
                     "skipped".into(),
-                    SKIPPED_SLACK_UNAVAILABLE.into()
+                    "the Slack integration was deleted".into()
                 ),
             ]
+        );
+    }
+
+    /// A Slack integration that cannot post is `skipped` with its reason before
+    /// any request: the API base is never redirected here, so a post would
+    /// reach the real Slack and fail rather than skip (#637).
+    #[tokio::test]
+    async fn a_disabled_slack_integration_is_skipped_with_its_reason() {
+        let file = with_job("j-slack-off");
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute_batch(
+                r#"INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                             created_at, updated_at)
+                   VALUES ('s-off', 's-off', 'slack', 0,
+                           '{"auth_mode":"bot_token","bot_token":"xoxb-off"}', '{}', '{}',
+                           '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC');"#,
+            )
+            .expect("seed");
+        let slack = TaskDestination {
+            r#type: "slack".into(),
+            when: "always".into(),
+            slack: Some(crate::native::gojson::GoStruct(SlackDestination {
+                integration_id: "s-off".into(),
+                channel_ids: crate::native::gojson::GoList(vec!["C0123ABCD".into()]),
+            })),
+        };
+        deliver_all(file.path(), &[slack], &report("j-slack-off", "success")).await;
+        assert_eq!(
+            rows(file.path(), "j-slack-off"),
+            vec![(
+                0,
+                "slack".into(),
+                "C0123ABCD".into(),
+                "skipped".into(),
+                "the Slack integration is disabled".into()
+            )]
         );
     }
 
