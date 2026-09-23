@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
+use super::delivery::{self, DeliveryReport};
 use super::runtime::Scheduler;
 use crate::native::agent_run::RunResult;
 use crate::native::agents::{self, Agent};
@@ -292,7 +293,9 @@ fn auto_pause(scheduler: &Arc<Scheduler>, mut task: ScheduledTask, reason: &str)
 /// splitting it any finer would only add hand-offs.
 ///
 /// The notifications stay out here because [`publish`] already spawns and
-/// deliberately does not wait — see its own note.
+/// deliberately does not wait — see its own note. Delivery (#636) sits beside
+/// every notification, the `prepare` failures included, for the same reason:
+/// [`delivery::dispatch`] spawns and returns `()`.
 async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
     let db_path = scheduler.db_path().to_path_buf();
 
@@ -314,6 +317,24 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
         Some(Ok(ready)) => ready,
         Some(Err(failed)) => {
             publish_task_failed(&db_path, &failed.task, &failed.message);
+            // Before `finish` exists, so a `when: always` destination hears
+            // about a run that could not start too (#636).
+            let duration_ms = (Utc::now() - run.started_at).num_milliseconds();
+            delivery::dispatch(
+                &db_path,
+                failed.task.destinations.clone(),
+                DeliveryReport {
+                    task_id: failed.task.id.clone(),
+                    task_name: failed.task.name.clone(),
+                    job_id: run.job_id.clone(),
+                    chat_session_id: String::new(),
+                    status: "failed".to_string(),
+                    duration_ms,
+                    model: failed.task.model.clone(),
+                    answer: String::new(),
+                    error: Some(failed.message.clone()),
+                },
+            );
             return;
         }
         None => return,
@@ -346,6 +367,25 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
         return;
     };
 
+    // Delivery is a second publish (#636): built from what was recorded, handed
+    // off, never awaited. The destinations are the snapshot this run started
+    // with — the write-back copies only the counters onto it — so an edit that
+    // lands mid-run applies from the next run.
+    delivery::dispatch(
+        &db_path,
+        recorded.task.destinations.clone(),
+        DeliveryReport {
+            task_id: recorded.task.id.clone(),
+            task_name: recorded.task.name.clone(),
+            job_id: recorded.job.id.clone(),
+            chat_session_id: chat_session_id.clone(),
+            status: recorded.job.status.clone(),
+            duration_ms: recorded.job.duration_ms,
+            model: recorded.job.model.clone(),
+            answer: recorded.answer.clone(),
+            error: recorded.failure.clone(),
+        },
+    );
     if let Some(message) = &recorded.failure {
         publish_task_failed(&db_path, &recorded.task, message);
         return;
@@ -463,6 +503,9 @@ struct Recorded {
     task: ScheduledTask,
     job: JobHistory,
     failure: Option<String>,
+    /// The agent's reply, whatever `save_output` says — delivery sends it even
+    /// when the job row stores `""` (#636). Empty on a failed run.
+    answer: String,
 }
 
 /// Everything `runTask` does after the agent run, as one synchronous section:
@@ -492,6 +535,7 @@ fn finish(
                 task,
                 job,
                 failure: Some(e),
+                answer: String::new(),
             };
         }
     };
@@ -526,6 +570,7 @@ fn finish(
         task,
         job,
         failure: None,
+        answer: result.answer,
     }
 }
 
@@ -1892,6 +1937,133 @@ mod tests {
                 "{kind:?} still records the run"
             );
         }
+    }
+
+    /// Polls until `job_id` has `n` deliveries and none is `pending`, since
+    /// [`delivery::dispatch`] finishes on a spawned task of its own.
+    async fn settled_deliveries(
+        path: &std::path::Path,
+        job_id: &str,
+        n: usize,
+    ) -> Vec<(i64, String, String, String, String)> {
+        for _ in 0..200 {
+            let rows = super::super::delivery::tests::rows(path, job_id);
+            if rows.len() == n && rows.iter().all(|r| r.3 != "pending") {
+                return rows;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "deliveries never settled: {:?}",
+            super::super::delivery::tests::rows(path, job_id)
+        );
+    }
+
+    /// #636: a run that fails in `prepare` never reaches `finish`, and a
+    /// `when: always` destination must still hear about it — on the job id the
+    /// run was started under, which is the one `POST /api/tasks/{id}/run`
+    /// answered with.
+    #[tokio::test]
+    async fn a_prepare_failure_delivers_to_always_and_skips_success_only() {
+        use super::super::delivery::tests::fake;
+        let file = at_its_limit();
+        let scheduler = test_scheduler(file.path());
+        let mut task = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        task.destinations = vec![fake("fake", "success"), fake("fake", "always")];
+
+        run_task(
+            &scheduler,
+            task,
+            Run {
+                kind: RunKind::Manual,
+                job_id: "j-prepare-fail".to_string(),
+                started_at: Utc::now(),
+            },
+        )
+        .await;
+
+        let rows = settled_deliveries(file.path(), "j-prepare-fail", 2).await;
+        assert_eq!(rows[0].3, "skipped");
+        assert_eq!(rows[0].4, super::super::delivery::SKIPPED_RUN_FAILED);
+        assert_eq!(rows[1].3, "sent");
+        let received = super::super::delivery::fake_received("j-prepare-fail");
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].status, "failed");
+        assert!(
+            received[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("resolve agent")),
+            "{received:?}"
+        );
+    }
+
+    /// `finish`'s failure arm hands delivery the run's error and no answer.
+    #[test]
+    fn a_failed_run_carries_its_error_and_no_answer() {
+        let file = at_its_limit();
+        let scheduler = test_scheduler(file.path());
+        let task = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        let run = Run {
+            kind: RunKind::Manual,
+            job_id: "j-finish-fail".to_string(),
+            started_at: Utc::now(),
+        };
+        let job = create_initial_job_history(file.path(), &task, "", "p", &run);
+        let recorded = finish(
+            &scheduler,
+            task,
+            job,
+            "",
+            "p",
+            Err("the agent failed".to_string()),
+            &run,
+        );
+        assert_eq!(recorded.failure.as_deref(), Some("the agent failed"));
+        assert!(recorded.answer.is_empty());
+    }
+
+    /// #636: `save_output` decides what the job row *keeps*; the answer handed
+    /// to delivery is the whole reply either way.
+    #[test]
+    fn an_unsaved_answer_is_still_carried_to_delivery() {
+        let file = at_its_limit();
+        let scheduler = test_scheduler(file.path());
+        let task = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        assert!(!task.save_output, "the fixture does not save output");
+        let run = Run {
+            kind: RunKind::Manual,
+            job_id: "j-unsaved".to_string(),
+            started_at: Utc::now(),
+        };
+        let job = create_initial_job_history(file.path(), &task, "", "p", &run);
+        let recorded = finish(
+            &scheduler,
+            task,
+            job,
+            "",
+            "p",
+            Ok(RunResult {
+                answer: "the whole answer".to_string(),
+                ..Default::default()
+            }),
+            &run,
+        );
+        assert_eq!(recorded.answer, "the whole answer");
+        assert_eq!(recorded.job.response_text, "");
+        assert_eq!(
+            tasks::get_job_history(file.path(), "j-unsaved")
+                .expect("read")
+                .expect("row")
+                .response_text,
+            ""
+        );
     }
 
     /// A task sitting **exactly** on its `stop_after_count`, still `active`.

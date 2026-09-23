@@ -1291,3 +1291,235 @@ async fn a_task_whose_stale_run_was_reaped_fires_normally_afterwards() {
     assert_eq!(jobs[0].0, "failed", "the stale row, reaped");
     assert_eq!(jobs[1].0, "success", "the next fire, run: {:?}", jobs[1].1);
 }
+
+// ─── Delivery (#636) ──────────────────────────────────────────────────────────
+//
+// Driven through the `test-hooks` Fake destination: `fake` sends, `fake-fail`
+// fails, `fake-hang` never finishes. Each records the report it was handed.
+
+fn set_destinations(path: &Path, task_id: &str, json: &str) {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.execute(
+        "UPDATE scheduled_tasks SET destinations = ?1 WHERE id = ?2",
+        [json, task_id],
+    )
+    .expect("set destinations");
+}
+
+/// `(type, status, error)` per delivery of `job_id`, in read order.
+fn deliveries(path: &Path, job_id: &str) -> Vec<(String, String, String)> {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, status, error FROM job_deliveries
+             WHERE job_id = ?1 ORDER BY position, created_at, id",
+        )
+        .expect("prepare");
+    let rows = stmt
+        .query_map([job_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+/// Polls until `job_id` has `n` deliveries and none is `pending`: delivery
+/// finishes on a task of its own, after the run has returned.
+async fn settled(path: &Path, job_id: &str, n: usize) -> Vec<(String, String, String)> {
+    for _ in 0..500 {
+        let rows = deliveries(path, job_id);
+        if rows.len() == n && rows.iter().all(|r| r.1 != "pending") {
+            return rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("deliveries never settled: {:?}", deliveries(path, job_id));
+}
+
+fn only_job_id(path: &Path) -> String {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.query_row("SELECT id FROM job_history", [], |r| r.get(0))
+        .expect("exactly one job row")
+}
+
+const ANSWERING_CLI: &str = r#"        raw('{"type":"result","subtype":"success","is_error":false,"result":"the full answer","session_id":"sdk-d-1","usage":{"input_tokens":1,"output_tokens":2}}')"#;
+
+/// A timer fire and `POST /api/tasks/{id}/run` produce the same delivery rows,
+/// on the run's own job id — and with `save_output` off the destination still
+/// receives the whole answer while the job row stores `""`.
+#[tokio::test]
+async fn a_run_delivers_its_unsaved_answer_the_same_way_timed_or_manual() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    for manual in [false, true] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("agento.db");
+        let task_id = migrated_with_task(&db, "cron", false);
+        set_destinations(
+            &db,
+            &task_id,
+            r#"[{"type":"fake","when":"always"},{"type":"fake","when":"success"}]"#,
+        );
+        let cli = fake_cli(dir.path(), ANSWERING_CLI);
+
+        let _env = env_lock().lock().await;
+        std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+        let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+        if manual {
+            let guard = scheduler.try_mark_running(&task_id).expect("free");
+            agento_lib::native::schedule::executor::run_manual(
+                std::sync::Arc::clone(&scheduler),
+                agento_lib::native::tasks::get_task(&db, &task_id)
+                    .expect("read")
+                    .expect("row"),
+                "job-delivery-manual".to_string(),
+                guard,
+            )
+            .await;
+        } else {
+            agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+        }
+
+        let job_id = only_job_id(&db);
+        let (status, error, response, _, _) = job_rows(&db).remove(0);
+        assert_eq!(status, "success", "manual={manual} error was {error:?}");
+        assert_eq!(response, "", "manual={manual}: save_output is off");
+        assert_eq!(
+            settled(&db, &job_id, 2).await,
+            vec![
+                ("fake".into(), "sent".into(), String::new()),
+                ("fake".into(), "sent".into(), String::new()),
+            ],
+            "manual={manual}"
+        );
+        let received = agento_lib::native::schedule::delivery::fake_received(&job_id);
+        assert_eq!(received.len(), 2, "manual={manual}");
+        assert!(
+            received.iter().all(|r| r.answer == "the full answer"
+                && r.status == "success"
+                && r.task_name == "Nightly"),
+            "manual={manual}: {received:?}"
+        );
+    }
+}
+
+/// A delivery's failure is the delivery's: the run stays `success` and its
+/// `error_message` keeps what the run wrote.
+#[tokio::test]
+async fn a_failed_delivery_leaves_the_runs_status_alone() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    set_destinations(&db, &task_id, r#"[{"type":"fake-fail","when":"success"}]"#);
+    let cli = fake_cli(dir.path(), ANSWERING_CLI);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let job_id = only_job_id(&db);
+    assert_eq!(
+        settled(&db, &job_id, 1).await,
+        vec![(
+            "fake-fail".into(),
+            "failed".into(),
+            "fake destination failed".into()
+        )]
+    );
+    let (status, error, response, _, _) = job_rows(&db).remove(0);
+    assert_eq!(status, "success");
+    assert_eq!(error, "");
+    assert_eq!(response, "the full answer");
+}
+
+/// A destination that never answers holds nothing the run owns: the run
+/// returns, its permit and in-flight entry are released, the next run fires,
+/// and the delivery is still `pending` for #635's reaper to find.
+#[tokio::test]
+async fn a_hanging_destination_does_not_hold_the_run_or_its_permit() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    set_destinations(&db, &task_id, r#"[{"type":"fake-hang","when":"always"}]"#);
+    let cli = fake_cli(dir.path(), ANSWERING_CLI);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    let permits = scheduler.semaphore().available_permits();
+
+    for n in 0..2 {
+        let guard = scheduler.try_mark_running(&task_id).expect("released");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            agento_lib::native::schedule::executor::run_manual(
+                std::sync::Arc::clone(&scheduler),
+                agento_lib::native::tasks::get_task(&db, &task_id)
+                    .expect("read")
+                    .expect("row"),
+                format!("job-hang-{n}"),
+                guard,
+            ),
+        )
+        .await
+        .expect("the run returns without waiting for its delivery");
+        assert!(
+            !scheduler.is_running(&task_id),
+            "run {n} released its guard"
+        );
+        assert_eq!(
+            scheduler.semaphore().available_permits(),
+            permits,
+            "run {n} released its permit"
+        );
+        // The pending row is written on the delivery's own task; give it a
+        // moment, then it stays pending because the post never finishes.
+        for _ in 0..500 {
+            if !deliveries(&db, &format!("job-hang-{n}")).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            deliveries(&db, &format!("job-hang-{n}")),
+            vec![("fake-hang".into(), "pending".into(), String::new())]
+        );
+    }
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs.iter().all(|j| j.0 == "success"), "{jobs:?}");
+}
+
+/// A task with no destinations spawns nothing and writes nothing.
+#[tokio::test]
+async fn a_task_with_no_destinations_records_no_deliveries() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    let cli = fake_cli(dir.path(), ANSWERING_CLI);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM job_deliveries", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(count, 0);
+}
