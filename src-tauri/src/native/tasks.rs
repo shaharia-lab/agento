@@ -94,8 +94,9 @@ pub struct ScheduleConfig {
 ///
 /// **Typed, with one sub-object per type keyed by the type's name**, so a new
 /// destination type is a new optional field here and needs no migration:
-/// `{"type":"slack","when":"success","slack":{...}}`. Only `slack` exists yet;
-/// [`validate_destinations`] refuses any other `type`.
+/// `{"type":"slack","when":"success","slack":{...}}`. `slack` (#637) and
+/// `telegram` (#639) exist; [`validate_destinations`] refuses any other `type`,
+/// and a sub-object belonging to a type other than the entry's own.
 ///
 /// Stored whole as a JSON array in `scheduled_tasks.destinations` and decoded
 /// from request bodies, so every scalar carries `null_is_zero_value` and the
@@ -115,6 +116,8 @@ pub struct TaskDestination {
     pub when: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slack: Option<super::gojson::GoStruct<SlackDestination>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<super::gojson::GoStruct<TelegramDestination>>,
 }
 
 /// A Slack destination's configuration: which connected Slack integration posts,
@@ -129,6 +132,22 @@ pub struct SlackDestination {
     pub integration_id: String,
     #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub channel_ids: super::gojson::GoList<String>,
+}
+
+/// A Telegram destination's configuration (#639): which Telegram integration's
+/// bot sends, and to which chats.
+///
+/// `chat_ids` are strings on the wire, numeric ones only — a signed 64-bit
+/// integer, because that is what the bot API's `chat_id` and
+/// `trigger::telegram_api::send_reply` take. A channel's `@username` is not
+/// accepted in v1; its numeric `-100…` id is. Not a foreign key, for
+/// [`SlackDestination`]'s reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelegramDestination {
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
+    pub integration_id: String,
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
+    pub chat_ids: super::gojson::GoList<String>,
 }
 
 /// One scheduled task. Mirrors `storage.ScheduledTask`.
@@ -1741,7 +1760,7 @@ mod tests {
         let cases = [
             (
                 r#"{"name":"N","prompt":"p","destinations":[{"type":"email"}]}"#.to_string(),
-                r#"validation error for "destinations[0].type": type must be slack"#,
+                r#"validation error for "destinations[0].type": type must be slack or telegram"#,
             ),
             (
                 r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","when":"sometimes","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]}"#.to_string(),
@@ -1814,6 +1833,110 @@ mod tests {
         assert_eq!(before, after, "no row changed");
     }
 
+    const ONE_TELEGRAM_DESTINATION: &str = r#"{"name":"N","prompt":"p",
+        "destinations":[{"type":"telegram","when":"always","telegram":{"integration_id":"tg-1",
+            "chat_ids":["-1001234567890","42"]}}]}"#;
+
+    #[test]
+    fn a_telegram_destination_round_trips_in_wire_order() {
+        let file = migrated_with_integrations();
+        let task = created(&file, ONE_TELEGRAM_DESTINATION);
+        let want = r#""destinations":[{"type":"telegram","when":"always","telegram":{"integration_id":"tg-1","chat_ids":["-1001234567890","42"]}}],"#;
+        let one = encoded(&get_task(file.path(), &task.id).expect("get").expect("task"));
+        assert!(one.contains(want), "{one}");
+        assert_eq!(
+            stored_destinations(&file, &task.id),
+            r#"[{"type":"telegram","when":"always","telegram":{"integration_id":"tg-1","chat_ids":["-1001234567890","42"]}}]"#
+        );
+
+        // A `null` list decodes to the zero value, which validation refuses.
+        let err = create_task(
+            file.path(),
+            br#"{"name":"N","prompt":"p","destinations":[{"type":"telegram","telegram":{"integration_id":"tg-1","chat_ids":null}}]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Replace, not preserve: a PUT that omits the list clears it.
+        update_task(file.path(), &task.id, br#"{"name":"N","prompt":"p"}"#).expect("update");
+        assert_eq!(stored_destinations(&file, &task.id), "[]");
+    }
+
+    #[test]
+    fn every_telegram_destination_rule_is_a_422() {
+        let file = migrated_with_integrations();
+        let telegram = |telegram: &str| {
+            format!(
+                r#"{{"name":"N","prompt":"p","destinations":[{{"type":"telegram","telegram":{telegram}}}]}}"#
+            )
+        };
+        let cases = [
+            (
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"telegram"}]}"#.to_string(),
+                r#"validation error for "destinations[0].telegram": telegram is required for telegram destinations"#,
+            ),
+            (
+                telegram(r#"{"chat_ids":["42"]}"#),
+                r#"validation error for "destinations[0].telegram.integration_id": integration_id is required for telegram destinations"#,
+            ),
+            (
+                telegram(r#"{"integration_id":"tg-1","chat_ids":[]}"#),
+                r#"validation error for "destinations[0].telegram.chat_ids": chat_ids is required for telegram destinations"#,
+            ),
+            (
+                telegram(r#"{"integration_id":"tg-1","chat_ids":["@mychannel"]}"#),
+                r#"validation error for "destinations[0].telegram.chat_ids": chat id "@mychannel" is not a numeric Telegram chat id"#,
+            ),
+            (
+                telegram(r#"{"integration_id":"tg-1","chat_ids":["99999999999999999999"]}"#),
+                r#"validation error for "destinations[0].telegram.chat_ids": chat id "99999999999999999999" is not a numeric Telegram chat id"#,
+            ),
+            (
+                telegram(r#"{"integration_id":"tg-1","chat_ids":["42","42"]}"#),
+                r#"validation error for "destinations[0].telegram.chat_ids": chat id "42" is listed more than once"#,
+            ),
+            (
+                telegram(r#"{"integration_id":"slack-1","chat_ids":["42"]}"#),
+                r#"validation error for "destinations[0].telegram.integration_id": integration_id is not a Telegram integration"#,
+            ),
+            (
+                telegram(r#"{"integration_id":"gone","chat_ids":["42"]}"#),
+                r#"validation error for "destinations[0].telegram.integration_id": integration_id does not name an integration"#,
+            ),
+            (
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]},"telegram":{"integration_id":"tg-1","chat_ids":["42"]}}]}"#.to_string(),
+                r#"validation error for "destinations[0].telegram": telegram is only allowed on telegram destinations"#,
+            ),
+        ];
+        for (body, want) in &cases {
+            let err = create_task(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), *want, "create {body}");
+            assert_eq!(
+                err.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "create {body}"
+            );
+        }
+        assert!(
+            list_tasks(file.path()).expect("list").is_empty(),
+            "no row written"
+        );
+    }
+
+    #[test]
+    fn a_deleted_telegram_integration_is_grandfathered_on_put() {
+        let file = migrated_with_integrations();
+        let task = created(&file, ONE_TELEGRAM_DESTINATION);
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute("DELETE FROM integrations WHERE id = 'tg-1'", [])
+            .expect("delete integration");
+        update_task(file.path(), &task.id, ONE_TELEGRAM_DESTINATION.as_bytes())
+            .expect("an edit keeping the stored destination is accepted");
+        let err = create_task(file.path(), ONE_TELEGRAM_DESTINATION.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     #[test]
     fn the_index_in_a_field_path_names_the_offending_entry() {
         let file = migrated_with_integrations();
@@ -1879,7 +2002,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err.message(),
-            r#"validation error for "destinations[0].type": type must be slack"#
+            r#"validation error for "destinations[0].type": type must be slack or telegram"#
         );
         // Wrong container shapes are a 400, not a zero value.
         for body in [
@@ -3355,8 +3478,11 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
 fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), WriteError> {
     for (i, dest) in destinations.iter_mut().enumerate() {
         let field = |name: &str| format!("destinations[{i}].{name}");
-        if dest.r#type != "slack" {
-            return Err(WriteError::validation(&field("type"), "type must be slack"));
+        if dest.r#type != "slack" && dest.r#type != "telegram" {
+            return Err(WriteError::validation(
+                &field("type"),
+                "type must be slack or telegram",
+            ));
         }
         match dest.when.as_str() {
             "success" | "always" => {}
@@ -3367,6 +3493,22 @@ fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), Wri
                     "when must be success or always",
                 ))
             }
+        }
+        // A sub-object for another type would be stored and never read.
+        for (name, present) in [
+            ("slack", dest.slack.is_some()),
+            ("telegram", dest.telegram.is_some()),
+        ] {
+            if present && dest.r#type != name {
+                return Err(WriteError::validation(
+                    &field(name),
+                    format!("{name} is only allowed on {name} destinations"),
+                ));
+            }
+        }
+        if dest.r#type == "telegram" {
+            validate_telegram(dest.telegram.as_deref(), &field)?;
+            continue;
         }
         let Some(slack) = dest.slack.as_deref() else {
             return Err(WriteError::validation(
@@ -3404,6 +3546,48 @@ fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), Wri
     Ok(())
 }
 
+/// A `telegram` entry's sub-object (#639), in [`validate_destinations`]'s
+/// wording: an integration, at least one chat, and every chat id a signed
+/// 64-bit integer — the only shape `send_reply` can address.
+fn validate_telegram(
+    telegram: Option<&TelegramDestination>,
+    field: &dyn Fn(&str) -> String,
+) -> Result<(), WriteError> {
+    let Some(telegram) = telegram else {
+        return Err(WriteError::validation(
+            &field("telegram"),
+            "telegram is required for telegram destinations",
+        ));
+    };
+    if telegram.integration_id.is_empty() {
+        return Err(WriteError::validation(
+            &field("telegram.integration_id"),
+            "integration_id is required for telegram destinations",
+        ));
+    }
+    if telegram.chat_ids.is_empty() {
+        return Err(WriteError::validation(
+            &field("telegram.chat_ids"),
+            "chat_ids is required for telegram destinations",
+        ));
+    }
+    for (j, chat) in telegram.chat_ids.iter().enumerate() {
+        if chat.parse::<i64>().is_err() {
+            return Err(WriteError::validation(
+                &field("telegram.chat_ids"),
+                format!("chat id {chat:?} is not a numeric Telegram chat id"),
+            ));
+        }
+        if telegram.chat_ids[..j].contains(chat) {
+            return Err(WriteError::validation(
+                &field("telegram.chat_ids"),
+                format!("chat id {chat:?} is listed more than once"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `^[CGD][A-Z0-9]{8,}$`: a public channel, private group or DM id as Slack
 /// issues them. Spelled out rather than a regex because it is one character
 /// class and a length.
@@ -3417,8 +3601,9 @@ fn is_slack_channel_id(id: &str) -> bool {
 }
 
 /// The one database-backed destination check: each `integration_id` must name
-/// a **Slack** integration. Runs inside the write's transaction, before the
-/// insert or update, so a refusal writes nothing.
+/// an integration of the entry's own type — Slack for `slack`, Telegram for
+/// `telegram` (#639). Runs inside the write's transaction, before the insert or
+/// update, so a refusal writes nothing.
 ///
 /// **A missing integration is grandfathered when this task already stores it.**
 /// Deleting an integration keeps the task's configuration (the delivery shows a
@@ -3434,29 +3619,28 @@ fn check_destination_integrations(
     stored: &[TaskDestination],
 ) -> Result<(), WriteError> {
     for (i, dest) in destinations.iter().enumerate() {
-        let Some(slack) = dest.slack.as_deref() else {
+        let Some((kind, label, id)) = destination_integration(dest) else {
             continue;
         };
-        let id = &slack.integration_id;
         let integration_type: Option<String> = conn
             .query_row("SELECT type FROM integrations WHERE id = ?1", [id], |row| {
                 row.get(0)
             })
             .optional()
             .map_err(|e| WriteError::Fallback(format!("looking up integration {id:?}: {e}")))?;
-        let field = format!("destinations[{i}].slack.integration_id");
+        let field = format!("destinations[{i}].{kind}.integration_id");
         match integration_type.as_deref() {
-            Some("slack") => {}
+            Some(t) if t == kind => {}
             Some(_) => {
                 return Err(WriteError::validation(
                     &field,
-                    "integration_id is not a Slack integration",
+                    format!("integration_id is not a {label} integration"),
                 ))
             }
             None => {
-                let already_stored = stored
-                    .iter()
-                    .any(|d| d.slack.as_deref().is_some_and(|s| s.integration_id == *id));
+                let already_stored = stored.iter().any(|d| {
+                    destination_integration(d).is_some_and(|(k, _, s)| k == kind && s == id)
+                });
                 if !already_stored {
                     return Err(WriteError::validation(
                         &field,
@@ -3467,6 +3651,17 @@ fn check_destination_integrations(
         }
     }
     Ok(())
+}
+
+/// `(type, display name, integration_id)` of the sub-object an entry delivers
+/// through; `None` when it has none.
+fn destination_integration(dest: &TaskDestination) -> Option<(&'static str, &'static str, &str)> {
+    if let Some(slack) = dest.slack.as_deref() {
+        return Some(("slack", "Slack", slack.integration_id.as_str()));
+    }
+    dest.telegram
+        .as_deref()
+        .map(|t| ("telegram", "Telegram", t.integration_id.as_str()))
 }
 
 /// Go's `TimeoutMinutes == 0 → 30`, applied by both create and update *after*

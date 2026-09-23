@@ -571,6 +571,9 @@ export function JobsView({
 
 /* --- The run's deliveries (#638) ----------------------------------------- */
 
+/** A delivery type's display name; an unknown one shows raw. */
+const DELIVERY_TYPE_LABEL: Record<string, string> = { slack: "Slack", telegram: "Telegram" };
+
 /** A delivery status's badge; `failed` is the one that needs attention. */
 const DELIVERY_BADGE: Record<DeliveryStatus, { label: string; tone: string }> = {
   sent: { label: "Sent", tone: "badge--green" },
@@ -591,7 +594,7 @@ function RunDeliveries({ deliveries }: { deliveries: JobDelivery[] }) {
         const when = d.finished_at ?? d.created_at;
         return (
           <Fragment key={d.id}>
-            <InspRow label={d.type === "slack" ? "Slack" : d.type}>
+            <InspRow label={DELIVERY_TYPE_LABEL[d.type] ?? d.type}>
               <span className="row delivery__result" title={`${dateTime(when)} (${relativeTime(when)})`}>
                 <span className="mono truncate">{d.target || "—"}</span>
                 <span className={`badge ${badge.tone}`}>{badge.label}</span>

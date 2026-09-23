@@ -165,7 +165,7 @@ fn escape(text: &str) -> String {
 }
 
 /// `850ms`, `12s`, `3m 12s`, `1h 4m`.
-fn format_duration(ms: i64) -> String {
+pub(crate) fn format_duration(ms: i64) -> String {
     let ms = ms.max(0);
     if ms < 1000 {
         return format!("{ms}ms");

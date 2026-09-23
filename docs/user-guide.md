@@ -443,14 +443,20 @@ Other options:
 
 ### Delivery
 
-A task can also send each run's output to Slack. The **Delivery** section
-appears once a Slack integration is enabled and connected (see
-[Integrations](#integrations)), and on any task that already has a destination.
+A task can also send each run's output to Slack or Telegram. The **Delivery**
+section appears once a Slack or Telegram integration is enabled and connected
+(see [Integrations](#integrations)), and on any task that already has a
+destination.
 
 - **+ Add Slack destination** adds a row: pick the Slack integration, type the
   **Channel IDs** (comma-separated, such as `C0123ABCD`), and choose **When** —
   **On success** or **Always**. **Remove** takes a row off the task; nothing
   changes until you save.
+- **+ Add Telegram destination** works the same way with **Chat IDs**: numeric
+  ids such as `123456789`, or `-1001234567890` for a group or channel. Each chat
+  gets a short header (task, status, duration) and then the output as plain
+  text. The bot can only message a chat where someone has started it, or that it
+  was added to; a channel's `@username` is not accepted — use its numeric id.
 - The output is still kept in Agento as usual (subject to **Save output**);
   delivery sends a copy. Slack channels are shared, so everyone in them sees the
   output. Invite the bot to each channel, or Slack refuses the post.
@@ -458,7 +464,8 @@ appears once a Slack integration is enabled and connected (see
   destination whose integration was deleted, disabled or disconnected stays on
   the task with a warning on its row and `⚠` in the header; it is never dropped.
 
-Each run's delivery results — sent, failed or skipped, with Slack's error — are
+Each run's delivery results — sent, failed or skipped, with Slack's or
+Telegram's error — are
 in **Job history**, and a run whose delivery failed is marked in the task's
 **Recent runs**.
 

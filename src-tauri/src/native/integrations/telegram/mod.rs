@@ -51,6 +51,7 @@
 //! and gated on the row's type.
 
 pub mod client;
+pub mod delivery;
 pub mod messaging;
 pub mod validate;
 

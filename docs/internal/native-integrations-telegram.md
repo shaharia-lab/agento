@@ -54,3 +54,30 @@ the model in a result sentence, so `Option<Box<RawValue>>` cannot be left to
 serde, which folds a JSON null into `None`.
 
 Cap 10 MiB and timeout 60 seconds, the largest of the six on both counts.
+
+## Task delivery (#639)
+
+A scheduled task with a `telegram` destination sends its output here after every
+run; `schedule/delivery.rs` calls `telegram/delivery.rs::deliver_chat` once per
+chat id. The rules, each stated in that module's `//!` header:
+
+- **The send path is the dispatcher's reply**, `trigger/telegram_api.rs::send_reply(token, chat, 0, text)`
+  — not the `send_message` MCP tool, which takes a model-supplied payload and
+  does not split. So the 4096-**byte** split and the sorted payload bytes are
+  that module's, unchanged. A header message (`<task> — Completed in 3m 12s`)
+  goes first, then the output; plain text, no `parse_mode`.
+- **The token comes from `trigger/receiver.rs::telegram_delivery_token`**, which
+  shares its row read with the webhook's `enabled_bot_token` but names each
+  refusal (deleted, not Telegram, disabled, no bot token) so the delivery row
+  records `skipped` with a reason. It checks `enabled` only, as the webhook does
+  — not `authenticated`; the form's warning follows the same rule.
+- **Errors are mapped from the envelope's description**, never the status:
+  `Bad Request: chat not found`, `Forbidden…` and `Unauthorized` become advice
+  naming the chat id, with Telegram's words after it; anything else, including
+  `Too Many Requests`, passes through and is not retried in v1.
+- **Numeric chat ids only.** `send_reply` takes an `i64`; a channel's
+  `@username` is refused at write time (a `-100…` id works).
+
+Pinned by `telegram/delivery.rs`'s tests (against a fake through
+`client::set_api_base`), `schedule/delivery.rs`'s two Telegram tests, and
+`tasks.rs`'s `every_telegram_destination_rule_is_a_422`.

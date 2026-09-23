@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 use crate::native::db;
 use crate::native::gotime::GoTime;
 use crate::native::tasks::{
-    self, JobDelivery, SlackDestination, TaskDestination, DELIVERY_FAILED, DELIVERY_PENDING,
-    DELIVERY_SENT, DELIVERY_SKIPPED,
+    self, JobDelivery, SlackDestination, TaskDestination, TelegramDestination, DELIVERY_FAILED,
+    DELIVERY_PENDING, DELIVERY_SENT, DELIVERY_SKIPPED,
 };
 
 /// Everything a destination may say about one run, owned, because it outlives
@@ -97,6 +97,7 @@ const SKIPPED_UNKNOWN_TYPE: &str = "unknown destination type";
 #[derive(Debug, Clone)]
 enum Destination {
     Slack(SlackDestination),
+    Telegram(TelegramDestination),
     /// Test-only. `type` `fake` sends, `fake-fail` fails, `fake-hang` never
     /// finishes; each records the report it was handed (see [`fake_received`]).
     #[cfg(any(test, feature = "test-hooks"))]
@@ -119,6 +120,9 @@ impl Destination {
             "slack" => Some(Self::Slack(
                 config.slack.as_deref().cloned().unwrap_or_default(),
             )),
+            "telegram" => Some(Self::Telegram(
+                config.telegram.as_deref().cloned().unwrap_or_default(),
+            )),
             #[cfg(any(test, feature = "test-hooks"))]
             "fake" => Some(Self::Fake(FakeMode::Send)),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -131,10 +135,11 @@ impl Destination {
 
     /// One entry per channel or recipient, each of which gets its own row.
     ///
-    /// The Slack target is the bare channel id.
+    /// The Slack target is the bare channel id; the Telegram one the chat id.
     fn targets(&self) -> Vec<String> {
         match self {
             Self::Slack(slack) => slack.channel_ids.iter().cloned().collect(),
+            Self::Telegram(telegram) => telegram.chat_ids.iter().cloned().collect(),
             #[cfg(any(test, feature = "test-hooks"))]
             Self::Fake(_) => vec!["fake".to_string()],
         }
@@ -144,6 +149,9 @@ impl Destination {
         match self {
             Self::Slack(slack) => {
                 deliver_slack(db_path, &slack.integration_id, target, report).await
+            }
+            Self::Telegram(telegram) => {
+                deliver_telegram(db_path, &telegram.integration_id, target, report).await
             }
             #[cfg(any(test, feature = "test-hooks"))]
             Self::Fake(mode) => {
@@ -198,6 +206,52 @@ async fn deliver_slack(
     match delivery::deliver_channel(&token, channel, &run).await {
         delivery::ChannelOutcome::Sent { .. } => Outcome::Sent,
         delivery::ChannelOutcome::Failed(e) => Outcome::Failed(e),
+    }
+}
+
+/// One Telegram chat (#639): the token through
+/// `receiver::telegram_delivery_token`, then `telegram::delivery`'s header and
+/// output. An integration that cannot send — deleted, not Telegram, disabled,
+/// no bot token — is `skipped` with the reason, before any network call.
+async fn deliver_telegram(
+    db_path: &Path,
+    integration_id: &str,
+    chat: &str,
+    report: &DeliveryReport,
+) -> Outcome {
+    use crate::native::integrations::telegram::delivery;
+    use crate::native::trigger::receiver;
+
+    // Validation admits numeric ids only, so this refuses a hand-edited row.
+    let Ok(chat_id) = chat.parse::<i64>() else {
+        return Outcome::Failed(format!(
+            "chat id {chat:?} is not a numeric Telegram chat id"
+        ));
+    };
+    let path = db_path.to_path_buf();
+    let id = integration_id.to_string();
+    let token = match db::blocking("telegram delivery token", move || {
+        receiver::telegram_delivery_token(&path, &id)
+    })
+    .await
+    {
+        Some(Ok(token)) => token,
+        Some(Err(reason)) => return Outcome::Skipped(reason.to_string()),
+        None => return Outcome::Failed("could not read the Telegram integration".to_string()),
+    };
+    let run = delivery::RunSummary {
+        task_name: report.task_name.clone(),
+        succeeded: report.run_ok(),
+        duration_ms: report.duration_ms,
+        body: if report.run_ok() {
+            report.answer.clone()
+        } else {
+            report.error.clone().unwrap_or_default()
+        },
+    };
+    match delivery::deliver_chat(&token, chat_id, &run).await {
+        Ok(()) => Outcome::Sent,
+        Err(e) => Outcome::Failed(e),
     }
 }
 
@@ -334,6 +388,7 @@ pub(crate) mod tests {
             r#type: r#type.to_string(),
             when: when.to_string(),
             slack: None,
+            telegram: None,
         }
     }
 
@@ -403,6 +458,7 @@ pub(crate) mod tests {
                     "C0456EFGH".into(),
                 ]),
             })),
+            telegram: None,
         };
         deliver_all(
             file.path(),
@@ -462,6 +518,7 @@ pub(crate) mod tests {
                 integration_id: "s-off".into(),
                 channel_ids: crate::native::gojson::GoList(vec!["C0123ABCD".into()]),
             })),
+            telegram: None,
         };
         deliver_all(file.path(), &[slack], &report("j-slack-off", "success")).await;
         assert_eq!(
@@ -537,5 +594,121 @@ pub(crate) mod tests {
                 SKIPPED_UNKNOWN_TYPE.into()
             )]
         );
+    }
+
+    fn telegram(integration_id: &str, chats: &[&str]) -> TaskDestination {
+        TaskDestination {
+            r#type: "telegram".into(),
+            when: "always".into(),
+            slack: None,
+            telegram: Some(crate::native::gojson::GoStruct(TelegramDestination {
+                integration_id: integration_id.into(),
+                chat_ids: crate::native::gojson::GoList(
+                    chats.iter().map(ToString::to_string).collect(),
+                ),
+            })),
+        }
+    }
+
+    fn seed_telegram(path: &Path, id: &str, enabled: bool) {
+        rusqlite::Connection::open(path)
+            .expect("open")
+            .execute(
+                r#"INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                             created_at, updated_at)
+                   VALUES (?1, ?1, 'telegram', ?2, '{"bot_token":"123:TG-DELIVERY-SECRET"}', '{}',
+                           '{}', '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')"#,
+                rusqlite::params![id, enabled],
+            )
+            .expect("seed");
+    }
+
+    /// A Telegram integration that cannot send is `skipped` with its reason
+    /// before any request, one row per chat (#639).
+    #[tokio::test]
+    async fn a_deleted_or_disabled_telegram_integration_is_skipped() {
+        let file = with_job("j-tg-off");
+        seed_telegram(file.path(), "tg-off", false);
+        deliver_all(
+            file.path(),
+            &[
+                telegram("tg-off", &["42"]),
+                telegram("tg-gone", &["-100", "7"]),
+            ],
+            &report("j-tg-off", "success"),
+        )
+        .await;
+        let skipped = |position, chat: &str, why: &str| {
+            (
+                position,
+                "telegram".to_string(),
+                chat.to_string(),
+                "skipped".to_string(),
+                why.to_string(),
+            )
+        };
+        assert_eq!(
+            rows(file.path(), "j-tg-off"),
+            vec![
+                skipped(0, "42", "the Telegram integration is disabled"),
+                skipped(1, "-100", "the Telegram integration was deleted"),
+                skipped(1, "7", "the Telegram integration was deleted"),
+            ]
+        );
+    }
+
+    /// End to end through the dispatcher: each chat gets its row, a refusal
+    /// names its chat, the token is in no row, and the run's own row is not
+    /// touched (#639).
+    #[tokio::test]
+    async fn a_telegram_destination_records_one_row_per_chat() {
+        use crate::native::integrations::telegram::client::{api_base_lock, set_api_base};
+
+        let _guard = api_base_lock().await;
+        let app = axum::Router::new().fallback(|body: String| async move {
+            if body.contains(r#""chat_id":-404"#) {
+                r#"{"ok":false,"description":"Bad Request: chat not found"}"#
+            } else {
+                r#"{"ok":true}"#
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        set_api_base(Some(base));
+
+        let file = with_job("j-tg");
+        seed_telegram(file.path(), "tg-1", true);
+        deliver_all(
+            file.path(),
+            &[telegram("tg-1", &["42", "-404"])],
+            &report("j-tg", "success"),
+        )
+        .await;
+        set_api_base(None);
+
+        let rows = rows(file.path(), "j-tg");
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].2.as_str(), rows[0].3.as_str()), ("42", "sent"));
+        assert_eq!((rows[1].2.as_str(), rows[1].3.as_str()), ("-404", "failed"));
+        assert!(
+            rows[1].4.starts_with("chat -404 not found"),
+            "{}",
+            rows[1].4
+        );
+        assert!(rows.iter().all(|r| !r.4.contains("TG-DELIVERY-SECRET")));
+        let status: String = rusqlite::Connection::open(file.path())
+            .expect("open")
+            .query_row(
+                "SELECT status FROM job_history WHERE id = 'j-tg'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("job row");
+        assert_eq!(status, "success", "a failed delivery never touches the run");
     }
 }
