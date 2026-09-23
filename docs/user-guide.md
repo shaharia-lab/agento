@@ -448,10 +448,16 @@ A task can also send each run's output to Slack, Telegram or email. The
 connected (see [Integrations](#integrations)) or an SMTP server is set up in
 **Settings → Notifications**, and on any task that already has a destination.
 
-- **+ Add Slack destination** adds a row: pick the Slack integration, type the
-  **Channel IDs** (comma-separated, such as `C0123ABCD`), and choose **When** —
-  **On success** or **Always**. **Remove** takes a row off the task; nothing
-  changes until you save.
+- **+ Add Slack destination** adds a row: pick the Slack integration, tick the
+  **Channels** to post to (search by name), and choose **When** — **On
+  success** or **Always**. **Remove** takes a row off the task; nothing changes
+  until you save. A channel marked **bot not in channel** would refuse the post:
+  invite the app there with `/invite` first. A saved channel Slack no longer
+  shows (archived, deleted, or private without the bot) stays on the task as
+  `C0123ABCD (not found)` until you remove it. Listing channels needs the
+  `channels:read` scope, and `groups:read` as well — the list includes private
+  channels. If the list cannot be loaded, the row falls back to typing
+  comma-separated **Channel IDs** such as `C0123ABCD`.
 - **+ Add Telegram destination** works the same way with **Chat IDs**: numeric
   ids such as `123456789`, or `-1001234567890` for a group or channel. Each chat
   gets a short header (task, status, duration) and then the output as plain

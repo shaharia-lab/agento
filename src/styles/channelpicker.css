@@ -1,0 +1,104 @@
+/* The Slack destination's channel picker (#641), imported by
+   components/SlackChannelPicker.tsx. Rows keep the 28px rhythm, and the
+   checkbox and its label are siblings — a Checkbox is a <button>. */
+
+.chanpick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.chanpick__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.chanpick__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 22px;
+  padding: 0 var(--sp-2) 0 var(--sp-4);
+  border-radius: var(--r-sm);
+  background: var(--bg-inset);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line-soft);
+  font-size: var(--text-sm);
+  max-width: 100%;
+}
+
+.chanpick__chip > svg {
+  color: var(--amber);
+}
+
+.chanpick__chip--gone {
+  color: var(--fg-tertiary);
+}
+
+.chanpick__remove.iconbtn {
+  width: 16px;
+  height: 16px;
+}
+
+.chanpick__list {
+  max-height: calc(var(--row-h) * 8);
+  overflow-y: auto;
+  border-radius: var(--r-md);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line-soft);
+  padding: var(--sp-1) 0;
+}
+
+.chanpick__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  height: var(--row-h);
+  padding: 0 var(--sp-4);
+  min-width: 0;
+}
+
+.chanpick__row:hover {
+  background: var(--bg-hover);
+}
+
+.chanpick__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-base);
+}
+
+.chanpick__row > .badge {
+  flex: none;
+}
+
+.chanpick__note {
+  display: flex;
+  align-items: center;
+  height: var(--row-h);
+  padding: 0 var(--sp-4);
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+}
+
+.chanpick__hint {
+  font-size: var(--text-sm);
+  color: var(--amber);
+}
+
+.chanpick__error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--amber);
+}
+
+.chanpick__error > .btn {
+  flex: none;
+  margin-left: auto;
+}

@@ -56,6 +56,7 @@
 //! [`reload_after_auth`](super::registry::reload_after_auth) on Go's 2xx for
 //! every hosted type.
 
+pub mod channels;
 pub mod client;
 pub mod delivery;
 pub mod inbound;

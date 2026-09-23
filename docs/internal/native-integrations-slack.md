@@ -389,3 +389,32 @@ configured channel. Four rules:
 Pinned by `slack/delivery.rs`'s tests (against a recording fake, in the library
 for the reason above) and `registry.rs`'s
 `slack_delivery_token_refuses_every_row_it_cannot_post_with`.
+
+## Channel list route (#641)
+
+`GET /api/integrations/{id}/slack/channels` feeds the Tasks form's channel
+picker (`components/SlackChannelPicker.tsx`). It lives in `slack/channels.rs`
+and is answered by the **streaming** registry because it calls Slack, as the
+gateway's catalog route is; `integrations::route_of` refuses the extra segments,
+so the buffered registry never claims it. Rules:
+
+- **The token is `registry::slack_delivery_token`'s**, so `is_member` is
+  relative to the identity delivery posts with. Unknown id → 404; not Slack,
+  disabled, not connected or no token → 400.
+- **Every page, capped at `MAX_PAGES` (10) × 1000.** `conversations.list` with
+  `types=public_channel,private_channel`, `exclude_archived=true`, `limit=1000`,
+  following `response_metadata.next_cursor`; a cursor that never empties stops
+  at the cap.
+- **Four fields**: `id`, `name`, `is_private`, `is_member`, sorted by name then
+  id, through `gojson::to_vec`. Never Slack's body.
+- **Upstream failure is a 502** with a sentence: `missing_scope` names
+  `channels:read` and `groups:read` (the call asks for private channels too, so
+  a token without `groups:read` fails outright), the rejected-token family says
+  to reconnect, and anything else — the client's rate-limit sentence, a failed
+  request — passes through. `ok` decides over the HTTP status, as everywhere.
+- **Nothing caches server-side.** The form fetches once per integration per
+  mount of the Delivery section and shares the request between rows
+  (`loadChannels`), because the method is Tier 2.
+
+Pinned by `slack/channels.rs`'s tests and the `desktop_routes.json` set-equality
+test (the route is recorded in `integrations::ROUTES`).
