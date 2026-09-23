@@ -180,7 +180,7 @@ fn tls_policy(encryption: &str, host: &str) -> Result<Tls, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn config() -> SmtpConfig {
@@ -305,7 +305,7 @@ mod tests {
     /// function. Without it, "we build a plausible message" and "a server
     /// accepts it" are two different claims and only the first is tested — and
     /// the second is the one a user notices.
-    fn serve_one_session(listener: TcpListener) -> std::thread::JoinHandle<String> {
+    pub(crate) fn serve_one_session(listener: TcpListener) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
             let mut writer = stream.try_clone().expect("clone");

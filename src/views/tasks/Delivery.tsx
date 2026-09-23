@@ -69,7 +69,7 @@ const KINDS: Record<
     ids: "recipients",
     idsLabel: "Recipients",
     noun: "recipient",
-    help: "Comma-separated addresses. Sent with the SMTP server from Settings → Notifications as one message; all recipients see each other.",
+    help: "Comma-separated addresses. One message to all of them, so every recipient sees the others.",
     placeholder: "alice@example.com, bob@example.com",
     needsAuth: false,
   },
@@ -111,9 +111,9 @@ function config(dest: TaskDestination): { integration_id: string; ids: string[] 
   return { integration_id: sub?.integration_id ?? "", ids: ids ?? [] };
 }
 
-/** The one sentence for an email destination with no SMTP server to send
- *  through — the reason a run records, too. */
-export const SMTP_MISSING =
+/** The warning on an email destination with no SMTP server to send through;
+ *  a run then records it as skipped. */
+const SMTP_MISSING =
   "SMTP is not configured, so nothing is sent until it is set up in Settings → Notifications.";
 
 /**
@@ -213,10 +213,11 @@ export function DeliverySection({
 }) {
   const all = integrations ?? [];
   const hasTelegram = all.some(isUsableTelegram);
-  // Slack stays offered whenever Telegram is not, which is the section as it
-  // was before a second type existed.
+  // Slack stays offered whenever no other type is, which is the section as it
+  // was before a second type existed — but not beside email alone, where it
+  // would add a row with no integration to choose.
   const addable: DestinationType[] = [
-    ...(all.some(isUsableSlack) || !hasTelegram ? (["slack"] as const) : []),
+    ...(all.some(isUsableSlack) || (!hasTelegram && !smtpConfigured) ? (["slack"] as const) : []),
     ...(hasTelegram ? (["telegram"] as const) : []),
     ...(smtpConfigured ? (["email"] as const) : []),
   ];

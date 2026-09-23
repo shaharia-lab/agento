@@ -163,6 +163,43 @@ mod tests {
         assert_eq!(super::super::stored_provider(file.path()), Ok(None));
     }
 
+    /// The success path on the wire: one conversation, every recipient on the
+    /// envelope, the task-output subject, and the output in the body.
+    #[test]
+    fn a_send_reaches_every_recipient_in_one_message() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = super::super::smtp::tests::serve_one_session(listener);
+        let file = with_settings(&format!(
+            r#"{{"enabled":false,"provider":{{"host":"127.0.0.1","port":{port},
+                "username":"mailer","password":"pw","from_address":"agento@example.com",
+                "to_addresses":"settings@example.com","encryption":"none"}}}}"#
+        ));
+        assert_eq!(
+            deliver(
+                file.path(),
+                &["a@example.com".into(), "b@example.com".into()],
+                &run()
+            ),
+            EmailOutcome::Sent
+        );
+        let transcript = server.join().expect("server thread");
+        assert!(
+            transcript.contains("<RCPT TO:<a@example.com>>")
+                && transcript.contains("<RCPT TO:<b@example.com>>"),
+            "{transcript}"
+        );
+        assert!(!transcript.contains("settings@example.com"), "{transcript}");
+        assert!(
+            transcript.contains("Subject: Agento Notification - Daily report: Completed"),
+            "{transcript}"
+        );
+        assert!(
+            transcript.contains("Chat Session ID: chat-1"),
+            "{transcript}"
+        );
+    }
+
     /// Independent of the global switch: `enabled: false` with opted-out
     /// preferences still dials — here, a port nothing listens on — and the
     /// failure is the send's, without the password in it.
