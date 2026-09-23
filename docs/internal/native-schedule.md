@@ -441,7 +441,9 @@ the list sits between `save_output` and `status` and is **omitted when empty**,
 so a task without destinations keeps its pre-#634 bytes. `PUT` replaces it like
 every other field (absent, `null` and `[]` all clear it). Shape is checked in the
 pure `validate_destinations` (an empty `when` becomes `success`; channel ids
-match `^[CGD][A-Z0-9]{8,}$`, no duplicates); the integration's type is checked
+match `^[CGD][A-Z0-9]{8,}$`, Telegram chat ids parse as `i64` (#639), no
+duplicates, and a sub-object for another type than the entry's is refused); the
+integration's type is checked
 in `check_destination_integrations`, inside the write's transaction. **An
 `integration_id` that names nothing is refused on a create but grandfathered
 when the task already stores it**, because a deleted integration keeps the
@@ -494,7 +496,9 @@ form's *Save output* hint says so. The destinations are the task snapshot the
 run started with — the write-back copies only counters onto it — so an edit
 landing mid-run applies from the next run. The Slack arm posts per channel
 through `integrations/slack/delivery.rs` (#637; see
-`docs/internal/native-integrations-slack.md`, *Task delivery*). A new type is
+`docs/internal/native-integrations-slack.md`, *Task delivery*); the Telegram
+arm sends per chat through `integrations/telegram/delivery.rs` (#639; see
+`docs/internal/native-integrations-telegram.md`, *Task delivery*). A new type is
 one `Destination` variant and its arms; the executor does not change. Tests
 drive a `Fake` variant (types `fake`, `fake-fail`, `fake-hang`) compiled under
 `cfg(test)` or the `test-hooks` feature. Pinned by `delivery.rs`'s tests, the

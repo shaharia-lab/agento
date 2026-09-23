@@ -26,6 +26,7 @@
 
 use std::path::Path;
 
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 
 use crate::native::db;
@@ -107,28 +108,98 @@ fn registered(db_path: &Path, id: &str) -> Option<Registered> {
     .ok()
 }
 
-/// The integration's bot token, if it is enabled and its credentials parse.
-fn enabled_bot_token(db_path: &Path, id: &str) -> Option<String> {
+/// Why a task's Telegram delivery has no bot token (#639). Every variant renders
+/// as a sentence for the delivery row, and none carries the token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TelegramUnavailable {
+    NotFound,
+    NotTelegram,
+    Disabled,
+    NoToken,
+    /// The row could not be read at all; the text names the database, not
+    /// the row.
+    Unreadable(String),
+}
+
+impl std::fmt::Display for TelegramUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("the Telegram integration was deleted"),
+            Self::NotTelegram => f.write_str("the integration is not a Telegram integration"),
+            Self::Disabled => f.write_str("the Telegram integration is disabled"),
+            Self::NoToken => f.write_str("the Telegram integration has no bot token"),
+            Self::Unreadable(e) => write!(f, "could not read the Telegram integration: {e}"),
+        }
+    }
+}
+
+/// One integration row as the two bot-token readers need it. `bot_token` is
+/// `None` when the credentials do not parse.
+struct BotRow {
+    integration_type: String,
+    enabled: bool,
+    bot_token: Option<String>,
+}
+
+fn bot_row(db_path: &Path, id: &str) -> Result<Option<BotRow>, String> {
     #[derive(Deserialize)]
     struct Creds {
         #[serde(default, deserialize_with = "null_is_zero_value")]
         bot_token: String,
     }
 
-    let conn = db::open_read_only(db_path).ok()?;
-    let (enabled, credentials): (bool, String) = conn
+    let conn = db::open_read_only(db_path)?;
+    let row: Option<(String, bool, String)> = conn
         .query_row(
-            "SELECT enabled, credentials FROM integrations WHERE id = ?1",
+            "SELECT type, enabled, credentials FROM integrations WHERE id = ?1",
             [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .ok()?;
-    if !enabled {
+        .optional()
+        .map_err(|e| format!("reading integration: {e}"))?;
+    Ok(row.map(|(integration_type, enabled, credentials)| BotRow {
+        integration_type,
+        enabled,
+        bot_token: serde_json::from_str::<Creds>(&credentials)
+            .ok()
+            .map(|c| c.bot_token),
+    }))
+}
+
+/// The integration's bot token, if it is enabled and its credentials parse.
+///
+/// The webhook's reader: every refusal is the same silent `None`, and neither
+/// the type nor an empty token is checked, as Go's handler checks neither.
+fn enabled_bot_token(db_path: &Path, id: &str) -> Option<String> {
+    let row = bot_row(db_path, id).ok()??;
+    if !row.enabled {
         return None;
     }
-    serde_json::from_str::<Creds>(&credentials)
-        .ok()
-        .map(|c| c.bot_token)
+    row.bot_token
+}
+
+/// The bot token a task's Telegram delivery sends with (#639): the webhook's
+/// reader, with each refusal named rather than collapsed, plus the two checks a
+/// sender needs that the webhook does not — the row is a Telegram one, and the
+/// token is not empty. Synchronous because it reads SQLite: callers on the
+/// runtime wrap it in `db::blocking`.
+pub(crate) fn telegram_delivery_token(
+    db_path: &Path,
+    id: &str,
+) -> Result<String, TelegramUnavailable> {
+    let row = bot_row(db_path, id)
+        .map_err(TelegramUnavailable::Unreadable)?
+        .ok_or(TelegramUnavailable::NotFound)?;
+    if row.integration_type != "telegram" {
+        return Err(TelegramUnavailable::NotTelegram);
+    }
+    if !row.enabled {
+        return Err(TelegramUnavailable::Disabled);
+    }
+    match row.bot_token {
+        Some(token) if !token.is_empty() => Ok(token),
+        _ => Err(TelegramUnavailable::NoToken),
+    }
 }
 
 /// `handleInbound`, without the HTTP.
@@ -274,6 +345,52 @@ mod tests {
             }
             other => panic!("expected dispatch, got {other:?}"),
         }
+    }
+
+    /// A task's Telegram delivery gets a token only from an enabled Telegram
+    /// row with a non-empty one, and each refusal is its own sentence with no
+    /// token in it (#639).
+    #[test]
+    fn telegram_delivery_token_names_every_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path(), true, "s", "active");
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        for (id, kind, enabled, creds) in [
+            ("off", "telegram", false, r#"{"bot_token":"botsecret"}"#),
+            ("empty", "telegram", true, r#"{"bot_token":""}"#),
+            ("garbled", "telegram", true, "not json"),
+            ("sl", "slack", true, r#"{"bot_token":"botsecret"}"#),
+        ] {
+            conn.execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, services,
+                                           created_at, updated_at)
+                 VALUES (?1, ?1, ?2, ?3, ?4, '{}', '2026-01-01 00:00:00 +0000 UTC',
+                         '2026-01-01 00:00:00 +0000 UTC')",
+                rusqlite::params![id, kind, enabled, creds],
+            )
+            .expect("seed");
+        }
+
+        assert_eq!(
+            telegram_delivery_token(&db, "tg").as_deref(),
+            Ok("botsecret")
+        );
+        for (id, want) in [
+            ("gone", TelegramUnavailable::NotFound),
+            ("off", TelegramUnavailable::Disabled),
+            ("empty", TelegramUnavailable::NoToken),
+            ("garbled", TelegramUnavailable::NoToken),
+            ("sl", TelegramUnavailable::NotTelegram),
+        ] {
+            let got = telegram_delivery_token(&db, id).expect_err(id);
+            assert_eq!(got, want, "{id}");
+            assert!(!got.to_string().contains("botsecret"), "{id}");
+        }
+        // The webhook's reader is unchanged: silent `None`, no type or empty
+        // check.
+        assert_eq!(enabled_bot_token(&db, "off"), None);
+        assert_eq!(enabled_bot_token(&db, "empty").as_deref(), Some(""));
+        assert_eq!(enabled_bot_token(&db, "sl").as_deref(), Some("botsecret"));
     }
 
     #[test]

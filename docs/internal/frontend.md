@@ -294,9 +294,14 @@ back to the preference, and closing it by hand sticks until the next error.
 
 **The Tasks form's Delivery section** (#638) lives in `views/tasks/Delivery.tsx`
 and is a third `FormSection`, slug `delivery` in `lib/taskFormPrefs.ts`. It
-renders only while some Slack integration is `enabled && authenticated` — the
-predicate delivery itself applies before sending — **or** the draft already has
-a destination. **A stored destination is never dropped from the draft for a
+renders only while some Slack or Telegram integration is `enabled &&
+authenticated` (`isUsableDestination`) **or** the draft already has a
+destination. Per-type differences — labels, the ids field, help text, and
+whether an unauthenticated integration warns (Slack's sender refuses one,
+Telegram's checks `enabled` only, #639) — are one `KINDS` table; the row, the
+warning and the summary are a single implementation over it, and an *Add X
+destination* button shows per type with a usable integration (Slack also when
+no Telegram one is). **A stored destination is never dropped from the draft for a
 missing, disabled or unauthenticated integration**: its row renders from the
 stored id (a `(missing)` picker option) with an amber warning, and the header
 summary gains ` · ⚠`, so an untouched save round-trips it. Warnings wait until

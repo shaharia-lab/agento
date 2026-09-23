@@ -41,7 +41,7 @@ import {
   Splitter,
   Switch,
 } from "../components/ui";
-import { DeliverySection, isUsableSlack } from "./tasks/Delivery";
+import { DeliverySection, isUsableDestination } from "./tasks/Delivery";
 import "../styles/tasks.css";
 
 const POLL_MS = 10_000;
@@ -1010,10 +1010,10 @@ export function TasksView({
 
                 <div className="divider" />
 
-                {/* Hidden while no Slack integration could deliver, unless the
+                {/* Hidden while no integration could deliver, unless the
                     task already has a destination — a stored one always shows,
                     with its warning, and rides in the draft either way. */}
-                {((integrations ?? []).some(isUsableSlack) ||
+                {((integrations ?? []).some(isUsableDestination) ||
                   (draft.destinations?.length ?? 0) > 0) && (
                   <>
                     <DeliverySection

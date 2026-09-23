@@ -249,11 +249,18 @@ export interface SlackDestinationConfig {
   channel_ids: string[] | null;
 }
 
+/** Numeric chat ids only, as strings (#639). */
+export interface TelegramDestinationConfig {
+  integration_id: string;
+  chat_ids: string[] | null;
+}
+
 /** One place a task's output is delivered; one sub-object per `type`. */
 export interface TaskDestination {
-  type: "slack";
+  type: "slack" | "telegram";
   when: DeliveryWhen;
   slack?: SlackDestinationConfig;
+  telegram?: TelegramDestinationConfig;
 }
 
 export interface ScheduledTask {
