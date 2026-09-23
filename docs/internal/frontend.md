@@ -102,6 +102,7 @@ src/
     sessions/SessionLink.tsx   a session rendered as a control, wherever one is
                  *named* (#536) — left-click hands off to the Sessions section
                  through `NavTarget.sessionId`, right-click opens the row menu.
+    tasks/Delivery.tsx  the Tasks form's Delivery section and its helpers (#638)
                  `sessionMenuItems` is the **single** definition of those five
                  entries: `SessionsView`'s own rows build their menu from it
                  too, so a second hand-written array cannot drift. What an entry
@@ -290,6 +291,19 @@ for Execution and Limits, persisted by `lib/taskFormPrefs.ts` under
 of its fields (`fieldOf` in `lib/hooks.ts` parses the wire's
 `validation error for "<field>":`); that is derived at render, never written
 back to the preference, and closing it by hand sticks until the next error.
+
+**The Tasks form's Delivery section** (#638) lives in `views/tasks/Delivery.tsx`
+and is a third `FormSection`, slug `delivery` in `lib/taskFormPrefs.ts`. It
+renders only while some Slack integration is `enabled && authenticated` — the
+predicate delivery itself applies before sending — **or** the draft already has
+a destination. **A stored destination is never dropped from the draft for a
+missing, disabled or unauthenticated integration**: its row renders from the
+stored id (a `(missing)` picker option) with an amber warning, and the header
+summary gains ` · ⚠`, so an untouched save round-trips it. Warnings wait until
+`/integrations` has loaded, and the auth word comes from `connectionState()`. A
+422 on `destinations[i]…` opens the section: `SECTION_FIELDS` matches a field
+*within* the owned name, not only equal to it. The channel field keeps its raw
+text row-locally and writes the parsed array through `edit()`.
 
 **The Tasks inspector previews an unsaved task** (#633): in create mode it
 renders `TaskPreviewBody` from `POST /api/tasks/preview`, requested through

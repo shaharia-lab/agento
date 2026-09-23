@@ -195,3 +195,24 @@
 .tasks-form__fillrow .formrow__help {
   flex: none;
 }
+
+/* --- Delivery section (#638) --------------------------------------------- */
+.delivery__dest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  padding-bottom: var(--sp-5);
+  border-bottom: var(--hairline) solid var(--line);
+}
+
+.delivery__warning {
+  margin-top: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--amber);
+}
+
+.runrow__warn {
+  flex: none;
+  display: inline-flex;
+  color: var(--amber);
+}

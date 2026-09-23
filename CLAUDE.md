@@ -217,7 +217,7 @@ src/
   components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx, DirField,
                  CopyButton, TokenReveal, charts.tsx, SaveBar.tsx
   views/         one file per section; sessions/, settings/, gateway/,
-                 integrations/, analytics/ have their own subdirectories
+                 integrations/, analytics/, tasks/ have their own subdirectories
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
 src-tauri/src/
