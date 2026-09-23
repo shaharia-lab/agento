@@ -1892,6 +1892,14 @@ mod tests {
                 r#"validation error for "destinations[0].telegram.chat_ids": chat id "99999999999999999999" is not a numeric Telegram chat id"#,
             ),
             (
+                telegram(r#"{"integration_id":"tg-1","chat_ids":["42","+42"]}"#),
+                r#"validation error for "destinations[0].telegram.chat_ids": chat id "+42" is not a numeric Telegram chat id"#,
+            ),
+            (
+                telegram(r#"{"integration_id":"tg-1","chat_ids":["042"]}"#),
+                r#"validation error for "destinations[0].telegram.chat_ids": chat id "042" is not a numeric Telegram chat id"#,
+            ),
+            (
                 telegram(r#"{"integration_id":"tg-1","chat_ids":["42","42"]}"#),
                 r#"validation error for "destinations[0].telegram.chat_ids": chat id "42" is listed more than once"#,
             ),
@@ -3548,7 +3556,8 @@ fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), Wri
 
 /// A `telegram` entry's sub-object (#639), in [`validate_destinations`]'s
 /// wording: an integration, at least one chat, and every chat id a signed
-/// 64-bit integer — the only shape `send_reply` can address.
+/// 64-bit integer in its canonical spelling — the only shape `send_reply` can
+/// address.
 fn validate_telegram(
     telegram: Option<&TelegramDestination>,
     field: &dyn Fn(&str) -> String,
@@ -3572,7 +3581,9 @@ fn validate_telegram(
         ));
     }
     for (j, chat) in telegram.chat_ids.iter().enumerate() {
-        if chat.parse::<i64>().is_err() {
+        // Canonical spelling only, so `+42` and `042` cannot slip past the
+        // duplicate check below as a second copy of `42`.
+        if chat.parse::<i64>().map(|n| n.to_string()).as_deref() != Ok(chat.as_str()) {
             return Err(WriteError::validation(
                 &field("telegram.chat_ids"),
                 format!("chat id {chat:?} is not a numeric Telegram chat id"),
