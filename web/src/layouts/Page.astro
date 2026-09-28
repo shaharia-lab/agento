@@ -18,14 +18,17 @@ interface Props {
   description: string;
   current?: 'docs' | 'blog';
   ogType?: string;
+  /** A page's own 1200×630 share card; the site-wide og.png otherwise. */
+  image?: { path: string; alt: string };
 }
-const { title, description, current, ogType = 'website' } = Astro.props;
+const { title, description, current, ogType = 'website', image } = Astro.props;
 const canonical = new URL(Astro.url.pathname, Astro.site).href;
 
 // Absolute, because a scraper resolves it with no page context. The alt text
 // describes the mark rather than repeating the title: a screen reader that has
 // just read the title should not hear it twice.
-const ogImage = abs(OG_IMAGE.path);
+const ogImage = abs(image?.path ?? OG_IMAGE.path);
+const ogImageAlt = image?.alt ?? 'The Agento mark over an abstract session-cost chart';
 const gtm = gtmId();
 ---
 <!doctype html>
@@ -51,7 +54,7 @@ const gtm = gtmId();
     <meta property="og:image" content={ogImage} />
     <meta property="og:image:width" content={String(OG_IMAGE.width)} />
     <meta property="og:image:height" content={String(OG_IMAGE.height)} />
-    <meta property="og:image:alt" content="The Agento mark over an abstract session-cost chart" />
+    <meta property="og:image:alt" content={ogImageAlt} />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:image" content={ogImage} />
     <slot name="head" />

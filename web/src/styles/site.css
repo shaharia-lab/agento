@@ -369,6 +369,7 @@ td code { font-family: var(--font-mono); font-size: 12.5px; }
 .entry__meta { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 20px; }
 .entry h1 { font-family: var(--font-display); font-weight: 400; font-size: 58px; line-height: 1.0; letter-spacing: -0.025em; margin: 0 0 16px; text-wrap: balance; }
 .entry__lede { font-size: 20px; line-height: 1.5; color: var(--ink-soft); margin: 0 0 30px; padding-bottom: 26px; border-bottom: var(--bw-strong) solid var(--ink); }
+.entry__banner { display: block; width: 100%; height: auto; margin: 0 0 30px; border: var(--bw) solid var(--ink); border-radius: var(--radius); }
 .entry p { margin: 0 0 17px; font-size: 17px; line-height: 1.68; }
 .entry h2 { font-family: var(--font-display); font-weight: 400; font-size: 32px; margin: 38px 0 12px; line-height: 1.12; }
 .entry .codeblock { margin: 0 0 20px; }

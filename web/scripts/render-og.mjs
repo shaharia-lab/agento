@@ -11,6 +11,12 @@
  *
  * It is not wired into `npm run build`, and check-links.mjs skips .png, so
  * nothing in CI depends on Chrome being present.
+ *
+ * A blog post's banner is drawn the same way and at the same size, so it is
+ * rendered by the same script with a source and an output named, both
+ * relative to web/:
+ *
+ *     npm run build:og -- design/blog/<slug>.html public/blog/<slug>.png
  */
 import { spawn } from 'node:child_process';
 import { access, rename, rm } from 'node:fs/promises';
@@ -18,8 +24,9 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const SRC = resolve(here, '../design/og-image.html');
-const OUT = resolve(here, '../public/og.png');
+const [srcArg, outArg] = process.argv.slice(2);
+const SRC = resolve(here, '..', srcArg ?? 'design/og-image.html');
+const OUT = resolve(here, '..', outArg ?? 'public/og.png');
 
 /** The image is meta-tagged at this size, so the two must not drift. */
 const WIDTH = 1200;

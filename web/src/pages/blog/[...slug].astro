@@ -41,7 +41,7 @@ const schema = {
   description: post.data.description,
   datePublished: post.data.date.toISOString(),
   keywords: post.data.tags,
-  image: abs(OG_IMAGE.path),
+  image: abs(post.data.image ?? OG_IMAGE.path),
   mainEntityOfPage: { '@type': 'WebPage', '@id': abs(url(`/blog/${post.id}/`)) },
   author: { '@type': 'Person', name: post.data.author },
   publisher: { '@type': 'Organization', name: ORG.name, url: ORG.url },
@@ -54,6 +54,7 @@ const schema = {
   description={post.data.description}
   current="blog"
   ogType="article"
+  image={post.data.image ? { path: post.data.image, alt: post.data.imageAlt ?? '' } : undefined}
 >
   <JsonLd slot="head" schema={schema} />
   <div class="shell">
@@ -64,6 +65,15 @@ const schema = {
       </div>
       <h1>{post.data.title}</h1>
       <p class="entry__lede">{post.data.description}</p>
+      {post.data.image && (
+        <img
+          class="entry__banner"
+          src={url(post.data.image)}
+          alt={post.data.imageAlt ?? ''}
+          width={OG_IMAGE.width}
+          height={OG_IMAGE.height}
+        />
+      )}
 
       <Content />
 

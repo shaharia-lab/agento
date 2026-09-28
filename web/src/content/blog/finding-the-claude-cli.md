@@ -3,7 +3,7 @@ title: Finding the Claude CLI where it actually is
 description: A user ran claude --version, got 2.1.231, and Agento told them Claude Code was not installed. They were both right.
 date: 2026-08-25
 tags: [Engineering, Release 1.2.0]
-featured: true
+featured: false
 ---
 
 Agento does not ship the Claude Code CLI. It spawns it — every agent run is a
