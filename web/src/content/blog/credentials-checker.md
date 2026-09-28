@@ -49,9 +49,21 @@ like a real credential, including:
 - Private keys and JWTs
 
 Findings are grouped by session, so you can see exactly which conversation a
-key leaked in and jump straight to it. From there you decide what to do:
+key leaked in. From there you decide what to do:
 rotate the key, mark the finding as a false positive, or whitelist a value or
 a whole rule you do not care about.
+
+## See it in action
+
+Here is the whole flow in the real app: switch the checker on, see what it
+found, and triage a finding. The sessions and keys are made up for the demo.
+
+<iframe
+  class="entry__embed"
+  src="/blog/credentials-checker/walkthrough.html"
+  title="Walkthrough: turning on the Credentials Checker in Agento and triaging a finding"
+  loading="lazy"
+></iframe>
 
 ## Built so that the checker is not another leak
 
