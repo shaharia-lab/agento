@@ -299,6 +299,14 @@ git tag -d v1.1.0
 git push origin :refs/tags/v1.1.0
 ```
 
+**Tagging is refused because `main` has a failing check that isn't CI.** A
+Dependabot security-update job reports as a `Dependabot` check-run on the commit
+it ran against, so an advisory with no patched version (glib, pinned by Tauri's
+gtk stack, in September 2026) fails on every push to `main` and blocks the tag.
+That run cannot be re-run. Dismiss the alert if there is genuinely no fix, then
+tag once a later commit lands on `main`. Check `main`'s check-runs before merging
+a release bump, so a merged version is not left untagged.
+
 **One runner failed.** `fail-fast` is off, so the others still finish, but the
 draft release job needs all of them. Re-run the failed job; if it is a mirror or
 network failure, that is usually enough.
