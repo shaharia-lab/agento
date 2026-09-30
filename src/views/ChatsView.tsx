@@ -442,12 +442,18 @@ export function ChatsView({
     const items = queues[queueKey] ?? [];
     const content = mergeQueue(text ? [...items, queueItem(text)] : items);
     if (!content) return;
-    if (!(await sendContent(selected, content))) return;
+    // Cleared before the turn starts, so the queue never shows beside the
+    // message it became; put back if the turn could not start.
+    setQueue(queueKey, () => []);
+    setDraft("");
+    if (!(await sendContent(selected, content))) {
+      setQueue(queueKey, (rest) => [...items, ...rest]);
+      setDraft(text);
+      return;
+    }
     // A send the user made is a fresh start for the failure rule.
     delete retried.current[queueKey];
     delete resent.current[queueKey];
-    setQueue(queueKey, () => []);
-    setDraft("");
   }, [draft, busy, queueKey, queues, selected, setQueue, sendContent]);
 
   // Stop the running turn, then send one item as soon as it has closed.

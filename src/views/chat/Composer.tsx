@@ -101,7 +101,11 @@ export function Composer({
         <textarea
           ref={box}
           className="composer__input"
-          placeholder={placeholder}
+          placeholder={
+            busy
+              ? `Queue a message — ${MOD} ↵, sent when the agent finishes`
+              : placeholder
+          }
           value={value}
           rows={1}
           onChange={(e) => onChange(e.target.value)}
@@ -128,20 +132,13 @@ export function Composer({
           {busy ? (
             <>
               <div className="composer__hint">
-                {stopping ? (
-                  "Stopping…"
-                ) : (
-                  <>
-                    <span className="kbd">{MOD} ↵</span>
-                    to queue
-                  </>
-                )}
+                {stopping ? "Stopping…" : ""}
               </div>
               <button
                 className="btn composer__queue"
                 disabled={!hasDraft}
                 onClick={onSend}
-                title="Send when the agent finishes"
+                title={`Send when the agent finishes (${MOD} ↵)`}
               >
                 Queue
               </button>
@@ -156,9 +153,14 @@ export function Composer({
             </>
           ) : (
             <>
+              {/* "Send N queued" says it already, and the bar has no room for both. */}
               <div className="composer__hint">
-                <span className="kbd">{MOD} ↵</span>
-                to send
+                {!queued && (
+                  <>
+                    <span className="kbd">{MOD} ↵</span>
+                    to send
+                  </>
+                )}
               </div>
               {queued ? (
                 <button
