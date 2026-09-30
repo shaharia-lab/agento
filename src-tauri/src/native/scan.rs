@@ -1053,16 +1053,20 @@ mod tests {
         assert_eq!(version("beta"), current, "the unchanged one is not");
     }
 
-    /// A removed session is expired and keeps its rows, and one under a config
-    /// dir that could not be listed is not touched at all (#705).
+    /// A removed session is expired, keeping its cache and insight rows but not
+    /// its index row, and one under a config dir that could not be listed is
+    /// not touched at all (#705, #706).
     ///
-    /// **The first half** is the expiry: `alpha`'s transcript is gone from a
-    /// dir that still lists, so its cache row stays with `transcript_expired_at`
-    /// set, and the reconciles that key on "no cache row for this pair remains"
-    /// keep its insight and index rows. Before #705 this test asserted the
-    /// opposite — the delete pass removed the row and the reconciles followed.
-    /// Dropping an expired session's index row is #706's, and whichever of the
-    /// two lands second asserts it here.
+    /// **The first half** is the expiry, and it is also the ordering assertion:
+    /// `alpha`'s transcript is gone from a dir that still lists, so its cache
+    /// row stays with `transcript_expired_at` set (#705). The insights
+    /// reconcile keys on "no cache row for this pair remains" and keeps its
+    /// insight; `search::delete_orphans` keys on "no **live** cache row" and
+    /// drops its index row (#706). Moving that reconcile *above* `apply_changes`
+    /// — which is where the expiry pass runs — finds the row still live,
+    /// deletes nothing, and leaves the transcript's text searchable. Every
+    /// other observable stays identical, which is why this needs a test rather
+    /// than a comment.
     ///
     /// **The second half is the protection**: an unlistable config dir is an
     /// unplugged drive, and its rows are neither expired nor reconciled away.
@@ -1195,9 +1199,13 @@ mod tests {
         );
         assert_eq!(
             pairs(&conn, "session_search"),
-            cached,
-            "an expired row is still a cache row, so the reconcile keeps its index \
-             row until #706 drops it; the protected one is kept regardless",
+            cached
+                .iter()
+                .filter(|(session_id, _)| session_id != "alpha")
+                .cloned()
+                .collect::<Vec<_>>(),
+            "an expired session's text leaves the index (#706), and the one \
+             under an unlistable config dir is not expired, so it is kept",
         );
     }
 

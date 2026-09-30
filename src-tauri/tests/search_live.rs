@@ -457,7 +457,7 @@ fn the_index_is_correct_and_measured_over_the_real_corpus() {
     let orphan_sweep = t.elapsed();
     assert_eq!(
         orphans, 0,
-        "{orphans} index rows have no cache row, immediately after a rebuild \
+        "{orphans} index rows have no live cache row, immediately after a rebuild \
          that read the cache"
     );
 

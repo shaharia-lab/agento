@@ -58,8 +58,8 @@
 //!   Driving it from the side table would make an index row with no key entry
 //!   unreachable for ever; keying both statements on "no live cache row for
 //!   this pair" (none, or an expired one — #706) makes them independently
-//!   correct, and #439 measured that pass at
-//!   35 ms over the whole index — once per scan, not once per session.
+//!   correct, and #439 measured that pass at 35 ms over the whole index —
+//!   once per scan, not once per session.
 //!
 //! **bm25 is negative, and smaller is better.** SQLite's `bm25()` returns the
 //! negated score specifically so that a plain `ORDER BY rank` puts the best
