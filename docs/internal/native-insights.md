@@ -37,8 +37,9 @@ Three rules, each silent when wrong:
   **The ordering is asserted in `scan.rs`'s own tests since #447**, over a
   two-config-dir fixture corpus under a swapped `HOME`: a removed session is
   expired and keeps its insight row, and a session under a `chmod 0o000` config
-  dir keeps its cache, insight *and* index rows unexpired. Both `delete_orphans` functions had unit tests
-  against a hand-built database, and what those cannot say is *where they are
+  dir keeps its cache, insight *and* index rows unexpired. Both
+  `delete_orphans` functions had unit tests against a hand-built database, and
+  what those cannot say is *where they are
   called from* — moving `search::delete_orphans` above `apply_changes` finds
   every row still present, deletes nothing, and changes no other observable.
 - **A full queue asks for a sweep; it does not drop and wait.** The scan

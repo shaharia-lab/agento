@@ -32,7 +32,6 @@ use std::sync::mpsc;
 
 use rusqlite::Connection;
 
-use crate::native::gotime::{to_go_string_utc, GoTime};
 use crate::native::pricing::Resolver;
 use crate::native::sessions::summary::SessionSummary;
 
@@ -353,7 +352,7 @@ fn record_pending(pending: &mut BTreeMap<SessionKey, Notification>, item: &ScanR
 /// Stamps every entry with one `now`, and counts the rows actually changed
 /// rather than the entries listed.
 fn run_expiry(conn: &mut Connection, to_expire: &[CachedEntry]) -> Result<usize, String> {
-    let now = to_go_string_utc(GoTime(chrono::Utc::now().fixed_offset()));
+    let now = crate::native::gotime::now_go_text();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let mut changed = 0;
     for entry in to_expire {

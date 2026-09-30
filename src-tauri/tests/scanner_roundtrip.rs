@@ -4,8 +4,7 @@
 //! the pieces are checked as a *sequence*: that a first scan inserts and
 //! announces discoveries, that a second scan does nothing, that a touched file
 //! is re-read as an update, that a removed transcript is expired and a restored
-//! one un-expired (#705), and
-//! that the two user-owned columns survive all of it.
+//! one un-expired (#705), and that the two user-owned columns survive all of it.
 //!
 //! The database here is created by the test. The application's own handle is
 //! read-only, and nothing in the app calls these writers — see the module docs
@@ -243,8 +242,8 @@ fn a_rescan_preserves_the_two_user_owned_columns() {
 type Kept = (
     String,
     f64,
-    i64,
-    i64,
+    (i64, i64, i64, i64),
+    String,
     String,
     String,
     String,
@@ -256,7 +255,9 @@ type Kept = (
 
 fn kept(conn: &Connection, session: &str) -> Kept {
     conn.query_row(
-        "SELECT file_path, total_cost_usd, input_tokens, output_tokens, model, git_branch,
+        "SELECT file_path, total_cost_usd,
+                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                cost_by_model, model, git_branch,
                 custom_title, is_favorite, native_title, ai_title, config_dir
          FROM claude_session_cache WHERE session_id = ?1",
         [session],
@@ -264,15 +265,15 @@ fn kept(conn: &Connection, session: &str) -> Kept {
             Ok((
                 r.get(0)?,
                 r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
+                (r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?),
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
                 r.get(9)?,
                 r.get(10)?,
+                r.get(11)?,
+                r.get(12)?,
+                r.get(13)?,
             ))
         },
     )
