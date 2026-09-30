@@ -56,8 +56,9 @@
 //!   leaving a row behind.
 //! * **[`delete_orphans`] is still keyed on the cache, not on this table.**
 //!   Driving it from the side table would make an index row with no key entry
-//!   unreachable for ever; keying both statements on "no cache row for this pair
-//!   remains" makes them independently correct, and #439 measured that pass at
+//!   unreachable for ever; keying both statements on "no live cache row for
+//!   this pair" (none, or an expired one — #706) makes them independently
+//!   correct, and #439 measured that pass at
 //!   35 ms over the whole index — once per scan, not once per session.
 //!
 //! **bm25 is negative, and smaller is better.** SQLite's `bm25()` returns the
@@ -361,10 +362,16 @@ pub fn delete_all(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Drop index rows whose session is no longer in the cache.
+/// Drop index rows whose session has no **live** cache row: none at all, or
+/// one whose transcript has expired (`transcript_expired_at` set).
 ///
-/// The exact shape of `insights::store::delete_orphans`, and for exactly its
-/// reasons: **keyed on "no cache row for this pair remains", never on a path.**
+/// Expired counts as gone because transcript content does not outlive the
+/// transcript (#703): the cache row survives to keep the session's summary, and
+/// the index is content, so without this its text would stay searchable for
+/// ever (#706). Titles live on the cache row and stay matchable.
+///
+/// Otherwise the shape of `insights::store::delete_orphans`, and for its
+/// reasons: **keyed on the cache row for this pair, never on a path.**
 /// A claim shift moves a transcript to a new `file_path` and is an *update*
 /// (#245), so a path-keyed delete would drop a session that is still there.
 /// `session_search` carries no `file_path` at all, so path is not even available
@@ -389,6 +396,13 @@ pub fn delete_all(conn: &Connection) -> Result<(), String> {
 /// table. #439 measured that at 35 ms over a 188.7 MB index — one pass per scan,
 /// not one per session, which is why it does not want the rowid treatment.
 ///
+/// An expired pair's `session_insights.search_index_version` is reset to 0 in
+/// the same call, so that a transcript which reappears (un-expired by the
+/// scanner) is re-indexed by the next worker sweep: its version would otherwise
+/// still read current, and an unchanged mtime emits no scan notification either.
+/// The insight row itself is kept — the insights reconcile still keys on "no
+/// cache row". The `<> 0` guard makes the steady state a no-op.
+///
 /// The count returned is the index's, which is what the caller reports.
 pub fn delete_orphans(conn: &Connection) -> Result<usize, String> {
     let removed = conn
@@ -398,6 +412,7 @@ pub fn delete_orphans(conn: &Connection) -> Result<usize, String> {
              SELECT 1 FROM claude_session_cache c
               WHERE c.session_id = session_search.session_id
                 AND c.project_path = session_search.project_path
+                AND c.transcript_expired_at IS NULL
          )",
             [],
         )
@@ -408,10 +423,23 @@ pub fn delete_orphans(conn: &Connection) -> Result<usize, String> {
              SELECT 1 FROM claude_session_cache c
               WHERE c.session_id = session_search_key.session_id
                 AND c.project_path = session_search_key.project_path
+                AND c.transcript_expired_at IS NULL
          )",
         [],
     )
     .map_err(|e| format!("reconciling orphaned search index keys: {e}"))?;
+    conn.execute(
+        "UPDATE session_insights SET search_index_version = 0
+          WHERE search_index_version <> 0
+            AND EXISTS (
+                SELECT 1 FROM claude_session_cache c
+                 WHERE c.session_id = session_insights.session_id
+                   AND c.project_path = session_insights.project_path
+                   AND c.transcript_expired_at IS NOT NULL
+            )",
+        [],
+    )
+    .map_err(|e| format!("marking expired sessions for re-indexing: {e}"))?;
     Ok(removed)
 }
 
@@ -537,16 +565,36 @@ mod tests {
         .expect("cache row");
     }
 
+    fn expire(conn: &Connection, session_id: &str, project_path: &str) {
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = '2026-02-01 00:00:00+00:00'
+              WHERE session_id = ?1 AND project_path = ?2",
+            params![session_id, project_path],
+        )
+        .expect("expire the transcript");
+    }
+
     /// The reconcile keys on the **pair**, so a session id that also exists
     /// under another project keeps the row for the project still cached.
     ///
     /// Keyed on the id alone this would empty both, and the surviving session
     /// would simply stop being findable — with the cache row, the insight row
     /// and every count still intact, so nothing looks wrong anywhere.
+    ///
+    /// Since #706 a pair whose cache row is **expired** is gone as far as the
+    /// index is concerned, from both tables, while the same id under a project
+    /// whose transcript is live keeps its row. This is the deliberate opposite
+    /// of `insights::store`'s test of the same name, where an expired row stays.
     #[test]
     fn the_reconcile_drops_only_rows_with_no_cache_row() {
         let (_file, conn) = migrated();
-        for (session, project) in [("s1", "/a"), ("s1", "/b"), ("gone", "/a")] {
+        for (session, project) in [
+            ("s1", "/a"),
+            ("s1", "/b"),
+            ("gone", "/a"),
+            ("x", "/a"),
+            ("x", "/c"),
+        ] {
             cache_row(
                 &conn,
                 session,
@@ -561,9 +609,106 @@ mod tests {
             [],
         )
         .expect("reconcile the cache");
+        expire(&conn, "x", "/a");
 
-        assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 2);
-        assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
+        assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 3);
+        assert_eq!(
+            indexed_pairs(&conn),
+            vec![("s1".into(), "/a".into()), ("x".into(), "/c".into())],
+        );
+        assert_key_table_agrees(&conn, "after reconciling an expired pair");
+        let cached: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM claude_session_cache WHERE session_id = 'x'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(cached, 2, "the reconcile must not touch the cache itself");
+    }
+
+    /// What expiry means end to end (#706): the transcript's words stop
+    /// matching, its insight survives, and its index version is reset so that a
+    /// transcript which reappears is picked up by the next worker sweep.
+    ///
+    /// Without the reset the un-expired pair would read current for ever —
+    /// `needs_processing` would skip it and, with an unchanged mtime, no scan
+    /// notification would come either — so it would simply never be searchable
+    /// again. The live pair beside it proves the reset is scoped to expiry.
+    #[test]
+    fn an_expired_sessions_row_is_dropped_but_its_insight_is_kept_and_marked_for_reindex() {
+        let (_file, conn) = migrated();
+        for session in ["expired", "live"] {
+            cache_row(&conn, session, "/a", &format!("/a/{session}.jsonl"));
+            let mut d = doc(session, "/a");
+            d.user_text = format!("zanzibar {session}");
+            replace(&conn, &d).expect("index");
+            conn.execute(
+                "INSERT INTO session_insights
+                     (session_id, project_path, scanned_at, processor_version, search_index_version)
+                 VALUES (?1, '/a', '', ?2, ?3)",
+                params![
+                    session,
+                    crate::native::insights::processors::CURRENT_PROCESSOR_VERSION,
+                    SEARCH_INDEX_VERSION
+                ],
+            )
+            .expect("insight row");
+        }
+        let pending = |conn: &Connection| -> Vec<String> {
+            crate::native::insights::store::needs_processing(
+                conn,
+                crate::native::insights::processors::CURRENT_PROCESSOR_VERSION,
+                SEARCH_INDEX_VERSION,
+            )
+            .expect("needs_processing")
+            .into_iter()
+            .map(|p| p.session_id)
+            .collect()
+        };
+        assert!(pending(&conn).is_empty(), "both rows start current");
+
+        expire(&conn, "expired", "/a");
+        assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 1);
+
+        let hits: Vec<String> = search(&conn, "zanzibar", 10)
+            .expect("search")
+            .into_iter()
+            .map(|h| h.session_id)
+            .collect();
+        assert_eq!(hits, vec!["live".to_string()]);
+
+        let versions: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id, search_index_version FROM session_insights
+                      ORDER BY session_id",
+                )
+                .expect("prepare");
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("rows")
+        };
+        assert_eq!(
+            versions,
+            vec![
+                ("expired".to_string(), 0),
+                ("live".to_string(), SEARCH_INDEX_VERSION),
+            ],
+            "the insight survives, reset for re-indexing; the live one is untouched",
+        );
+
+        // Steady state: a second pass removes nothing and changes nothing.
+        assert_eq!(delete_orphans(&conn).expect("second pass"), 0);
+
+        // Un-expiry: the transcript reappears, and the worker must pick it up.
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = NULL",
+            [],
+        )
+        .expect("un-expire");
+        assert_eq!(pending(&conn), vec!["expired".to_string()]);
     }
 
     /// A claim shift moves a transcript and is an **update**, not a deletion
@@ -1068,6 +1213,18 @@ mod tests {
         .expect("reconcile the cache");
         assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 1);
         assert_key_table_agrees(&conn, "after delete_orphans");
+
+        // Expiry (#706): the cache row stays, but its transcript is gone, so
+        // the index row and its key row must both go in the same pass.
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = '2026-02-01 00:00:00+00:00'
+              WHERE session_id = 's1' AND project_path = '/a'",
+            [],
+        )
+        .expect("expire");
+        assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 1);
+        assert_key_table_agrees(&conn, "after delete_orphans over an expired pair");
+        assert!(indexed_pairs(&conn).is_empty());
 
         delete_all(&conn).expect("clear");
         assert_key_table_agrees(&conn, "after delete_all");

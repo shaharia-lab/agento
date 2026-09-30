@@ -27,7 +27,13 @@ Three rules, each silent when wrong:
   conflict target does not exist since migration 29); the *join* is the quiet
   one, because a current row for one project satisfies the other project's
   cache row and that session is reported done forever.
-- **The reconcile keys on "no cache row remains", never on a path.** A claim
+- **The reconcile keys on the cache row for the pair, never on a path.** The
+  insights reconcile drops a row when no cache row remains; the **search**
+  reconcile (`search::delete_orphans`) drops one when no **live** cache row
+  remains — none, or one with `transcript_expired_at` set — because transcript
+  content does not outlive the transcript while its insight does (#706). The
+  same call resets an expired pair's `search_index_version` to 0, so a
+  transcript that reappears is re-indexed by the next sweep. A claim
   shift moves a transcript and is an update, not a deletion (#245), and
   `session_insights` has no `file_path` to get this wrong with. Running it after
   the scan's own expiry pass is what inherits the unreadable-config-dir
@@ -135,6 +141,8 @@ scanning the `%_content` table. Three rules around it:
 - **`delete_orphans` is still keyed on the cache, not on the side table.**
   Driving it off the key table would make an index row with no key entry
   unreachable for ever, and it runs once per scan rather than once per session.
+  Both statements key on "no live cache row" (#706): an expired session's text
+  leaves the index in this same pass, never through a per-session `delete`.
 
 ## The search index, measured (`src-tauri/tests/search_live.rs`, #439)
 

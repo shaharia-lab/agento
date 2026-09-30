@@ -541,14 +541,16 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
         // scan costs the corpus.
         Err(e) => log::warn!("claude sessions: {e}"),
     }
-    // The search index's reconcile, on exactly the same terms and for the same
-    // reasons (#435): keyed on "no cache row for this pair remains" rather than
-    // on a path, and run **here** — after the expiry pass — so it inherits the
+    // The search index's reconcile, on the insights reconcile's terms and for
+    // its reasons (#435): keyed on the cache row for the pair rather than on a
+    // path, and run **here** — after the expiry pass — so it inherits the
     // unreadable-config-dir protection instead of emptying an account's index
-    // when a drive is unmounted.
+    // when a drive is unmounted. One difference: an **expired** cache row
+    // counts as gone here, because transcript content does not outlive the
+    // transcript (#706), while its insight is kept.
     //
     // A separate statement rather than a shared one: the two tables are
-    // reconciled against the same condition but a failure of one must not stop
+    // reconciled against the same cache but a failure of one must not stop
     // the other, and `session_search` is an FTS5 table whose delete scans, so
     // the costs are not comparable either.
     match super::search::delete_orphans(&conn) {

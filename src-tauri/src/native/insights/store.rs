@@ -618,21 +618,34 @@ mod tests {
     /// The reconcile keys on the pair, not on the id: a session id that also
     /// exists under another project must keep the row for the project that is
     /// still cached.
+    ///
+    /// An **expired** cache row still counts as a cache row here (#706): the
+    /// insights of a session whose transcript is gone survive with its summary
+    /// (#707). That is the deliberate opposite of `search`'s test of the same
+    /// name, which drops the expired pair's index text.
     #[test]
     fn the_reconcile_drops_only_rows_with_no_cache_row() {
         let mut conn = db();
         cache_row(&conn, "s1", "/a", "/a/s1.jsonl");
         cache_row(&conn, "s1", "/b", "/b/s1.jsonl");
         cache_row(&conn, "gone", "/a", "/a/gone.jsonl");
+        cache_row(&conn, "expired", "/a", "/a/expired.jsonl");
         write(&mut conn, &insight("s1"), "/a");
         write(&mut conn, &insight("s1"), "/b");
         write(&mut conn, &insight("gone"), "/a");
+        write(&mut conn, &insight("expired"), "/a");
 
         conn.execute(
             "DELETE FROM claude_session_cache WHERE session_id = 'gone' OR project_path = '/b'",
             [],
         )
         .expect("reconcile the cache");
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = '2026-02-01 00:00:00+00:00'
+              WHERE session_id = 'expired'",
+            [],
+        )
+        .expect("expire the transcript");
 
         assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 2);
         assert_eq!(
@@ -640,7 +653,43 @@ mod tests {
                 .iter()
                 .map(|(s, p, _)| (s.clone(), p.clone()))
                 .collect::<Vec<_>>(),
-            vec![("s1".to_string(), "/a".to_string())],
+            vec![
+                ("expired".to_string(), "/a".to_string()),
+                ("s1".to_string(), "/a".to_string()),
+            ],
+        );
+    }
+
+    /// The other half of the search reconcile's expiry rule (#706): it resets
+    /// an expired pair's `search_index_version` to 0, and once the transcript
+    /// reappears (`transcript_expired_at` cleared) that row must be pending, or
+    /// the session would never be searchable again.
+    #[test]
+    fn needs_processing_finds_an_un_expired_row_left_at_index_version_zero() {
+        let mut conn = db();
+        for session in ["returned", "current"] {
+            cache_row(&conn, session, "/a", &format!("/a/{session}.jsonl"));
+            write(&mut conn, &insight(session), "/a");
+        }
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = '2026-02-01 00:00:00+00:00'
+              WHERE session_id = 'returned'",
+            [],
+        )
+        .expect("expire");
+        crate::native::search::delete_orphans(&conn).expect("search reconcile");
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = NULL",
+            [],
+        )
+        .expect("un-expire");
+
+        assert_eq!(
+            current(&conn)
+                .iter()
+                .map(|p| p.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["returned"],
         );
     }
 
