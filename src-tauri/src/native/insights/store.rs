@@ -67,6 +67,14 @@ pub struct Pending {
 /// so it can no longer remove a row — it is what stopped the single-keyed join
 /// returning a duplicated id twice, and leaving it costs nothing.
 ///
+/// **An expired row is never pending** (#707): `transcript_expired_at` says the
+/// transcript is gone, so there is nothing to read and a pending row would be
+/// retried on every sweep forever — and `search::delete_orphans` resets every
+/// expired pair's `search_index_version` to 0, which without this clause makes
+/// each of them pending after the next scan. Its insight row is kept, and once
+/// the scanner clears the stamp the row is selectable again. Pinned by
+/// `needs_processing_skips_an_expired_row`.
+///
 /// A row whose `file_path` is empty is skipped by the caller rather than here,
 /// matching `rescanOutdated`.
 pub fn needs_processing(
@@ -81,9 +89,10 @@ pub fn needs_processing(
              LEFT JOIN session_insights i
                     ON c.session_id = i.session_id
                    AND c.project_path = i.project_path
-             WHERE i.session_id IS NULL
-                OR i.processor_version < ?1
-                OR i.search_index_version < ?2",
+             WHERE c.transcript_expired_at IS NULL
+               AND (i.session_id IS NULL
+                    OR i.processor_version < ?1
+                    OR i.search_index_version < ?2)",
         )
         .map_err(|e| format!("preparing needs_processing: {e}"))?;
 
@@ -690,6 +699,59 @@ mod tests {
                 .map(|p| p.session_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["returned"],
+        );
+    }
+
+    /// An expired cache row is never pending on any branch of the predicate
+    /// (#707): no insight row, a stale `processor_version`, and the
+    /// `search_index_version = 0` the search reconcile writes for an expired
+    /// pair. Asked twice, it answers nothing both times, the insight rows
+    /// survive, and clearing the stamp makes every one of them pending again.
+    #[test]
+    fn needs_processing_skips_an_expired_row() {
+        let mut conn = db();
+        for session in ["absent", "processor-stale", "index-reset", "current"] {
+            cache_row(&conn, session, "/a", &format!("/a/{session}.jsonl"));
+        }
+        for session in ["processor-stale", "index-reset", "current"] {
+            write(&mut conn, &insight(session), "/a");
+        }
+        conn.execute(
+            "UPDATE session_insights SET processor_version = 0
+              WHERE session_id = 'processor-stale'",
+            [],
+        )
+        .expect("age the insight");
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = '2026-02-01 00:00:00+00:00'
+              WHERE session_id != 'current'",
+            [],
+        )
+        .expect("expire");
+        crate::native::search::delete_orphans(&conn).expect("search reconcile");
+
+        assert!(current(&conn).is_empty(), "first sweep");
+        assert!(current(&conn).is_empty(), "second sweep");
+        assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 0);
+        assert_eq!(
+            stored_versions(&conn)
+                .iter()
+                .map(|(s, _, _)| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["current", "index-reset", "processor-stale"],
+        );
+
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = NULL",
+            [],
+        )
+        .expect("un-expire");
+        assert_eq!(
+            current(&conn)
+                .iter()
+                .map(|p| p.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["absent", "index-reset", "processor-stale"],
         );
     }
 

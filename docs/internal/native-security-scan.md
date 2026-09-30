@@ -29,6 +29,11 @@ statement; the rules below are the ones a change is most likely to break.
 - **Incremental and periodic, like insights.** `scan.rs` announces changed
   sessions to both workers from the same `outcome.notifications`; the
   five-minute sweep over `store::needs_scanning` picks up a ruleset bump.
+- **An expired session is never pending** (#707): `needs_scanning` excludes a
+  cache row with `transcript_expired_at` set on both branches, so neither a
+  sweep nor a ruleset bump retries a transcript that is gone. Its findings and
+  `credential_scan_state` row are kept and still counted
+  (`needs_scanning_skips_an_expired_row`).
 - **A changed session is marked before it is announced.** `needs_scanning`
   compares versions only, so `scan.rs` calls `store::mark_changed` (resets
   `ruleset_version` to 0) on every changed session first — whether or not the

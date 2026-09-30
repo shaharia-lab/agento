@@ -27,6 +27,12 @@ Three rules, each silent when wrong:
   conflict target does not exist since migration 29); the *join* is the quiet
   one, because a current row for one project satisfies the other project's
   cache row and that session is reported done forever.
+- **`needs_processing` never selects an expired row** (#707):
+  `c.transcript_expired_at IS NULL` gates every branch of its predicate, because
+  there is no transcript to read and the search reconcile's reset to 0 would
+  otherwise make every expired session pending on every sweep. Its insight row
+  is kept, and clearing the stamp makes it pending again
+  (`needs_processing_skips_an_expired_row`).
 - **The reconcile keys on the cache row for the pair, never on a path.** The
   insights reconcile drops a row when no cache row remains; the **search**
   reconcile (`search::delete_orphans`) drops one when no **live** cache row

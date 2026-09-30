@@ -52,6 +52,12 @@ pub struct Pending {
 /// under an older ruleset. Passing [`super::rules::CURRENT_RULESET_VERSION`]
 /// after a bump therefore answers the whole corpus again — the same contract as
 /// `insights::store::needs_processing` and `CURRENT_PROCESSOR_VERSION`.
+///
+/// **An expired row is never pending** (#707), whatever its state: with
+/// `transcript_expired_at` set there is no transcript to read, so it would be
+/// retried on every sweep and every ruleset bump forever. Its findings and
+/// state row are kept, and clearing the stamp makes it pending again. Pinned by
+/// `needs_scanning_skips_an_expired_row`.
 pub fn needs_scanning(conn: &Connection, ruleset_version: i64) -> Result<Vec<Pending>, String> {
     let mut stmt = conn
         .prepare(
@@ -60,8 +66,9 @@ pub fn needs_scanning(conn: &Connection, ruleset_version: i64) -> Result<Vec<Pen
              LEFT JOIN credential_scan_state s
                     ON c.session_id = s.session_id
                    AND c.project_path = s.project_path
-             WHERE s.session_id IS NULL
-                OR s.ruleset_version < ?1",
+             WHERE c.transcript_expired_at IS NULL
+               AND (s.session_id IS NULL
+                    OR s.ruleset_version < ?1)",
         )
         .map_err(|e| format!("preparing needs_scanning: {e}"))?;
 
@@ -734,6 +741,76 @@ mod tests {
         );
         record_scan(&mut conn, "s1", "/a", 2, TEXT, &[alpha()]).expect("rescan");
         assert_eq!(pending_ids(&conn, 2), vec![("s2".into(), "/a".into())]);
+    }
+
+    /// An expired cache row is never pending on either branch (#707): never
+    /// scanned, reset to 0 by `mark_changed`, or scanned under an older
+    /// ruleset — including after a bump. Its findings and state rows survive
+    /// and still count, and clearing the stamp queues every one of them again.
+    #[test]
+    fn needs_scanning_skips_an_expired_row() {
+        let current = super::super::rules::CURRENT_RULESET_VERSION;
+        let mut conn = db();
+        for session in ["unscanned", "changed", "old-ruleset", "live"] {
+            cache_row(&conn, session, "/a");
+        }
+        record_scan(&mut conn, "changed", "/a", current, TEXT, &[alpha()]).expect("record");
+        record_scan(
+            &mut conn,
+            "old-ruleset",
+            "/a",
+            current - 1,
+            TEXT,
+            &[bravo()],
+        )
+        .expect("record");
+        record_scan(&mut conn, "live", "/a", current, TEXT, &[]).expect("record");
+        mark_changed(
+            &mut conn,
+            &[Pending {
+                session_id: "changed".into(),
+                project_path: "/a".into(),
+                file_path: "/a/changed.jsonl".into(),
+            }],
+        )
+        .expect("mark_changed");
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = '2026-02-01 00:00:00+00:00'
+              WHERE session_id != 'live'",
+            [],
+        )
+        .expect("expire");
+
+        assert!(pending_ids(&conn, current).is_empty(), "first sweep");
+        assert!(pending_ids(&conn, current).is_empty(), "second sweep");
+        assert_eq!(
+            pending_ids(&conn, current + 1),
+            vec![("live".into(), "/a".into())],
+            "a ruleset bump requeues only the live session"
+        );
+
+        let states: i64 = conn
+            .query_row("SELECT COUNT(*) FROM credential_scan_state", [], |r| {
+                r.get(0)
+            })
+            .expect("state rows");
+        assert_eq!(states, 3);
+        assert_eq!(list_findings(&conn, None).expect("findings").len(), 2);
+        assert_eq!(summary(&conn).expect("summary").open, 2);
+
+        conn.execute(
+            "UPDATE claude_session_cache SET transcript_expired_at = NULL",
+            [],
+        )
+        .expect("un-expire");
+        assert_eq!(
+            pending_ids(&conn, current),
+            vec![
+                ("changed".into(), "/a".into()),
+                ("old-ruleset".into(), "/a".into()),
+                ("unscanned".into(), "/a".into()),
+            ]
+        );
     }
 
     #[test]
