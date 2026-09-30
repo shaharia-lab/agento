@@ -500,6 +500,9 @@ export function ChatsView({
     const now = sendNow.current;
     if (now) {
       sendNow.current = null;
+      // A send-now from one chat can stop another chat's turn; that chat was
+      // stopped all the same, so its queue waits for the user too.
+      if (outcome === "stopped" && chatId !== now.key) held.current.add(chatId);
       // Its card or draft is already gone, so a send that cannot go out puts
       // the text back in the queue rather than dropping it.
       const restore = () =>

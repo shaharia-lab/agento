@@ -112,7 +112,11 @@ src/
                  `stopped` beats `failed` (a Stop may close with an error
                  `result`), a failure resends once (`retried`) and hands the
                  items back on a second failure, and a queue key is deleted
-                 when it empties so key order is "oldest queue first"
+                 when it empties so key order is "oldest queue first". A
+                 stopped or twice-failed queue is `held`: the cross-chat
+                 fallback skips it until the user sends from it, queues into it
+                 or deletes the chat — without that, another chat's successful
+                 turn would send a queue the user stopped
     tasks/Delivery.tsx  the Tasks form's Delivery section and its helpers (#638)
                  `sessionMenuItems` is the **single** definition of those five
                  entries: `SessionsView`'s own rows build their menu from it
