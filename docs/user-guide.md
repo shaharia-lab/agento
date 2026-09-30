@@ -131,7 +131,9 @@ an empty input opens the last card.
   never go through the queue.
 - A queue belongs to its conversation and lives only until the app closes. Only
   one conversation runs at a time, so a queue in another chat waits its turn and
-  is sent when the running one finishes.
+  is sent when the running one finishes — except a queue you stopped, or one
+  that came back after a failed resend, which waits for you to send it (or to
+  queue something more into it).
 
 **The inspector** shows the agent, the model, the permission mode, the message
 count and the token usage of the whole conversation, split into input, output,

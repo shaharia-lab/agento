@@ -156,6 +156,12 @@ export function ChatsView({
   const retried = useRef<Record<string, boolean>>({});
   /** What that resend carried, restored to the queue if it fails too. */
   const resent = useRef<Record<string, QueueItem[]>>({});
+  /**
+   * Queues left for the user — by a Stop, or by a resend that failed too. The
+   * "oldest other queue" fallback skips them; the user's own send, or queueing
+   * more into one, releases it.
+   */
+  const held = useRef<Set<string>>(new Set());
   /** A "send now": sent as soon as the turn it stopped has closed. */
   const sendNow = useRef<{ key: string; text: string } | null>(null);
   /**
@@ -435,6 +441,7 @@ export function ChatsView({
     const text = draft.trim();
     if (busy) {
       if (!text) return;
+      held.current.delete(queueKey);
       setQueue(queueKey, (items) => [...items, queueItem(text)]);
       setDraft("");
       return;
@@ -452,6 +459,7 @@ export function ChatsView({
       return;
     }
     // A send the user made is a fresh start for the failure rule.
+    held.current.delete(queueKey);
     delete retried.current[queueKey];
     delete resent.current[queueKey];
   }, [draft, busy, queueKey, queues, selected, setQueue, sendContent]);
@@ -492,14 +500,24 @@ export function ChatsView({
     const now = sendNow.current;
     if (now) {
       sendNow.current = null;
+      // Its card or draft is already gone, so a send that cannot go out puts
+      // the text back in the queue rather than dropping it.
+      const restore = () =>
+        setQueue(now.key, (rest) => [queueItem(now.text), ...rest]);
       if (now.key !== DRAFT_KEY || drafting) {
-        void sendContent(now.key === DRAFT_KEY ? null : now.key, now.text);
+        void sendContent(now.key === DRAFT_KEY ? null : now.key, now.text).then(
+          (started) => {
+            if (!started) restore();
+          }
+        );
         return;
       }
+      restore();
     }
 
     // Stop is a hard stop: the queue stays and nothing is sent.
     if (outcome === "stopped") {
+      held.current.add(chatId);
       delete retried.current[chatId];
       delete resent.current[chatId];
       return;
@@ -509,6 +527,7 @@ export function ChatsView({
       const back = resent.current[chatId] ?? [];
       delete retried.current[chatId];
       delete resent.current[chatId];
+      held.current.add(chatId);
       if (back.length) setQueue(chatId, (items) => [...back, ...items]);
       return;
     }
@@ -518,11 +537,14 @@ export function ChatsView({
     // This chat's queue first; otherwise the oldest other one that can go. A
     // draft's queue goes only while the draft is still open — sending it
     // creates the chat from the New Chat bar.
-    const key = queues[chatId]?.length
-      ? chatId
-      : Object.keys(queues).find(
-          (k) => queues[k].length && (k !== DRAFT_KEY || drafting)
-        );
+    const key = Object.keys(queues)
+      .sort((a, b) => Number(b === chatId) - Number(a === chatId))
+      .find(
+        (k) =>
+          queues[k].length &&
+          !held.current.has(k) &&
+          (k !== DRAFT_KEY || drafting)
+      );
     if (!key) return;
     const items = queues[key];
     if (outcome === "failed" && key === chatId) {
@@ -582,6 +604,7 @@ export function ChatsView({
       try {
         await api.del(`/chats/${id}`);
         setQueue(id, () => []);
+        held.current.delete(id);
         setSelected(null);
         setConfirmDelete(false);
         autoSelected.current = false;
