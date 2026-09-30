@@ -16,8 +16,11 @@ import type {
 } from "../../lib/types";
 import "../../styles/newchat.css";
 
-/** What the agent editor offers, so a chat and an agent read the same. */
-const MODELS = [
+/**
+ * What the agent editor offers, so a chat and an agent read the same.
+ * `ChatSettingsBar` offers this same list on an existing chat (#722).
+ */
+export const MODELS = [
   { value: "sonnet", label: "Sonnet" },
   { value: "opus", label: "Opus" },
   { value: "haiku", label: "Haiku" },
@@ -33,7 +36,7 @@ const MODELS = [
  * any of them: the interactive permission handler forced "default" on every
  * turn, which is why a `bypass` agent still stopped to ask.
  */
-const PERMISSION_MODES = [
+export const PERMISSION_MODES = [
   { value: "", label: "Permissions: agent default" },
   { value: "default", label: "Permissions: ask before acting" },
   { value: "bypass", label: "Permissions: never ask" },
@@ -243,12 +246,12 @@ export function NewChatBar({
 /** The initial value, before the effect above resolves the real defaults. */
 export const NEW_CHAT_INITIAL = EMPTY_PREFS;
 
-function labelFor(options: { value: string; label: string }[], value: string) {
+export function labelFor(options: { value: string; label: string }[], value: string) {
   return options.find((o) => o.value === value)?.label ?? value;
 }
 
 /** Keep a stored model the picker does not enumerate, e.g. a full model id. */
-function withCurrent(
+export function withCurrent(
   options: { value: string; label: string }[],
   value: string
 ) {

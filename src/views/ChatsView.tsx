@@ -37,6 +37,7 @@ import {
 } from "./chat/NewChatBar";
 import { saveNewChatPrefs, type NewChatPrefs } from "../lib/newChatPrefs";
 import { Composer } from "./chat/Composer";
+import { ChatSettingsBar } from "./chat/ChatSettingsBar";
 import { Transcript } from "./chat/Transcript";
 import { useChatStream } from "./chat/useChatStream";
 import { openExternal } from "../lib/tauri";
@@ -400,7 +401,15 @@ export function ChatsView({
   );
 
   const patch = useCallback(
-    async (id: string, body: { title?: string; is_favorite?: boolean }) => {
+    async (
+      id: string,
+      body: {
+        title?: string;
+        is_favorite?: boolean;
+        model?: string;
+        permission_mode?: string;
+      }
+    ) => {
       try {
         await api.patch<ChatSession>(`/chats/${id}`, body);
         chats.reload();
@@ -785,9 +794,20 @@ export function ChatsView({
               placeholder={`Message ${agentLabel}…`}
               focusNonce={composerFocus}
               meta={
-                <span className="composer__meta">
-                  {session?.model || stream.system?.model || "Default model"}
-                </span>
+                session && selected ? (
+                  <ChatSettingsBar
+                    session={session}
+                    agent={agents.data?.find(
+                      (a) => a.slug === session.agent_slug
+                    )}
+                    disabled={busy}
+                    onChange={(body) => patch(selected, body)}
+                  />
+                ) : (
+                  <span className="composer__meta">
+                    {stream.system?.model || "Default model"}
+                  </span>
+                )
               }
             />
           </>

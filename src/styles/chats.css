@@ -206,6 +206,14 @@
   padding: 0 var(--sp-3);
 }
 
+/* The model and permission mode of an existing chat (#722). */
+.composer__settings {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
 .composer__stop {
   height: var(--control-h);
   gap: var(--sp-2);

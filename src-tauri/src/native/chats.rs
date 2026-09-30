@@ -459,16 +459,23 @@ struct CreateChatRequest {
     permission_mode: String,
 }
 
-/// The PATCH body. Both fields are genuinely optional — `null` and absent mean
-/// the same thing (leave it alone), and "neither present" is its own 400. So
+/// The PATCH body. Every field is genuinely optional — `null` and absent mean
+/// the same thing (leave it alone), and "none present" is its own 400. So
 /// these are `Option`, not zero-value fields: a `title` of `""` is a *different*
 /// request from no title at all, and Go rejects the first and ignores the
 /// second.
+///
+/// `model` and `permission_mode` (#722) follow the same rule, but for them `""`
+/// is a value: the default model, and "ask" — exactly what it means on create.
+/// The runner re-reads both from the row at the start of every turn, so a
+/// change applies from the next message.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct PatchChatRequest {
     title: Option<String>,
     is_favorite: Option<bool>,
+    model: Option<String>,
+    permission_mode: Option<String>,
 }
 
 /// `BulkDeleteRequest` (`internal/api/types.go`).
@@ -653,18 +660,36 @@ pub(super) fn insert_session(
     })
 }
 
-/// `handleUpdateChat`: rename and/or favourite.
+/// `handleUpdateChat`: rename and/or favourite, and (#722) the model and
+/// permission mode the next turn runs with.
 ///
-/// Two statuses, and the split is not the usual one. A missing chat is a
-/// **404** with the fixed string `chat not found` — not the service's
-/// `NotFoundError` wording, and not the 400 the other checks give. Everything
-/// else here is a **400** rather than a 422, because these checks live in the
-/// handler and the chats handlers never call `httpErr`.
+/// The split is not the usual one. A missing chat is a **404** with the fixed
+/// string `chat not found` — not the service's `NotFoundError` wording, and not
+/// the 400 the other checks give. The title and no-fields checks are a **400**
+/// rather than a 422, because they live in the handler and the chats handlers
+/// never call `httpErr`. An invalid `permission_mode` is the one **422**: it is
+/// `create`'s validation, answered the way `create` answers it.
 fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
     let req = decode_body::<PatchChatRequest>(body)?;
-    if req.title.is_none() && req.is_favorite.is_none() {
+    if req.title.is_none()
+        && req.is_favorite.is_none()
+        && req.model.is_none()
+        && req.permission_mode.is_none()
+    {
         return Err(WriteError::BadRequest("no fields to update".to_string()));
     }
+    // The same 422 `create` answers, and before the transaction opens, so an
+    // invalid mode mutates nothing. The runner's unknown-mode arm is bypass,
+    // which makes this check the guard rather than the UI's option list.
+    if let Some(mode) = &req.permission_mode {
+        if !is_valid_permission_mode(mode) {
+            return Err(WriteError::validation(
+                "permission_mode",
+                r#"must be one of "bypass", "default", "plan", "dontAsk", or empty"#,
+            ));
+        }
+    }
+    let model = req.model.map(|m| m.trim().to_string());
     let title = match req.title {
         Some(raw) => {
             let trimmed = raw.trim().to_string();
@@ -697,6 +722,13 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
     }
     if let Some(favorite) = req.is_favorite {
         session.is_favorite = favorite;
+    }
+    let settings_changed = model.is_some() || req.permission_mode.is_some();
+    if let Some(model) = model {
+        session.model = model;
+    }
+    if let Some(mode) = req.permission_mode {
+        session.permission_mode = mode;
     }
     let now = super::gotime::now_go_text();
 
@@ -742,6 +774,14 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
     // Nothing below this line may return `Fallback` — see `create`.
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit chat patch: {e}")))?;
+    if settings_changed {
+        log::info!(
+            "chat session settings updated session_id={:?} model={:?} permission_mode={:?}",
+            session.id,
+            session.model,
+            session.permission_mode
+        );
+    }
     Ok(super::Answer::json(body))
 }
 
@@ -1517,6 +1557,79 @@ mod tests {
         // A null title is "leave it alone", not "set it to empty" — so with no
         // other field it is the no-fields case rather than the empty-title one.
         let err = patch(file.path(), &id, br#"{"title":null}"#).unwrap_err();
+        assert_eq!(err, WriteError::BadRequest("no fields to update".into()));
+    }
+
+    /// #722: the model and permission mode are editable on an existing chat.
+    /// `null` leaves a field alone, `""` is a value (default model, "ask"), and
+    /// the model is trimmed like the title.
+    #[test]
+    fn patching_sets_the_model_and_permission_mode() {
+        let file = migrated();
+        let id = created_id(
+            &create(
+                file.path(),
+                br#"{"model":"claude-a","permission_mode":"plan"}"#,
+            )
+            .expect("create"),
+        );
+
+        let answer = patch(file.path(), &id, br#"{"permission_mode":"bypass"}"#).expect("patch");
+        assert_eq!(answer.status, StatusCode::OK);
+        let session = get(file.path(), &id).expect("get").unwrap().session;
+        assert_eq!(session.permission_mode, "bypass");
+        assert_eq!(session.model, "claude-a", "an absent model is left alone");
+
+        patch(
+            file.path(),
+            &id,
+            br#"{"model":"  claude-b  ","permission_mode":null}"#,
+        )
+        .expect("patch");
+        let session = get(file.path(), &id).expect("get").unwrap().session;
+        assert_eq!(session.model, "claude-b");
+        assert_eq!(
+            session.permission_mode, "bypass",
+            "a null mode is left alone"
+        );
+
+        patch(file.path(), &id, br#"{"model":"","permission_mode":""}"#).expect("patch");
+        let session = get(file.path(), &id).expect("get").unwrap().session;
+        assert_eq!(session.model, "");
+        assert_eq!(session.permission_mode, "");
+    }
+
+    /// An unknown mode is the create route's 422, and the row is untouched —
+    /// the runner reads an unknown mode as bypass, so this is the guard.
+    #[test]
+    fn patching_an_invalid_permission_mode_is_422_and_changes_nothing() {
+        let file = migrated();
+        let id = created_id(
+            &create(
+                file.path(),
+                br#"{"model":"claude-a","permission_mode":"plan"}"#,
+            )
+            .expect("create"),
+        );
+
+        let err = patch(
+            file.path(),
+            &id,
+            br#"{"title":"Renamed","model":"claude-b","permission_mode":"yolo"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let session = get(file.path(), &id).expect("get").unwrap().session;
+        assert_eq!(session.permission_mode, "plan");
+        assert_eq!(session.model, "claude-a");
+        assert_eq!(session.title, "New Chat");
+
+        let err = patch(
+            file.path(),
+            &id,
+            br#"{"model":null,"permission_mode":null}"#,
+        )
+        .unwrap_err();
         assert_eq!(err, WriteError::BadRequest("no fields to update".into()));
     }
 
