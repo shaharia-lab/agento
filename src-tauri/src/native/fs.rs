@@ -81,22 +81,52 @@ pub struct FsListResponse {
     pub entries: Vec<FsEntry>,
 }
 
+/// Why `GET /api/fs` could not list the requested path.
+///
+/// Mirrors the three `writeError` branches in `handleFSList`
+/// (`internal/api/filesystem.go`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListError {
+    /// `os.UserHomeDir()` failed when expanding `""` or `"~"`.
+    NoHome,
+    /// `os.IsNotExist(err)` from `os.ReadDir(clean)`.
+    NotFound,
+    /// Any other `os.ReadDir(clean)` failure (a plain file, permission denied,
+    /// or an unreadable entry).
+    Unreadable,
+}
+
+impl ListError {
+    /// The HTTP status `handleFSList` wrote for each branch.
+    pub fn status(&self) -> super::StatusCode {
+        match self {
+            Self::NoHome => super::StatusCode::INTERNAL_SERVER_ERROR,
+            Self::NotFound => super::StatusCode::NOT_FOUND,
+            Self::Unreadable => super::StatusCode::BAD_REQUEST,
+        }
+    }
+
+    /// The `writeError` message `handleFSList` wrote for each branch.
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::NoHome => "could not determine home directory",
+            Self::NotFound => "path not found",
+            Self::Unreadable => "cannot read directory",
+        }
+    }
+}
+
 /// `handleFSList`.
 ///
-/// **Every error here is a 500, and two of them should not be.** The inherited
-/// behaviour answers 404 for a missing path, 400 for anything else unreadable
-/// and 500 only when the home directory cannot be resolved. Those three bodies
-/// were never written, because at the time an `Err` reached an implementation
-/// that had them. Nothing does now, so the directory picker reports "internal
-/// server error" for a path the user simply mistyped.
-///
-/// Known gap rather than a decision — it is on the list in `CLAUDE.md`. Fixing
-/// it means giving this function a typed error and three bodies.
-pub fn list(raw_path: &str) -> Result<FsListResponse, String> {
+/// Answers **404** (`"path not found"`) for a missing path, **400**
+/// (`"cannot read directory"`) when the path is not a directory or cannot be
+/// read, and **500** (`"could not determine home directory"`) only when `""` or
+/// `"~"` cannot resolve a home directory.
+pub fn list(raw_path: &str) -> Result<FsListResponse, ListError> {
     // `""` and `"~"` — and nothing else — mean the home directory.
     let expanded = if raw_path.is_empty() || raw_path == "~" {
         paths::home()
-            .ok_or("could not determine home directory")?
+            .ok_or(ListError::NoHome)?
             .to_string_lossy()
             .into_owned()
     } else {
@@ -106,15 +136,18 @@ pub fn list(raw_path: &str) -> Result<FsListResponse, String> {
     let clean = gopath::clean(&expanded);
 
     let mut entries = Vec::new();
-    let reader =
-        std::fs::read_dir(&clean).map_err(|e| format!("cannot read directory {clean:?}: {e}"))?;
+    let reader = std::fs::read_dir(&clean).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ListError::NotFound
+        } else {
+            ListError::Unreadable
+        }
+    })?;
     for entry in reader {
-        let entry = entry.map_err(|e| format!("reading an entry of {clean:?}: {e}"))?;
+        let entry = entry.map_err(|_| ListError::Unreadable)?;
         // `file_type`, never `metadata`: Go's `DirEntry.IsDir` does not follow
         // symlinks, so a link to a directory is not listed.
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("stat-ing an entry of {clean:?}: {e}"))?;
+        let file_type = entry.file_type().map_err(|_| ListError::Unreadable)?;
         if !file_type.is_dir() {
             continue;
         }
@@ -271,7 +304,10 @@ fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, Strin
     if req.path == PATH_MKDIR {
         return finish(mkdir(req.body));
     }
-    let listing = list(&path_param(req.query))?;
+    let listing = match list(&path_param(req.query)) {
+        Ok(listing) => listing,
+        Err(e) => return super::Answer::error(e.status(), e.message()),
+    };
     let body = super::gojson::to_vec(&listing).map_err(|e| format!("encoding fs listing: {e}"))?;
     Ok(super::Answer::json(body))
 }
@@ -298,6 +334,21 @@ mod tests {
 
     fn names(listing: &FsListResponse) -> Vec<&str> {
         listing.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    fn serve_get(query: &str) -> super::super::Answer {
+        let ctx = super::super::Ctx {
+            db_path: std::path::PathBuf::new(),
+        };
+        let req = super::super::Request {
+            method: &Method::GET,
+            path: "/api/fs",
+            query,
+            content_type: "",
+            secret_token: "",
+            body: b"",
+        };
+        serve(&ctx, &req).expect("typed error is answered, not returned as Err")
     }
 
     /// `os.ReadDir` sorts by filename; `std::fs::read_dir` does not. Byte order,
@@ -357,6 +408,7 @@ mod tests {
     /// relative, and the read fails — which is what Go answers.
     #[test]
     fn only_a_bare_tilde_and_the_empty_path_mean_home() {
+        let _env = crate::paths::tests::env_lock();
         let home = paths::home().expect("a home directory");
         let home = home.to_string_lossy().into_owned();
 
@@ -365,10 +417,96 @@ mod tests {
             assert_eq!(listing.path, gopath::clean(&home), "{raw:?}");
         }
 
-        assert!(
-            list("~/definitely-not-a-real-directory").is_err(),
+        assert_eq!(
+            list("~/definitely-not-a-real-directory"),
+            Err(ListError::NotFound),
             "a trailing-path tilde must not be expanded"
         );
+    }
+
+    /// A path that does not exist answers **404** with `"path not found"`.
+    #[test]
+    fn a_missing_path_answers_404_path_not_found() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("no-such-folder");
+        let missing = missing.to_str().expect("utf8 path");
+
+        assert_eq!(list(missing), Err(ListError::NotFound));
+
+        let answer = serve_get(&format!("path={missing}"));
+        assert_eq!(answer.status, super::super::StatusCode::NOT_FOUND);
+        assert_eq!(
+            String::from_utf8(answer.body.expect("body")).expect("utf8"),
+            "{\"error\":\"path not found\"}\n"
+        );
+    }
+
+    /// An existing path that is not a directory (or cannot be read) answers
+    /// **400** with `"cannot read directory"`.
+    #[test]
+    fn a_non_directory_or_unreadable_path_answers_400_cannot_read_directory() {
+        let dir = tree();
+        let file = dir.path().join("notes.txt");
+        let file = file.to_str().expect("utf8 path");
+
+        assert_eq!(list(file), Err(ListError::Unreadable));
+
+        let answer = serve_get(&format!("path={file}"));
+        assert_eq!(answer.status, super::super::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            String::from_utf8(answer.body.expect("body")).expect("utf8"),
+            "{\"error\":\"cannot read directory\"}\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let unreadable = dir.path().join("locked");
+            std::fs::create_dir(&unreadable).expect("locked dir");
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
+                .expect("chmod 000");
+            let unreadable_str = unreadable.to_str().expect("utf8 path");
+
+            // Root bypasses mode 000; only assert when read_dir itself fails.
+            if std::fs::read_dir(&unreadable).is_err() {
+                assert_eq!(list(unreadable_str), Err(ListError::Unreadable));
+                let answer = serve_get(&format!("path={unreadable_str}"));
+                assert_eq!(answer.status, super::super::StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    String::from_utf8(answer.body.expect("body")).expect("utf8"),
+                    "{\"error\":\"cannot read directory\"}\n"
+                );
+            }
+
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o750))
+                .expect("restore permissions");
+        }
+    }
+
+    /// When neither `HOME` nor `USERPROFILE` is set, expanding `""` or `"~"`
+    /// answers **500** with `"could not determine home directory"`.
+    #[test]
+    fn an_unresolvable_home_directory_answers_500() {
+        let _env = crate::paths::tests::env_lock();
+        let _home = crate::paths::tests::EnvVar::unset("HOME");
+        let _userprofile = crate::paths::tests::EnvVar::unset("USERPROFILE");
+
+        for (raw, query) in [("", ""), ("~", "path=~")] {
+            assert_eq!(list(raw), Err(ListError::NoHome), "{raw:?}");
+
+            let answer = serve_get(query);
+            assert_eq!(
+                answer.status,
+                super::super::StatusCode::INTERNAL_SERVER_ERROR,
+                "{query:?}"
+            );
+            assert_eq!(
+                String::from_utf8(answer.body.expect("body")).expect("utf8"),
+                "{\"error\":\"could not determine home directory\"}\n",
+                "{query:?}"
+            );
+        }
     }
 
     /// The root is its own parent, spelled out rather than left to `Dir`.
