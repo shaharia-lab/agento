@@ -54,6 +54,14 @@
   Agento created itself is indexed in the corpus under that id, and "continue"
   on one of those reopens the chat it already is rather than cloning it. Rows
   written before migration 37 record no source and keep today's behaviour.
+- **A continued chat inherits the session's permission mode (#721)**, read from
+  the transcript's last `permission-mode` event and translated by
+  `continue_chat.rs::chat_mode_from_cli`: `bypassPermissions` → `bypass`, and
+  `default`, `plan`, `dontAsk` one-to-one. Everything else — `""`,
+  `acceptEdits`, `auto`, a mode the CLI adds later — becomes `""`, so the
+  runner asks. The table stays closed because the runner's `_ =>` arm treats an
+  unrecognised mode as bypass. A reopened chat (the idempotent path above)
+  keeps whatever mode it already has.
 - **A chat's permission mode is the chat's, then the agent's, then `default`.**
   `chat_sessions.permission_mode` (migration 30) beats the rule that an
   interactive handler forces `default`; empty means "no choice", not a mode.

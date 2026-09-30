@@ -2,9 +2,19 @@
 //! `handleContinueClaudeSession` (`internal/api/claude_sessions.go`).
 //!
 //! Opens a new Agento chat that **resumes** an existing Claude Code
-//! conversation: it inherits the transcript's working directory and model, and
-//! carries the Claude session id in `sdk_session_id` so the SDK picks the
-//! history up on the first message.
+//! conversation: it inherits the transcript's working directory, model and
+//! permission mode, and carries the Claude session id in `sdk_session_id` so the
+//! SDK picks the history up on the first message.
+//!
+//! # The permission mode is translated, through a closed table (#721)
+//!
+//! The transcript spells a mode the way the CLI does (`bypassPermissions`), a
+//! chat the way `CHAT_PERMISSION_MODES` does (`bypass`), and
+//! [`chat_mode_from_cli`] is the one place the two meet. Anything it does not
+//! name becomes `""`, which is what every continued chat had before — the runner
+//! then asks for each tool. The table is closed because the runner treats an
+//! *unrecognised* mode as bypass, so passing a value through would turn a mode
+//! the CLI invents tomorrow into a prompt-free chat.
 //!
 //! # Two writes, one transaction
 //!
@@ -101,7 +111,7 @@ pub fn continue_session(db_path: &std::path::Path, session_id: &str) -> Result<A
             working_directory: &detail.summary.cwd,
             model: &detail.summary.model,
             settings_profile_id: "",
-            permission_mode: "",
+            permission_mode: chat_mode_from_cli(&detail.summary.permission_mode),
         },
     )?;
 
@@ -169,6 +179,25 @@ pub fn continue_session(db_path: &std::path::Path, session_id: &str) -> Result<A
     Ok(Answer::json_status(StatusCode::CREATED, body))
 }
 
+/// The chat permission mode a Claude Code session's own mode becomes.
+///
+/// `detail.summary.permission_mode` is the transcript's last `permission-mode`
+/// event, in the CLI's spelling. The table is an allowlist on purpose: the
+/// runner's `_ =>` arm treats an unrecognised mode as bypass, so an unknown
+/// value must land on `""` (the runner asks), never pass through. `acceptEdits`
+/// and `auto` have no chat spelling and take the same `""`.
+fn chat_mode_from_cli(cli: &str) -> &'static str {
+    let mode = match cli {
+        "bypassPermissions" => "bypass",
+        "default" => "default",
+        "plan" => "plan",
+        "dontAsk" => "dontAsk",
+        _ => "",
+    };
+    debug_assert!(chats::is_valid_permission_mode(mode));
+    mode
+}
+
 /// The chat this session has already been continued into, if there is one.
 ///
 /// Two ways a chat can already *be* this conversation, and both are matched:
@@ -215,13 +244,19 @@ mod tests {
 
     impl Fixture {
         fn new(session_id: &str) -> Self {
+            Self::with_extra(session_id, "")
+        }
+
+        /// The fixture with `extra` (whole JSONL lines) appended to the
+        /// transcript, for the tests that need a session-metadata event.
+        fn with_extra(session_id: &str, extra: &str) -> Self {
             let dir = tempfile::tempdir().expect("temp dir");
             let claude = dir.path().join(".claude");
             let project = claude.join("projects").join("-home-u-proj");
             std::fs::create_dir_all(&project).expect("project dir");
 
             let transcript = format!(
-                "{}\n{}\n",
+                "{}\n{}\n{extra}",
                 r#"{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-08-01T10:00:00Z","cwd":"/home/u/proj","message":{"role":"user","content":"do the thing"}}"#,
                 r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-08-01T10:00:05Z","cwd":"/home/u/proj","message":{"role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#
             );
@@ -616,6 +651,96 @@ mod tests {
             from_id, "",
             "its own history is in chat_messages, so it inherits nothing"
         );
+    }
+
+    /// Every row of the table, including the values that must *not* pass
+    /// through: the runner reads an unrecognised mode as bypass.
+    #[test]
+    fn the_cli_mode_maps_through_a_closed_table() {
+        for (cli, chat) in [
+            ("bypassPermissions", "bypass"),
+            ("default", "default"),
+            ("plan", "plan"),
+            ("dontAsk", "dontAsk"),
+            ("", ""),
+            ("acceptEdits", ""),
+            ("auto", ""),
+            ("bypass", ""),
+            ("yolo", ""),
+        ] {
+            assert_eq!(chat_mode_from_cli(cli), chat, "{cli:?}");
+            assert!(chats::is_valid_permission_mode(chat_mode_from_cli(cli)));
+        }
+    }
+
+    fn permission_mode_event(mode: &str) -> String {
+        format!(
+            "{{\"type\":\"permission-mode\",\"permissionMode\":\"{mode}\",\
+             \"sessionId\":\"s\"}}\n"
+        )
+    }
+
+    fn stored_mode(f: &Fixture, chat_id: &str) -> String {
+        f.conn()
+            .query_row(
+                "SELECT permission_mode FROM chat_sessions WHERE id = ?1",
+                [chat_id],
+                |r| r.get(0),
+            )
+            .expect("the chat row")
+    }
+
+    /// A bypass session continues as a bypass chat — the last
+    /// `permission-mode` event wins, because the CLI re-appends it on each
+    /// resume and the final value is the current one.
+    #[test]
+    fn a_bypass_session_continues_as_a_bypass_chat() {
+        let extra = format!(
+            "{}{}",
+            permission_mode_event("default"),
+            permission_mode_event("bypassPermissions")
+        );
+        let f = Fixture::with_extra("88888888-9999-aaaa-bbbb-cccccccccccc", &extra);
+
+        let chat_id = chat_id_of(continue_session(&f.db, &f.session_id).expect("continue"));
+        assert_eq!(stored_mode(&f, &chat_id), "bypass");
+    }
+
+    /// A mode with no chat spelling keeps the old behaviour: the runner asks.
+    #[test]
+    fn an_unmapped_session_mode_continues_as_no_choice() {
+        let f = Fixture::with_extra(
+            "99999999-aaaa-bbbb-cccc-dddddddddddd",
+            &permission_mode_event("acceptEdits"),
+        );
+
+        let chat_id = chat_id_of(continue_session(&f.db, &f.session_id).expect("continue"));
+        assert_eq!(stored_mode(&f, &chat_id), "");
+    }
+
+    /// Re-continuing is still the #490 no-write path: the chat's mode is left
+    /// as it is, even when the transcript has since changed its mind.
+    #[test]
+    fn re_continuing_leaves_the_chat_mode_alone() {
+        let f = Fixture::with_extra(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            &permission_mode_event("plan"),
+        );
+
+        let first = chat_id_of(continue_session(&f.db, &f.session_id).expect("first"));
+        assert_eq!(stored_mode(&f, &first), "plan");
+
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.project.join(format!("{}.jsonl", f.session_id)))
+            .expect("append")
+            .write_all(permission_mode_event("bypassPermissions").as_bytes())
+            .expect("write");
+
+        let second = chat_id_of(continue_session(&f.db, &f.session_id).expect("second"));
+        assert_eq!(first, second);
+        assert_eq!(stored_mode(&f, &second), "plan", "no write on reopen");
     }
 
     /// A session that exists nowhere is Go's 404 with its own fixed wording,
