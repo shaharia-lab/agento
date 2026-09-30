@@ -506,7 +506,7 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
     let outcome = apply::apply_changes(
         &mut conn,
         units,
-        &changes.to_delete,
+        &changes.to_expire,
         resolver.as_ref(),
         idle_ms,
         |done, total| {
@@ -527,11 +527,12 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
     // scan races. Nothing durable is lost either way, because a session with no
     // insight row is exactly what the worker's own sweep selects for.
     //
-    // The reconcile runs **after** the delete pass rather than inside it, and
+    // The reconcile runs **after** the expiry pass rather than inside it, and
     // keys on "no cache row for this pair remains" rather than on a path — see
     // `insights::store::delete_orphans` for why a claim shift makes the path
-    // formulation wrong, and why running here inherits the delete pass's
-    // protection for an unreadable config dir.
+    // formulation wrong, and why running here inherits the expiry pass's
+    // protection for an unreadable config dir. An expired row is still a cache
+    // row, so its insights are kept by design (#705).
     match super::insights::store::delete_orphans(&conn) {
         Ok(n) if n > 0 => log::info!("insights: reconciled {n} orphaned rows"),
         Ok(_) => {}
@@ -542,7 +543,7 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
     }
     // The search index's reconcile, on exactly the same terms and for the same
     // reasons (#435): keyed on "no cache row for this pair remains" rather than
-    // on a path, and run **here** — after the delete pass — so it inherits the
+    // on a path, and run **here** — after the expiry pass — so it inherits the
     // unreadable-config-dir protection instead of emptying an account's index
     // when a drive is unmounted.
     //
@@ -585,9 +586,9 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
         .rows_written = outcome.rows_written;
     record_markers(&conn, &stale);
     log::info!(
-        "claude session scan complete: {} written, {} deleted, {} skipped",
+        "claude session scan complete: {} written, {} expired, {} skipped",
         outcome.rows_written,
-        outcome.rows_deleted,
+        outcome.rows_expired,
         outcome.skipped
     );
     Ok(())
@@ -1050,30 +1051,26 @@ mod tests {
         assert_eq!(version("beta"), current, "the unchanged one is not");
     }
 
-    /// A removed session loses its index row, and one under a config dir that
-    /// could not be listed keeps both its rows.
+    /// A removed session is expired and keeps its rows, and one under a config
+    /// dir that could not be listed is not touched at all (#705).
     ///
-    /// **The first half is the ordering assertion**, and it is the one that
-    /// fails on the revert: `search::delete_orphans` keys on "no cache row for
-    /// this pair remains", so moving it *above* `apply_changes` — which is where
-    /// the cache's own delete pass runs — finds the row still present, deletes
-    /// nothing, and leaves an index row for a session that no longer exists.
-    /// Every other observable stays identical, which is why this needs a test
-    /// rather than a comment.
+    /// **The first half** is the expiry: `alpha`'s transcript is gone from a
+    /// dir that still lists, so its cache row stays with `transcript_expired_at`
+    /// set, and the reconciles that key on "no cache row for this pair remains"
+    /// keep its insight and index rows. Before #705 this test asserted the
+    /// opposite — the delete pass removed the row and the reconciles followed.
+    /// Dropping an expired session's index row is #706's, and whichever of the
+    /// two lands second asserts it here.
     ///
-    /// **The second half is what that ordering buys**, and it is the failure the
-    /// argument is actually about: an unlistable config dir is an unplugged
-    /// drive, its cache rows are deliberately protected from the delete pass,
-    /// and the reconcile running afterwards inherits that protection for free.
-    /// Reconciling on a path instead, or before the delete pass, empties that
-    /// account's index with nothing to report it.
+    /// **The second half is the protection**: an unlistable config dir is an
+    /// unplugged drive, and its rows are neither expired nor reconciled away.
     ///
     /// The index rows are written directly rather than by running the worker:
     /// this is a test of the reconcile, and `insights/worker.rs` owns the
     /// question of what a correct index row contains.
     #[cfg(unix)]
     #[test]
-    fn the_reconcile_drops_a_removed_sessions_rows_and_spares_a_protected_dirs() {
+    fn the_reconcile_expires_a_removed_session_and_spares_a_protected_dirs() {
         use std::os::unix::fs::PermissionsExt;
 
         let _serialised = scan_state_lock();
@@ -1168,29 +1165,37 @@ mod tests {
         scanned.expect("the second scan");
 
         let conn = rusqlite::Connection::open(file.path()).expect("open");
-        let survivor: Vec<(String, String)> = cached
-            .iter()
-            .filter(|(session_id, _)| session_id == "beta")
-            .cloned()
-            .collect();
-        assert_eq!(survivor.len(), 1, "the fixture named its sessions wrongly");
         assert_eq!(
             pairs(&conn, "claude_session_cache"),
-            survivor,
-            "a session under an unlistable config dir must keep its cache row, \
-             and a deleted one must lose it",
+            cached,
+            "a vanished transcript expires its row rather than deleting it, and \
+             a session under an unlistable config dir keeps its row",
         );
+        let expired = |session: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT transcript_expired_at FROM claude_session_cache WHERE session_id = ?1",
+                [session],
+                |r| r.get(0),
+            )
+            .expect("stamp")
+        };
+        assert!(expired("alpha").is_some(), "the removed session is expired");
         assert_eq!(
-            pairs(&conn, "session_search"),
-            survivor,
-            "the reconcile must drop the removed session's index row — and must \
-             run after the delete pass, or it finds nothing to drop",
+            expired("beta"),
+            None,
+            "absence under an unlistable dir is not evidence"
         );
         assert_eq!(
             pairs(&conn, "session_insights"),
-            survivor,
-            "the sibling reconcile is wired on exactly the same terms, and an \
-             unmounted drive must not cost an account its insights either",
+            cached,
+            "an expired session keeps its insights, and an unmounted drive must \
+             not cost an account its insights either",
+        );
+        assert_eq!(
+            pairs(&conn, "session_search"),
+            cached,
+            "an expired row is still a cache row, so the reconcile keeps its index \
+             row until #706 drops it; the protected one is kept regardless",
         );
     }
 

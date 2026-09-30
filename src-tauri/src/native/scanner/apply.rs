@@ -32,6 +32,7 @@ use std::sync::mpsc;
 
 use rusqlite::Connection;
 
+use crate::native::gotime::{to_go_string_utc, GoTime};
 use crate::native::pricing::Resolver;
 use crate::native::sessions::summary::SessionSummary;
 
@@ -107,7 +108,7 @@ pub struct Notification {
 #[derive(Debug, Default, PartialEq)]
 pub struct ApplyOutcome {
     pub rows_written: usize,
-    pub rows_deleted: usize,
+    pub rows_expired: usize,
     /// Files that could not be read, or produced no row.
     pub skipped: usize,
     /// One per session, however many of its files changed.
@@ -116,13 +117,14 @@ pub struct ApplyOutcome {
 
 /// Reads every unit in parallel and writes the results in batches.
 ///
-/// Deletes run **after** every write, which is what makes a claim shift safe:
-/// the row is upserted under its new path first, and only then is the stale
-/// path reconciled away.
+/// The expiry pass runs **after** every write, as the delete pass it replaced
+/// did (#705). A claim shift's old path is never in `to_expire` — the diff
+/// excludes it by key — so the order no longer carries that rule; it keeps a
+/// failed expiry from costing the writes.
 pub fn apply_changes(
     conn: &mut Connection,
     units: Vec<ScanUnit>,
-    to_delete: &[CachedEntry],
+    to_expire: &[CachedEntry],
     resolver: Option<&Resolver>,
     idle_gap_ms: i64,
     mut progress: impl FnMut(usize, usize),
@@ -202,13 +204,14 @@ pub fn apply_changes(
         }
     });
 
-    // The delete pass is a single transaction that aborts wholesale on the
+    // The expiry pass is a single transaction that aborts wholesale on the
     // first error, unlike the batched writes: a partial reconciliation is worse
-    // than none, since the rows it would leave behind look deleted to nothing.
-    if !to_delete.is_empty() {
-        match run_deletes(conn, to_delete) {
-            Ok(n) => outcome.rows_deleted = n,
-            Err(e) => log::warn!("claude sessions: delete pass failed, leaving rows: {e}"),
+    // than none. A failed pass leaves the rows live, and the next scan lists
+    // them again.
+    if !to_expire.is_empty() {
+        match run_expiry(conn, to_expire) {
+            Ok(n) => outcome.rows_expired = n,
+            Err(e) => log::warn!("claude sessions: expiry pass failed, leaving rows: {e}"),
         }
     }
 
@@ -347,13 +350,17 @@ fn record_pending(pending: &mut BTreeMap<SessionKey, Notification>, item: &ScanR
         });
 }
 
-fn run_deletes(conn: &mut Connection, to_delete: &[CachedEntry]) -> Result<usize, String> {
+/// Stamps every entry with one `now`, and counts the rows actually changed
+/// rather than the entries listed.
+fn run_expiry(conn: &mut Connection, to_expire: &[CachedEntry]) -> Result<usize, String> {
+    let now = to_go_string_utc(GoTime(chrono::Utc::now().fixed_offset()));
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    for entry in to_delete {
-        store::delete_cached_file(&tx, entry)?;
+    let mut changed = 0;
+    for entry in to_expire {
+        changed += store::expire_cached_file(&tx, entry, &now)?;
     }
     tx.commit().map_err(|e| e.to_string())?;
-    Ok(to_delete.len())
+    Ok(changed)
 }
 
 #[cfg(test)]

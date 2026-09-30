@@ -9,6 +9,16 @@
 //! mirror Claude Code's own title events — including a rename that clears one —
 //! and `custom_title` wins over both when the display title is resolved.
 //!
+//! ## An expired row keeps everything but its preview (#705)
+//!
+//! A row whose transcript vanished is stamped `transcript_expired_at` and has
+//! `preview` blanked — the one column that is transcript *content*. Cost,
+//! tokens, model, project, times, duration, git branch, permission mode,
+//! config dir, `custom_title`, `is_favorite`, `native_title`, `ai_title` and the
+//! `claude_session_pr` rows are kept. Both upserts write
+//! `transcript_expired_at = NULL`, so a re-read — a restored file, or a claim
+//! shift onto a new path — un-expires the row and brings `preview` back.
+//!
 //! ## Two encodings that are not what they look like
 //!
 //! `cost_by_model` is JSON, but an empty map stores as `""` rather than `"{}"`.
@@ -50,10 +60,12 @@ fn load_from(
     is_subagent: bool,
 ) -> Result<(), String> {
     let sql = if is_subagent {
-        "SELECT file_path, file_mtime, COALESCE(config_dir, ''), parent_session_id, agent_id
+        "SELECT file_path, file_mtime, COALESCE(config_dir, ''), parent_session_id, agent_id,
+                transcript_expired_at IS NOT NULL
          FROM claude_subagent_cache"
     } else {
-        "SELECT file_path, file_mtime, COALESCE(config_dir, ''), session_id, project_path
+        "SELECT file_path, file_mtime, COALESCE(config_dir, ''), session_id, project_path,
+                transcript_expired_at IS NOT NULL
          FROM claude_session_cache"
     };
 
@@ -65,6 +77,7 @@ fn load_from(
             let config_dir: String = r.get(2)?;
             let key_a: String = r.get(3)?;
             let key_b: String = r.get(4)?;
+            let expired: bool = r.get(5)?;
             Ok(CachedEntry {
                 file_path: PathBuf::from(file_path),
                 mtime: GoTime::parse_any(&mtime)
@@ -79,6 +92,7 @@ fn load_from(
                     key_b.clone()
                 },
                 agent_id: if is_subagent { key_b } else { String::new() },
+                expired,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -92,8 +106,8 @@ fn load_from(
 /// Writes one session row.
 ///
 /// The conflict target is the table's primary key, so a claim shift — the same
-/// row arriving under a new path — updates in place and the stale path is
-/// reconciled away by the delete pass afterwards.
+/// row arriving under a new path — updates in place, moving the row. Every
+/// write clears `transcript_expired_at`: a file that was read is not expired.
 pub fn insert_cache_row(
     tx: &Transaction,
     file: &DiskFile,
@@ -155,7 +169,8 @@ pub fn insert_cache_row(
              unpriced_tokens = excluded.unpriced_tokens,
              cost_by_model = excluded.cost_by_model,
              active_duration_ms = excluded.active_duration_ms,
-             config_dir = excluded.config_dir",
+             config_dir = excluded.config_dir,
+             transcript_expired_at = NULL",
         params![
             s.session_id,
             s.project_path,
@@ -316,7 +331,8 @@ pub fn upsert_subagent_row(
              unpriced_models = excluded.unpriced_models,
              unpriced_tokens = excluded.unpriced_tokens,
              active_duration_ms = excluded.active_duration_ms,
-             config_dir = excluded.config_dir",
+             config_dir = excluded.config_dir,
+             transcript_expired_at = NULL",
         params![
             file.session_id,
             file.agent_id,
@@ -351,33 +367,27 @@ pub fn upsert_subagent_row(
     .map_err(|e| format!("writing sub-agent row {}: {e}", file.agent_id))
 }
 
-/// Removes one cached row and, for a session, its pull requests.
+/// Marks one cached row's transcript as gone, returning how many rows changed.
 ///
-/// The PR delete resolves the session id *through* the session row, so it must
-/// run before that row is removed.
-pub fn delete_cached_file(tx: &Transaction, entry: &CachedEntry) -> Result<(), String> {
+/// `now` is the DATETIME text every other time column is written in (UTC). The
+/// `IS NULL` guard keeps the first stamp, so the call is idempotent. A session
+/// row also loses its `preview`; a sub-agent row has none. The pull requests
+/// are not touched — see the module docs for what an expired row keeps.
+pub fn expire_cached_file(
+    tx: &Transaction,
+    entry: &CachedEntry,
+    now: &str,
+) -> Result<usize, String> {
     let path = entry.file_path.to_string_lossy().into_owned();
-
-    if !entry.is_subagent {
-        tx.execute(
-            "DELETE FROM claude_session_pr WHERE session_id IN
-                 (SELECT session_id FROM claude_session_cache WHERE file_path = ?1)",
-            params![path],
-        )
-        .map_err(|e| format!("clearing PR rows for {path}: {e}"))?;
-    }
-
-    let table = if entry.is_subagent {
-        "claude_subagent_cache"
+    let sql = if entry.is_subagent {
+        "UPDATE claude_subagent_cache SET transcript_expired_at = ?2
+         WHERE file_path = ?1 AND transcript_expired_at IS NULL"
     } else {
-        "claude_session_cache"
+        "UPDATE claude_session_cache SET transcript_expired_at = ?2, preview = ''
+         WHERE file_path = ?1 AND transcript_expired_at IS NULL"
     };
-    tx.execute(
-        &format!("DELETE FROM {table} WHERE file_path = ?1"),
-        params![path],
-    )
-    .map(|_| ())
-    .map_err(|e| format!("deleting {path}: {e}"))
+    tx.execute(sql, params![path, now])
+        .map_err(|e| format!("expiring {path}: {e}"))
 }
 
 /// Newline-joined, not JSON: a model id may contain a slash but never a

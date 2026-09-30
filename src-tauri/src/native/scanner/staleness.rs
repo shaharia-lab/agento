@@ -90,7 +90,7 @@ fn stored_i64(conn: &Connection, column: &str) -> i64 {
 ///
 /// The rows are **kept**, not dropped: a dropped row would come back as an
 /// insert and re-fire a discovery event for a session that has been cached for
-/// months, and the delete pass would lose the ability to detect a genuine
+/// months, and the expiry pass would lose the ability to detect a genuine
 /// removal in the same scan.
 pub fn invalidate_cached_mtimes(cached: &mut [CachedEntry]) {
     let zero = chrono::DateTime::UNIX_EPOCH;
@@ -196,6 +196,7 @@ mod tests {
             session_id: "s1".into(),
             project_path: "/p".into(),
             agent_id: String::new(),
+            expired: false,
         }];
         invalidate_cached_mtimes(&mut rows);
         assert_eq!(rows.len(), 1, "dropping the row would re-fire a discovery");

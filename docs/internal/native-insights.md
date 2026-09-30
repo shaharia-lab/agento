@@ -30,12 +30,14 @@ Three rules, each silent when wrong:
 - **The reconcile keys on "no cache row remains", never on a path.** A claim
   shift moves a transcript and is an update, not a deletion (#245), and
   `session_insights` has no `file_path` to get this wrong with. Running it after
-  the scan's own delete pass is what inherits the unreadable-config-dir
-  protection: those cache rows survive, so their insights are not orphans.
+  the scan's own expiry pass is what inherits the unreadable-config-dir
+  protection: those cache rows survive, so their insights are not orphans. An
+  **expired** row is a cache row too (#705), so a session whose transcript
+  vanished keeps its insights by design.
   **The ordering is asserted in `scan.rs`'s own tests since #447**, over a
-  two-config-dir fixture corpus under a swapped `HOME`: a removed session loses
-  its index row, and a session under a `chmod 0o000` config dir keeps its cache,
-  insight *and* index rows. Both `delete_orphans` functions had unit tests
+  two-config-dir fixture corpus under a swapped `HOME`: a removed session is
+  expired and keeps its insight row, and a session under a `chmod 0o000` config
+  dir keeps its cache, insight *and* index rows unexpired. Both `delete_orphans` functions had unit tests
   against a hand-built database, and what those cannot say is *where they are
   called from* — moving `search::delete_orphans` above `apply_changes` finds
   every row still present, deletes nothing, and changes no other observable.

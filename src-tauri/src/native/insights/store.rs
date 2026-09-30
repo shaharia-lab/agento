@@ -330,7 +330,7 @@ pub fn scanned_at_now() -> String {
 /// "no cache row for this pair remains" is the only formulation that survives a
 /// move.
 ///
-/// It follows that this must run **after** the cache's delete pass, and that it
+/// It follows that this must run **after** the cache's expiry pass, and that it
 /// inherits that pass's protection for free: a config dir that could not be
 /// listed keeps its cache rows, so its insights are not orphans and are not
 /// touched. That is the property that stops an unmounted drive wiping an

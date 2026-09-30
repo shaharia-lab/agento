@@ -333,7 +333,7 @@ fn payload(value: &impl Serialize) -> Box<RawValue> {
 /// `find_session_file` has already established that the file exists, so the only
 /// ways to fail past it are a permissions change, an unmounted drive or an I/O
 /// error — and "we could not look" is not "it does not exist", which is the rule
-/// the scanner's own delete pass is built on. Reporting it as the route's 404
+/// the scanner's own expiry pass is built on. Reporting it as the route's 404
 /// would also have the two tabs of one session disagree about the same file at
 /// the same instant, since `detail::get` propagates and answers 500. Only the
 /// **parent** read is fatal; an unreadable sub-agent transcript contributes no

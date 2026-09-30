@@ -13,7 +13,7 @@
 //! on it would wipe an account's whole corpus, taking `custom_title` and
 //! `is_favorite` (the two user-owned columns a rescan deliberately preserves)
 //! with it. So a dir that failed to list is left out of [`DiskWalk::walked`],
-//! and the delete pass skips every row belonging to it.
+//! and the expiry pass skips every row belonging to it.
 //!
 //! Three outcomes, and the middle one is easy to miss:
 //!
@@ -72,10 +72,10 @@ pub struct DiskWalk {
     /// The config dirs that produced a complete listing.
     ///
     /// Not bookkeeping: a cached row whose config dir is absent from this set
-    /// must be excluded from the delete pass.
+    /// must be excluded from the expiry pass.
     pub walked: HashSet<String>,
     /// Directory paths whose contents could not be fully listed. Rows beneath
-    /// them are excluded from the delete pass.
+    /// them are excluded from the expiry pass.
     pub protected: Vec<PathBuf>,
 }
 

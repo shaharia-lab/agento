@@ -293,10 +293,11 @@ fn run_once(db_path: &Path, rx: &Receiver<Pending>, timeout: Duration) -> Pass {
 ///
 /// It is selected by every sweep rather than once, so `read_in_parallel` warns
 /// about it every [`RESCAN_INTERVAL`] instead of never. That is the intended
-/// trade and it is bounded: a transcript that is simply *gone* has its cache row
-/// removed by the scan's own delete pass and its rows reconciled away, so what
-/// retries for ever is precisely the protected case — a config dir that could
-/// not be listed — which is the case that must retry.
+/// trade. A transcript that could not be listed — the protected case — is the
+/// one that must retry. A transcript that is simply *gone* no longer loses its
+/// cache row: since #705 the scan expires it and keeps it, so a sweep still
+/// selects it and skips it, until the workers learn to pass expired rows over
+/// (#707).
 fn sweep(db_path: &Path) {
     let conn = match db::open_read_only(db_path) {
         Ok(conn) => conn,

@@ -3,7 +3,8 @@
 //! Walk → diff → apply, over a corpus built in a temp directory. This is where
 //! the pieces are checked as a *sequence*: that a first scan inserts and
 //! announces discoveries, that a second scan does nothing, that a touched file
-//! is re-read as an update, that a removed transcript is reconciled away, and
+//! is re-read as an update, that a removed transcript is expired and a restored
+//! one un-expired (#705), and
 //! that the two user-owned columns survive all of it.
 //!
 //! The database here is created by the test. The application's own handle is
@@ -46,6 +47,7 @@ CREATE TABLE claude_session_cache (
     unpriced_models TEXT NOT NULL DEFAULT '', unpriced_tokens INTEGER NOT NULL DEFAULT 0,
     cost_by_model TEXT NOT NULL DEFAULT '', active_duration_ms INTEGER NOT NULL DEFAULT 0,
     config_dir TEXT NOT NULL DEFAULT '',
+    transcript_expired_at DATETIME,
     PRIMARY KEY (session_id, project_path)
 );
 CREATE TABLE claude_subagent_cache (
@@ -66,6 +68,7 @@ CREATE TABLE claude_subagent_cache (
     total_cost_usd REAL NOT NULL DEFAULT 0,
     unpriced_models TEXT NOT NULL DEFAULT '', unpriced_tokens INTEGER NOT NULL DEFAULT 0,
     active_duration_ms INTEGER NOT NULL DEFAULT 0, config_dir TEXT NOT NULL DEFAULT '',
+    transcript_expired_at DATETIME,
     PRIMARY KEY (parent_session_id, agent_id)
 );
 CREATE TABLE claude_session_pr (
@@ -133,7 +136,7 @@ fn scan(
     apply_changes(
         conn,
         units,
-        &diff.to_delete,
+        &diff.to_expire,
         None,
         IDLE_GAP_MS,
         |_done, _total| {},
@@ -236,28 +239,243 @@ fn a_rescan_preserves_the_two_user_owned_columns() {
     assert_eq!(messages, 3, "and the row did pick up the new turn");
 }
 
+/// Everything an expired row must keep, in one comparable tuple.
+type Kept = (
+    String,
+    f64,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+);
+
+fn kept(conn: &Connection, session: &str) -> Kept {
+    conn.query_row(
+        "SELECT file_path, total_cost_usd, input_tokens, output_tokens, model, git_branch,
+                custom_title, is_favorite, native_title, ai_title, config_dir
+         FROM claude_session_cache WHERE session_id = ?1",
+        [session],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+            ))
+        },
+    )
+    .unwrap()
+}
+
+fn stamp_and_preview(conn: &Connection, session: &str) -> (Option<String>, String) {
+    conn.query_row(
+        "SELECT transcript_expired_at, preview FROM claude_session_cache WHERE session_id = ?1",
+        [session],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+}
+
+fn session_path(cfg: &str, session: &str) -> PathBuf {
+    Path::new(cfg)
+        .join("projects")
+        .join("-w")
+        .join(format!("{session}.jsonl"))
+}
+
 #[test]
-fn a_removed_transcript_is_reconciled_away_with_its_pull_requests() {
+fn a_removed_transcript_is_expired_and_keeps_its_pull_requests() {
+    // Rewritten by #705 from `a_removed_transcript_is_reconciled_away_with_its_
+    // pull_requests`: the row, its user-owned columns and its PR links used to
+    // be deleted, and are now kept with the transcript marked gone.
     let tmp = tempfile::tempdir().unwrap();
     let cfg = build_corpus(tmp.path(), &["s1", "s2"]);
     let mut conn = scratch_db();
     scan(&mut conn, std::slice::from_ref(&cfg));
     assert_eq!(row_count(&conn, "claude_session_pr"), 2);
+    conn.execute(
+        "UPDATE claude_session_cache SET custom_title = 'mine', is_favorite = 1
+         WHERE session_id = 's2'",
+        [],
+    )
+    .unwrap();
+    let before = kept(&conn, "s2");
 
-    std::fs::remove_file(Path::new(&cfg).join("projects").join("-w").join("s2.jsonl")).unwrap();
+    std::fs::remove_file(session_path(&cfg, "s2")).unwrap();
 
     let outcome = scan(&mut conn, std::slice::from_ref(&cfg));
-    assert_eq!(outcome.rows_deleted, 1);
-    assert_eq!(row_count(&conn, "claude_session_cache"), 1);
-    // No foreign key does this for us; the delete pass resolves the session id
-    // through the row before removing it.
-    assert_eq!(row_count(&conn, "claude_session_pr"), 1);
+    assert_eq!(outcome.rows_expired, 1);
+    assert_eq!(row_count(&conn, "claude_session_cache"), 2);
+    assert_eq!(row_count(&conn, "claude_session_pr"), 2);
+    assert_eq!(kept(&conn, "s2"), before, "only the preview is blanked");
+    let (stamp, preview) = stamp_and_preview(&conn, "s2");
+    assert!(stamp.is_some(), "the vanished transcript is stamped");
+    assert_eq!(preview, "", "the preview is transcript content");
+    assert_eq!(
+        stamp_and_preview(&conn, "s1"),
+        (None, "do the thing".to_string()),
+        "the live session is untouched"
+    );
 }
 
 #[test]
-fn an_unreadable_config_dir_protects_its_rows_from_the_delete_pass() {
+fn a_second_scan_does_not_move_the_expiry_stamp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = build_corpus(tmp.path(), &["s1"]);
+    let mut conn = scratch_db();
+    scan(&mut conn, std::slice::from_ref(&cfg));
+    std::fs::remove_file(session_path(&cfg, "s1")).unwrap();
+    scan(&mut conn, std::slice::from_ref(&cfg));
+    let first = stamp_and_preview(&conn, "s1").0;
+    assert!(first.is_some());
+
+    // Past a second, so a re-stamp would be visible in the text.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let outcome = scan(&mut conn, std::slice::from_ref(&cfg));
+    assert_eq!(
+        outcome.rows_expired, 0,
+        "an expired row is not listed again"
+    );
+    assert_eq!(stamp_and_preview(&conn, "s1").0, first);
+}
+
+#[test]
+fn a_restored_transcript_with_its_original_mtime_is_un_expired() {
+    // `cp -p`: the same bytes and the same mtime. The diff would see nothing
+    // changed, so the expired flag alone must send it for a re-read.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = build_corpus(tmp.path(), &["s1"]);
+    let path = session_path(&cfg, "s1");
+    let bytes = std::fs::read(&path).unwrap();
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut conn = scratch_db();
+    scan(&mut conn, std::slice::from_ref(&cfg));
+
+    std::fs::remove_file(&path).unwrap();
+    scan(&mut conn, std::slice::from_ref(&cfg));
+    assert!(stamp_and_preview(&conn, "s1").0.is_some());
+
+    std::fs::write(&path, bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+
+    let outcome = scan(&mut conn, std::slice::from_ref(&cfg));
+    assert_eq!(outcome.rows_written, 1, "the restored file was re-read");
+    assert_eq!(
+        stamp_and_preview(&conn, "s1"),
+        (None, "do the thing".to_string()),
+        "the upsert clears the stamp and brings the preview back"
+    );
+}
+
+#[test]
+fn a_removed_sub_agent_transcript_is_expired() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = build_corpus(tmp.path(), &["s1"]);
+    let subagents = Path::new(&cfg)
+        .join("projects")
+        .join("-w")
+        .join("s1")
+        .join("subagents");
+    std::fs::create_dir_all(&subagents).unwrap();
+    std::fs::write(subagents.join("agent-1.jsonl"), transcript(20)).unwrap();
+    let mut conn = scratch_db();
+    scan(&mut conn, std::slice::from_ref(&cfg));
+    assert_eq!(row_count(&conn, "claude_subagent_cache"), 1);
+
+    std::fs::remove_file(subagents.join("agent-1.jsonl")).unwrap();
+    let outcome = scan(&mut conn, std::slice::from_ref(&cfg));
+
+    assert_eq!(outcome.rows_expired, 1);
+    let (stamp, messages): (Option<String>, i64) = conn
+        .query_row(
+            "SELECT transcript_expired_at, message_count FROM claude_subagent_cache",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(stamp.is_some());
+    assert_eq!(messages, 2, "the row's figures are kept");
+    assert_eq!(stamp_and_preview(&conn, "s1").0, None, "the parent is live");
+}
+
+#[test]
+fn a_claim_shift_is_never_expired() {
+    // A live row moving from one config dir to another in a single scan.
+    let tmp = tempfile::tempdir().unwrap();
+    let first = build_corpus(&tmp.path().join("a"), &["s1"]);
+    let second = build_corpus(&tmp.path().join("b"), &[]);
+    let dirs = [first.clone(), second.clone()];
+    let mut conn = scratch_db();
+    scan(&mut conn, &dirs);
+
+    std::fs::rename(session_path(&first, "s1"), session_path(&second, "s1")).unwrap();
+    let outcome = scan(&mut conn, &dirs);
+
+    assert_eq!(outcome.rows_expired, 0, "a move is not an expiry");
+    assert_eq!(row_count(&conn, "claude_session_cache"), 1);
+    assert_eq!(stamp_and_preview(&conn, "s1").0, None);
+    assert_eq!(
+        kept(&conn, "s1").0,
+        session_path(&second, "s1").to_string_lossy()
+    );
+}
+
+#[test]
+fn an_expired_session_reappearing_under_another_config_dir_is_un_expired() {
+    // The DB-only case: the row outlived its transcript, then the same session
+    // turns up under a different config dir. The claim shift re-points it.
+    let tmp = tempfile::tempdir().unwrap();
+    let first = build_corpus(&tmp.path().join("a"), &["s1"]);
+    let second = build_corpus(&tmp.path().join("b"), &[]);
+    let dirs = [first.clone(), second.clone()];
+    let mut conn = scratch_db();
+    scan(&mut conn, &dirs);
+    let bytes = std::fs::read(session_path(&first, "s1")).unwrap();
+
+    std::fs::remove_file(session_path(&first, "s1")).unwrap();
+    scan(&mut conn, &dirs);
+    assert!(stamp_and_preview(&conn, "s1").0.is_some());
+
+    std::fs::write(session_path(&second, "s1"), bytes).unwrap();
+    let outcome = scan(&mut conn, &dirs);
+
+    assert_eq!(outcome.rows_expired, 0);
+    assert!(
+        outcome.notifications.iter().all(|n| !n.is_new),
+        "the row existed, so it is an update"
+    );
+    assert_eq!(row_count(&conn, "claude_session_cache"), 1);
+    assert_eq!(
+        stamp_and_preview(&conn, "s1"),
+        (None, "do the thing".to_string())
+    );
+    assert_eq!(
+        kept(&conn, "s1").0,
+        session_path(&second, "s1").to_string_lossy()
+    );
+}
+
+#[test]
+fn an_unreadable_config_dir_protects_its_rows_from_the_expiry_pass() {
     // The unplugged-drive case, end to end: the rows must survive a scan that
-    // could not see their files.
+    // could not see their files, unexpired.
     let tmp = tempfile::tempdir().unwrap();
     let cfg = build_corpus(tmp.path(), &["s1"]);
     let mut conn = scratch_db();
@@ -268,8 +486,12 @@ fn an_unreadable_config_dir_protects_its_rows_from_the_delete_pass() {
     std::fs::remove_dir_all(&cfg).unwrap();
 
     let outcome = scan(&mut conn, std::slice::from_ref(&cfg));
-    assert_eq!(outcome.rows_deleted, 0, "absence is not evidence");
+    assert_eq!(outcome.rows_expired, 0, "absence is not evidence");
     assert_eq!(row_count(&conn, "claude_session_cache"), 1);
+    assert_eq!(
+        stamp_and_preview(&conn, "s1"),
+        (None, "do the thing".to_string())
+    );
 }
 
 #[test]

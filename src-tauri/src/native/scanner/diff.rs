@@ -2,7 +2,7 @@
 //! `internal/claudesessions/scanner.go`.
 //!
 //! The diff turns "what is on disk" plus "what is cached" into three lists:
-//! files to insert, files to re-read, and rows to delete. Two of its rules
+//! files to insert, files to re-read, and rows to expire. Two of its rules
 //! exist because of failures that were shipped once.
 //!
 //! ## A path that moved is an update, not a discovery (#245)
@@ -17,18 +17,33 @@
 //!
 //! So the cache is indexed **twice**: by path, and by row key. A file whose
 //! path is unknown but whose key exists is an update. The row exists; only its
-//! path moved. The upsert conflicts on the primary key and the old path is
-//! reconciled away by the delete pass, which runs after the writes.
+//! path moved. The upsert conflicts on the primary key, which moves the row.
+//!
+//! The diff also indexes the files on disk by key, so a cached path whose key
+//! is still on disk somewhere is a move and never an expiry (#705). It does
+//! not lean on the expiry's `UPDATE … WHERE file_path = old` matching nothing
+//! once the upsert has moved the row; a claim shift whose new-path read fails
+//! keeps its row live rather than expiring it.
 //!
 //! This is a correctness fix for what `is_new` *means*, not a performance one:
 //! the insight worker subscribes to discovered and updated alike, and the
 //! scanner re-reads an updated transcript exactly as it re-reads a new one, so
 //! the work done is the same either way.
 //!
-//! ## A row is only deleted if we actually looked
+//! ## A row is only expired if we actually looked
 //!
 //! [`row_reconcilable`] is the guard. "No file on disk" and "we could not look"
 //! are indistinguishable here, and only one of them means the session is gone.
+//!
+//! ## A vanished transcript expires its row; it does not delete it (#705)
+//!
+//! Claude Code removes transcripts after `cleanupPeriodDays`, and the row holds
+//! what the transcript no longer can: cost, tokens, the user's rename and
+//! favourite, the PR links. So a row with no file behind it is stamped
+//! `transcript_expired_at`, once — an already-expired row is not listed again,
+//! so the stamp keeps the time the file was first found missing. An expired
+//! row whose file is back on disk is re-read even when the mtime is unchanged
+//! (`cp -p`), because the re-read is what clears the stamp.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -48,6 +63,8 @@ pub struct CachedEntry {
     pub session_id: String,
     pub project_path: String,
     pub agent_id: String,
+    /// `transcript_expired_at IS NOT NULL`.
+    pub expired: bool,
 }
 
 /// The identity of a row, which is **not** its path.
@@ -92,8 +109,9 @@ pub struct DiskDiff {
     pub to_insert: Vec<PathBuf>,
     /// Paths whose file changed, or whose row exists under a different path.
     pub to_update: Vec<PathBuf>,
-    /// Cached rows with no file behind them, in directories we could list.
-    pub to_delete: Vec<CachedEntry>,
+    /// Live cached rows with no file behind them — by path or by key — in
+    /// directories we could list.
+    pub to_expire: Vec<CachedEntry>,
 }
 
 /// Classifies every on-disk file and every cached row.
@@ -111,6 +129,9 @@ pub fn diff_disk_and_cache(
 
     // The second view: the cache by row identity rather than by path.
     let by_key: HashSet<String> = cached.values().map(CachedEntry::key).collect();
+    // The third: the files on disk by row identity, which is what tells a
+    // claim shift's old path (a move) from a vanished transcript (an expiry).
+    let on_disk_keys: HashSet<String> = on_disk.values().map(DiskFile::key).collect();
 
     for (path, file) in on_disk {
         match cached.get(path) {
@@ -123,7 +144,9 @@ pub fn diff_disk_and_cache(
                 }
             }
             Some(entry) => {
-                if entry.mtime != file.mtime {
+                // An expired row back on disk is re-read even at an unchanged
+                // mtime: the upsert is what clears its stamp.
+                if entry.mtime != file.mtime || entry.expired {
                     diff.to_update.push(path.clone());
                 }
             }
@@ -131,11 +154,15 @@ pub fn diff_disk_and_cache(
     }
 
     for (path, entry) in cached {
-        if on_disk.contains_key(path) {
+        if on_disk.contains_key(path) || entry.expired {
+            continue;
+        }
+        if on_disk_keys.contains(&entry.key()) {
+            // A claim shift: the row moves with the upsert.
             continue;
         }
         if row_reconcilable(entry, walk, default_config_dir) {
-            diff.to_delete.push(entry.clone());
+            diff.to_expire.push(entry.clone());
         }
     }
 
@@ -143,11 +170,11 @@ pub fn diff_disk_and_cache(
     // matters for the batching writer's progress reporting and for tests.
     diff.to_insert.sort();
     diff.to_update.sort();
-    diff.to_delete.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+    diff.to_expire.sort_by(|a, b| a.file_path.cmp(&b.file_path));
     diff
 }
 
-/// Whether a row with no file behind it may be deleted.
+/// Whether a row with no file behind it may be expired.
 ///
 /// Two ways to fail: the row's config dir was never listed, or its file sits
 /// under a project directory that could not be read. Either way the absence is
@@ -204,6 +231,14 @@ mod tests {
             session_id: session.into(),
             project_path: project.into(),
             agent_id: String::new(),
+            expired: false,
+        }
+    }
+
+    fn expired(path: &str, session: &str, project: &str, mtime: &str, dir: &str) -> CachedEntry {
+        CachedEntry {
+            expired: true,
+            ..cached(path, session, project, mtime, dir)
         }
     }
 
@@ -249,8 +284,9 @@ mod tests {
         let diff = diff_disk_and_cache(&on_disk, &cache, &walked(&["/d"]), "/default");
         assert_eq!(diff.to_insert, vec![PathBuf::from("/d/new.jsonl")]);
         assert_eq!(diff.to_update, vec![PathBuf::from("/d/mod.jsonl")]);
-        assert_eq!(diff.to_delete.len(), 1);
-        assert_eq!(diff.to_delete[0].session_id, "gone");
+        // A vanished transcript expires its row rather than deleting it (#705).
+        assert_eq!(diff.to_expire.len(), 1);
+        assert_eq!(diff.to_expire[0].session_id, "gone");
     }
 
     #[test]
@@ -277,13 +313,74 @@ mod tests {
         let diff = diff_disk_and_cache(&on_disk, &cache, &walked(&["/default", "/second"]), "/x");
         assert!(diff.to_insert.is_empty(), "the row already existed");
         assert_eq!(diff.to_update, vec![PathBuf::from("/second/s1.jsonl")]);
-        // The old path is reconciled away by the delete pass, which runs after
-        // the writes.
-        assert_eq!(diff.to_delete.len(), 1);
-        assert_eq!(
-            diff.to_delete[0].file_path,
-            PathBuf::from("/default/s1.jsonl")
+        // Changed deliberately by #705: the old path used to be listed for the
+        // delete pass, which then matched nothing because the upsert had moved
+        // the row. It is now excluded by key — stricter, not weaker: a claim
+        // shift is a move, and must never be stamped expired, even when the
+        // new path's read fails and the row is not moved this scan.
+        assert!(diff.to_expire.is_empty());
+    }
+
+    #[test]
+    fn an_already_expired_row_is_not_listed_again() {
+        // The stamp keeps the time the transcript was first found missing.
+        let (on_disk, cache) = maps(
+            vec![],
+            vec![expired(
+                "/d/gone.jsonl",
+                "gone",
+                "/p",
+                "2026-03-01T00:00:00Z",
+                "/d",
+            )],
         );
+        let diff = diff_disk_and_cache(&on_disk, &cache, &walked(&["/d"]), "/default");
+        assert_eq!(diff, DiskDiff::default());
+    }
+
+    #[test]
+    fn an_expired_row_back_on_disk_is_re_read_at_an_unchanged_mtime() {
+        // `cp -p` restores the original mtime; only the re-read un-expires it.
+        let (on_disk, cache) = maps(
+            vec![disk("/d/s.jsonl", "s", "/p", "2026-03-01T00:00:00Z", "/d")],
+            vec![expired(
+                "/d/s.jsonl",
+                "s",
+                "/p",
+                "2026-03-01T00:00:00Z",
+                "/d",
+            )],
+        );
+        let diff = diff_disk_and_cache(&on_disk, &cache, &walked(&["/d"]), "/default");
+        assert_eq!(diff.to_update, vec![PathBuf::from("/d/s.jsonl")]);
+        assert!(diff.to_insert.is_empty());
+        assert!(diff.to_expire.is_empty());
+    }
+
+    #[test]
+    fn an_expired_row_whose_key_reappears_elsewhere_is_an_update() {
+        // A DB-only session re-pointed from another config dir: the upsert
+        // moves it to the new path and clears its stamp.
+        let (on_disk, cache) = maps(
+            vec![disk(
+                "/second/s1.jsonl",
+                "s1",
+                "/p",
+                "2026-03-01T00:00:00Z",
+                "/second",
+            )],
+            vec![expired(
+                "/default/s1.jsonl",
+                "s1",
+                "/p",
+                "2026-03-01T00:00:00Z",
+                "/default",
+            )],
+        );
+        let diff = diff_disk_and_cache(&on_disk, &cache, &walked(&["/default", "/second"]), "/x");
+        assert_eq!(diff.to_update, vec![PathBuf::from("/second/s1.jsonl")]);
+        assert!(diff.to_insert.is_empty());
+        assert!(diff.to_expire.is_empty());
     }
 
     #[test]
@@ -300,7 +397,7 @@ mod tests {
             )],
         );
         let diff = diff_disk_and_cache(&on_disk, &cache, &walked(&["/default"]), "/default");
-        assert!(diff.to_delete.is_empty());
+        assert!(diff.to_expire.is_empty());
     }
 
     #[test]
@@ -319,13 +416,13 @@ mod tests {
         );
         let diff = diff_disk_and_cache(&on_disk, &cache, &walked(&["/default"]), "/default");
         assert_eq!(
-            diff.to_delete.len(),
+            diff.to_expire.len(),
             1,
             "reconcilable against the default dir"
         );
 
         let diff = diff_disk_and_cache(&on_disk, &cache, &walked(&["/other"]), "/default");
-        assert!(diff.to_delete.is_empty(), "the default dir was not walked");
+        assert!(diff.to_expire.is_empty(), "the default dir was not walked");
     }
 
     #[test]
@@ -355,8 +452,8 @@ mod tests {
             ],
         );
         let diff = diff_disk_and_cache(&on_disk, &cache, &walk, "/default");
-        assert_eq!(diff.to_delete.len(), 1);
-        assert_eq!(diff.to_delete[0].session_id, "b");
+        assert_eq!(diff.to_expire.len(), 1);
+        assert_eq!(diff.to_expire[0].session_id, "b");
     }
 
     #[test]

@@ -370,7 +370,7 @@ pub fn delete_all(conn: &Connection) -> Result<(), String> {
 /// `session_search` carries no `file_path` at all, so path is not even available
 /// as a wrong answer.
 ///
-/// It follows that this must run **after** the cache's own delete pass, which is
+/// It follows that this must run **after** the cache's own expiry pass, which is
 /// where it inherits that pass's protection for free: a config dir that could
 /// not be listed keeps its cache rows, so its index rows are not orphans and are
 /// left alone. That is what stops an unmounted drive emptying an account's

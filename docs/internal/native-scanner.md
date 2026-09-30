@@ -21,11 +21,11 @@ read at, so "has this file grown since" is exact; rows that moved on are
 skipped, because every figure would read as "computed is larger", which is also
 what an over-counting bug looks like.
 
-Four rules that are silent when wrong:
+Five rules that are silent when wrong:
 
 - **"No file on disk" and "we could not look" are different answers.** A
   config dir that failed to list is left out of `walked` and its rows are
-  excluded from the delete pass; an unmounted drive would otherwise wipe an
+  excluded from the expiry pass; an unmounted drive would otherwise wipe an
   account's corpus, `custom_title` and `is_favorite` included. A dir that
   exists but has no `projects/` is the case that looks like a failure and
   is not. Protection is per project, not per config dir.
@@ -33,6 +33,15 @@ Four rules that are silent when wrong:
   `(session_id, project_path)` while `file_path` is a non-unique index, so
   a claim shift legitimately brings the same row under a new path. The diff
   indexes the cache twice — by path and by row key — to tell them apart.
+- **A vanished transcript expires its row; nothing deletes it** (#705). The
+  expiry pass stamps `transcript_expired_at` and blanks `preview`, and keeps
+  every figure, both user-owned columns, the titles and the PR links. It is
+  idempotent — an expired row is not listed again, so the stamp is the time
+  the file was first found missing — and a restored file un-expires through
+  the upsert, which writes `transcript_expired_at = NULL`. An expired row
+  whose file is back is re-read even at an unchanged mtime (`cp -p`), and a
+  cached path whose *key* is still on disk is a claim shift, never an expiry.
+  `scanner/diff.rs` and `tests/scanner_roundtrip.rs` pin each case.
 - **`custom_title` and `is_favorite` are in neither write list.** They are
   the only columns here the user typed.
 - **Three markers force a full re-read with nothing changed on disk**:
