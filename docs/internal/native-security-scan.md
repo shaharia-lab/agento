@@ -35,9 +35,9 @@ statement; the rules below are the ones a change is most likely to break.
   `credential_scan_state` row are kept and still counted
   (`needs_scanning_skips_an_expired_row`).
 - **A changed session is marked before it is announced.** `needs_scanning`
-  compares versions only, so `scan.rs` calls `store::mark_changed` (resets
-  `ruleset_version` to 0) on every changed session first — whether or not the
-  worker runs. Without it, an already-scanned session whose announcement was
+  looks at versions, never at whether a file changed, so `scan.rs` calls
+  `store::mark_changed` (resets `ruleset_version` to 0) on every changed
+  session first — whether or not the worker runs. Without it, an already-scanned session whose announcement was
   dropped (full queue, checker off) is never rescanned
   (`a_changed_session_whose_announcement_was_dropped_is_swept`).
 - **The scanned text is uncapped and nothing is dropped as injected** — unlike

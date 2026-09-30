@@ -90,9 +90,10 @@ pub fn needs_scanning(conn: &Connection, ruleset_version: i64) -> Result<Vec<Pen
 /// the `ruleset_version` of their `credential_scan_state` rows to 0 (#603).
 ///
 /// The scan calls this for every session it saw change, **whether or not the
-/// worker is running**. [`needs_scanning`] compares versions only, so without
-/// this an already-scanned session whose announcement was dropped — the queue
-/// overflowed, or the checker was off — would never be rescanned by any sweep.
+/// worker is running**. [`needs_scanning`] never looks at whether a file
+/// changed, so without this an already-scanned session whose announcement was
+/// dropped — the queue overflowed, or the checker was off — would never be
+/// rescanned by any sweep.
 /// A session with no row is already pending, so this only updates rows that
 /// exist; with the checker never enabled it changes nothing. One transaction.
 pub fn mark_changed(conn: &mut Connection, sessions: &[Pending]) -> Result<usize, String> {

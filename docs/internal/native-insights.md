@@ -18,7 +18,7 @@ a corpus with nothing in it — the failure that only a count over the real
 corpus can see, which is what `tests/insights_live.rs` is (`--ignored`; run it
 by hand like `scan_live`).
 
-Three rules, each silent when wrong:
+Four rules, each silent when wrong:
 
 - **Every statement keys on `(session_id, project_path)`.** The Go store keys
   on the id alone in all three — the upsert's `ON CONFLICT`, the join, and the
