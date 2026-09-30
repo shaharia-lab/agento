@@ -214,13 +214,70 @@
   min-width: 0;
 }
 
-.composer__stop {
+.composer__stop,
+.composer__queue {
   height: var(--control-h);
   gap: var(--sp-2);
 }
 
-.composer__input:disabled {
-  color: var(--fg-tertiary);
+/* --- Composer queue (#723) ------------------------------------------------ */
+.queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-4) 0;
+}
+
+.queue__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+}
+
+.queue__help {
+  font-weight: normal;
+  color: var(--fg-quaternary);
+}
+
+.queue__card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 28px;
+  padding: 0 var(--sp-1) 0 0;
+  background: var(--bg-inset);
+  border-radius: var(--r-md);
+}
+
+.queue__text {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 var(--sp-4);
+  text-align: left;
+  font-size: var(--text-base);
+  color: var(--fg);
+}
+
+.queue__btn {
+  flex: none;
+  width: 22px;
+  height: 22px;
+}
+
+.queue__edit {
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-content);
+  border-radius: var(--r-md);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  resize: none;
 }
 
 /* --- Inspector ------------------------------------------------------------ */

@@ -102,6 +102,17 @@ src/
     sessions/SessionLink.tsx   a session rendered as a control, wherever one is
                  *named* (#536) — left-click hands off to the Sessions section
                  through `NavTarget.sessionId`, right-click opens the row menu.
+    chat/queue.ts, chat/QueueList.tsx  the composer's message queue (#723).
+                 The composer never locks while a turn runs; `ChatsView` owns
+                 `Record<chatId | DRAFT_KEY, QueueItem[]>` and flushes it from
+                 an **effect** on the turn's outcome (`useChatStream`'s
+                 `onTurnEnd(id, message, outcome)`), never from the callback
+                 itself — the callback runs inside `finish` before the stream
+                 has cleared its state, so a turn started there is torn down.
+                 `stopped` beats `failed` (a Stop may close with an error
+                 `result`), a failure resends once (`retried`) and hands the
+                 items back on a second failure, and a queue key is deleted
+                 when it empties so key order is "oldest queue first"
     tasks/Delivery.tsx  the Tasks form's Delivery section and its helpers (#638)
                  `sessionMenuItems` is the **single** definition of those five
                  entries: `SessionsView`'s own rows build their menu from it

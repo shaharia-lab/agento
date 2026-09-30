@@ -39,7 +39,14 @@ import { saveNewChatPrefs, type NewChatPrefs } from "../lib/newChatPrefs";
 import { Composer } from "./chat/Composer";
 import { ChatSettingsBar } from "./chat/ChatSettingsBar";
 import { Transcript } from "./chat/Transcript";
-import { useChatStream } from "./chat/useChatStream";
+import { useChatStream, type TurnOutcome } from "./chat/useChatStream";
+import {
+  DRAFT_KEY,
+  mergeQueue,
+  moveItem,
+  queueItem,
+  type QueueItem,
+} from "./chat/queue";
 import { openExternal } from "../lib/tauri";
 import { SessionLink } from "./sessions/SessionLink";
 import { SessionTranscript } from "./sessions/SessionTranscript";
@@ -127,16 +134,51 @@ export function ChatsView({
     [selected]
   );
 
+  // --- The composer's queue (#723) -----------------------------------------
+  //
+  // Keyed by chat id, or DRAFT_KEY for a chat not yet created. A key is deleted
+  // when its queue empties, so the object's key order is the order the queues
+  // were started in — which is how "the oldest other queue" is found.
+  const [queues, setQueues] = useState<Record<string, QueueItem[]>>({});
+  const setQueue = useCallback(
+    (key: string, fn: (items: QueueItem[]) => QueueItem[]) =>
+      setQueues((prev) => {
+        const items = fn(prev[key] ?? []);
+        if (items === prev[key]) return prev;
+        const next = { ...prev };
+        if (items.length) next[key] = items;
+        else delete next[key];
+        return next;
+      }),
+    []
+  );
+  /** Chats whose failed turn has had its one automatic resend. */
+  const retried = useRef<Record<string, boolean>>({});
+  /** What that resend carried, restored to the queue if it fails too. */
+  const resent = useRef<Record<string, QueueItem[]>>({});
+  /** A "send now": sent as soon as the turn it stopped has closed. */
+  const sendNow = useRef<{ key: string; text: string } | null>(null);
+  /**
+   * The turn that just ended. Held as state and acted on in an effect: the
+   * end callback runs inside the stream's `finish`, before it has cleared its
+   * own state, so a turn started from there would be torn down by it.
+   */
+  const [ended, setEnded] = useState<{
+    chatId: string;
+    outcome: TurnOutcome;
+  } | null>(null);
+
   const chatsReload = chats.reload;
   const stream = useChatStream(
     useCallback(
-      (chatId: string, message: ChatMessage | null) => {
+      (chatId: string, message: ChatMessage | null, outcome: TurnOutcome) => {
         if (message) {
           setExtra((prev) => ({
             ...prev,
             [chatId]: [...(prev[chatId] ?? []), message],
           }));
         }
+        setEnded({ chatId, outcome });
         chatsReload();
       },
       [chatsReload]
@@ -333,52 +375,161 @@ export function ChatsView({
     setComposerFocus((n) => n + 1);
   }, [openChatId, openChatNonce, select]);
 
-  const send = useCallback(async () => {
-    const content = draft.trim();
-    if (!content || busy) return;
-
-    let id = selected;
-    if (!id) {
-      // An agent run without a working directory lands in whatever directory
-      // the server happened to start in — refuse to create the chat instead.
-      const workingDir = newChat.workingDir.trim();
-      if (!workingDir) {
-        setActionError("Set a working directory before starting the chat.");
-        return;
+  /**
+   * Start a turn in `target`, creating the chat first when it is null. Answers
+   * whether the turn started, so a caller holding queued items can put them
+   * back when it did not.
+   */
+  const sendContent = useCallback(
+    async (target: string | null, content: string): Promise<boolean> => {
+      let id = target;
+      if (!id) {
+        // An agent run without a working directory lands in whatever directory
+        // the server happened to start in — refuse to create the chat instead.
+        const workingDir = newChat.workingDir.trim();
+        if (!workingDir) {
+          setActionError("Set a working directory before starting the chat.");
+          return false;
+        }
+        try {
+          const created = await api.post<ChatSession>("/chats", {
+            agent_slug: newChat.agentSlug,
+            working_directory: workingDir,
+            model: newChat.model,
+            settings_profile_id: newChat.settingsProfileId,
+            permission_mode: newChat.permissionMode,
+          });
+          id = created.id;
+          setSelected(created.id);
+          setDrafting(false);
+          // Only a chat that was actually created is a preference — see
+          // `saveNewChatPrefs`.
+          saveNewChatPrefs({ ...newChat, workingDir });
+          chats.reload();
+        } catch (err) {
+          setActionError(describeError(err));
+          return false;
+        }
       }
-      try {
-        const created = await api.post<ChatSession>("/chats", {
-          agent_slug: newChat.agentSlug,
-          working_directory: workingDir,
-          model: newChat.model,
-          settings_profile_id: newChat.settingsProfileId,
-          permission_mode: newChat.permissionMode,
-        });
-        id = created.id;
-        setSelected(created.id);
-        setDrafting(false);
-        // Only a chat that was actually created is a preference — see
-        // `saveNewChatPrefs`.
-        saveNewChatPrefs({ ...newChat, workingDir });
-        chats.reload();
-      } catch (err) {
-        setActionError(describeError(err));
+
+      const chatId = id;
+      stream.reset();
+      setExtra((prev) => ({
+        ...prev,
+        [chatId]: [
+          ...(prev[chatId] ?? []),
+          { role: "user", content, timestamp: new Date().toISOString() },
+        ],
+      }));
+      stream.start(chatId, content);
+      return true;
+    },
+    [newChat, chats, stream]
+  );
+
+  const queueKey = selected ?? DRAFT_KEY;
+
+  // While a turn runs, a send queues the draft; when idle it sends the queue
+  // and the draft together, draft last.
+  const send = useCallback(async () => {
+    const text = draft.trim();
+    if (busy) {
+      if (!text) return;
+      setQueue(queueKey, (items) => [...items, queueItem(text)]);
+      setDraft("");
+      return;
+    }
+    const items = queues[queueKey] ?? [];
+    const content = mergeQueue(text ? [...items, queueItem(text)] : items);
+    if (!content) return;
+    if (!(await sendContent(selected, content))) return;
+    // A send the user made is a fresh start for the failure rule.
+    delete retried.current[queueKey];
+    delete resent.current[queueKey];
+    setQueue(queueKey, () => []);
+    setDraft("");
+  }, [draft, busy, queueKey, queues, selected, setQueue, sendContent]);
+
+  // Stop the running turn, then send one item as soon as it has closed.
+  const sendNowItem = useCallback(
+    (id?: string) => {
+      if (!busy) return;
+      let text: string;
+      if (id) {
+        const item = queues[queueKey]?.find((i) => i.id === id);
+        if (!item) return;
+        text = item.text.trim();
+        setQueue(queueKey, (items) => items.filter((i) => i.id !== id));
+      } else {
+        text = draft.trim();
+        setDraft("");
+      }
+      if (!text) return;
+      // A second "send now" before the first has gone joins it rather than
+      // replacing it, so nothing the user asked to send is dropped.
+      const pending = sendNow.current;
+      sendNow.current =
+        pending && pending.key === queueKey
+          ? { key: queueKey, text: `${pending.text}\n\n${text}` }
+          : { key: queueKey, text };
+      if (!stream.stopping) stream.stop();
+    },
+    [busy, queues, queueKey, draft, setQueue, stream]
+  );
+
+  // Act on a finished turn once the stream is free again.
+  useEffect(() => {
+    if (!ended || busy) return;
+    setEnded(null);
+    const { chatId, outcome } = ended;
+
+    const now = sendNow.current;
+    if (now) {
+      sendNow.current = null;
+      if (now.key !== DRAFT_KEY || drafting) {
+        void sendContent(now.key === DRAFT_KEY ? null : now.key, now.text);
         return;
       }
     }
 
-    const chatId = id;
-    setDraft("");
-    stream.reset();
-    setExtra((prev) => ({
-      ...prev,
-      [chatId]: [
-        ...(prev[chatId] ?? []),
-        { role: "user", content, timestamp: new Date().toISOString() },
-      ],
-    }));
-    stream.start(chatId, content);
-  }, [draft, busy, selected, newChat, chats, stream]);
+    // Stop is a hard stop: the queue stays and nothing is sent.
+    if (outcome === "stopped") {
+      delete retried.current[chatId];
+      delete resent.current[chatId];
+      return;
+    }
+    if (outcome === "failed" && retried.current[chatId]) {
+      // The automatic resend failed too: hand its items back, and stop there.
+      const back = resent.current[chatId] ?? [];
+      delete retried.current[chatId];
+      delete resent.current[chatId];
+      if (back.length) setQueue(chatId, (items) => [...back, ...items]);
+      return;
+    }
+    if (outcome === "ok") delete retried.current[chatId];
+    delete resent.current[chatId];
+
+    // This chat's queue first; otherwise the oldest other one that can go. A
+    // draft's queue goes only while the draft is still open — sending it
+    // creates the chat from the New Chat bar.
+    const key = queues[chatId]?.length
+      ? chatId
+      : Object.keys(queues).find(
+          (k) => queues[k].length && (k !== DRAFT_KEY || drafting)
+        );
+    if (!key) return;
+    const items = queues[key];
+    if (outcome === "failed" && key === chatId) {
+      retried.current[chatId] = true;
+      resent.current[chatId] = items;
+    }
+    setQueue(key, () => []);
+    void sendContent(key === DRAFT_KEY ? null : key, mergeQueue(items)).then(
+      (started) => {
+        if (!started) setQueue(key, (rest) => [...items, ...rest]);
+      }
+    );
+  }, [ended, busy, queues, drafting, setQueue, sendContent]);
 
   // The answer to an agent question travels over /input, not /messages, and
   // the server does not persist it — echoing it here keeps the exchange
@@ -424,6 +575,7 @@ export function ChatsView({
     async (id: string) => {
       try {
         await api.del(`/chats/${id}`);
+        setQueue(id, () => []);
         setSelected(null);
         setConfirmDelete(false);
         autoSelected.current = false;
@@ -432,8 +584,21 @@ export function ChatsView({
         setActionError(describeError(err));
       }
     },
-    [chats]
+    [chats, setQueue]
   );
+
+  const queueProps = {
+    queue: queues[queueKey],
+    onQueueEdit: (id: string, text: string) =>
+      setQueue(queueKey, (items) =>
+        items.map((i) => (i.id === id ? { ...i, text } : i))
+      ),
+    onQueueDelete: (id: string) =>
+      setQueue(queueKey, (items) => items.filter((i) => i.id !== id)),
+    onQueueMove: (id: string, delta: number) =>
+      setQueue(queueKey, (items) => moveItem(items, id, delta)),
+    onSendNow: sendNowItem,
+  };
 
   return (
     <div className="panes">
@@ -612,6 +777,7 @@ export function ChatsView({
               busy={busy}
               stopping={stream.stopping}
               onStop={stream.stop}
+              {...queueProps}
               placeholder={`Message ${newChat.agentSlug || "Agento"}…`}
             />
           </>
@@ -791,6 +957,7 @@ export function ChatsView({
               busy={busy}
               stopping={stream.stopping}
               onStop={stream.stop}
+              {...queueProps}
               placeholder={`Message ${agentLabel}…`}
               focusNonce={composerFocus}
               meta={

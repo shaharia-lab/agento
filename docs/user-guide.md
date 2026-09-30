@@ -113,6 +113,26 @@ is going into an issue or a commit message.
   continues.
 - **Stop** halts the run. Anything already written stays.
 
+**Queueing your next message.** The composer stays open while a turn runs.
+Press **⌘↵** (Ctrl+↵) or **Queue** and the draft becomes a card above the input,
+ready for the next one. Click a card to edit it (↵ saves, Esc cancels, an empty
+card is removed), **×** removes it, **⌥↑ / ⌥↓** on a card moves it, and **↑** in
+an empty input opens the last card.
+
+- When the turn finishes, every queued card is sent as **one** message, in
+  order, with a blank line between them.
+- **Stop** keeps the queue and sends nothing. The send button then reads
+  **Send N queued**, and sends the queue plus whatever you have typed.
+- If the turn fails, the queue is sent once automatically. If that fails as
+  well, the cards come back and wait for you.
+- The send icon on a card, or **⌘⇧↵** from the input, stops the agent and sends
+  that one message straight away.
+- Permission prompts and the agent's questions are answered as before; they
+  never go through the queue.
+- A queue belongs to its conversation and lives only until the app closes. Only
+  one conversation runs at a time, so a queue in another chat waits its turn and
+  is sent when the running one finishes.
+
 **The inspector** shows the agent, the model, the permission mode, the message
 count and the token usage of the whole conversation, split into input, output,
 cache read and cache write, with the cost.

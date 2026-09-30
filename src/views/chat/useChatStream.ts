@@ -54,6 +54,13 @@ export interface Live {
 
 const EMPTY: Live = { blocks: [], text: "", thinking: "", thinkingTokens: 0 };
 
+/**
+ * How a turn ended, for the composer's queue (#723). `stopped` wins over
+ * `failed`: an interrupted turn may close with an error `result`, and a Stop
+ * must never trigger the queue's automatic resend.
+ */
+export type TurnOutcome = "ok" | "stopped" | "failed";
+
 export interface ChatStream {
   /** The chat this turn belongs to, or null when nothing is in flight. */
   chatId: string | null;
@@ -80,7 +87,11 @@ export interface ChatStream {
 }
 
 export function useChatStream(
-  onTurnEnd: (chatId: string, message: ChatMessage | null) => void
+  onTurnEnd: (
+    chatId: string,
+    message: ChatMessage | null,
+    outcome: TurnOutcome
+  ) => void
 ): ChatStream {
   const [chatId, setChatId] = useState<string | null>(null);
   const [live, setLive] = useState<Live | null>(null);
@@ -96,6 +107,8 @@ export function useChatStream(
   const liveRef = useRef<Live | null>(null);
   const resultRef = useRef<TurnResult | null>(null);
   const endedRef = useRef(false);
+  const stoppedRef = useRef(false);
+  const erroredRef = useRef(false);
   const onEndRef = useRef(onTurnEnd);
   onEndRef.current = onTurnEnd;
 
@@ -114,6 +127,8 @@ export function useChatStream(
       liveRef.current = EMPTY;
       resultRef.current = null;
       endedRef.current = false;
+      stoppedRef.current = false;
+      erroredRef.current = false;
       setLive(EMPTY);
       setResult(null);
       setPrompt(null);
@@ -126,7 +141,16 @@ export function useChatStream(
         if (endedRef.current) return;
         endedRef.current = true;
         abortRef.current = null;
-        onEndRef.current(id, composeMessage(liveRef.current, resultRef.current));
+        const outcome: TurnOutcome = stoppedRef.current
+          ? "stopped"
+          : erroredRef.current || resultRef.current?.isError
+            ? "failed"
+            : "ok";
+        onEndRef.current(
+          id,
+          composeMessage(liveRef.current, resultRef.current),
+          outcome
+        );
         liveRef.current = null;
         setLive(null);
         setPrompt(null);
@@ -237,6 +261,7 @@ export function useChatStream(
               return;
             }
             case "error":
+              erroredRef.current = true;
               setError(readError(payload) ?? "The stream failed.");
               return;
             default:
@@ -246,6 +271,7 @@ export function useChatStream(
           }
         },
         onError: (err) => {
+          erroredRef.current = true;
           setError(describeError(err));
           finish();
         },
@@ -258,6 +284,7 @@ export function useChatStream(
   const stop = useCallback(() => {
     const id = chatId;
     if (!id) return;
+    stoppedRef.current = true;
     if (stopping) {
       // Second press: the interrupt did not land, drop the connection.
       abortRef.current?.();
