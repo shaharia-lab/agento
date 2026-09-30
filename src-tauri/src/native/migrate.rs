@@ -49,7 +49,10 @@
 //! output is delivered after a run (#634, epic #626). Migration **45** is the
 //! fifteenth: the `job_deliveries` table, one row per channel a run's output
 //! was delivered to and how that went, kept off the run's own row (#635, epic
-//! #626).
+//! #626). Migration **46** is the sixteenth: `transcript_expired_at` and
+//! `harness` on both session cache tables, and the single-row
+//! `install_identity` table whose random `machine_id` the migration itself
+//! generates, once per database (#704, epic #703).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -281,8 +284,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 45, "expected 45 migrations");
-        assert_eq!(expected_version(), 45);
+        assert_eq!(all.len(), 46, "expected 46 migrations");
+        assert_eq!(expected_version(), 46);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -376,7 +379,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 45);
+        assert_eq!(current_version(&conn).expect("version"), 46);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -571,6 +574,113 @@ mod tests {
         assert_eq!((pid, started), (None, None));
     }
 
+    /// **Migration 46 marks nothing expired and names Claude Code as the
+    /// harness of every row already cached** (#704).
+    ///
+    /// Seeded at 45 rather than built fresh, because the rows that matter are
+    /// the ones an existing install already has: a NULL `transcript_expired_at`
+    /// is what says "the transcript is still there", and the default is what
+    /// fills `harness` on rows written before the column existed.
+    #[test]
+    fn an_expired_marker_and_harness_default_on_existing_cache_rows() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 45);
+        conn.execute_batch(
+            "INSERT INTO claude_session_cache (session_id, project_path, file_path, file_mtime,
+                 start_time, last_activity)
+             VALUES ('s1', '/a', '/a/s1.jsonl', 'now', 'now', 'now'),
+                    ('s2', '/b', '/b/s2.jsonl', 'now', 'now', 'now');
+             INSERT INTO claude_subagent_cache (parent_session_id, agent_id, file_path, file_mtime)
+             VALUES ('s1', 'a1', '/a/s1/subagents/agent-a1.jsonl', 'now');",
+        )
+        .expect("seed rows at 45");
+
+        apply(&mut conn).expect("apply 46");
+        assert_eq!(current_version(&conn).expect("version"), 46);
+
+        for table in ["claude_session_cache", "claude_subagent_cache"] {
+            let (rows, untouched): (i64, i64) = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*), SUM(transcript_expired_at IS NULL AND harness = 'claude')
+                         FROM {table}"
+                    ),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read back");
+            assert!(rows > 0, "{table} was seeded");
+            assert_eq!(
+                rows, untouched,
+                "{table}: every existing row keeps a transcript and is claude's"
+            );
+        }
+    }
+
+    /// **The install's `machine_id` is made once, by the migration, and kept**
+    /// (#704).
+    ///
+    /// One row of 32 lowercase hex characters; a second `apply` and a reopen of
+    /// the file leave it as it was, because nothing but migration 46 writes it
+    /// and that runs once per database. Two databases get two ids — the value
+    /// itself is random, so this asserts shape and stability, never a value.
+    #[test]
+    fn the_machine_id_is_generated_once_and_survives_reapply() {
+        fn machine_ids(conn: &Connection) -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT machine_id FROM install_identity")
+                .expect("prepare");
+            stmt.query_map([], |row| row.get(0))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("rows")
+        }
+
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let first = {
+            let mut conn = Connection::open(file.path()).expect("open");
+            apply(&mut conn).expect("apply");
+            let ids = machine_ids(&conn);
+            assert_eq!(ids.len(), 1, "exactly one install identity");
+            let id = ids[0].clone();
+            assert_eq!(id.len(), 32, "{id}");
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "{id} is lowercase hex"
+            );
+
+            apply(&mut conn).expect("second apply");
+            assert_eq!(machine_ids(&conn), vec![id.clone()], "a re-apply keeps it");
+            id
+        };
+
+        let mut reopened = Connection::open(file.path()).expect("reopen");
+        apply(&mut reopened).expect("apply after reopen");
+        assert_eq!(
+            machine_ids(&reopened),
+            vec![first.clone()],
+            "a restart keeps it"
+        );
+
+        let other = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(other.path()).expect("open");
+        apply(&mut conn).expect("apply");
+        assert_ne!(
+            machine_ids(&conn),
+            vec![first],
+            "each database gets its own id"
+        );
+
+        // The single-row rule is the table's, not merely this test's.
+        conn.execute(
+            "INSERT INTO install_identity (id, machine_id) VALUES (2, 'x')",
+            [],
+        )
+        .expect_err("install_identity holds one row");
+    }
+
     /// **Migration 41's tables key on the session pair, and a rescan of the
     /// same match is refused rather than duplicated** (#600).
     ///
@@ -625,7 +735,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 45);
+        assert_eq!(current_version(&conn).expect("version"), 46);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -650,30 +760,7 @@ mod tests {
         for stop_at in 1..all.len() {
             let file = tempfile::NamedTempFile::new().expect("temp file");
             let mut conn = Connection::open(file.path()).expect("open");
-
-            // Seed it at `stop_at` by applying only that prefix, through the
-            // same statements `apply` uses.
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (
-                     version    INTEGER PRIMARY KEY,
-                     applied_at DATETIME NOT NULL
-                 );",
-            )
-            .expect("migration table");
-            for migration in &all[..stop_at] {
-                conn.execute_batch(&migration.sql)
-                    .unwrap_or_else(|e| panic!("seeding migration {}: {e}", migration.version));
-                conn.execute(
-                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-                    rusqlite::params![migration.version, crate::native::gotime::now_go_text()],
-                )
-                .expect("record");
-            }
-            assert_eq!(
-                current_version(&conn).expect("version"),
-                stop_at as i64,
-                "seeding did not land on the expected version"
-            );
+            seed_at(&conn, stop_at);
 
             apply(&mut conn)
                 .unwrap_or_else(|e| panic!("upgrading from version {stop_at} failed: {e}"));
@@ -685,6 +772,32 @@ mod tests {
             verify(&conn)
                 .unwrap_or_else(|e| panic!("upgrade from {stop_at} left it unusable: {e}"));
         }
+    }
+
+    /// Seed a database at `stop_at` by applying only that prefix, through the
+    /// same statements `apply` uses.
+    fn seed_at(conn: &Connection, stop_at: usize) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                 version    INTEGER PRIMARY KEY,
+                 applied_at DATETIME NOT NULL
+             );",
+        )
+        .expect("migration table");
+        for migration in &migrations()[..stop_at] {
+            conn.execute_batch(&migration.sql)
+                .unwrap_or_else(|e| panic!("seeding migration {}: {e}", migration.version));
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                rusqlite::params![migration.version, crate::native::gotime::now_go_text()],
+            )
+            .expect("record");
+        }
+        assert_eq!(
+            current_version(conn).expect("version"),
+            stop_at as i64,
+            "seeding did not land on the expected version"
+        );
     }
 
     /// The property this whole function exists for, and the one sequential
@@ -733,7 +846,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 45);
+        assert_eq!(current_version(&conn).expect("version"), 46);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -742,7 +855,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 45);
+        assert_eq!(recorded, 46);
     }
 
     #[test]
