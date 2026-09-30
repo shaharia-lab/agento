@@ -95,8 +95,8 @@ from **Settings → General** the first time.
 
 **The model and permission mode can be changed on an existing chat** from the
 two dropdowns in the composer strip. The change applies from your next message,
-and both are locked while a turn is running. A chat whose agent pins a model shows
-that model, locked, marked *from agent*.
+and both are locked while a turn is running. A chat with an agent always runs the
+agent's model, so there the model is shown locked, marked *from agent*.
 
 **Replies are rendered as markdown** — headings, lists, tables, links and code
 blocks. Hover a message for a **copy** button, and any code block for its own.

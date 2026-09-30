@@ -28,9 +28,12 @@ export function ChatSettingsBar({
   disabled?: boolean;
   onChange(body: { model?: string; permission_mode?: string }): void;
 }) {
-  // #299, the same rule as `NewChatBar`: an agent that pins a model wins over
-  // the chat's own, so an editable picker there would silently do nothing.
-  const modelLocked = !!agent?.model;
+  // #299: the runner consults a chat's own model only when the chat names no
+  // agent (`runner.rs`, `build_options`) — an agent with an empty model runs
+  // with none at all. So the picker locks on the slug, wider than
+  // `NewChatBar`'s rule: a stored model the next turn ignores would be a
+  // control that silently does nothing.
+  const modelLocked = !!session.agent_slug;
   const model = session.model ?? "";
   const mode = session.permission_mode ?? "";
 
@@ -46,7 +49,7 @@ export function ChatSettingsBar({
         ariaLabel="Model"
         label={
           modelLocked
-            ? `Model: ${agent?.model} (from agent)`
+            ? `Model: ${agent?.model || "agent default"} (from agent)`
             : `Model: ${labelFor(MODELS, model) || "default"}`
         }
         options={[
