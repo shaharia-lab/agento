@@ -570,17 +570,22 @@ function DeleteExpiredStrip({
 }) {
   const [day, setDay] = useState("");
   const before = dayBoundary(day, "start");
-  const count = useResource<SessionFacets | undefined>(
-    (signal) =>
-      before
-        ? api.get<SessionFacets>(
-            `/claude-sessions/facets${qs({
-              transcript: "expired",
-              ended_before: before,
-            })}`,
-            signal
-          )
-        : Promise.resolve(undefined),
+  // The answer is tagged with the bound it was asked for: `useResource` raises
+  // `loading` in an effect, so the render in which the date changes still holds
+  // the previous date's total, and an untagged count would sit beside the new
+  // date with `Delete` enabled for that one frame.
+  const count = useResource<{ before: string; total: number } | undefined>(
+    async (signal) => {
+      if (!before) return undefined;
+      const facets = await api.get<SessionFacets>(
+        `/claude-sessions/facets${qs({
+          transcript: "expired",
+          ended_before: before,
+        })}`,
+        signal
+      );
+      return { before, total: facets.total };
+    },
     [before]
   );
 
@@ -600,13 +605,14 @@ function DeleteExpiredStrip({
     );
   }
 
-  // `loading` covers the gap between a date change and its answer, when `data`
-  // still holds the previous date's total.
-  const n = before && !count.loading && !count.error ? count.data?.total : undefined;
+  const n =
+    before && !count.error && count.data?.before === before
+      ? count.data.total
+      : undefined;
   const date = before ? fullDate(before) : "";
   const reason = !before
     ? "Pick a date to see how many expired sessions ended before it."
-    : count.error
+    : count.error && !count.loading
     ? `Could not count the expired sessions: ${count.error}`
     : n === 0
     ? `No expired sessions ended before ${date}.`
@@ -1120,6 +1126,9 @@ export function SessionsView({
         reloadAll();
       } catch (err) {
         setActionError({ action: "delete", message: deleteFailure(err) });
+        // Something else took it first (the retention prune, another delete):
+        // the row on screen is stale, so the list is read again.
+        if (err instanceof ApiError && err.status === 404) reloadAll();
       } finally {
         setConfirming(undefined);
         setBusy(undefined);

@@ -414,12 +414,12 @@ compile-time pin; `Delete` won because it was already the majority and because
   kind is already on screen, and a per-view suffix is how a fourth word starts.
 - **A confirmation is `Delete <name>? <what goes with it>.`** — the verb, the
   record's own name, and one clause naming the collateral (`Its run history
-  goes with it.`). The clause lists what the cascade
-  really takes — a session's reads `Its sub-agents, pull-request links,
-  insights and credential findings go with it.` (#714) — and a bulk
-  confirmation names the count and the bound in place of a name (`Delete 3
-  expired sessions that ended before 1 Sept 2026? Their … go with them.`). Not `Delete this task and its history?`, which names no row,
-  and not a bare `Delete rule?`.
+  goes with it.`). Not `Delete this task and its history?`, which names no row,
+  and not a bare `Delete rule?`. The clause lists what the cascade really
+  takes — a session's reads `Its sub-agents, pull-request links, insights and
+  credential findings go with it.` (#714) — and a bulk confirmation names the
+  count and the bound in place of a name (`Delete 3 expired sessions that
+  ended before 1 Sept 2026? Their … go with them.`).
 - **`Remove` survives for detaching, and only that**: taking a row out of a
   list nothing has stored yet (a gateway alias's fallback target), or
   unregistering something from a third party while the record it belongs to
