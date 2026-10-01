@@ -19,6 +19,7 @@
    ========================================================================== */
 
 import { hostInfo, resetHostInfo } from "./tauri";
+import type { TranscriptExpiredBody } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -29,6 +30,19 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/**
+ * Whether `e` is the `410 Gone` of an expired transcript (#709): the session is
+ * known, its file is not coming back, and asking again cannot change that.
+ * Narrows the error so a view can read `e.body.expired_at`.
+ */
+export function isTranscriptExpired(
+  e: unknown
+): e is ApiError & { body: TranscriptExpiredBody } {
+  if (!(e instanceof ApiError) || e.status !== 410) return false;
+  const body = e.body as Partial<TranscriptExpiredBody> | null | undefined;
+  return typeof body === "object" && body !== null && body.transcript_expired === true;
 }
 
 const BASE = "/api";
@@ -102,6 +116,10 @@ async function rejection(
  * changing this function's shape rather than a constant. (The repo has no
  * frontend test runner, so this is covered by construction and by driving a live
  * regenerate in the real webview, which is what `ui-verify` is for.)
+ *
+ * **Only a 401 is retried.** Every other status is final on the first answer —
+ * including the `410` of an expired transcript (#709), which is one request and
+ * an `ApiError` the caller narrows with `isTranscriptExpired`.
  *
  * A 401 with **no** `Authorization` header attached is not retried: the page
  * never had a token, so re-asking cannot produce one, and `rejection` turns it

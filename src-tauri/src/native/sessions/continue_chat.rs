@@ -56,7 +56,9 @@
 //!
 //! A missing session is `404`; a lookup *failure* is `500`. `detail::get`
 //! collapses both into `None`/`Err`, so the split here is the same one it
-//! makes.
+//! makes. A session the scanner stamped expired is `410` with the typed body
+//! (#709, `detail::expiry`) — even when a continued chat already exists, since
+//! the transcript read comes first.
 
 use axum::http::StatusCode;
 use serde::Serialize;
@@ -80,7 +82,14 @@ pub fn continue_session(db_path: &std::path::Path, session_id: &str) -> Result<A
     let detail = detail::get(db_path, session_id)
         .map_err(|e| WriteError::Fallback(format!("looking up claude session: {e}")))?;
     let Some(detail) = detail else {
-        return Err(WriteError::NotFoundMessage("session not found".to_string()));
+        // Known but expired (#709) is a 410, answered before anything is opened
+        // for writing, so it leaves no chat row behind either.
+        let expired = detail::expiry(db_path, session_id)
+            .map_err(|e| WriteError::Fallback(format!("looking up transcript expiry: {e}")))?;
+        return match expired {
+            Some(at) => detail::gone(at).map_err(WriteError::Fallback),
+            None => Err(WriteError::NotFoundMessage("session not found".to_string())),
+        };
     };
 
     let mut conn = chats::open_for_write(db_path)?;
@@ -759,6 +768,35 @@ mod tests {
 
         let conn = rusqlite::Connection::open(&db).expect("open");
         let chats: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_sessions", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(chats, 0);
+    }
+
+    /// The same id once the scanner has stamped its row expired (#709): 410
+    /// rather than 404, and still nothing written. The bytes and the sibling
+    /// cases are pinned in `tests_gone.rs`.
+    #[test]
+    fn an_expired_session_is_410_and_creates_no_chat() {
+        let f = Fixture::new("expired-session-id");
+        std::fs::remove_file(f.project.join("expired-session-id.jsonl")).expect("remove");
+        f.conn()
+            .execute(
+                "INSERT INTO claude_session_cache
+                     (session_id, project_path, file_path, file_mtime, start_time,
+                      last_activity, transcript_expired_at)
+                 VALUES ('expired-session-id', '/home/u/proj', 'gone.jsonl',
+                         '2026-08-01 10:00:05 +0000 UTC', '2026-08-01 10:00:00 +0000 UTC',
+                         '2026-08-01 10:00:05 +0000 UTC', '2026-09-01 08:30:00 +0000 UTC')",
+                [],
+            )
+            .expect("expired row");
+
+        let answer = continue_session(&f.db, &f.session_id).expect("a typed answer, not an error");
+        assert_eq!(answer.status, StatusCode::GONE);
+
+        let chats: i64 = f
+            .conn()
             .query_row("SELECT COUNT(*) FROM chat_sessions", [], |r| r.get(0))
             .expect("count");
         assert_eq!(chats, 0);

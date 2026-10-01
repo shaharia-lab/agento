@@ -24,6 +24,23 @@
 //! - **Sub-agents** live in sibling transcripts under `<session-id>/subagents/`,
 //!   so they come from `claude_subagent_cache` rather than from this file.
 //!
+//! # An expired transcript is 410, not 404 (#709)
+//!
+//! Since #705 the scanner keeps the cache row of a session whose transcript
+//! vanished and stamps `transcript_expired_at` on it, so the list shows a
+//! session this read cannot open. [`expiry`] is how the three routes that need
+//! the file — detail, journey, continue — tell that apart from an id that never
+//! existed: **410 when no config dir holds the file and the row is stamped, 404
+//! otherwise.** A file on disk always wins over a stamp, and an unstamped row
+//! with no file stays 404, because the scanner is the only thing that decides a
+//! transcript has expired.
+//!
+//! The readers keep their `Option` contract and the handlers consult [`expiry`]
+//! on the `None` arm only, rather than the readers returning a three-way enum:
+//! that leaves the 200 path and export's call site untouched. It is keyed on the
+//! **file being absent**, not on the reader's `None`, because `journey::get`
+//! also answers `None` for a file with no timestamped event.
+//!
 //! Two asymmetries in `readSessionDetail` that look like bugs and are not, and
 //! which this reproduces exactly:
 //!
@@ -43,9 +60,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::summary::{SessionCost, SessionSummary, TokenUsage};
+use crate::native::gotime::GoTime;
 use crate::native::insights::transcript::{self, Event};
 use crate::native::scanner::summary_file;
-use crate::native::{gopath, settings};
+use crate::native::{gojson, gopath, settings, Answer};
 
 /// `previewMaxRunes`.
 const PREVIEW_MAX_CHARS: usize = 120;
@@ -233,6 +251,67 @@ pub fn get(db_path: &Path, session_id: &str) -> Result<Option<SessionDetail>, St
     let mut detail = read_detail(&config_dir, session_id, &project_path, &file)?;
     patch_from_cache(&conn, session_id, &mut detail);
     Ok(Some(detail))
+}
+
+/// The body of the 410 the file-reading routes answer for an expired
+/// transcript (#709), in wire order.
+///
+/// `error` is first so every existing error reader — `api.ts`'s `errorMessage`
+/// included — still finds a message where it looks for one. Agento's own shape
+/// with no Go ancestor, pinned by `parity/session_expired_golden.json`.
+#[derive(Serialize)]
+pub struct ExpiredBody<'a> {
+    pub error: &'a str,
+    pub transcript_expired: bool,
+    pub expired_at: GoTime,
+}
+
+/// `410 Gone` carrying [`ExpiredBody`].
+pub fn gone(at: GoTime) -> Result<Answer, String> {
+    let body = gojson::to_vec(&ExpiredBody {
+        error: "transcript expired",
+        transcript_expired: true,
+        expired_at: at,
+    })
+    .map_err(|e| format!("encoding expired body: {e}"))?;
+    Ok(Answer::json_status(axum::http::StatusCode::GONE, body))
+}
+
+/// The scanner's expiry stamp for `session_id`, or `None` when no row carries
+/// one.
+///
+/// A session id can sit under two projects (the #362 family); the newest stamp
+/// is the one reported, so the answer does not depend on row order. A database
+/// error is an `Err` and so a 500, never a silent 404: "we could not look" is
+/// not "it does not exist".
+pub fn expired_at(conn: &Connection, session_id: &str) -> Result<Option<GoTime>, String> {
+    if !is_valid_session_id(session_id) {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT transcript_expired_at FROM claude_session_cache
+          WHERE session_id = ?1 AND transcript_expired_at IS NOT NULL
+          ORDER BY transcript_expired_at DESC LIMIT 1",
+        [session_id],
+        |row| crate::native::gotime::from_sql_text(&row.get::<_, String>(0)?, 0),
+    )
+    .optional()
+    .map_err(|e| format!("reading transcript expiry: {e}"))
+}
+
+/// When a route's reader answered `None`: the stamp if the session is known and
+/// its transcript expired, `None` if the answer is still the route's 404.
+///
+/// The file is looked for again rather than trusting the caller's `None`, so a
+/// transcript that is on disk — restored before the next scan, or present but
+/// holding nothing a journey can be drawn from — is never reported as expired.
+pub fn expiry(db_path: &Path, session_id: &str) -> Result<Option<GoTime>, String> {
+    let conn = crate::native::db::open_read_only(db_path)?;
+    let dirs = settings::load(&conn).indexed_config_dirs;
+    if find_session_file(&dirs, session_id).is_some() {
+        return Ok(None);
+    }
+    expired_at(&conn, session_id)
 }
 
 /// `readSessionDetail`: the transcript, and only the transcript.

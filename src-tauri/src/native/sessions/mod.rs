@@ -148,7 +148,9 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
             // `handleGetClaudeSessionJourney`'s own 404: a session whose
             // transcript no config dir holds, and equally one that holds no
             // timestamped event to draw a timeline from.
-            None => Answer::error(axum::http::StatusCode::NOT_FOUND, "session not found"),
+            //
+            // Unless the scanner stamped it expired (#709), which is a 410.
+            None => missing(&ctx.db_path, id),
             Some(j) => Ok(Answer::json(
                 gojson::to_vec(&j).map_err(|e| format!("encoding session journey: {e}"))?,
             )),
@@ -157,8 +159,9 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
 
     if let Some(Route::Detail(id)) = route_of(req.path) {
         return match detail::get(&ctx.db_path, id)? {
-            // `handleGetClaudeSession`'s own 404, answered here since #278.
-            None => Answer::error(axum::http::StatusCode::NOT_FOUND, "session not found"),
+            // `handleGetClaudeSession`'s own 404, answered here since #278 —
+            // or the 410 of a transcript that expired (#709).
+            None => missing(&ctx.db_path, id),
             Some(d) => Ok(Answer::json(
                 gojson::to_vec(&d).map_err(|e| format!("encoding session detail: {e}"))?,
             )),
@@ -222,11 +225,24 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     Ok(Answer::json(body))
 }
 
+/// What the detail and the journey answer when no transcript could be read:
+/// `410` with the typed body for a session whose transcript expired, the
+/// handlers' own `404` for everything else. See `detail::expiry`.
+fn missing(db_path: &std::path::Path, session_id: &str) -> Result<Answer, String> {
+    match detail::expiry(db_path, session_id)? {
+        Some(at) => detail::gone(at),
+        None => Answer::error(axum::http::StatusCode::NOT_FOUND, "session not found"),
+    }
+}
+
 #[cfg(test)]
 mod tests_db;
 
 #[cfg(test)]
 mod tests_expiry;
+
+#[cfg(test)]
+mod tests_gone;
 
 #[cfg(test)]
 mod tests_search;

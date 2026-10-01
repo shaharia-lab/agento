@@ -92,6 +92,20 @@
   rows, because `corpus.rs` reads every cache row. The column is index 54 of
   `SUMMARY_COLUMNS`, so the relevance key `page.rs` appends is index **55**; a
   stale index fails only on `sort=relevance`.
+- **A read that needs the file answers 410 for an expired transcript, 404
+  otherwise** (#709). `GET /api/claude-sessions/{id}`, its `/journey` and
+  `POST …/continue` answer `410 Gone` when **no config dir holds the
+  transcript and the cache row is stamped**; an id with no row, and an unstamped
+  row whose file is missing, stay `404 session not found`, because the scanner
+  is the only thing that decides expiry. A file on disk wins over a stamp. The
+  body is `{"error":"transcript expired","transcript_expired":true,"expired_at":…}`
+  in that order — `error` first so every existing error reader still finds a
+  message — pinned by `parity/session_expired_golden.json`. `detail::expiry` is
+  keyed on the file being absent, not on the reader's `None`, since the journey
+  also answers `None` for a file with no timestamped event. `continue` answers
+  it before opening the database for writing. Enforced by
+  `sessions/tests_gone.rs`. `api.ts` retries a 401 only, so a 410 is one
+  request; `isTranscriptExpired` narrows the `ApiError`.
 - **Cache invalidation is multi-dimensional**: TTL (1h), `scanner_version`,
   pricing revision fingerprint, and idle-threshold drift each force a re-read.
 - **Session export is a Tauri command, not an `/api` route, and it reads the

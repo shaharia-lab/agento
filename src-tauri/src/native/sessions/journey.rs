@@ -1190,6 +1190,8 @@ mod tests {
     fn a_transcript_with_no_timestamped_event_has_no_journey() {
         // An empty file, and one whose every line is unparseable, are the same
         // answer — the handler's 404. There is nothing to draw a timeline from.
+        // It stays a 404 even on a row stamped expired (#709), because the file
+        // is on disk: `tests_gone.rs` pins that at the route.
         assert!(Corpus::new(&[], &[]).build(&[]).is_none());
         assert!(Corpus::new(&["not json at all {{{".to_string()], &[])
             .build(&[])

@@ -477,6 +477,17 @@ export interface ClaudeSessionSummary {
   transcript_expired_at?: string;
 }
 
+/**
+ * The body of the `410 Gone` the detail, journey and continue routes answer
+ * for a session whose transcript expired (#709). An id that never existed is
+ * still a 404. Narrow an error to it with `isTranscriptExpired` (`lib/api.ts`).
+ */
+export interface TranscriptExpiredBody {
+  error: string;
+  transcript_expired: true;
+  expired_at: string;
+}
+
 /** One content block of an assistant turn, normalized by the scanner. */
 export interface NormalizedBlock {
   type: string; // "thinking" | "text" | "tool_use" | "tool_result"

@@ -91,11 +91,16 @@ git show 07b6212^:desktop/parity/
 git show 07b6212^:desktop/parity/github_parity_test.go
 ```
 
-Seven files never had a generator and are hand-written beside the code:
+Eight files never had a generator and are hand-written beside the code:
 `desktop_routes.json`, `session_metric_vectors.json`,
 `claude_sessions_search_golden.json`, `claude_sessions_expired_golden.json`,
-`session_detail_blocks_golden.json`, `journey_golden.json` and
-`trigger_select_vectors.json`.
+`session_expired_golden.json`, `session_detail_blocks_golden.json`,
+`journey_golden.json` and `trigger_select_vectors.json`.
+
+`session_expired_golden.json` (#709) is the whole body of the `410 Gone` the
+session detail, journey and continue routes answer for an expired transcript:
+`error` first, then `transcript_expired` and `expired_at`. `sessions/tests_gone.rs`
+is the only reader.
 
 `claude_sessions_expired_golden.json` (#708) pins one sessions list holding an
 expired row between two live ones: `transcript_expired` and
