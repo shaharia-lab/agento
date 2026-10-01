@@ -248,6 +248,20 @@
       "status": "native",
       "owner": "#604",
       "reason": "enabled (the stored setting), running (the worker in this process), finding counts by status and the last scan time; read-scoped, because it names no finding"
+    },
+    {
+      "method": "DELETE",
+      "route": "/api/claude-sessions/{id}",
+      "status": "native",
+      "owner": "#711",
+      "reason": "deletes an expired session and everything stored about it -- cache row, insights, search rows, credential findings and scan state, and its sub-agent and PR rows once no cache row carries the id; 204, 404 for an unknown id, 409 while a transcript for it is on disk or a row is not stamped expired"
+    },
+    {
+      "method": "DELETE",
+      "route": "/api/claude-sessions",
+      "status": "native",
+      "owner": "#711",
+      "reason": "bulk form: body {before: RFC 3339} deletes every expired session whose last_activity is strictly before it and whose file is not on disk, in one transaction; 200 with {deleted: N}, 422 for a missing or unparseable before -- there is no delete-everything form"
     }
   ]
 }

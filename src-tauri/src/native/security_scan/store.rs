@@ -617,6 +617,35 @@ pub fn summary(conn: &Connection) -> Result<Summary, String> {
     Ok(out)
 }
 
+/// Remove everything the checker stored about one session: its findings and
+/// its `credential_scan_state` row (#711).
+///
+/// Takes the caller's connection so it joins the caller's transaction — a
+/// user's delete of an expired session removes these with the cache row or not
+/// at all. `credential_whitelist` is not session-linked and is left alone: an
+/// entry made from one of these findings names a rule or a value hash, and
+/// still suppresses that value wherever else it appears.
+///
+/// The session id is deliberately in no error text; see `worker.rs` on why
+/// this module never logs one.
+pub fn delete_session(
+    conn: &Connection,
+    session_id: &str,
+    project_path: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM credential_findings WHERE session_id = ?1 AND project_path = ?2",
+        params![session_id, project_path],
+    )
+    .map_err(|e| format!("deleting a session's credential findings: {e}"))?;
+    conn.execute(
+        "DELETE FROM credential_scan_state WHERE session_id = ?1 AND project_path = ?2",
+        params![session_id, project_path],
+    )
+    .map_err(|e| format!("deleting a session's credential scan state: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

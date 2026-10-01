@@ -250,6 +250,11 @@ pub struct SessionQuery {
     pub cost: NumericRange,
     pub from: Option<GoTime>,
     pub to: Option<GoTime>,
+    /// Sessions whose last activity is strictly before this instant (#711) —
+    /// the bound `DELETE /api/claude-sessions` deletes on, so the facets can
+    /// count that delete before it runs. `to` cannot stand in: it bounds
+    /// `start_time`, inclusively.
+    pub ended_before: Option<GoTime>,
     pub windows: Vec<TimeWindow>,
     pub sort: Sort,
     pub limit: i64,
@@ -315,6 +320,7 @@ impl SessionQuery {
             cost: numeric_range(&params, "cost"),
             from: optional_time(&get("from")),
             to: optional_time(&get("to")),
+            ended_before: optional_time(&get("ended_before")),
             windows: parse_windows(&get("windows"))?,
             sort: resolve_sort(&get("sort"), &search),
             search,
@@ -487,6 +493,7 @@ pub fn build_filter(
     add_search(conn, &mut f, &q.search);
     add_links(&mut f, q.links);
     add_transcript(&mut f, q.transcript);
+    add_ended_before(&mut f, q.ended_before);
 
     add_range(&mut f, SQL_MESSAGE_COUNT, q.messages, 1.0);
     // The duration filter is entered in minutes; the column stores milliseconds.
@@ -762,6 +769,18 @@ pub fn add_transcript(f: &mut Filter, transcript: Transcript) {
         Transcript::Available => f.add("c.transcript_expired_at IS NULL", vec![]),
         Transcript::Expired => f.add("c.transcript_expired_at IS NOT NULL", vec![]),
         Transcript::Any => {}
+    }
+}
+
+/// Narrow to sessions that ended strictly before `bound` (#711).
+///
+/// Its own term rather than part of [`add_time_filter`], so it holds under a
+/// drill-down too: this is the predicate a delete is counted with, and a bound
+/// that some other parameter could switch off would count one set and delete
+/// another. Bound as [`sql_time`] text, like every other time predicate here.
+pub fn add_ended_before(f: &mut Filter, bound: Option<GoTime>) {
+    if let Some(bound) = bound {
+        f.add("c.last_activity < ?", vec![Value::Text(sql_time(bound))]);
     }
 }
 
@@ -1069,6 +1088,33 @@ mod tests {
         assert_eq!(q.sort, Sort::Cost);
         assert_eq!(q.limit, 25);
         assert_eq!(q.cursor, "abc");
+    }
+
+    #[test]
+    fn ended_before_is_a_strict_bound_on_last_activity_in_the_stored_text_shape() {
+        let q =
+            SessionQuery::parse("ended_before=2026-08-01T12%3A00%3A00%2B02%3A00").expect("parse");
+        let mut f = Filter::default();
+        add_ended_before(&mut f, q.ended_before);
+
+        assert_eq!(f.where_clause(), "\nWHERE c.last_activity < ?");
+        // The column is compared as text, so the bound is the driver's own
+        // rendering in UTC — never the RFC 3339 the client sent.
+        assert!(
+            matches!(&f.args[..], [Value::Text(t)] if t == "2026-08-01 10:00:00 +0000 UTC"),
+            "{:?}",
+            f.args
+        );
+    }
+
+    #[test]
+    fn an_absent_or_unparseable_ended_before_adds_no_term() {
+        for raw in ["", "ended_before=", "ended_before=yesterday"] {
+            let q = SessionQuery::parse(raw).expect("parse");
+            let mut f = Filter::default();
+            add_ended_before(&mut f, q.ended_before);
+            assert_eq!(f.where_clause(), "", "{raw}");
+        }
     }
 
     #[test]

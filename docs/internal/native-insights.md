@@ -45,7 +45,9 @@ Four rules, each silent when wrong:
   the scan's own expiry pass is what inherits the unreadable-config-dir
   protection: those cache rows survive, so their insights are not orphans. An
   **expired** row is a cache row too (#705), so a session whose transcript
-  vanished keeps its insights by design.
+  vanished keeps its insights by design — until the user deletes the session
+  (#711), which removes the pair's row through `store::delete` in the same
+  transaction as its cache row.
   **The ordering is asserted in `scan.rs`'s own tests since #447**, over a
   two-config-dir fixture corpus under a swapped `HOME`: a removed session is
   expired, keeps its insight row and loses its index row (#706), and a session

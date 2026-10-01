@@ -258,6 +258,7 @@ pub fn finish(result: Result<super::Answer, WriteError>) -> Result<super::Answer
 /// | `chats::BulkDeleteRequest`, `tasks::BulkDeleteRequest` | — (`GoList<String>`) | n/a |
 /// | `pricing::RateRequest` | — (the bands are not expressible in a request) | n/a |
 /// | `sessions::update::UpdateRequest` | — | n/a |
+/// | `sessions::delete::DeleteBeforeRequest` | — | n/a |
 /// | `fs::MkdirRequest` | — | n/a |
 /// | `chat::{SendMessageRequest, ProvideInputRequest, PermissionRequestBody}` | — | n/a |
 /// | `claude_settings::profiles::{CreateRequest, UpdateRequest}` | — (`settings` is a `RawValue`, as Go's is) | n/a |

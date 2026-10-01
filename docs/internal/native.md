@@ -119,11 +119,13 @@
       mod.rs     buildJobDefinition and gocron's four job types; claims no route
       cron.rs    robfig/cron's dialect, which is the one a cron task is written in
     sessions/    GET /api/claude-sessions, /facets, /projects, /{id} and
-                 /{id}/journey (#479), plus POST /{id}/continue (#308) and
-                 PATCH /{id} (#296)
+                 /{id}/journey (#479), plus POST /{id}/continue (#308),
+                 PATCH /{id} (#296) and the two DELETEs of expired sessions (#711)
       continue_chat.rs the two writes that resume a Claude session as a chat,
                  the lookup that makes continue idempotent, and the three
                  `continued_from_*` columns migration 37 adds (#490)
+      delete.rs  DELETE /{id} and DELETE with {before}: only an expired
+                 session, and the one cascade over the seven tables (#711)
       update.rs  the rename and the favourite — the only two columns here the
                  user typed, and the only ones the scanner never writes
       detail.rs  one session re-read from its transcript, patched from the cache
@@ -249,8 +251,10 @@ log.
    `filepath.Clean`/`Dir`/`Join` must answer, which is how #268 caught a doubled
    separator. Build the fixture with **no ties on any sort key**: a tie makes
    the expected ordering ambiguous, and an ambiguous golden is a flaky test.
-4. **Register it** in `ENDPOINTS`, and record it in `parity/read_routes.json` or
-   `write_routes.json`.
+4. **Register it** in `ENDPOINTS`, and record it in
+   `parity/desktop_routes.json` through the owning module's `ROUTES` const.
+   `read_routes.json` and `write_routes.json` are frozen records of Go's
+   surface and cannot take a route Go never had.
 
 Two rules that outlived the harness they came from, and still apply to any
 comparison you build:

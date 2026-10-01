@@ -409,7 +409,18 @@ mod tests {
         // method (#296). Every other method on it is unrouted.
         assert!(claims(&Method::PATCH, "/api/claude-sessions/abc-123"));
         assert!(!claims(&Method::PUT, "/api/claude-sessions/abc-123"));
-        assert!(!claims(&Method::DELETE, "/api/claude-sessions/abc-123"));
+        // Deleting an expired session, and the bulk form on the list's own
+        // path (#711). Neither reaches a sibling route.
+        assert!(claims(&Method::DELETE, "/api/claude-sessions/abc-123"));
+        assert!(claims(&Method::DELETE, "/api/claude-sessions"));
+        assert!(!claims(&Method::DELETE, "/api/claude-sessions/facets"));
+        assert!(!claims(&Method::DELETE, "/api/claude-sessions/projects"));
+        assert!(!claims(&Method::DELETE, "/api/claude-sessions/abc/journey"));
+        assert!(!claims(
+            &Method::DELETE,
+            "/api/claude-sessions/abc/continue"
+        ));
+        assert!(!claims(&Method::PUT, "/api/claude-sessions"));
         assert!(!claims(&Method::PATCH, "/api/claude-sessions/"));
         assert!(!claims(&Method::PATCH, "/api/claude-sessions/abc/journey"));
         // The journey timeline, claimed since #479 — and for `GET` alone, so
@@ -837,8 +848,8 @@ mod tests {
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
         //
-        // The file has **five owners** since #604, so the claimed set is the
-        // union of all five modules' consts. A sixth owner appends here;
+        // The file has **six owners** since #711, so the claimed set is the
+        // union of all six modules' consts. A seventh owner appends here;
         // leaving it out would silently weaken the assertion from set equality
         // to "the owners I remembered", which is the one-directional property
         // this test exists to escape.
@@ -848,6 +859,7 @@ mod tests {
             .chain(tasks::ROUTES.iter())
             .chain(integrations::ROUTES.iter())
             .chain(security_scan::api::ROUTES.iter())
+            .chain(sessions::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(

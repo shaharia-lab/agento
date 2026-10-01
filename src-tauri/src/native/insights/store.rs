@@ -357,6 +357,21 @@ pub fn delete_orphans(conn: &Connection) -> Result<usize, String> {
     .map_err(|e| format!("reconciling orphaned insights: {e}"))
 }
 
+/// Remove one session's insight row (#711).
+///
+/// Keyed on the pair, like everything here, and on the caller's connection so
+/// it joins the caller's transaction. [`delete_orphans`] would reach the same
+/// row on the next scan once its cache row is gone; a user's delete does not
+/// wait for one.
+pub fn delete(conn: &Connection, session_id: &str, project_path: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM session_insights WHERE session_id = ?1 AND project_path = ?2",
+        params![session_id, project_path],
+    )
+    .map_err(|e| format!("deleting session insights: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -106,6 +106,29 @@
   it before opening the database for writing. Enforced by
   `sessions/tests_gone.rs`. `api.ts` retries a 401 only, so a 410 is one
   request; `isTranscriptExpired` narrows the `ApiError`.
+- **Only an expired session can be deleted, and a delete removes everything
+  stored about it** (#711). `DELETE /api/claude-sessions/{id}` answers `204`,
+  `404 session not found` when no cache row has the id, and `409` when a
+  transcript for it is on disk or any row with that id is not stamped — decided
+  by the same `detail::expiry` the 410 reads use, plus the row's stored
+  `file_path`, and all-or-nothing over every pair carrying the id.
+  `DELETE /api/claude-sessions` with `{"before":"<RFC 3339>"}` answers
+  `200 {"deleted":N}` (`parity/session_delete_golden.json`) for every expired
+  pair with `last_activity` **strictly** before the bound whose file is not on
+  disk; a missing, `null`, empty or unparseable `before` is a 422, and there is
+  no delete-everything form. The bulk candidates come from the list's own
+  `build_filter` with `transcript=expired` and the new `ended_before`
+  parameter (`c.last_activity < ?`, which also applies under a drill-down), so
+  `GET …/facets?transcript=expired&ended_before=T` counts exactly what the bulk
+  delete removes — and a hidden project's or an un-indexed config dir's
+  sessions are in neither. `delete::delete_pairs` is the one cascade, on the
+  caller's transaction: the pair's findings, scan state, insights, search rows
+  and cache row, then the id-keyed sub-agent and PR rows **only once no cache
+  row carries the id**. It deletes a cache row only while it is still stamped,
+  so a pair a scan un-expired in between is skipped whole. The transcript is
+  never touched. Both routes are desktop-only and recorded in
+  `parity/desktop_routes.json` through `sessions::ROUTES`. Enforced by
+  `sessions/tests_delete.rs`.
 - **Cache invalidation is multi-dimensional**: TTL (1h), `scanner_version`,
   pricing revision fingerprint, and idle-threshold drift each force a re-read.
 - **Session export is a Tauri command, not an `/api` route, and it reads the

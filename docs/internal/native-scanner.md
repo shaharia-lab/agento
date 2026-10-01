@@ -33,7 +33,8 @@ Five rules that are silent when wrong:
   `(session_id, project_path)` while `file_path` is a non-unique index, so
   a claim shift legitimately brings the same row under a new path. The diff
   indexes the cache twice — by path and by row key — to tell them apart.
-- **A vanished transcript expires its row; nothing deletes it** (#705). The
+- **A vanished transcript expires its row; the scanner never deletes it**
+  (#705) — only the user does, through `sessions/delete.rs` (#711). The
   expiry pass stamps `transcript_expired_at` and blanks `preview`, and keeps
   every figure, both user-owned columns, the titles and the PR links. It is
   idempotent — an expired row is not listed again, so the stamp is the time

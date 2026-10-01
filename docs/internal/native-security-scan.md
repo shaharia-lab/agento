@@ -33,7 +33,9 @@ statement; the rules below are the ones a change is most likely to break.
   cache row with `transcript_expired_at` set on both branches, so neither a
   sweep nor a ruleset bump retries a transcript that is gone. Its findings and
   `credential_scan_state` row are kept and still counted
-  (`needs_scanning_skips_an_expired_row`).
+  (`needs_scanning_skips_an_expired_row`) until the user deletes the session
+  (#711), which removes both through `store::delete_session` in the delete's
+  own transaction. `credential_whitelist` is not session-linked and survives.
 - **A changed session is marked before it is announced.** `needs_scanning`
   looks at versions, never at whether a file changed, so `scan.rs` calls
   `store::mark_changed` (resets `ruleset_version` to 0) on every changed

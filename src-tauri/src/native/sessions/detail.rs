@@ -232,7 +232,7 @@ pub fn find_session_file(dirs: &[String], session_id: &str) -> Option<(String, S
 }
 
 /// `validSessionID`: `^[a-zA-Z0-9_-]+$`.
-fn is_valid_session_id(id: &str) -> bool {
+pub(crate) fn is_valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .bytes()

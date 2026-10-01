@@ -27,6 +27,7 @@
 
 pub mod continue_chat;
 pub mod corpus;
+pub mod delete;
 pub mod detail;
 pub mod export;
 pub mod journey;
@@ -39,6 +40,18 @@ pub mod update;
 use axum::http::Method;
 
 use crate::native::{db, gojson, settings, Answer, Ctx, Endpoint, Request};
+
+/// The routes here that exist **only** in the desktop build (#711).
+///
+/// An owner of `parity/desktop_routes.json`, whose assertion is set equality
+/// over the union of every owner's const — so this list and that file move
+/// together or `the_desktop_only_routes_are_recorded_in_both_directions` fails.
+/// Everything else this module claims came from Go and is recorded in
+/// `read_routes.json` / `write_routes.json`.
+pub const ROUTES: &[(&str, &str)] = &[
+    ("DELETE", "/api/claude-sessions/{id}"),
+    ("DELETE", "/api/claude-sessions"),
+];
 
 /// This module's entry in `native::ENDPOINTS`.
 pub const ENDPOINT: Endpoint = Endpoint {
@@ -107,10 +120,14 @@ fn route_of(path: &str) -> Option<Route<'_>> {
 
 fn claims(method: &Method, path: &str) -> bool {
     match route_of(path) {
-        // The two writes, each claimed for its own method only, so the wrong
+        // The writes, each claimed for its own method only, so the wrong
         // pairing is unrouted.
         Some(Route::Continue(_)) => method == Method::POST,
-        Some(Route::Detail(_)) => method == Method::GET || method == Method::PATCH,
+        Some(Route::Detail(_)) => {
+            method == Method::GET || method == Method::PATCH || method == Method::DELETE
+        }
+        // The bulk delete of expired sessions (#711) shares the list's path.
+        Some(Route::List) => method == Method::GET || method == Method::DELETE,
         // Read-only, so no method shares this path — a `PATCH` on it stays
         // unrouted rather than reaching the rename write below.
         Some(Route::Journey(_)) => method == Method::GET,
@@ -119,7 +136,7 @@ fn claims(method: &Method, path: &str) -> bool {
     }
 }
 
-/// Answer one of the five reads, or one of the two writes.
+/// Answer one of the five reads, or one of the four writes.
 ///
 /// **`/status` and `/refresh` are not here, and that is a decision rather than
 /// an omission.** Both are about the *scan*, which since #289 the shell owns —
@@ -140,6 +157,20 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
                 crate::native::writes::finish(update::update(&ctx.db_path, id, req.body))
             }
             _ => Err(format!("PATCH {} is not ported", req.path)),
+        };
+    }
+
+    // The two deletes of expired sessions (#711): one by id on the detail's
+    // path, one by date on the list's.
+    if req.method == Method::DELETE {
+        return match route_of(req.path) {
+            Some(Route::Detail(id)) => {
+                crate::native::writes::finish(delete::delete_one(&ctx.db_path, id))
+            }
+            Some(Route::List) => {
+                crate::native::writes::finish(delete::delete_before(&ctx.db_path, req.body))
+            }
+            _ => Err(format!("DELETE {} is not ported", req.path)),
         };
     }
 
