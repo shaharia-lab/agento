@@ -35,6 +35,9 @@ pub mod params;
 pub mod report;
 
 #[cfg(test)]
+mod tests_expiry;
+
+#[cfg(test)]
 mod tests_golden;
 
 use axum::http::Method;

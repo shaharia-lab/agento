@@ -208,6 +208,40 @@ mod tests {
         }
     }
 
+    /// History outlives the transcript (#708): a row the scanner marked expired
+    /// is still a row, so it can be renamed and favourited like any other, and
+    /// the write leaves its expiry stamp alone.
+    #[test]
+    fn an_expired_session_can_still_be_renamed_and_favourited() {
+        let file = migrated_with_session("s1");
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "UPDATE claude_session_cache
+                SET transcript_expired_at = '2026-09-01 08:30:00 +0000 UTC'
+              WHERE session_id = 's1'",
+            [],
+        )
+        .expect("expire");
+
+        let answer = update(
+            file.path(),
+            "s1",
+            br#"{"custom_title":"Kept","is_favorite":true}"#,
+        )
+        .expect("update an expired row");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+        assert_eq!(row(&file, "s1"), ("Kept".to_string(), true));
+
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT transcript_expired_at FROM claude_session_cache WHERE session_id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("stamp");
+        assert_eq!(stamp.as_deref(), Some("2026-09-01 08:30:00 +0000 UTC"));
+    }
+
     /// The one that looks like a bug and is not: Go never checks the session
     /// exists, and an `UPDATE` matching no row is not an error — so an unknown
     /// id is a **204**, not a 404.

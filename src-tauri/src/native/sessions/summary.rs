@@ -138,6 +138,20 @@ pub struct SessionSummary {
     /// no index row at all.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub match_snippet: String,
+    /// The transcript file is gone and this row is history only (#708): the
+    /// scanner stamped `transcript_expired_at` instead of deleting the row
+    /// (#705). Derived from the stamp below, never stored on its own.
+    ///
+    /// **Trailing, and omitted when false**, for `match_snippet`'s reason: a
+    /// live row serializes exactly as it did before the field existed, so no
+    /// frozen golden moves. `parity/claude_sessions_expired_golden.json` pins
+    /// the expired spelling.
+    #[serde(skip_serializing_if = "is_false")]
+    pub transcript_expired: bool,
+    /// When the scanner first found the transcript missing. Omitted for a live
+    /// row, so the key's presence and `transcript_expired` always agree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_expired_at: Option<GoTime>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -266,7 +280,8 @@ pub const SUMMARY_COLUMNS: &str = "
 	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0),
 	       COALESCE(sa.ic, 0), COALESCE(sa.oc, 0), COALESCE(sa.crc, 0),
 	       COALESCE(sa.cwc, 0), COALESCE(sa.tc, 0), COALESCE(sa.ut, 0),
-	       COALESCE(sa.um, ''), COALESCE(sa.adm, 0)";
+	       COALESCE(sa.um, ''), COALESCE(sa.adm, 0),
+	       c.transcript_expired_at";
 
 /// The FROM/JOIN half, split out so an aggregate can reuse it without the
 /// projection. Its aliases are what `query.rs`'s metric expressions name.
@@ -302,6 +317,12 @@ pub fn scan(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
     let cost_by_model: String = row.get(36)?;
     let subagent_unpriced_tokens: i64 = row.get(51)?;
     let subagent_unpriced_models: String = row.get(52)?;
+    // NULL for a live row. Written by the scanner as Go-style UTC text, so it
+    // is read the way `start_time` is rather than hand-parsed.
+    let transcript_expired_at = row
+        .get::<_, Option<String>>(54)?
+        .map(|text| crate::native::gotime::from_sql_text(&text, 54))
+        .transpose()?;
 
     let mut s = SessionSummary {
         session_id: row.get(0)?,
@@ -371,6 +392,8 @@ pub fn scan(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         // Not in `SUMMARY_COLUMNS`: the snippet is one extra read over the
         // index for the page's rows, attached afterwards (`page::attach_match_snippets`).
         match_snippet: String::new(),
+        transcript_expired: transcript_expired_at.is_some(),
+        transcript_expired_at,
     };
     s.display_title = resolve_display_title(&s);
     Ok(s)
@@ -531,6 +554,8 @@ mod tests {
             unpriced_models: Vec::new(),
             unpriced_tokens: 0,
             match_snippet: String::new(),
+            transcript_expired: false,
+            transcript_expired_at: None,
         }
     }
 }

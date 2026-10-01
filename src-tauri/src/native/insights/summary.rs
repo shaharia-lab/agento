@@ -323,6 +323,58 @@ fn sorted_tool_counts(totals: BTreeMap<String, i64>) -> Vec<ToolCount> {
 mod tests {
     use super::*;
 
+    /// An expired session keeps the insights it was given while its transcript
+    /// existed (#708): the summary reads the cache row and the insights row,
+    /// and neither went away.
+    #[test]
+    fn an_expired_sessions_insights_row_is_still_counted() {
+        use crate::native::insights::processors::SessionInsight;
+
+        let mut conn = Connection::open_in_memory().expect("in-memory database");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute_batch(
+            "INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time, last_activity,
+                  transcript_expired_at)
+             VALUES ('live', '/p', '/p/live.jsonl', 0,
+                     '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 12:00:00 +0000 UTC', NULL),
+                    ('gone', '/p', '/p/gone.jsonl', 0,
+                     '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 13:00:00 +0000 UTC',
+                     '2026-09-01 08:30:00 +0000 UTC');",
+        )
+        .expect("seed sessions");
+        let tx = conn.transaction().expect("tx");
+        for (id, turns) in [("live", 2), ("gone", 6)] {
+            let insight = SessionInsight {
+                session_id: id.to_string(),
+                turn_count: turns,
+                ..Default::default()
+            };
+            crate::native::insights::store::upsert(
+                &tx,
+                &insight,
+                "/p",
+                "2026-08-02 00:00:00+00:00",
+            )
+            .expect("upsert");
+        }
+        tx.commit().expect("commit");
+
+        let query = "from=2026-08-01&to=2026-08-02&tz=UTC";
+        let all = summary(&conn, &DataSettings::default(), query).expect("summary");
+        assert_eq!(all.total_sessions, 2);
+        assert_eq!(all.avg_turn_count, 4.0);
+
+        let gone = summary(
+            &conn,
+            &DataSettings::default(),
+            &format!("{query}&ids=gone"),
+        )
+        .expect("summary of the expired session");
+        assert_eq!(gone.total_sessions, 1);
+        assert_eq!(gone.avg_turn_count, 6.0);
+    }
+
     #[test]
     fn the_ids_parameter_drops_blanks_and_trims() {
         assert_eq!(parse_session_ids(""), Vec::<String>::new());

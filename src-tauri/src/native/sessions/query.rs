@@ -192,6 +192,16 @@ pub enum Links {
     Without,
 }
 
+/// Whether a session's transcript must still be on disk (#708). A tri-state
+/// like [`Links`], because a boolean cannot say "only the live ones".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Transcript {
+    #[default]
+    Any,
+    Available,
+    Expired,
+}
+
 /// An inclusive numeric filter. One min/max pair expresses all three
 /// comparisons the UI offers.
 #[derive(Debug, Clone, Copy, Default)]
@@ -230,6 +240,7 @@ pub struct SessionQuery {
     pub search: String,
     pub favorites_only: bool,
     pub links: Links,
+    pub transcript: Transcript,
     pub permission_mode: String,
     pub model: String,
     pub messages: NumericRange,
@@ -275,6 +286,13 @@ impl SessionQuery {
             other => return Err(format!("invalid links filter {other:?}")),
         };
 
+        let transcript = match get("transcript").as_str() {
+            "" => Transcript::Any,
+            "available" => Transcript::Available,
+            "expired" => Transcript::Expired,
+            other => return Err(format!("invalid transcript filter {other:?}")),
+        };
+
         let limit = match get("limit") {
             raw if raw.is_empty() => 0,
             raw => raw
@@ -287,6 +305,7 @@ impl SessionQuery {
             config_dir: get("config_dir"),
             favorites_only: get("favorites") == "true",
             links,
+            transcript,
             permission_mode: get("permission_mode"),
             model: get("model"),
             messages: numeric_range(&params, "messages"),
@@ -467,6 +486,7 @@ pub fn build_filter(
     }
     add_search(conn, &mut f, &q.search);
     add_links(&mut f, q.links);
+    add_transcript(&mut f, q.transcript);
 
     add_range(&mut f, SQL_MESSAGE_COUNT, q.messages, 1.0);
     // The duration filter is entered in minutes; the column stores milliseconds.
@@ -732,6 +752,16 @@ pub fn add_links(f: &mut Filter, links: Links) {
         Links::With => f.add(PR_EXISTS, vec![]),
         Links::Without => f.add(format!("NOT {PR_EXISTS}"), vec![]),
         Links::Any => {}
+    }
+}
+
+/// Narrow to sessions whose transcript is still readable, or to the ones the
+/// scanner marked expired (#705). The column is NULL for a live row.
+pub fn add_transcript(f: &mut Filter, transcript: Transcript) {
+    match transcript {
+        Transcript::Available => f.add("c.transcript_expired_at IS NULL", vec![]),
+        Transcript::Expired => f.add("c.transcript_expired_at IS NOT NULL", vec![]),
+        Transcript::Any => {}
     }
 }
 
@@ -1056,6 +1086,19 @@ mod tests {
     fn an_invalid_links_filter_is_rejected() {
         assert!(SessionQuery::parse("links=maybe").is_err());
         assert!(SessionQuery::parse("links=").is_ok());
+    }
+
+    #[test]
+    fn the_transcript_filter_is_a_tri_state_and_anything_else_is_rejected() {
+        let parsed = |raw: &str| SessionQuery::parse(raw).map(|q| q.transcript);
+        assert_eq!(parsed(""), Ok(Transcript::Any));
+        assert_eq!(parsed("transcript="), Ok(Transcript::Any));
+        assert_eq!(parsed("transcript=available"), Ok(Transcript::Available));
+        assert_eq!(parsed("transcript=expired"), Ok(Transcript::Expired));
+        assert_eq!(
+            parsed("transcript=bogus"),
+            Err("invalid transcript filter \"bogus\"".to_string())
+        );
     }
 
     #[test]

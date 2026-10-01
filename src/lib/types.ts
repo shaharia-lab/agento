@@ -468,6 +468,13 @@ export interface ClaudeSessionSummary {
    * that matched only on its id, path or title. Default it (`?? ""`).
    */
   match_snippet?: string;
+  /**
+   * The transcript file is gone and this row is history only (#708). Both keys
+   * are omitted for a live session, so read them as `?? false` / `undefined`.
+   * `GET /claude-sessions?transcript=available|expired` filters on it.
+   */
+  transcript_expired?: boolean;
+  transcript_expired_at?: string;
 }
 
 /** One content block of an assistant turn, normalized by the scanner. */
@@ -599,6 +606,8 @@ export interface SessionFacets {
   config_dirs?: string[] | null;
   has_favorites: boolean;
   has_prs: boolean;
+  /** Expired sessions in the filtered set (#708). Omitted when 0. */
+  expired_sessions?: number;
 }
 
 export interface ClaudeProject {
@@ -631,6 +640,11 @@ export interface AnalyticsSummary {
   estimated_cost_usd: number;
   unknown_pricing_tokens: number;
   unknown_pricing_models: string[] | null;
+  /**
+   * How many of `total_sessions` have lost their transcript (#708). They stay
+   * in every total above. Omitted when 0.
+   */
+  expired_sessions?: number;
 }
 
 export interface TimeSeriesPoint {
@@ -685,6 +699,8 @@ export interface SessionRanking {
   tokens: number;
   subagent_count: number;
   last_activity: string;
+  /** The session's transcript is gone (#708). Omitted when false. */
+  transcript_expired?: boolean;
 }
 
 export interface CostSummary {

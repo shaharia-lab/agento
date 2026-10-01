@@ -132,6 +132,8 @@ impl Row {
             // Never set outside a search response, and the analytics golden is
             // not one — see `SessionSummary::match_snippet`.
             match_snippet: String::new(),
+            transcript_expired: false,
+            transcript_expired_at: None,
         }
     }
 }

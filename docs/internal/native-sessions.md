@@ -79,6 +79,19 @@
   Its markers are **U+0001/U+0002**, unambiguous because `search::normalize`
   strips every control character from the indexed text — never HTML, and never a
   printable sentinel a transcript could contain.
+- **Expiry is two trailing, omitted fields and one tri-state filter** (#708).
+  A row the scanner stamped `transcript_expired_at` (#705) carries
+  `transcript_expired: true` and `transcript_expired_at` as the **last** keys of
+  its `SessionSummary`; a live row carries neither, which is what kept every
+  frozen golden byte-identical, and `parity/claude_sessions_expired_golden.json`
+  pins the expired spelling. `transcript` on the list and the facets is `""`
+  (any), `available` or `expired`, and anything else is a 400, exactly like
+  `links`. The counts follow the same rule: `SessionFacets.expired_sessions`,
+  `AnalyticsSummary.expired_sessions` and `SessionRanking.transcript_expired`
+  are last and omitted at zero or false. Analytics totals **include** expired
+  rows, because `corpus.rs` reads every cache row. The column is index 54 of
+  `SUMMARY_COLUMNS`, so the relevance key `page.rs` appends is index **55**; a
+  stale index fails only on `sort=relevance`.
 - **Cache invalidation is multi-dimensional**: TTL (1h), `scanner_version`,
   pricing revision fingerprint, and idle-threshold drift each force a re-read.
 - **Session export is a Tauri command, not an `/api` route, and it reads the

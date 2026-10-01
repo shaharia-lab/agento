@@ -54,6 +54,16 @@ pub struct SessionFacets {
     pub config_dirs: Vec<String>,
     pub has_favorites: bool,
     pub has_prs: bool,
+    /// How many sessions in the filtered set have lost their transcript
+    /// (#708), so the UI can offer the `transcript` filter only when it would
+    /// match something. Last and omitted at 0, which keeps every response
+    /// without an expired row byte-identical to what it was.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub expired_sessions: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 /// Read one page of sessions matching `q`.
@@ -157,10 +167,10 @@ pub fn list_page(
         .map_err(|e| format!("claudesessions: preparing session page: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(args.iter()), |row| {
-            // `SUMMARY_COLUMNS` is 54 columns, 0..=53; the relevance key is the
+            // `SUMMARY_COLUMNS` is 55 columns, 0..=54; the relevance key is the
             // one appended above, and is absent for every other sort.
             let sort_value = if relevance {
-                row.get::<_, f64>(54)?
+                row.get::<_, f64>(55)?
             } else {
                 RELEVANCE_UNRANKED
             };
@@ -263,7 +273,8 @@ pub fn facets(
     let where_clause = filter.where_clause();
 
     let totals_sql = format!(
-        "SELECT COUNT(*), COALESCE(SUM({SQL_TOKENS}), 0), COALESCE(SUM({SQL_COST_USD}), 0)\
+        "SELECT COUNT(*), COALESCE(SUM({SQL_TOKENS}), 0), COALESCE(SUM({SQL_COST_USD}), 0), \
+         COALESCE(SUM(c.transcript_expired_at IS NOT NULL), 0)\
          {SUMMARY_SOURCE}{where_clause}"
     );
     let mut f: SessionFacets = conn
@@ -275,6 +286,7 @@ pub fn facets(
                     total: row.get(0)?,
                     total_tokens: row.get(1)?,
                     total_cost_usd: row.get(2)?,
+                    expired_sessions: row.get(3)?,
                     ..SessionFacets::default()
                 })
             },

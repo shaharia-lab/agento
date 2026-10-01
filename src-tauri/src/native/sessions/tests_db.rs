@@ -72,6 +72,7 @@ const SCHEMA: &str = "
         cost_by_model TEXT NOT NULL DEFAULT '',
         active_duration_ms INTEGER NOT NULL DEFAULT 0,
         config_dir TEXT NOT NULL DEFAULT '',
+        transcript_expired_at DATETIME,
         -- The real key, as `internal/storage/sqlite.go` declares it. It was
         -- `session_id TEXT PRIMARY KEY` here, which made the one shape these
         -- tests could not express — a session id under two project paths —

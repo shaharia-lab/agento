@@ -110,6 +110,16 @@ pub struct AnalyticsSummary {
     /// `None` only in the empty report, where Go leaves the zero-valued struct's
     /// nil slice to marshal as `null`.
     pub unknown_pricing_models: Option<Vec<String>>,
+    /// How many of `total_sessions` have lost their transcript (#708). They
+    /// stay in every total above — history outlives the file — and this count
+    /// is what lets the UI say how much of the window is history only. Last
+    /// and omitted at 0, so a window with no expired session is unchanged.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub expired_sessions: i64,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One bucket of the token-usage-over-time chart.
@@ -209,6 +219,10 @@ pub struct SessionRanking {
     pub tokens: i64,
     pub subagent_count: i64,
     pub last_activity: GoTime,
+    /// The session's transcript is gone (#708), so its id deep-links to
+    /// history only. Last and omitted when false.
+    #[serde(skip_serializing_if = "is_false")]
+    pub transcript_expired: bool,
 }
 
 /// The leaderboards: the same sessions ranked three ways, because "expensive",
@@ -442,6 +456,7 @@ fn build_summary(sessions: &[&SessionSummary]) -> (AnalyticsSummary, CostSummary
             estimated_cost_usd: cost.total_cost_usd,
             unknown_pricing_tokens: unpriced_tokens,
             unknown_pricing_models: Some(unpriced_models.into_iter().collect()),
+            expired_sessions: sessions.iter().filter(|s| s.transcript_expired).count() as i64,
         },
         cost,
     )
@@ -812,6 +827,7 @@ fn build_top_sessions(sessions: &[&SessionSummary]) -> TopSessions {
                     + u.cache_creation_tokens,
                 subagent_count: s.subagent_count,
                 last_activity: s.last_activity,
+                transcript_expired: s.transcript_expired,
             }
         })
         .collect();

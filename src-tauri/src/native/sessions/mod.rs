@@ -226,6 +226,9 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
 mod tests_db;
 
 #[cfg(test)]
+mod tests_expiry;
+
+#[cfg(test)]
 mod tests_search;
 
 /// Whether this route is one that would have triggered a rescan in Go.

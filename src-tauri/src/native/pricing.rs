@@ -1355,6 +1355,26 @@ mod tests {
         );
     }
 
+    /// An expired session's tokens were still spent on that model (#708), so
+    /// losing the transcript must not take the model off the unpriced list.
+    /// Over the migrated schema, because the column is migration 46's.
+    #[test]
+    fn an_expired_sessions_unpriced_model_is_still_listed() {
+        let file = migrated();
+        let conn = Connection::open(file.path()).expect("open");
+        conn.execute_batch(
+            "INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time, last_activity,
+                  unpriced_models, transcript_expired_at)
+             VALUES ('live', '/p', '/p/live.jsonl', 0, 0, 0, 'glm-4.6', NULL),
+                    ('gone', '/p', '/p/gone.jsonl', 0, 0, 0, 'qwen-plus',
+                     '2026-09-01 08:30:00 +0000 UTC');",
+        )
+        .expect("seed");
+
+        assert_eq!(unpriced_models(&conn), vec!["glm-4.6", "qwen-plus"]);
+    }
+
     #[test]
     fn an_empty_catalog_serializes_as_empty_arrays_not_null() {
         let conn = Connection::open_in_memory().expect("in-memory database");
