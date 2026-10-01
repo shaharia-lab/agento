@@ -39,6 +39,10 @@
 //! they did is re-assembled from [`Obj`], which keeps key order and every
 //! value's spelling — a `serde_json::Value` would sort the keys (this crate
 //! does not enable `preserve_order`) and respell the numbers.
+//!
+//! **A failure is typed** (#710): [`ExportError`] reaches `invoke`'s rejection
+//! as `{"kind":…}`, so the panel can tell a transcript the scanner stamped
+//! expired from an id that never existed without matching on English.
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader};
@@ -50,6 +54,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
 use super::detail::{self, SessionDetail};
+use crate::native::gotime::GoTime;
 use crate::native::settings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -87,6 +92,39 @@ pub struct ExportResult {
     pub attachments_dir: Option<String>,
 }
 
+/// Why an export did not happen, as the command's rejection (#710).
+///
+/// Tauri serialises a command's `Err` with serde, so this is the object
+/// `invoke` rejects with: `kind` first, then the variant's own fields. Every
+/// variant carries a `message` a reader can show as it is. This is IPC, not an
+/// `/api` body, so `gojson` and the `parity/` goldens do not apply; the shape
+/// is pinned by `an_export_error_serialises_with_its_kind_first`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportError {
+    /// No config dir holds the transcript and no cache row is stamped expired.
+    NotFound { message: String },
+    /// The session is known and its transcript is gone. `expired_at` is the
+    /// scanner's stamp, spelled as the routes' 410 body spells it.
+    TranscriptExpired { expired_at: GoTime, message: String },
+    /// Everything else, with the text the command has always reported.
+    Failed { message: String },
+}
+
+impl ExportError {
+    pub fn failed(message: impl Into<String>) -> Self {
+        ExportError::Failed {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for ExportError {
+    fn from(message: String) -> Self {
+        ExportError::failed(message)
+    }
+}
+
 /// Export `session_id` to `dest`.
 ///
 /// Attachments are written before the main file, so a file that exists is a
@@ -96,8 +134,20 @@ pub fn export(
     session_id: &str,
     dest: &Path,
     opts: &ExportOptions,
-) -> Result<ExportResult, String> {
-    let file = locate(db_path, session_id)?.ok_or_else(|| "session not found".to_string())?;
+) -> Result<ExportResult, ExportError> {
+    let Some(file) = locate(db_path, session_id)? else {
+        // Consulted on the miss only, as the 410 routes do: a file on disk
+        // always wins over a stale stamp.
+        return Err(match detail::expiry(db_path, session_id)? {
+            Some(expired_at) => ExportError::TranscriptExpired {
+                expired_at,
+                message: "transcript expired".to_string(),
+            },
+            None => ExportError::NotFound {
+                message: "session not found".to_string(),
+            },
+        });
+    };
     let meta = if opts.include_metadata {
         detail::get(db_path, session_id)?
     } else {
@@ -1232,27 +1282,51 @@ mod tests {
         );
     }
 
-    /// The command's filesystem half: the attachment lands in the sibling
-    /// folder before the file that links it.
-    #[test]
-    fn export_writes_attachments_beside_the_file() {
-        let corpus = tempfile::tempdir().expect("corpus");
-        let project = corpus.path().join("projects").join("-p");
+    /// A migrated database whose settings row names `corpus`, which holds one
+    /// empty project directory.
+    fn fixture(corpus: &Path, data: &Path) -> (PathBuf, PathBuf) {
+        let project = corpus.join("projects").join("-p");
         std::fs::create_dir_all(&project).expect("project");
-        std::fs::write(project.join("s1.jsonl"), transcript().join("\n")).expect("transcript");
 
-        let data = tempfile::tempdir().expect("data");
-        let db = data.path().join("agento.db");
+        let db = data.join("agento.db");
         let mut conn = crate::native::db::ensure_database(&db).expect("db");
         crate::native::migrate::apply(&mut conn).expect("migrate");
         conn.execute("INSERT OR IGNORE INTO user_settings (id) VALUES (1)", [])
             .expect("settings row");
         conn.execute(
             "UPDATE user_settings SET claude_config_dirs = ?1 WHERE id = 1",
-            [serde_json::to_string(&[corpus.path().to_string_lossy()]).unwrap()],
+            [serde_json::to_string(&[corpus.to_string_lossy()]).unwrap()],
         )
         .expect("settings");
-        drop(conn);
+        (db, project)
+    }
+
+    /// The stamp the scanner writes: `gotime::now_go_text()`'s shape.
+    const EXPIRED_AT: &str = "2026-09-01 08:30:00 +0000 UTC";
+
+    /// The cache row a scan leaves behind, stamped expired or not.
+    fn cache_row(db: &Path, session_id: &str, expired_at: Option<&str>) {
+        crate::native::db::open_read_write(db)
+            .expect("open")
+            .execute(
+                "INSERT INTO claude_session_cache
+                     (session_id, project_path, file_path, file_mtime, start_time,
+                      last_activity, transcript_expired_at)
+                 VALUES (?1, '/p', '/gone.jsonl', '2026-08-01 10:00:05 +0000 UTC',
+                         '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 10:00:05 +0000 UTC', ?2)",
+                rusqlite::params![session_id, expired_at],
+            )
+            .expect("cache row");
+    }
+
+    /// The command's filesystem half: the attachment lands in the sibling
+    /// folder before the file that links it.
+    #[test]
+    fn export_writes_attachments_beside_the_file() {
+        let corpus = tempfile::tempdir().expect("corpus");
+        let data = tempfile::tempdir().expect("data");
+        let (db, project) = fixture(corpus.path(), data.path());
+        std::fs::write(project.join("s1.jsonl"), transcript().join("\n")).expect("transcript");
 
         let out = tempfile::tempdir().expect("out");
         let dest = out.path().join("my session.md");
@@ -1269,6 +1343,81 @@ mod tests {
             b"PNG"
         );
 
-        assert!(export(&db, "missing", &dest, &o).is_err());
+        let missing = export(&db, "missing", &dest, &o).expect_err("no such session");
+        assert!(
+            matches!(&missing, ExportError::NotFound { message } if message == "session not found"),
+            "{missing:?}"
+        );
+    }
+
+    #[test]
+    fn an_expired_transcript_is_not_reported_as_not_found() {
+        let corpus = tempfile::tempdir().expect("corpus");
+        let data = tempfile::tempdir().expect("data");
+        let (db, _) = fixture(corpus.path(), data.path());
+        cache_row(&db, "s1", Some(EXPIRED_AT));
+        // Known to the cache but never stamped: the scanner alone decides a
+        // transcript has expired, so this one is still "not found".
+        cache_row(&db, "s2", None);
+
+        let dest = data.path().join("out.md");
+        let err = export(&db, "s1", &dest, &opts(Format::Markdown)).expect_err("expired");
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"transcript_expired","expired_at":"2026-09-01T08:30:00Z","message":"transcript expired"}"#
+        );
+        let err = export(&db, "s2", &dest, &opts(Format::Markdown)).expect_err("unstamped");
+        assert!(matches!(err, ExportError::NotFound { .. }), "{err:?}");
+        assert!(!dest.exists(), "a refused export writes nothing");
+    }
+
+    /// A file restored before the next scan still carries the stamp; the file
+    /// wins.
+    #[test]
+    fn a_transcript_on_disk_exports_despite_a_stale_stamp() {
+        let corpus = tempfile::tempdir().expect("corpus");
+        let data = tempfile::tempdir().expect("data");
+        let (db, project) = fixture(corpus.path(), data.path());
+        std::fs::write(project.join("s1.jsonl"), transcript().join("\n")).expect("transcript");
+        cache_row(&db, "s1", Some(EXPIRED_AT));
+
+        let dest = data.path().join("out.md");
+        let r = export(&db, "s1", &dest, &opts(Format::Markdown)).expect("export");
+        assert!(r.bytes > 0);
+        assert!(dest.exists());
+    }
+
+    /// Any other failure keeps the text the command reported before #710.
+    #[test]
+    fn a_failure_that_is_neither_keeps_its_message() {
+        let corpus = tempfile::tempdir().expect("corpus");
+        let data = tempfile::tempdir().expect("data");
+        let (db, project) = fixture(corpus.path(), data.path());
+        std::fs::write(project.join("s1.jsonl"), transcript().join("\n")).expect("transcript");
+
+        let dest = data.path().join("no-such-dir").join("out.md");
+        let err = export(&db, "s1", &dest, &opts(Format::Markdown)).expect_err("unwritable");
+        let ExportError::Failed { message } = &err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            message.starts_with(&format!("writing {}: ", dest.display())),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_export_error_serialises_with_its_kind_first() {
+        let json = |e: ExportError| serde_json::to_string(&e).unwrap();
+        assert_eq!(
+            json(ExportError::NotFound {
+                message: "session not found".to_string()
+            }),
+            r#"{"kind":"not_found","message":"session not found"}"#
+        );
+        assert_eq!(
+            json(ExportError::from("writing /x: denied".to_string())),
+            r#"{"kind":"failed","message":"writing /x: denied"}"#
+        );
     }
 }

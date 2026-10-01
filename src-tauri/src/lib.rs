@@ -147,8 +147,10 @@ async fn export_session(
     session_id: String,
     dest_path: String,
     options: native::sessions::export::ExportOptions,
-) -> Result<native::sessions::export::ExportResult, String> {
-    let db = paths::database_path().ok_or("no home directory to find the database in")?;
+) -> Result<native::sessions::export::ExportResult, native::sessions::export::ExportError> {
+    use native::sessions::export::ExportError;
+    let db = paths::database_path()
+        .ok_or_else(|| ExportError::failed("no home directory to find the database in"))?;
     native::db::blocking("session export", move || {
         native::sessions::export::export(
             &db,
@@ -158,7 +160,7 @@ async fn export_session(
         )
     })
     .await
-    .unwrap_or_else(|| Err("the export failed unexpectedly".to_string()))
+    .unwrap_or_else(|| Err(ExportError::failed("the export failed unexpectedly")))
 }
 
 /// How this copy was installed.

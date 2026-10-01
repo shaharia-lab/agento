@@ -117,7 +117,11 @@
   only for the metadata header. An unfiltered JSONL line is written byte for
   byte and a filtered one is re-assembled in key order; binary content is never
   inlined in Markdown or text, it is decoded into `<stem>-attachments/`. What
-  each toggle governs is that module's `//!` doc.
+  each toggle governs is that module's `//!` doc. The command rejects with a
+  typed `ExportError` (#710) whose `kind` is `transcript_expired` (the file is
+  gone and the row is stamped, decided by the same `detail::expiry` the 410
+  routes use, with `expired_at`), `not_found`, or `failed` for everything else;
+  `lib/sessionExport.ts` rethrows it as a `SessionExportError`.
 
 ## Three read-path rules that make a wrong implementation look right
 

@@ -29,6 +29,53 @@ export interface ExportResult {
   attachments_dir?: string;
 }
 
+/** `ExportError`'s `kind` in `native/sessions/export.rs`, verbatim (#710). */
+export type ExportErrorKind = "not_found" | "transcript_expired" | "failed";
+
+/**
+ * A rejected export, typed by why. The command rejects with a plain object,
+ * which every generic reader would print as `[object Object]`; this is that
+ * object as an `Error`, so `describeError` shows `message` and a caller can
+ * branch on `kind` instead of on English.
+ */
+export class SessionExportError extends Error {
+  readonly kind: ExportErrorKind;
+  /** The scanner's stamp, RFC 3339. Set for `transcript_expired` only. */
+  readonly expiredAt?: string;
+
+  constructor(kind: ExportErrorKind, message: string, expiredAt?: string) {
+    super(message);
+    this.name = "SessionExportError";
+    this.kind = kind;
+    this.expiredAt = expiredAt;
+  }
+}
+
+const EXPORT_ERROR_KINDS: readonly ExportErrorKind[] = [
+  "not_found",
+  "transcript_expired",
+  "failed",
+];
+
+/** Whatever `invoke` rejected with, as a `SessionExportError`. */
+export function toSessionExportError(err: unknown): SessionExportError {
+  if (err instanceof SessionExportError) return err;
+  if (typeof err === "object" && err !== null && !(err instanceof Error)) {
+    const { kind, message, expired_at } = err as Record<string, unknown>;
+    if (EXPORT_ERROR_KINDS.includes(kind as ExportErrorKind)) {
+      return new SessionExportError(
+        kind as ExportErrorKind,
+        typeof message === "string" && message ? message : "The export failed.",
+        typeof expired_at === "string" ? expired_at : undefined
+      );
+    }
+  }
+  // Not this command's shape: a string from the IPC layer itself, say.
+  const message =
+    err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  return new SessionExportError("failed", message || "The export failed.");
+}
+
 export const EXPORT_AVAILABLE = IS_TAURI;
 
 export const FORMAT_EXT: Record<ExportFormat, string> = {
@@ -100,9 +147,13 @@ export async function exportSession(
   options: ExportOptions
 ): Promise<ExportResult> {
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<ExportResult>("export_session", {
-    sessionId,
-    destPath,
-    options,
-  });
+  try {
+    return await invoke<ExportResult>("export_session", {
+      sessionId,
+      destPath,
+      options,
+    });
+  } catch (err) {
+    throw toSessionExportError(err);
+  }
 }

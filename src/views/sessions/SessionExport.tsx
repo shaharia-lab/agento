@@ -21,6 +21,7 @@ import {
   exportFileName,
   exportSession,
   pickExportPath,
+  SessionExportError,
   type ExportFormat,
   type ExportOptions,
 } from "../../lib/sessionExport";
@@ -121,7 +122,11 @@ export function SessionExportPanel({
           : `Saved to ${res.path}`
       );
     } catch (err) {
-      setError(describeError(err));
+      setError(
+        err instanceof SessionExportError && err.kind === "transcript_expired"
+          ? "This session's transcript has expired; it can no longer be exported."
+          : describeError(err)
+      );
     } finally {
       setSaving(false);
     }
