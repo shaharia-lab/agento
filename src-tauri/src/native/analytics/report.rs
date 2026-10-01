@@ -116,6 +116,17 @@ pub struct AnalyticsSummary {
     /// and omitted at 0, so a window with no expired session is unchanged.
     #[serde(skip_serializing_if = "is_zero")]
     pub expired_sessions: i64,
+    /// The earliest `start_time` over the whole corpus (#716) — narrowed by
+    /// the `project` filter and **not** by `from`/`to`, because how far back
+    /// history reaches is a fact about the corpus rather than the window.
+    /// Present only when the project's corpus holds an expired session, so a
+    /// corpus with none is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_since: Option<GoTime>,
+    /// The same minimum over the sessions whose transcript is still on disk.
+    /// Absent beside a present `history_since` when every transcript expired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcripts_since: Option<GoTime>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -311,11 +322,18 @@ pub fn aggregate(
     let granularity = p.granularity();
     let filtered = filter_sessions(sessions, p);
 
+    let (history_since, transcripts_since) = history_reach(sessions, p);
+
     if filtered.is_empty() {
-        return empty_report(projects, loc, granularity);
+        let mut report = empty_report(projects, loc, granularity);
+        report.summary.history_since = history_since;
+        report.summary.transcripts_since = transcripts_since;
+        return report;
     }
 
-    let (summary, cost_summary) = build_summary(&filtered);
+    let (mut summary, cost_summary) = build_summary(&filtered);
+    summary.history_since = history_since;
+    summary.transcripts_since = transcripts_since;
     let project_breakdown = build_project_breakdown(&filtered);
     let cost_by_model = build_cost_by_model(&filtered);
     let time_series = build_time_series(&filtered, p, granularity, loc);
@@ -394,6 +412,35 @@ pub fn filter_sessions<'a>(
         .collect()
 }
 
+/// How far back history reaches, and how far back transcripts do (#716):
+/// the earliest `start_time` over every session of the project filter, and
+/// over those whose transcript is still on disk.
+///
+/// The window is deliberately ignored — a window with no sessions in it still
+/// has to be able to say where history starts. Both are `None` unless at least
+/// one session has expired: until then the two dates are the same date, the UI
+/// has nothing to say, and the response stays byte-identical to what it was.
+fn history_reach(
+    sessions: &[SessionSummary],
+    p: &AnalyticsParams,
+) -> (Option<GoTime>, Option<GoTime>) {
+    let in_project = || {
+        sessions
+            .iter()
+            .filter(|s| p.project.is_empty() || s.project_path == p.project)
+    };
+    if !in_project().any(|s| s.transcript_expired) {
+        return (None, None);
+    }
+    let earliest = |live_only: bool| {
+        in_project()
+            .filter(|s| !live_only || !s.transcript_expired)
+            .map(|s| s.start_time)
+            .min_by_key(GoTime::instant)
+    };
+    (earliest(false), earliest(true))
+}
+
 fn build_summary(sessions: &[&SessionSummary]) -> (AnalyticsSummary, CostSummary) {
     let (mut input, mut output, mut cache_read, mut cache_write) = (0i64, 0i64, 0i64, 0i64);
     let mut model_count: BTreeMap<String, i64> = BTreeMap::new();
@@ -457,6 +504,8 @@ fn build_summary(sessions: &[&SessionSummary]) -> (AnalyticsSummary, CostSummary
             unknown_pricing_tokens: unpriced_tokens,
             unknown_pricing_models: Some(unpriced_models.into_iter().collect()),
             expired_sessions: sessions.iter().filter(|s| s.transcript_expired).count() as i64,
+            history_since: None,
+            transcripts_since: None,
         },
         cost,
     )

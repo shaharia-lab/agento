@@ -97,12 +97,127 @@ fn a_window_with_no_expired_session_spells_neither_key() {
     let conn = corpus();
     let json = String::from_utf8(gojson::to_vec(&report(&conn)).expect("encode")).expect("utf-8");
     assert!(!json.contains("expired"), "{json}");
+    assert!(!json.contains("_since"), "{json}");
 
     expire(&conn);
     let json = String::from_utf8(gojson::to_vec(&report(&conn)).expect("encode")).expect("utf-8");
-    assert!(json.contains("\"expired_sessions\":1}"), "{json}");
+    // #716's two dates follow the count, in that order, and close the summary.
+    assert!(
+        json.contains(
+            "\"expired_sessions\":1,\"history_since\":\"2026-08-01T09:00:00Z\",\
+             \"transcripts_since\":\"2026-08-01T10:00:00Z\"}"
+        ),
+        "{json}"
+    );
     assert!(
         json.contains("\"transcript_expired\":true}"),
         "the flag is the ranking's last key: {json}"
+    );
+}
+
+// ─── How far back history and transcripts reach (#716) ───────────────────────
+
+fn report_for(conn: &Connection, query: &str) -> AnalyticsReport {
+    analytics(conn, &DataSettings::default(), query).expect("report")
+}
+
+fn since(r: &AnalyticsReport) -> (Option<String>, Option<String>) {
+    let text = |t: Option<crate::native::gotime::GoTime>| t.map(|t| t.rfc3339_nano_utc());
+    (
+        text(r.summary.history_since),
+        text(r.summary.transcripts_since),
+    )
+}
+
+fn at(text: &str) -> Option<String> {
+    Some(text.to_string())
+}
+
+#[test]
+fn an_expired_session_older_than_every_live_one_separates_the_two_dates() {
+    let conn = corpus();
+    assert_eq!(since(&report(&conn)), (None, None), "nothing expired yet");
+
+    expire(&conn);
+    assert_eq!(
+        since(&report(&conn)),
+        (at("2026-08-01T09:00:00Z"), at("2026-08-01T10:00:00Z"))
+    );
+}
+
+/// The dates describe the corpus, not the window: a window holding neither
+/// session, and one holding no session at all, answer the same pair — the
+/// second through `empty_report`.
+#[test]
+fn the_two_dates_ignore_the_window() {
+    let conn = corpus();
+    expire(&conn);
+    let expected = (at("2026-08-01T09:00:00Z"), at("2026-08-01T10:00:00Z"));
+
+    for query in [
+        QUERY,
+        "from=2026-09-01&to=2026-09-30&tz=UTC",
+        "from=2020-01-01&to=2020-01-02&tz=UTC",
+    ] {
+        assert_eq!(since(&report_for(&conn, query)), expected, "{query}");
+    }
+
+    let empty = report_for(&conn, "from=2026-09-01&to=2026-09-30&tz=UTC");
+    assert_eq!(empty.summary.total_sessions, 0, "the empty-report path");
+    assert_eq!(empty.summary.expired_sessions, 0);
+}
+
+#[test]
+fn a_project_filter_narrows_both_dates() {
+    let conn = corpus();
+    expire(&conn);
+
+    // `/work/alpha` holds only the live session: nothing of its own expired,
+    // so it says nothing, whatever happened in `/work/beta`.
+    let alpha = report_for(&conn, &format!("{QUERY}&project=/work/alpha"));
+    assert_eq!(since(&alpha), (None, None));
+
+    // `/work/beta` holds only the expired one.
+    let beta = report_for(&conn, &format!("{QUERY}&project=/work/beta"));
+    assert_eq!(since(&beta), (at("2026-08-01T09:00:00Z"), None));
+}
+
+#[test]
+fn a_corpus_with_every_transcript_expired_has_no_transcripts_date() {
+    let conn = corpus();
+    conn.execute(
+        "UPDATE claude_session_cache
+            SET transcript_expired_at = '2026-09-01 08:30:00 +0000 UTC'",
+        [],
+    )
+    .expect("expire all");
+
+    let r = report(&conn);
+    assert_eq!(since(&r), (at("2026-08-01T09:00:00Z"), None));
+
+    let json = String::from_utf8(gojson::to_vec(&r).expect("encode")).expect("utf-8");
+    assert!(
+        json.contains("\"expired_sessions\":2,\"history_since\":\"2026-08-01T09:00:00Z\"}"),
+        "{json}"
+    );
+    assert!(!json.contains("transcripts_since"), "{json}");
+}
+
+/// An expired session that is *newer* than a live one moves neither date off
+/// the live minimum: history and transcripts then start on the same day.
+#[test]
+fn an_expired_session_newer_than_a_live_one_leaves_the_dates_equal() {
+    let conn = corpus();
+    conn.execute(
+        "UPDATE claude_session_cache
+            SET transcript_expired_at = '2026-09-01 08:30:00 +0000 UTC'
+          WHERE session_id = 'live'",
+        [],
+    )
+    .expect("expire the newer one");
+
+    assert_eq!(
+        since(&report(&conn)),
+        (at("2026-08-01T09:00:00Z"), at("2026-08-01T09:00:00Z"))
     );
 }

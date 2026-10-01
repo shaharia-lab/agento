@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { api, qs } from "../lib/api";
 import { useResource } from "../lib/hooks";
 import { Icon } from "../lib/icons";
-import { integer, percent, usd } from "../lib/format";
+import { fullDate, integer, percent, usd } from "../lib/format";
 import { loadAnalyticsPrefs, saveAnalyticsPrefs } from "../lib/analyticsPrefs";
 import type {
   AnalyticsReport,
@@ -138,6 +138,22 @@ export function AnalyticsView({
     [query, ready, mode]
   );
 
+  // How far back history and transcripts reach is a fact about the corpus, not
+  // the window, and only `/claude-analytics` carries it. The two report modes
+  // already hold it; Insights reads a different endpoint, so it asks for the
+  // report once per project filter — without `from`/`to`, which the two dates
+  // ignore — rather than leaving the note out of one mode in three.
+  const reachQuery = qs({ project: project || undefined, tz: TZ });
+  const reach = useResource<AnalyticsReport | undefined>(
+    (signal) =>
+      mode === "insights"
+        ? api.get<AnalyticsReport>(`/claude-analytics${reachQuery}`, signal)
+        : Promise.resolve(undefined),
+    [reachQuery, mode]
+  );
+  const reachSummary =
+    mode === "insights" ? reach.data?.summary : report.data?.report.summary;
+
   const projects = useResource<ClaudeProject[] | null>(
     (signal) => api.get<ClaudeProject[] | null>("/claude-sessions/projects", signal),
     []
@@ -272,6 +288,13 @@ export function AnalyticsView({
           </div>
         )}
 
+        {reachSummary?.history_since && (
+          <HistoryNote
+            historySince={reachSummary.history_since}
+            transcriptsSince={reachSummary.transcripts_since}
+          />
+        )}
+
         {!ready ? (
           <div className="a-state">{period.label}</div>
         ) : error && !hasData ? (
@@ -321,6 +344,31 @@ export function AnalyticsView({
           </aside>
         </>
       )}
+    </div>
+  );
+}
+
+/* --- History note -------------------------------------------------------- */
+
+/**
+ * One line saying how far back the numbers go versus how far back a session
+ * can still be opened (#716). Rendered only once something has expired — until
+ * then the two dates are one date and there is nothing to explain.
+ */
+function HistoryNote({
+  historySince,
+  transcriptsSince,
+}: {
+  historySince: string;
+  /** Absent when no transcript remains on disk. */
+  transcriptsSince: string | undefined;
+}) {
+  return (
+    <div className="a-note a-history">
+      History goes back to {fullDate(historySince)}.{" "}
+      {transcriptsSince
+        ? `Transcripts go back to ${fullDate(transcriptsSince)}; older sessions keep their numbers but can no longer be opened.`
+        : "No transcripts remain on disk."}
     </div>
   );
 }

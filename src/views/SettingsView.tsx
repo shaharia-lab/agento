@@ -1583,7 +1583,9 @@ function PricingPane() {
       </div>
       <div className="formrow__help">
         Rates are US dollars per million tokens and drive every cost shown in the
-        app. Read-only here — corrections are made through the pricing API.
+        app. Read-only here — corrections are made through the pricing API. A
+        rate change re-prices only sessions whose transcript is still on disk. A
+        session whose transcript has expired keeps the cost it had.
       </div>
 
       <div style={{ overflowX: "auto" }}>

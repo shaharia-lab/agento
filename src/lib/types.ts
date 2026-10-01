@@ -666,6 +666,17 @@ export interface AnalyticsSummary {
    * in every total above. Omitted when 0.
    */
   expired_sessions?: number;
+  /**
+   * The earliest session start in the whole corpus (#716): narrowed by the
+   * project filter, never by `from`/`to`. Omitted unless that corpus holds an
+   * expired session.
+   */
+  history_since?: string;
+  /**
+   * The same, over sessions whose transcript is still on disk. Omitted beside
+   * a present `history_since` when every transcript has expired.
+   */
+  transcripts_since?: string;
 }
 
 export interface TimeSeriesPoint {

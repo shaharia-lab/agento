@@ -664,6 +664,10 @@ threshold. That is expected, and it happens in the background.
 Three views over the same indexed history. All of them take a date range, and
 group by hour, day, week, month or year depending on how wide that range is.
 
+Once a transcript has expired, a line under the toolbar says how far back
+history goes and how far back transcripts go. Sessions older than the second
+date still count in every figure, but they can no longer be opened.
+
 ### Comparing with the period before
 
 Token usage and General usage have a **Compare** box in the toolbar. Tick it and
@@ -1076,7 +1080,9 @@ Two separate actions, on purpose:
 - **Correct a rate** when the existing entry was wrong. This rewrites costs that
   were already reported.
 
-Either way, your sessions are re-priced in the background afterwards.
+Either way, your sessions are re-priced in the background afterwards. That
+re-pricing re-reads transcripts, so it reaches only sessions whose transcript is
+still on disk: a session whose transcript has expired keeps the cost it had.
 
 ### Security
 

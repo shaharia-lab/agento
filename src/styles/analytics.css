@@ -74,6 +74,13 @@
   line-height: var(--leading-normal);
 }
 
+/* The history-reach line (#716): a muted strip under the toolbar, in every
+   mode. Not a banner — it is a standing fact, not something that went wrong. */
+.a-history {
+  padding: var(--sp-3) var(--sp-6);
+  border-bottom: var(--hairline) solid var(--line-soft);
+}
+
 /* The chart and heatmap rules moved to `styles/charts.css` with the components
    they belong to (#428) — `components/charts.tsx` imports that sheet itself, so
    a consumer outside this section gets them without importing this file. */

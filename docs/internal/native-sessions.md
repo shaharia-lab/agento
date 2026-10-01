@@ -89,7 +89,15 @@
   `links`. The counts follow the same rule: `SessionFacets.expired_sessions`,
   `AnalyticsSummary.expired_sessions` and `SessionRanking.transcript_expired`
   are last and omitted at zero or false. Analytics totals **include** expired
-  rows, because `corpus.rs` reads every cache row. The column is index 54 of
+  rows, because `corpus.rs` reads every cache row. `AnalyticsSummary` then
+  carries two more trailing fields (#716), `history_since` and
+  `transcripts_since`: the earliest `start_time` over every session, and over
+  the sessions still on disk. Both are narrowed by `project` and **ignore
+  `from`/`to`** — they describe the corpus, so `empty_report` carries them too —
+  and both are omitted until that project's corpus holds an expired session,
+  which is what keeps `parity/claude_analytics_golden.json` untouched.
+  `transcripts_since` alone is omitted when every transcript has expired
+  (`analytics/report.rs::history_reach`). The column is index 54 of
   `SUMMARY_COLUMNS`, so the relevance key `page.rs` appends is index **55**; a
   stale index fails only on `sort=relevance`.
 - **A read that needs the file answers 410 for an expired transcript, 404
