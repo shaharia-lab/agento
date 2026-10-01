@@ -125,7 +125,8 @@
                  the lookup that makes continue idempotent, and the three
                  `continued_from_*` columns migration 37 adds (#490)
       delete.rs  DELETE /{id} and DELETE with {before}: only an expired
-                 session, and the one cascade over the seven tables (#711)
+                 session, and the one cascade over the seven tables (#711);
+                 `prune`, the scan's retention step over that cascade (#712)
       update.rs  the rename and the favourite — the only two columns here the
                  user typed, and the only ones the scanner never writes
       detail.rs  one session re-read from its transcript, patched from the cache

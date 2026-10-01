@@ -125,7 +125,12 @@
   caller's transaction: the pair's findings, scan state, insights, search rows
   and cache row, then the id-keyed sub-agent and PR rows **only once no cache
   row carries the id**. It deletes a cache row only while it is still stamped,
-  so a pair a scan un-expired in between is skipped whole. The transcript is
+  so a pair a scan un-expired in between is skipped whole. **The cascade has a
+  third caller that is not a route** (#712): `delete::prune`, which the scan
+  runs for the stored `session_history_retention_days`, in `Sweep` mode. It
+  selects on the stamp and `last_activity` alone, so unlike the bulk delete it
+  is **not** filtered by hidden projects or indexed config dirs; see
+  `docs/internal/native-scanner.md` for its place in the scan. The transcript is
   never touched. Both routes are desktop-only and recorded in
   `parity/desktop_routes.json` through `sessions::ROUTES`. Enforced by
   `sessions/tests_delete.rs`.

@@ -61,7 +61,9 @@ whose `last_activity` is strictly older than the window. Age is the session's
 end, never `transcript_expired_at`; a row whose stored file is on disk is kept
 at any age; and the no-readable-dir return is above it, so an unplugged drive
 prunes nothing. A failed prune is logged and the scan carries on. Saving a
-changed, non-zero window calls `scan::force_scan`, so it takes effect at once.
+changed, non-zero window calls `scan::force_scan`, so it takes effect at the
+scan that save requests — or, when a scan was already past its prune step, at
+the next one admitted.
 
 Two encodings to get wrong: `cost_by_model` is JSON but empty stores as
 `""`, and `unpriced_models` is newline-joined rather than JSON, because a
