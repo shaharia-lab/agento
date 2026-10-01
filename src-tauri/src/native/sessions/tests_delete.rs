@@ -324,6 +324,29 @@ fn a_stamped_row_whose_stored_file_exists_outside_the_config_dirs_is_409() {
     assert_eq!(f.dump(), before);
 }
 
+/// The half of the rule only `detail::expiry` decides: the stored path is gone,
+/// but a config dir holds the transcript under another project directory — so
+/// the detail read answers 200, and a session that reads is not one to delete.
+#[test]
+fn a_stamped_row_whose_transcript_is_under_another_project_dir_is_409() {
+    let f = Fixture::new();
+    f.session("moved", "/home/u/proj", 1, true);
+    f.dependents("moved", "/home/u/proj");
+    let other = f
+        .project_dir
+        .parent()
+        .expect("projects dir")
+        .join("-home-u-other");
+    std::fs::create_dir_all(&other).expect("other project dir");
+    std::fs::write(other.join("moved.jsonl"), "{}\n").expect("transcript");
+    let before = f.dump();
+
+    let answer = f.delete("moved");
+
+    assert_eq!(answer.status, StatusCode::CONFLICT);
+    assert_eq!(f.dump(), before);
+}
+
 /// All-or-nothing over the id: one live pair refuses the whole delete.
 #[test]
 fn an_id_with_one_expired_and_one_live_pair_is_409_and_keeps_both() {
