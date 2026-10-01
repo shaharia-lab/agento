@@ -377,6 +377,30 @@ would have rendered the Session heading and the whole Pull requests list
 unstyled, with nothing to say so; that is the savebar failure above, and a
 component sold as portable has to own its own styling or it is not.
 
+**An expired session is deleted from two places in `SessionsView`, and only an
+expired one** (#714). The strip gains a trash button — **rendered only while
+`transcript_expired` is set**, not disabled otherwise, because
+`DELETE /api/claude-sessions/{id}` refuses a live session and a control that can
+never be enabled is not an action that row has. Its confirmation replaces the
+strip's button row. Under the `Transcript: Expired` filter the toolbar offers
+`Delete expired…`, whose strip (`DeleteExpiredStrip`) holds a date and a count.
+Three rules, each silent when wrong:
+
+- **The count is not asked through `filterParamsOf`.** It sends only
+  `transcript=expired` and `ended_before`, because the bulk route ignores the
+  search term and every other filter; a count narrowed by them would promise
+  fewer rows than go. Count and delete carry the same instant, from one
+  `dayBoundary(day, "start")`.
+- **A single delete drops the row from the loaded page and clears
+  `lastSelected`.** `selected` and `openSession` both fall back to
+  `lastSelected`, so the inspector otherwise keeps rendering a session that no
+  longer exists until the reload lands. A bulk delete discards the loaded rows
+  whole, since which rows went is the server's answer.
+- **The confirmation classes are `.sess-confirm` / `.sess-confirm__text`, not
+  `tasks.css`'s `.confirm`.** Stylesheets are global once imported, and that one
+  is a single `nowrap` toolbar line; these wrap, because the inspector is as
+  narrow as 220px.
+
 **Destroying a stored record is `Delete`, everywhere, and `Remove` means
 something else** (#518). One gesture had three words — Integrations said
 `Remove`, Tasks and Settings profiles said `Delete`, Agents said `Delete
@@ -390,7 +414,11 @@ compile-time pin; `Delete` won because it was already the majority and because
   kind is already on screen, and a per-view suffix is how a fourth word starts.
 - **A confirmation is `Delete <name>? <what goes with it>.`** — the verb, the
   record's own name, and one clause naming the collateral (`Its run history
-  goes with it.`). Not `Delete this task and its history?`, which names no row,
+  goes with it.`). The clause lists what the cascade
+  really takes — a session's reads `Its sub-agents, pull-request links,
+  insights and credential findings go with it.` (#714) — and a bulk
+  confirmation names the count and the bound in place of a name (`Delete 3
+  expired sessions that ended before 1 Sept 2026? Their … go with them.`). Not `Delete this task and its history?`, which names no row,
   and not a bare `Delete rule?`.
 - **`Remove` survives for detaching, and only that**: taking a row out of a
   list nothing has stored yet (a gateway alias's fallback target), or

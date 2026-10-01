@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { api, isTranscriptExpired, qs } from "../lib/api";
+import { ApiError, api, isTranscriptExpired, qs } from "../lib/api";
 import type {
   ClaudeProject,
   ClaudeSessionDetail,
@@ -14,11 +14,13 @@ import type {
   SessionFacets,
   SessionPage,
   SessionScanStatus,
+  SessionsDeleted,
 } from "../lib/types";
 import { describeError, useDebounced, usePoll, useResource } from "../lib/hooks";
 import {
   compactNumber,
   dateTime,
+  fullDate,
   groupByRecency,
   integer,
   relativeTime,
@@ -56,6 +58,7 @@ import {
   SessionExportPanel,
   type SessionExportTarget,
 } from "./sessions/SessionExport";
+import { DESTROY, DESTROYING } from "../lib/formVerbs";
 import type { Eq, Expect } from "../lib/typeAssert";
 import "../styles/sessions.css";
 
@@ -522,6 +525,130 @@ function DraftMatchCount({ params }: { params: FilterParams }) {
   );
 }
 
+/* --- Deleting expired sessions (#714) ------------------------------------- */
+
+/**
+ * Which inline confirmation is up. One at a time: the inspector's, for the
+ * selected expired session, or the toolbar's, for every expired session that
+ * ended before a date. The date itself lives in `DeleteExpiredStrip`.
+ */
+type Confirming = { kind: "one"; id: string } | { kind: "before" };
+
+/** What a refused or failed delete reads as, under the control that asked. */
+function deleteFailure(err: unknown): string {
+  // 409 is `sessions/delete.rs` finding the transcript on disk again (or the
+  // row no longer stamped expired); its own message names neither outcome.
+  if (err instanceof ApiError && err.status === 409) {
+    return "This session's transcript is back on disk; it was not deleted.";
+  }
+  return describeError(err);
+}
+
+/**
+ * The bulk confirmation: a date, the number of expired sessions that ended
+ * before it, and the house sentence.
+ *
+ * The count is asked of the facets with **only** `transcript=expired` and
+ * `ended_before` — never through `filterParamsOf` — because the delete route
+ * ignores the search term and every other filter, and a count narrowed by them
+ * would promise fewer rows than go. Count and delete carry the same instant,
+ * from one `dayBoundary` call.
+ */
+function DeleteExpiredStrip({
+  busy,
+  error,
+  deleted,
+  onCancel,
+  onDelete,
+}: {
+  busy: boolean;
+  error?: string;
+  /** Set once the delete has answered: what the server says it removed. */
+  deleted?: number;
+  onCancel(): void;
+  onDelete(before: string): void;
+}) {
+  const [day, setDay] = useState("");
+  const before = dayBoundary(day, "start");
+  const count = useResource<SessionFacets | undefined>(
+    (signal) =>
+      before
+        ? api.get<SessionFacets>(
+            `/claude-sessions/facets${qs({
+              transcript: "expired",
+              ended_before: before,
+            })}`,
+            signal
+          )
+        : Promise.resolve(undefined),
+    [before]
+  );
+
+  if (deleted !== undefined) {
+    return (
+      <div className="sess-delete">
+        <div className="sess-confirm">
+          <span className="sess-confirm__text tnum">
+            Deleted {integer(deleted)} expired{" "}
+            {deleted === 1 ? "session" : "sessions"}.
+          </span>
+          <button className="btn btn--ghost" onClick={onCancel}>
+            Done
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // `loading` covers the gap between a date change and its answer, when `data`
+  // still holds the previous date's total.
+  const n = before && !count.loading && !count.error ? count.data?.total : undefined;
+  const date = before ? fullDate(before) : "";
+  const reason = !before
+    ? "Pick a date to see how many expired sessions ended before it."
+    : count.error
+    ? `Could not count the expired sessions: ${count.error}`
+    : n === 0
+    ? `No expired sessions ended before ${date}.`
+    : undefined;
+
+  return (
+    <div className="sess-delete">
+      <div className="sess-confirm">
+        <input
+          className="sess-filters__date"
+          type="date"
+          aria-label="Delete expired sessions that ended before"
+          value={day}
+          disabled={busy}
+          onChange={(e) => setDay(e.target.value)}
+        />
+        <span className="sess-confirm__text tnum">
+          {DESTROY} {n === undefined ? "…" : integer(n)} expired{" "}
+          {n === 1 ? "session" : "sessions"} that ended before{" "}
+          {date || "…"}?{" "}
+          {n === 1
+            ? "Its sub-agents, pull-request links, insights and credential findings go with it."
+            : "Their sub-agents, pull-request links, insights and credential findings go with them."}
+        </span>
+        <button className="btn btn--ghost" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+        <button
+          className="btn btn--danger"
+          disabled={busy || !before || !n}
+          onClick={() => before && onDelete(before)}
+        >
+          {busy ? DESTROYING : DESTROY}
+        </button>
+      </div>
+      {/* Visible text, not a `title`: a disabled button shows no tooltip (#713). */}
+      {reason && <div className="sess-note">{reason}</div>}
+      {error && <div className="sess-note sess-note--error">{error}</div>}
+    </div>
+  );
+}
+
 export function SessionsView({
   inspectorOpen,
   openSessionId,
@@ -859,7 +986,7 @@ export function SessionsView({
 
   /* --- Row actions -------------------------------------------------------- */
 
-  const [busy, setBusy] = useState<"favorite" | "continue">();
+  const [busy, setBusy] = useState<"favorite" | "continue" | "delete">();
   /**
    * Which action failed, not just what it said. The two surfaces render it in
    * different places — the inspector under its own three buttons, the full
@@ -867,7 +994,10 @@ export function SessionsView({
    * text under a "Continue in chat" button that was never pressed.
    */
   const [actionError, setActionError] =
-    useState<{ action: "favorite" | "continue" | "copy"; message: string }>();
+    useState<{
+      action: "favorite" | "continue" | "copy" | "delete";
+      message: string;
+    }>();
   const navigate = useNavigate();
 
   const applyPatch = useCallback(
@@ -950,9 +1080,93 @@ export function SessionsView({
     });
   }, []);
 
+  /* --- Deleting expired sessions (#714) ----------------------------------- */
+
+  const [confirming, setConfirming] = useState<Confirming>();
+  /** The bulk delete's failure, shown under its own strip, not the inspector's. */
+  const [bulkError, setBulkError] = useState<string>();
+  /** The bulk delete's answer, shown in its strip until dismissed. */
+  const [bulkDeleted, setBulkDeleted] = useState<number>();
+
+  const closeBulk = useCallback(() => {
+    setConfirming(undefined);
+    setBulkError(undefined);
+    setBulkDeleted(undefined);
+  }, []);
+
+  /**
+   * `DELETE /api/claude-sessions/{id}`, for an expired session only.
+   *
+   * The row is dropped from the loaded page as soon as the server has answered
+   * 204, and `lastSelected` with it: `selected` and `openSession` both fall
+   * back to that, so the inspector would otherwise keep rendering a session
+   * that no longer exists until the reload landed. The auto-select effect then
+   * takes the first remaining row.
+   */
+  const deleteOne = useCallback(
+    async (s: ClaudeSessionSummary) => {
+      setBusy("delete");
+      setActionError(undefined);
+      try {
+        await api.del<void>(`/claude-sessions/${s.session_id}`);
+        setLoaded((prev) => ({
+          ...prev,
+          items: prev.items.filter((r) => r.session_id !== s.session_id),
+        }));
+        setLastSelected((prev) =>
+          prev?.session_id === s.session_id ? undefined : prev
+        );
+        setOpenId((id) => (id === s.session_id ? undefined : id));
+        reloadAll();
+      } catch (err) {
+        setActionError({ action: "delete", message: deleteFailure(err) });
+      } finally {
+        setConfirming(undefined);
+        setBusy(undefined);
+      }
+    },
+    [reloadAll]
+  );
+
+  /**
+   * `DELETE /api/claude-sessions` with `{"before": …}`.
+   *
+   * Nothing is removed optimistically — which rows went is the server's answer,
+   * not something this view can work out from one loaded page — so the loaded
+   * rows are discarded whole and the list reloads from its first page.
+   */
+  const deleteBefore = useCallback(
+    async (before: string) => {
+      setBusy("delete");
+      setBulkError(undefined);
+      try {
+        const res = await api.del<SessionsDeleted>("/claude-sessions", { before });
+        setBulkDeleted(res?.deleted ?? 0);
+        setLoaded({ key: "", items: [], nextCursor: "", hasMore: false });
+        setLastSelected(undefined);
+        setOpenId(undefined);
+        reloadAll();
+      } catch (err) {
+        setBulkError(describeError(err));
+      } finally {
+        setBusy(undefined);
+      }
+    },
+    [reloadAll]
+  );
+
   useEffect(() => {
     setActionError(undefined);
+    // The inspector's confirmation names the row it was opened on.
+    setConfirming((c) => (c?.kind === "one" ? undefined : c));
   }, [selectedId]);
+
+  // The bulk action exists only under the Expired filter, so the rows about to
+  // go are the ones on screen; leaving the filter withdraws its confirmation.
+  const expiredOnly = filters.transcript === "expired";
+  useEffect(() => {
+    if (!expiredOnly) closeBulk();
+  }, [expiredOnly, closeBulk]);
 
   /* --- Row context menu ---------------------------------------------------- */
 
@@ -1228,6 +1442,21 @@ export function SessionsView({
             )}
           </button>
 
+          {expiredOnly && (
+            <button
+              className="btn"
+              disabled={busy !== undefined || confirming?.kind === "before"}
+              onClick={() => {
+                setBulkError(undefined);
+                setBulkDeleted(undefined);
+                setConfirming({ kind: "before" });
+              }}
+            >
+              <Icon name="trash" size={13} />
+              {DESTROY} expired…
+            </button>
+          )}
+
           <div className="spacer" />
 
           {scanning && status.data && (
@@ -1442,6 +1671,16 @@ export function SessionsView({
               </button>
             </div>
           </div>
+        )}
+
+        {expiredOnly && confirming?.kind === "before" && (
+          <DeleteExpiredStrip
+            busy={busy === "delete"}
+            error={bulkError}
+            deleted={bulkDeleted}
+            onCancel={closeBulk}
+            onDelete={deleteBefore}
+          />
         )}
 
         {page.error && items.length === 0 ? (
@@ -1715,6 +1954,30 @@ export function SessionsView({
                 with a full metadata block, which is the whole of #486. */}
             {selected && (
               <div className="sess-strip">
+                {confirming?.kind === "one" &&
+                confirming.id === selected.session_id ? (
+                  <div className="sess-confirm">
+                    <span className="sess-confirm__text">
+                      {DESTROY} {selected.display_title || "Untitled session"}?
+                      Its sub-agents, pull-request links, insights and
+                      credential findings go with it.
+                    </span>
+                    <button
+                      className="btn btn--ghost"
+                      disabled={busy === "delete"}
+                      onClick={() => setConfirming(undefined)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="btn btn--danger"
+                      disabled={busy !== undefined}
+                      onClick={() => deleteOne(selected)}
+                    >
+                      {busy === "delete" ? DESTROYING : DESTROY}
+                    </button>
+                  </div>
+                ) : (
                 <div className="sess-strip__row">
                   <button
                     className="btn btn--primary sess-strip__btn"
@@ -1765,7 +2028,28 @@ export function SessionsView({
                   >
                     <Icon name="play" size={13} />
                   </button>
+                  {/* Only an expired session has this action: the route
+                      refuses a live one, and a control that can never be
+                      enabled is not one that session has (#714). */}
+                  {selectedExpired && (
+                    <button
+                      className="btn sess-strip__btn"
+                      disabled={busy !== undefined}
+                      title={DESTROY}
+                      aria-label={DESTROY}
+                      onClick={() => {
+                        setActionError(undefined);
+                        setConfirming({
+                          kind: "one",
+                          id: selected.session_id,
+                        });
+                      }}
+                    >
+                      <Icon name="trash" size={13} />
+                    </button>
+                  )}
                 </div>
+                )}
                 {/* The reason is text, not a `title`: a disabled button takes
                     no mouse events, so a tooltip on one never shows (#713). */}
                 {selectedExpired && (

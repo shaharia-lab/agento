@@ -626,6 +626,11 @@ export interface SessionFacets {
   expired_sessions?: number;
 }
 
+/** `DELETE /api/claude-sessions` with `{"before": …}` (#711): rows removed. */
+export interface SessionsDeleted {
+  deleted: number;
+}
+
 export interface ClaudeProject {
   encoded_name: string;
   decoded_path: string;

@@ -397,6 +397,41 @@
   flex: none;
 }
 
+/* --- Inline confirmation (a modal dialog would freeze the webview) --------
+   Not `tasks.css`'s `.confirm`: stylesheets are global once imported, and that
+   one is a single `nowrap` toolbar line. Both of these wrap — the sentence
+   names a session title and its collateral, and the inspector is as narrow as
+   220px. */
+.sess-confirm {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+}
+.sess-confirm__text {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: var(--text-base);
+  color: var(--fg-secondary);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+}
+
+/* The bulk "delete expired before a date" strip, under the toolbar. */
+.sess-delete {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: var(--hairline) solid var(--line);
+  background: var(--bg-inset);
+}
+.sess-delete .sess-confirm__text {
+  flex: 1 1 320px;
+}
+
 .sess-fav--on {
   color: var(--amber);
 }

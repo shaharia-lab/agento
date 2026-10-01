@@ -623,6 +623,23 @@ was scanned. What is gone is the conversation itself, so viewing the session,
 continuing it in chat and exporting it are switched off for that row, and the
 inspector says so. You can still star it.
 
+### Deleting expired sessions
+
+Agento keeps an expired session until you delete it. There are two ways, and
+both ask you to confirm first:
+
+- **One session.** Select an expired session and press the trash button in the
+  inspector. Sessions whose transcript is still on disk have no such button.
+- **Everything before a date.** Open **Filters**, set **Transcript** to
+  **Expired**, apply, then press **Delete expired…** in the toolbar. Pick a
+  date, and Agento shows how many expired sessions ended before the start of
+  that day. This removes every expired session that ended before the date, not
+  only the ones matching your search or other filters.
+
+Deleting a session also deletes its sub-agents, pull-request links, insights and
+credential findings. There is no undo. If the transcript has reappeared on disk
+since the last scan, the session is not deleted and Agento tells you so.
+
 ### Duration means active time
 
 Claude Code sessions are resumable, so a session you picked up a week later would
