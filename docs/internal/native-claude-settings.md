@@ -164,3 +164,46 @@ pointing somewhere other than `~/.claude`. `parity-instance.sh` copies the
 database and does nothing for the Claude config dir, and this suite overwrites
 `settings.json`. Exporting it before `start` is also what puts both
 implementations in one directory — a diff across two would mean nothing.
+
+## Claude Code's own retention, read per config dir (#718)
+
+`GET /api/settings/claude-retention` (`claude_settings/retention.rs`) answers
+one entry per **indexed** config dir, default first, from the same resolution
+`GET /api/settings/claude-config-dirs` reports as `indexed`
+(`settings::indexed_claude_config_dirs`):
+
+```json
+{"dirs":[{"config_dir":"/home/u/.claude","cleanup_period_days":30,"source":"default"}]}
+```
+
+- `source: "settings"`: `cleanupPeriodDays` is a top-level key of that dir's
+  `settings.json` and is a whole, non-negative number. `90.0` and `1e2` count,
+  because Claude Code reads the file as JavaScript; `0` is reported as `0`.
+- `source: "default"`: the file or the key is absent. `cleanup_period_days` is
+  30, the default Claude Code's settings schema states (checked on 2.1.285).
+- `source: "unknown"`: the file cannot be read, is not UTF-8, is not valid
+  JSON, is not an object, names the key twice, or holds a value that is not a
+  whole, non-negative number (a string, a negative, a fraction, `null`).
+  `cleanup_period_days` is omitted and `reason` is a phrase the Data pane puts
+  after "Could not read Claude Code's retention from `<dir>/settings.json`:".
+
+**It does not reuse `get_settings`, and must not.** That handler reads the run
+dir alone and answers 500 for invalid JSON, which is right for the editor. This
+route never fails over a file's content, so a broken `settings.json` cannot
+turn Settings → Data into an error; the only 500 is an unreadable database.
+
+**It is a read and only a read.** The claim is GET-only, and
+`the_route_answers_every_indexed_dir_and_writes_nothing` compares every file's
+bytes and modification time before and after, including a default dir that has
+no `settings.json` and must not gain one. Writing the key is #719's, under its
+own route.
+
+Two limits, stated rather than solved. Only the user-level file is read, while
+Claude Code also takes the key from managed, project-level and
+`settings.local.json` files, so the value it uses can differ. And a stored `0`
+is not "delete at once": Claude Code 2.1.285 rejects it (`cleanupPeriodDays
+must be at least 1`) and skips cleanup until it is fixed, so the Data pane
+words `0` as its own sentence instead of "after 0 days".
+
+The route has no Go counterpart, so it is recorded in
+`parity/desktop_routes.json` through `claude_settings::retention::ROUTES`.

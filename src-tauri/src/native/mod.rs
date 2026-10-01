@@ -303,6 +303,7 @@ const ENDPOINTS: &[Endpoint] = &[
     tasks::ENDPOINT,
     settings::ENDPOINT,
     claude_settings::ENDPOINT,
+    claude_settings::retention::ENDPOINT,
     monitoring::ENDPOINT,
     version::ENDPOINT,
     notifications::ENDPOINT,
@@ -497,6 +498,12 @@ mod tests {
         assert!(claims(&Method::GET, "/api/settings/claude-config-dirs"));
         assert!(claims(&Method::PUT, "/api/settings"));
         assert!(!claims(&Method::PUT, "/api/settings/claude-config-dirs"));
+        // Claude Code's own retention, read per config dir (#718). A read and
+        // only a read: writing the key is #719's, under its own route.
+        assert!(claims(&Method::GET, "/api/settings/claude-retention"));
+        assert!(!claims(&Method::PUT, "/api/settings/claude-retention"));
+        assert!(!claims(&Method::POST, "/api/settings/claude-retention"));
+        assert!(!claims(&Method::DELETE, "/api/settings/claude-retention"));
         // Claude Code's own settings.json and the profiles beside it: a
         // different tree entirely, and since #304 all nine routes are ours —
         // reads included, because `GET .../profiles` seeds the index and so is
@@ -848,8 +855,8 @@ mod tests {
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
         //
-        // The file has **six owners** since #711, so the claimed set is the
-        // union of all six modules' consts. A seventh owner appends here;
+        // The file has **seven owners** since #718, so the claimed set is the
+        // union of all seven modules' consts. An eighth owner appends here;
         // leaving it out would silently weaken the assertion from set equality
         // to "the owners I remembered", which is the one-directional property
         // this test exists to escape.
@@ -860,6 +867,7 @@ mod tests {
             .chain(integrations::ROUTES.iter())
             .chain(security_scan::api::ROUTES.iter())
             .chain(sessions::ROUTES.iter())
+            .chain(claude_settings::retention::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(
@@ -1003,6 +1011,7 @@ mod tests {
             "/api/job-history/abc-123",
             "/api/settings",
             "/api/settings/claude-config-dirs",
+            "/api/settings/claude-retention",
             "/api/claude-settings",
             "/api/claude-settings/profiles",
             "/api/claude-settings/profiles/work",
@@ -1049,6 +1058,7 @@ mod tests {
             "/api/job-history/abc-123",
             "/api/settings",
             "/api/settings/claude-config-dirs",
+            "/api/settings/claude-retention",
             "/api/claude-settings",
             "/api/claude-settings/profiles",
             "/api/claude-settings/profiles/work",

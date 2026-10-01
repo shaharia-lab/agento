@@ -262,6 +262,13 @@
       "status": "native",
       "owner": "#711",
       "reason": "bulk form: body {before: RFC 3339} deletes every expired session whose last_activity is strictly before it and whose file is not on disk, in one transaction; 200 with {deleted: N}, 422 for a missing or unparseable before -- there is no delete-everything form"
+    },
+    {
+      "method": "GET",
+      "route": "/api/settings/claude-retention",
+      "status": "native",
+      "owner": "#718",
+      "reason": "Claude Code's own transcript retention, read and never written: one entry per indexed Claude config dir, default first, giving cleanupPeriodDays from that dir's settings.json with source 'settings', the CLI default of 30 with source 'default' when the file or the key is absent, or source 'unknown' and a reason when the file cannot be read, is not a JSON object or holds a value that is not a whole non-negative number -- never a 500 over a file's content"
     }
   ]
 }

@@ -25,6 +25,8 @@ import {
   type UpdatePref,
 } from "../lib/updatePref";
 import type {
+  ClaudeRetention,
+  ClaudeRetentionDir,
   ClaudeSettingsProfile,
   NotificationLogEntry,
   PricingCatalog,
@@ -1410,6 +1412,77 @@ function retentionLabel(days: number): string {
   return RETENTION_OPTIONS.find((o) => o.value === String(days))?.label ?? `${days} days`;
 }
 
+/** `<dir>/settings.json`, the one file the retention read looks at. */
+function retentionFile(d: ClaudeRetentionDir): string {
+  return `${tildePath(d.config_dir)}/settings.json`;
+}
+
+function daysText(days: number): string {
+  return days === 1 ? "1 day" : `${days} days`;
+}
+
+/**
+ * One config dir's line. `alone` picks the sentence form, for the usual single
+ * dir; with several, each line leads with its path instead.
+ */
+function claudeRetentionLine(d: ClaudeRetentionDir, alone: boolean): string {
+  if (d.source === "unknown" || d.cleanup_period_days === undefined) {
+    return `Could not read Claude Code's retention from ${retentionFile(d)}: ${
+      d.reason ?? "no reason was given"
+    }.`;
+  }
+  // Claude Code rejects 0 and skips cleanup rather than deleting at once, so
+  // "after 0 days" would say the opposite of what happens.
+  if (d.cleanup_period_days === 0) {
+    return `cleanupPeriodDays is 0 in ${retentionFile(d)}. Claude Code rejects 0 and skips transcript cleanup until it is at least 1.`;
+  }
+  const suffix = d.source === "default" ? " (the default)" : "";
+  return alone
+    ? `Claude Code deletes transcripts after ${daysText(d.cleanup_period_days)} on this machine${suffix}.`
+    : `${tildePath(d.config_dir)}: ${daysText(d.cleanup_period_days)}${suffix}`;
+}
+
+/** Claude Code's own `cleanupPeriodDays`, per indexed config dir. Read-only (#718). */
+function ClaudeRetentionRow() {
+  const retention = useResource(
+    (signal) => api.get<ClaudeRetention>("/settings/claude-retention", signal),
+    []
+  );
+  const dirs = retention.data?.dirs ?? [];
+
+  return (
+    <FormRow
+      label="Claude Code retention"
+      help="Read from cleanupPeriodDays in each indexed Claude config directory's settings.json. Agento does not change it, and Claude Code may take a different value from managed or project settings."
+    >
+      {retention.error ? (
+        <div className="msgline msgline--error">{retention.error}</div>
+      ) : !retention.data ? (
+        <span
+          style={{
+            paddingTop: "var(--sp-3)",
+            fontSize: "var(--text-sm)",
+            color: "var(--fg-tertiary)",
+          }}
+        >
+          Reading…
+        </span>
+      ) : (
+        <div
+          className="col"
+          style={{ gap: "var(--sp-2)", paddingTop: "var(--sp-3)", fontSize: "var(--text-sm)" }}
+        >
+          {dirs.map((d) => (
+            <div key={d.config_dir} title={d.config_dir}>
+              {claudeRetentionLine(d, dirs.length === 1)}
+            </div>
+          ))}
+        </div>
+      )}
+    </FormRow>
+  );
+}
+
 function DataPane({
   user,
   storedRetention,
@@ -1481,6 +1554,7 @@ function DataPane({
             </div>
           )}
         </FormRow>
+        <ClaudeRetentionRow />
       </div>
 
       <div className="divider" />

@@ -387,6 +387,27 @@ export interface UserSettings {
 }
 
 /**
+ * `GET /api/settings/claude-retention` (#718): Claude Code's own transcript
+ * retention, one entry per indexed config dir, default first. Read-only.
+ */
+export interface ClaudeRetention {
+  dirs: ClaudeRetentionDir[] | null;
+}
+
+export interface ClaudeRetentionDir {
+  config_dir: string;
+  /** Absent exactly when `source` is `unknown`. */
+  cleanup_period_days?: number;
+  /**
+   * `settings`: the key is in that dir's `settings.json`. `default`: the file
+   * or the key is absent, so the CLI default applies. `unknown`: the file could
+   * not be decided about, and `reason` says why.
+   */
+  source: "settings" | "default" | "unknown";
+  reason?: string;
+}
+
+/**
  * GET /settings does not return bare settings — it wraps them alongside which
  * fields the environment has pinned. `locked` maps a field name to the *name of
  * the environment variable* that pinned it, so the UI can say which one to

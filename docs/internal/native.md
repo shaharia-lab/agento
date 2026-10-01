@@ -60,6 +60,8 @@
       mod.rs     the run config dir, Go's `any`/`MarshalIndent`/`Indent`, GET+PUT
                  /api/claude-settings, and the request decoder that is NOT writes::decode_body
       profiles.rs the seven profile routes and the settings_profiles.json index
+      retention.rs GET /api/settings/claude-retention — cleanupPeriodDays per indexed
+                 config dir, read-only, never a 500 over a file's content (#718)
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
     notifications/ the settings read (password masked), /log, the settings

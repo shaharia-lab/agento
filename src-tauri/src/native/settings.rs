@@ -533,17 +533,24 @@ pub struct ClaudeConfigDirsResponse {
 /// default dir; reading the raw row would drop only the env value and add a dir
 /// Go does not index.
 pub fn claude_config_dirs_response(conn: &Connection) -> ClaudeConfigDirsResponse {
-    let stored = resolve(load_stored(conn)).settings;
-    let indexed = claude_config_dirs(
-        &stored.claude_config_dir,
-        stored.claude_config_dirs.as_deref().unwrap_or_default(),
-    );
+    let indexed = indexed_claude_config_dirs(conn);
     let candidates = discover_candidate_claude_dirs(&indexed);
     ClaudeConfigDirsResponse {
         indexed,
         candidates,
         default_dir: default_claude_config_dir(),
     }
+}
+
+/// The config dirs Agento indexes, default first — `indexed` above, for a
+/// caller that wants the set without the filesystem probe beside it (#718's
+/// retention read). One resolution, so the two routes cannot disagree.
+pub(crate) fn indexed_claude_config_dirs(conn: &Connection) -> Vec<String> {
+    let stored = resolve(load_stored(conn)).settings;
+    claude_config_dirs(
+        &stored.claude_config_dir,
+        stored.claude_config_dirs.as_deref().unwrap_or_default(),
+    )
 }
 
 /// `config.DiscoverCandidateClaudeDirs`: config dirs sitting beside the default

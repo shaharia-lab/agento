@@ -1065,6 +1065,14 @@ configuration works before you rely on it.
   you save, that saving deletes the expired sessions already older than it,
   along with their sub-agents, pull-request links, insights and credential
   findings.
+- **Claude Code retention**: how long Claude Code itself keeps a transcript
+  before deleting it, shown so you can see the number that makes sessions
+  expire. It is read from `cleanupPeriodDays` in the `settings.json` of each
+  indexed Claude config directory, one line per directory when you have several,
+  and it is 30 days when the file does not set it. Agento only shows it and
+  never changes it. If a `settings.json` cannot be read, the line says which
+  file and why. Claude Code can also take this value from managed or project
+  settings, which Agento does not read.
 - **Hidden projects**: keep a project out of every chart and list. Its data is
   kept, so unhiding is immediate.
 

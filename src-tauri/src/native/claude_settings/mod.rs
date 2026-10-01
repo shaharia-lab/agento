@@ -77,6 +77,7 @@
 //! is the authority the snapshot itself is installed from.
 
 pub mod profiles;
+pub mod retention;
 
 use std::io;
 use std::path::Path;
