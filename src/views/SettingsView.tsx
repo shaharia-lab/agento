@@ -427,6 +427,9 @@ export function SettingsView({
               {pane === "data" && user && (
                 <DataPane
                   user={user}
+                  storedRetention={
+                    settings.server?.settings.session_history_retention_days ?? 0
+                  }
                   onPatch={patchUser}
                   idleGapError={idleGapError}
                 />
@@ -1388,17 +1391,44 @@ function PrefRow({
 
 /* --- Data ---------------------------------------------------------------- */
 
+/** The windows `session_history_retention_days` accepts, longest first. */
+const RETENTION_OPTIONS = [
+  { value: "0", label: "Forever" },
+  { value: "365", label: "1 year" },
+  { value: "180", label: "6 months" },
+];
+
+/** `0` is *keep forever*, so it is the longest window rather than the shortest. */
+function retentionRank(days: number): number {
+  return days === 0 ? Infinity : days;
+}
+
+function retentionLabel(days: number): string {
+  return RETENTION_OPTIONS.find((o) => o.value === String(days))?.label ?? `${days} days`;
+}
+
 function DataPane({
   user,
+  storedRetention,
   onPatch,
   idleGapError,
 }: {
   user: UserSettings;
+  /** The server's copy, which the draft is compared against to warn before a prune. */
+  storedRetention: number;
   onPatch(patch: Partial<UserSettings>): void;
   idleGapError: string | undefined;
 }) {
   const [newProject, setNewProject] = useState("");
   const hidden = user.hidden_projects ?? [];
+
+  const retention = user.session_history_retention_days ?? 0;
+  // A stored value outside the three (a hand-edited database) is shown as what
+  // it is rather than silently rewritten; picking any offered option replaces it.
+  const retentionOptions = RETENTION_OPTIONS.some((o) => o.value === String(storedRetention))
+    ? RETENTION_OPTIONS
+    : [{ value: String(storedRetention), label: `${storedRetention} days` }, ...RETENTION_OPTIONS];
+  const retentionShortened = retentionRank(retention) < retentionRank(storedRetention);
 
   return (
     <>
@@ -1426,6 +1456,27 @@ function DataPane({
             </span>
           </div>
           {idleGapError && <div className="msgline msgline--error">{idleGapError}</div>}
+        </FormRow>
+        <FormRow
+          label="Keep session history"
+          help="Only sessions whose transcript has expired are ever deleted, counted from when the session ended. A session whose transcript is still on disk is kept at any age."
+        >
+          <Dropdown
+            style={{ maxWidth: 160 }}
+            value={String(retention)}
+            onChange={(v) => onPatch({ session_history_retention_days: Number(v) })}
+            options={retentionOptions}
+          />
+          {retentionShortened && (
+            <div className="msgline msgline--warn">
+              <Icon name="alert" size={13} className="msgline__icon" />
+              <span>
+                Saving deletes expired sessions that ended more than{" "}
+                {retentionLabel(retention)} ago, along with their sub-agents,
+                pull-request links, insights and credential findings.
+              </span>
+            </div>
+          )}
         </FormRow>
       </div>
 

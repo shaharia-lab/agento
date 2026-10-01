@@ -1052,6 +1052,14 @@ configuration works before you rely on it.
   working time. Between 1 and 240 minutes, 10 by default. Changing it re-reads
   your history in the background, because durations are stored rather than
   recomputed on every view.
+- **Keep session history**: how long Agento keeps a session after Claude Code
+  has deleted its transcript. **Forever** (the default), **1 year** or
+  **6 months**. Only sessions whose transcript has expired are ever deleted, and
+  the age is counted from when the session ended. A session whose transcript is
+  still on disk is kept at any age. Choosing a shorter window tells you, before
+  you save, that saving deletes the expired sessions already older than it,
+  along with their sub-agents, pull-request links, insights and credential
+  findings.
 - **Hidden projects**: keep a project out of every chart and list. Its data is
   kept, so unhiding is immediate.
 
