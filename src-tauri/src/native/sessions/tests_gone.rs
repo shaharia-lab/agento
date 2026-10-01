@@ -221,13 +221,57 @@ fn an_unreadable_stamp_is_an_error_not_a_404() {
     assert!(err.contains("transcript expiry"), "unexpected error: {err}");
 }
 
-/// A session id reaches SQL only after `validSessionID`; anything else is the
-/// route's 404 without a query.
+/// A session id reaches SQL only after `validSessionID`. The row is stamped
+/// under the invalid id itself, so without the guard the query would find it.
 #[test]
 fn an_invalid_session_id_is_never_expired() {
-    let f = Fixture::new().cached(true);
+    let f = Fixture::new();
+    let conn = f.conn();
+    stamped_row(&conn, "../etc", "/home/u/proj", EXPIRED_AT);
+
     assert_eq!(
-        super::detail::expiry(&f.ctx.db_path, "../etc").expect("lookup"),
+        super::detail::expired_at(&conn, "../etc").expect("lookup"),
         None
     );
+}
+
+/// One id under two projects (the #362 family), stamped by different scans:
+/// the newest stamp is the one reported, whatever order the rows come back in.
+#[test]
+fn the_newest_stamp_wins_for_an_id_under_two_projects() {
+    let f = Fixture::new();
+    let conn = f.conn();
+    stamped_row(
+        &conn,
+        SESSION,
+        "/home/u/later",
+        "2026-09-02 08:30:00 +0000 UTC",
+    );
+    stamped_row(&conn, SESSION, "/home/u/earlier", EXPIRED_AT);
+    stamped_row(
+        &conn,
+        SESSION,
+        "/home/u/middle",
+        "2026-09-01 20:00:00 +0000 UTC",
+    );
+
+    let answer = f.detail();
+    assert_eq!(answer.status, StatusCode::GONE);
+    assert!(
+        body(&answer).contains(r#""expired_at":"2026-09-02T08:30:00Z""#),
+        "{}",
+        body(&answer)
+    );
+}
+
+fn stamped_row(conn: &rusqlite::Connection, id: &str, project: &str, stamp: &str) {
+    conn.execute(
+        "INSERT INTO claude_session_cache
+             (session_id, project_path, file_path, file_mtime, start_time,
+              last_activity, transcript_expired_at)
+         VALUES (?1, ?2, 'gone.jsonl', '2026-08-01 10:00:05 +0000 UTC',
+                 '2026-08-01 10:00:00 +0000 UTC', '2026-08-01 10:00:05 +0000 UTC', ?3)",
+        rusqlite::params![id, project, stamp],
+    )
+    .expect("insert stamped row");
 }
