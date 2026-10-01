@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { api, qs } from "../lib/api";
+import { api, isTranscriptExpired, qs } from "../lib/api";
 import type {
   ClaudeProject,
   ClaudeSessionDetail,
@@ -842,7 +842,14 @@ export function SessionsView({
       .catch((err) => {
         // A hand-off that silently does nothing is the bug #485 was filed for,
         // so the list says why it is still showing the list.
-        if (!cancelled) setHandoffError(describeError(err));
+        // The by-id fallback reads the transcript, so a session with no list
+        // row whose file has expired answers 410 here rather than in the pane.
+        if (!cancelled)
+          setHandoffError(
+            isTranscriptExpired(err)
+              ? expiredSentence(err.body.expired_at)
+              : describeError(err)
+          );
       });
     return () => {
       cancelled = true;

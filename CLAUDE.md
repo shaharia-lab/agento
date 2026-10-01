@@ -311,6 +311,9 @@ opens it:
   are stable slugs pinned through `lib/typeAssert.ts`, never rendered titles.
 - **Cross-view navigation is `NavTarget`**: a view id plus one optional row id,
   a hand-off and not a router (#485, #536, #542).
+- **A disabled control states its reason in visible text beside it, never in a
+  `title`** (#713) — a disabled button receives no mouse events, so its tooltip
+  never shows.
 - **No `window.confirm` / `alert` / `prompt`** — they block the WebView and can
   wedge the app. Render inline confirmation UI.
 - **Theming**: tokens on bare `:root` for light, re-declared under both
