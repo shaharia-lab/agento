@@ -53,6 +53,9 @@
 //! `harness` on both session cache tables, and the single-row
 //! `install_identity` table whose random `machine_id` the migration itself
 //! generates, once per database (#704, epic #703).
+//! Migration **47** is the seventeenth:
+//! `user_settings.session_history_retention_days`, how long an expired
+//! session's history is kept, where 0 is for ever (#712, epic #703).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -284,8 +287,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 46, "expected 46 migrations");
-        assert_eq!(expected_version(), 46);
+        assert_eq!(all.len(), 47, "expected 47 migrations");
+        assert_eq!(expected_version(), 47);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -379,7 +382,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 46);
+        assert_eq!(current_version(&conn).expect("version"), 47);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -596,8 +599,8 @@ mod tests {
         )
         .expect("seed rows at 45");
 
-        apply(&mut conn).expect("apply 46");
-        assert_eq!(current_version(&conn).expect("version"), 46);
+        apply(&mut conn).expect("apply 46 and later");
+        assert_eq!(current_version(&conn).expect("version"), 47);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -735,7 +738,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 46);
+        assert_eq!(current_version(&conn).expect("version"), 47);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -846,7 +849,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 46);
+        assert_eq!(current_version(&conn).expect("version"), 47);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -855,7 +858,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 46);
+        assert_eq!(recorded, 47);
     }
 
     #[test]

@@ -3,7 +3,11 @@
 //!
 //! Neither route has a Go ancestor. Since #705 a session whose transcript
 //! vanished keeps its row for ever, so "forget this" needs a path of its own,
-//! and this is the only one: the scanner never deletes a cache row.
+//! and this module is the only one: the scanner itself never deletes a cache
+//! row.
+//!
+//! [`prune`] is the third caller of the cascade and not a route: the scan runs
+//! it for the "Keep session history" setting (#712).
 //!
 //! # Only an expired session is deletable
 //!
@@ -35,11 +39,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use axum::http::StatusCode;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use super::{detail, query};
-use crate::native::gotime::GoTime;
+use crate::native::gotime::{self, GoTime};
 use crate::native::writes::{decode_body, WriteError};
 use crate::native::{db, gojson, insights, search, security_scan, settings, Answer};
 
@@ -280,6 +285,68 @@ fn candidates(conn: &Connection, before: GoTime) -> Result<Vec<(String, String)>
         .filter(|(_, _, file_path)| !Path::new(file_path).exists())
         .map(|(session_id, project_path, _)| (session_id, project_path))
         .collect())
+}
+
+/// Delete every expired session that ended more than `days` days before `now`,
+/// through the same cascade as the two routes, and answer how many cache rows
+/// went (#712).
+///
+/// `days == 0` is "keep for ever" and returns without a query — it is not a
+/// horizon of zero days, which would delete every expired session.
+///
+/// **Age is the session's end, `last_activity`, not `transcript_expired_at`**:
+/// a 2024 session whose transcript vanished yesterday is already older than the
+/// window and must not live another year. `<` rather than `<=`, so a session
+/// that ended exactly on the horizon is kept, and the cutoff is
+/// [`gotime::go_text`] because the column is compared as text.
+///
+/// A session whose transcript is on disk is never pruned, at any age: the
+/// select takes only stamped rows, a row whose stored `file_path` exists is
+/// dropped as the bulk delete drops it, and [`delete_pairs`] skips a row
+/// un-expired in between. Unlike the bulk delete this does not go through the
+/// sessions list's filter — retention is a property of the store, so a hidden
+/// project's history is trimmed with the rest.
+///
+/// `now` is a parameter so the boundary is constructible in a test.
+pub(crate) fn prune(conn: &mut Connection, days: i64, now: DateTime<Utc>) -> Result<usize, String> {
+    if days <= 0 {
+        return Ok(0);
+    }
+    let cutoff = chrono::Duration::try_days(days)
+        .and_then(|window| now.checked_sub_signed(window))
+        // Unreachable for any value the settings write admits; refusing beats
+        // deleting against a cutoff that saturated.
+        .ok_or_else(|| format!("history retention of {days} days is out of range"))?;
+
+    // Selected, and checked against the disk, before the write lock is taken.
+    let rows: Vec<(String, String, String)> = conn
+        .prepare(
+            "SELECT session_id, project_path, file_path FROM claude_session_cache
+              WHERE transcript_expired_at IS NOT NULL AND last_activity < ?1",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([gotime::go_text(&cutoff)], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect()
+        })
+        .map_err(|e| format!("selecting expired sessions to prune: {e}"))?;
+    let pairs: Vec<(String, String)> = rows
+        .into_iter()
+        .filter(|(_, _, file_path)| !Path::new(file_path).exists())
+        .map(|(session_id, project_path, _)| (session_id, project_path))
+        .collect();
+    if pairs.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin expired sessions prune: {e}"))?;
+    let deleted = delete_pairs(&tx, &pairs, SearchMode::Sweep)?;
+    tx.commit()
+        .map_err(|e| format!("commit expired sessions prune: {e}"))?;
+    Ok(deleted)
 }
 
 #[cfg(test)]

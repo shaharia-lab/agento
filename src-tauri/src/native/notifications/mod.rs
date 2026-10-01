@@ -419,7 +419,8 @@ mod tests {
             claude_config_dir          TEXT    NOT NULL DEFAULT '',
             claude_config_dirs         TEXT    NOT NULL DEFAULT '[]',
             claude_executable_path     TEXT    NOT NULL DEFAULT '',
-            credentials_checker_enabled INTEGER NOT NULL DEFAULT 0
+            credentials_checker_enabled INTEGER NOT NULL DEFAULT 0,
+            session_history_retention_days INTEGER NOT NULL DEFAULT 0
         );";
 
     /// A database on disk, since both reads take a path and open their own

@@ -379,6 +379,11 @@ export interface UserSettings {
   claude_executable_path: string;
   /** Whether the Credentials Checker scans transcripts (#601). Off by default. */
   credentials_checker_enabled: boolean;
+  /**
+   * How many days of expired sessions are kept (#712): 0 is for ever (the
+   * default), otherwise 180 or 365. Age is the session's end, not its expiry.
+   */
+  session_history_retention_days: number;
 }
 
 /**

@@ -5,6 +5,7 @@
 //! file under a temp dir, never a stubbed answer.
 
 use axum::http::{Method, StatusCode};
+use chrono::{DateTime, Utc};
 use rusqlite::params;
 
 use super::*;
@@ -604,4 +605,136 @@ fn the_handlers_answer_the_same_outside_the_route() {
     assert_eq!(answer.status, StatusCode::NO_CONTENT);
     let answer = writes::finish(delete_one(&f.ctx.db_path, "gone")).expect("answer");
     assert_eq!(answer.status, StatusCode::NOT_FOUND);
+}
+
+// ─── the retention prune (#712) ──────────────────────────────────────────────
+
+/// 2027-08-10 10:00:00 UTC: 365 days after `at-bound`'s `last_activity`.
+fn prune_now() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2027-08-10T10:00:00Z")
+        .expect("now")
+        .with_timezone(&Utc)
+}
+
+impl Fixture {
+    fn prune(&self, days: i64, now: DateTime<Utc>) -> usize {
+        prune(&mut self.conn(), days, now).expect("prune")
+    }
+
+    /// Restate when `id` ended and when its transcript was found missing.
+    fn restamp(&self, id: &str, last_activity: DateTime<Utc>, expired_at: Option<DateTime<Utc>>) {
+        self.conn()
+            .execute(
+                "UPDATE claude_session_cache
+                    SET last_activity = ?2, transcript_expired_at = ?3
+                  WHERE session_id = ?1",
+                params![
+                    id,
+                    gotime::go_text(&last_activity),
+                    expired_at.map(|t| gotime::go_text(&t)),
+                ],
+            )
+            .expect("restamp");
+    }
+}
+
+#[test]
+fn a_retention_of_zero_prunes_nothing() {
+    let f = bulk_corpus();
+    let before = f.dump();
+
+    // A century on, so every row is older than any window.
+    let now = prune_now() + chrono::Duration::days(36_500);
+    assert_eq!(f.prune(0, now), 0);
+
+    assert_eq!(f.dump(), before);
+}
+
+/// The window is measured on `last_activity`, and never from
+/// `transcript_expired_at`: a session that ended 13 months ago goes even though
+/// its transcript vanished yesterday.
+#[test]
+fn the_prune_measures_age_from_the_sessions_end_not_from_its_expiry() {
+    let f = Fixture::new();
+    let now = prune_now();
+    let yesterday = now - chrono::Duration::days(1);
+    for id in [
+        "ended-13-months-ago",
+        "ended-11-months-ago",
+        "old-but-on-record",
+    ] {
+        f.full(id, "/home/u/proj", 1);
+    }
+    f.restamp(
+        "ended-13-months-ago",
+        now - chrono::Duration::days(395),
+        Some(yesterday),
+    );
+    f.restamp(
+        "ended-11-months-ago",
+        now - chrono::Duration::days(335),
+        Some(now - chrono::Duration::days(300)),
+    );
+    // 13 months old with its transcript never found missing.
+    f.restamp("old-but-on-record", now - chrono::Duration::days(395), None);
+
+    assert_eq!(f.prune(365, now), 1);
+
+    assert_eq!(f.ids(), ["ended-11-months-ago", "old-but-on-record"]);
+    assert_eq!(
+        f.counts("ended-13-months-ago"),
+        vec![0; TABLES.len()],
+        "a pruned session leaves no row in any table the cascade covers"
+    );
+    assert_eq!(f.counts("old-but-on-record"), vec![1; TABLES.len()]);
+}
+
+/// Strictly older than the horizon: the row ending exactly on it is kept, and
+/// so are a live row and a stamped row whose file is back on disk.
+#[test]
+fn the_prune_keeps_the_boundary_row_live_rows_and_restored_transcripts() {
+    let f = bulk_corpus();
+
+    assert_eq!(f.prune(365, prune_now()), 2);
+
+    assert_eq!(f.ids(), ["at-bound", "newer", "old-back", "old-live"]);
+    for id in ["old-1", "old-2"] {
+        assert_eq!(f.counts(id), vec![0; TABLES.len()], "{id}");
+    }
+    assert_eq!(f.counts("old-live"), vec![1; TABLES.len()]);
+
+    // One second later the boundary row is past the horizon too.
+    assert_eq!(f.prune(365, prune_now() + chrono::Duration::seconds(1)), 1);
+    assert_eq!(f.ids(), ["newer", "old-back", "old-live"]);
+}
+
+/// The shorter window reaches further forward, and a second pass is a no-op.
+#[test]
+fn a_shorter_window_prunes_more_and_a_repeat_prunes_nothing() {
+    let f = bulk_corpus();
+    // 180 days after `newer` ended, plus a second.
+    let now = prune_now() - chrono::Duration::days(184) + chrono::Duration::seconds(1);
+
+    assert_eq!(f.prune(365, now), 0);
+    assert_eq!(f.prune(180, now), 4);
+    assert_eq!(f.prune(180, now), 0);
+
+    assert_eq!(f.ids(), ["old-back", "old-live"]);
+}
+
+/// A hidden project is trimmed with the rest: retention is a property of the
+/// store, not of what the sessions list shows.
+#[test]
+fn the_prune_reaches_a_hidden_projects_expired_sessions() {
+    let f = Fixture::new();
+    f.full("hidden-old", "/home/u/secret", 1);
+    f.conn()
+        .execute(
+            "UPDATE user_settings SET hidden_projects = '[\"/home/u/secret\"]'",
+            [],
+        )
+        .expect("hide");
+
+    assert_eq!(f.prune(365, prune_now()), 1);
+    assert!(f.ids().is_empty());
 }

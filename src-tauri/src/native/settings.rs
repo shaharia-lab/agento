@@ -135,6 +135,15 @@ pub struct UserSettings {
     /// field is last: no Go counterpart, so appending moves no existing byte.
     #[serde(deserialize_with = "null_is_zero_value")]
     pub credentials_checker_enabled: bool,
+    /// How many days of expired sessions are kept (#712, epic #703): `0`
+    /// (for ever, the default), `180` or `365`.
+    ///
+    /// **Zero has to be the safe value.** A `PUT` replaces the whole row and an
+    /// omitted key decodes to zero, so a client that never heard of this field
+    /// posts back "keep everything" and can never shorten retention. Last for
+    /// the reason the two fields above it are.
+    #[serde(deserialize_with = "null_is_zero_value")]
+    pub session_history_retention_days: i64,
 }
 
 /// Read the settings row as stored. A missing row, a read error, or malformed
@@ -158,7 +167,8 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                     COALESCE(claude_config_dir, ''),
                     COALESCE(claude_config_dirs, ''),
                     COALESCE(claude_executable_path, ''),
-                    COALESCE(credentials_checker_enabled, 0)
+                    COALESCE(credentials_checker_enabled, 0),
+                    COALESCE(session_history_retention_days, 0)
              FROM user_settings WHERE id = 1",
             [],
             |r| {
@@ -183,6 +193,7 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                     claude_config_dirs: decode_string_list(&extra_raw),
                     claude_executable_path: r.get(13)?,
                     credentials_checker_enabled: credentials_checker != 0,
+                    session_history_retention_days: r.get(15)?,
                 })
             },
         )
@@ -604,6 +615,10 @@ fn discover_candidate_claude_dirs(configured: &[String]) -> Option<Vec<String>> 
 const MIN_IDLE_GAP_MINUTES: i64 = 1;
 const MAX_IDLE_GAP_MINUTES: i64 = 240;
 
+/// The retention windows `session_history_retention_days` accepts besides `0`:
+/// six months and a year, as fixed day counts.
+const SESSION_HISTORY_RETENTION_DAYS: [i64; 2] = [180, 365];
+
 /// `handleUpdateSettings`.
 ///
 /// Every failure is a **400** carrying the error's own text: the handler writes
@@ -656,6 +671,7 @@ fn update_with(
     // precisely how the manager arrived at it during startup wiring.
     let current = resolve(load_stored(&conn)).settings;
     let previous_idle_gap = current.idle_gap_threshold_minutes;
+    let previous_retention = current.session_history_retention_days;
     let previous_dirs = claude_config_dirs(
         &current.claude_config_dir,
         current.claude_config_dirs.as_deref().unwrap_or_default(),
@@ -665,7 +681,14 @@ fn update_with(
     save(&conn, &saved).map_err(WriteError::Fallback)?;
     drop(conn);
 
-    apply_data_settings(db_path, &saved, previous_idle_gap, &previous_dirs, rescan);
+    apply_data_settings(
+        db_path,
+        &saved,
+        previous_idle_gap,
+        previous_retention,
+        &previous_dirs,
+        rescan,
+    );
     // The Credentials Checker's worker follows the stored switch (#603).
     // Synced after **every** save rather than on a flip this request saw: a
     // flip judged against a value read before the save misses a racing save's
@@ -698,6 +721,7 @@ fn apply_update(
 ) -> Result<UserSettings, WriteError> {
     apply_locked_fields(&mut incoming, current)?;
     validate_idle_gap_threshold(incoming.idle_gap_threshold_minutes)?;
+    validate_session_history_retention(incoming.session_history_retention_days)?;
     validate_claude_config_dirs(&incoming, current)?;
     validate_claude_executable_path(&incoming, current)?;
 
@@ -779,6 +803,20 @@ fn validate_idle_gap_threshold(minutes: i64) -> Result<(), WriteError> {
     Err(WriteError::BadRequest(format!(
         "idle_gap_threshold_minutes must be between {MIN_IDLE_GAP_MINUTES} and \
          {MAX_IDLE_GAP_MINUTES} minutes, got {minutes}"
+    )))
+}
+
+/// The retention setting is one of three values, not a range (#712).
+///
+/// Zero is "keep for ever" and is what an omitted key decodes to. Anything
+/// outside the set is refused rather than rounded: a prune deletes history,
+/// so a window nobody chose must never be stored.
+fn validate_session_history_retention(days: i64) -> Result<(), WriteError> {
+    if days == 0 || SESSION_HISTORY_RETENTION_DAYS.contains(&days) {
+        return Ok(());
+    }
+    Err(WriteError::BadRequest(format!(
+        "session_history_retention_days must be 0, 180 or 365, got {days}"
     )))
 }
 
@@ -960,8 +998,8 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
              notification_settings, event_bus_worker_pool_size, public_url,
              hidden_projects, idle_gap_threshold_minutes,
              claude_config_dir, claude_config_dirs, claude_executable_path,
-             credentials_checker_enabled)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             credentials_checker_enabled, session_history_retention_days)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(id) DO UPDATE SET
             default_working_dir = excluded.default_working_dir,
             default_model = excluded.default_model,
@@ -977,7 +1015,8 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
             claude_config_dir = excluded.claude_config_dir,
             claude_config_dirs = excluded.claude_config_dirs,
             claude_executable_path = excluded.claude_executable_path,
-            credentials_checker_enabled = excluded.credentials_checker_enabled",
+            credentials_checker_enabled = excluded.credentials_checker_enabled,
+            session_history_retention_days = excluded.session_history_retention_days",
         rusqlite::params![
             settings.default_working_dir,
             settings.default_model,
@@ -994,6 +1033,7 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
             encode_string_list(&settings.claude_config_dirs),
             settings.claude_executable_path,
             i64::from(settings.credentials_checker_enabled),
+            settings.session_history_retention_days,
         ],
     )
     .map(|_| ())
@@ -1021,7 +1061,10 @@ fn encode_string_list(values: &Option<Vec<String>>) -> String {
 /// What is left is the scan, and Go's rules for it: hiding a project takes
 /// effect on the next read because it is a filter over cached rows, while a new
 /// threshold or a newly added config dir is not — the durations are stored per
-/// transcript and a dir that was never walked has no rows to filter.
+/// transcript and a dir that was never walked has no rows to filter. A changed,
+/// non-zero history retention rescans too (#712): the prune is a step of the
+/// scan, so this is what makes a shortened window take effect now rather than
+/// at the next TTL. A change *to* zero prunes nothing and needs no scan.
 ///
 /// `force_scan`, not `ensure_scan`: Go calls `Cache.EnsureScan`, which admits a
 /// scan outright, where `ensure_scan` is `ensureFresh` and would ask the
@@ -1032,6 +1075,7 @@ fn apply_data_settings(
     db_path: &Path,
     saved: &UserSettings,
     previous_idle_gap: i64,
+    previous_retention: i64,
     previous_dirs: &[String],
     rescan: impl FnOnce(PathBuf),
 ) {
@@ -1040,6 +1084,17 @@ fn apply_data_settings(
             "claude sessions: idle-gap threshold changed; recomputing durations \
              (from {previous_idle_gap} to {})",
             saved.idle_gap_threshold_minutes
+        );
+        rescan(db_path.to_path_buf());
+        return;
+    }
+    if saved.session_history_retention_days != previous_retention
+        && saved.session_history_retention_days != 0
+    {
+        log::info!(
+            "claude sessions: history retention changed; pruning expired sessions \
+             (from {previous_retention} to {} days)",
+            saved.session_history_retention_days
         );
         rescan(db_path.to_path_buf());
         return;
@@ -1194,7 +1249,8 @@ mod tests {
             claude_config_dir          TEXT    NOT NULL DEFAULT '',
             claude_config_dirs         TEXT    NOT NULL DEFAULT '[]',
             claude_executable_path     TEXT    NOT NULL DEFAULT '',
-            credentials_checker_enabled INTEGER NOT NULL DEFAULT 0
+            credentials_checker_enabled INTEGER NOT NULL DEFAULT 0,
+            session_history_retention_days INTEGER NOT NULL DEFAULT 0
         );";
 
     fn fixture(row: Option<&str>) -> Connection {
@@ -1220,13 +1276,13 @@ mod tests {
                   notification_settings, event_bus_worker_pool_size, public_url,
                   hidden_projects, idle_gap_threshold_minutes,
                   claude_config_dir, claude_config_dirs, claude_executable_path,
-                  credentials_checker_enabled)
+                  credentials_checker_enabled, session_history_retention_days)
                VALUES (1, 'working-dir', 'the-model', 1,
                        1, 13, 'the-font',
                        'the-notifications', 7, 'the-url',
                        '["/hidden/one"]', 25,
                        '/run/dir', '["/extra/dir"]', '/the/claude',
-                       1)"#,
+                       1, 365)"#,
         ));
 
         let stored = load_stored(&conn);
@@ -1251,6 +1307,7 @@ mod tests {
         );
         assert_eq!(stored.claude_executable_path, "/the/claude");
         assert!(stored.credentials_checker_enabled);
+        assert_eq!(stored.session_history_retention_days, 365);
 
         // The narrowed view must agree with the row it was derived from — one
         // reader is the point.
@@ -1332,7 +1389,8 @@ mod tests {
                 r#""public_url":"","hidden_projects":["/home/u/secret"],"#,
                 r#""idle_gap_threshold_minutes":0,"claude_config_dir":"","#,
                 r#""claude_config_dirs":[],"claude_executable_path":"","#,
-                r#""credentials_checker_enabled":false},"locked":{},"model_from_env":false}"#,
+                r#""credentials_checker_enabled":false,"session_history_retention_days":0},"#,
+                r#""locked":{},"model_from_env":false}"#,
                 "\n"
             )
         );
@@ -1715,7 +1773,8 @@ mod tests {
                 r#""hidden_projects":["/home/u/secret","/home/u/other"],"#,
                 r#""idle_gap_threshold_minutes":25,"claude_config_dir":"","#,
                 r#""claude_config_dirs":null,"claude_executable_path":"","#,
-                r#""credentials_checker_enabled":false},"locked":{},"model_from_env":false}"#,
+                r#""credentials_checker_enabled":false,"session_history_retention_days":0},"#,
+                r#""locked":{},"model_from_env":false}"#,
                 "\n"
             )
         );
@@ -1762,7 +1821,8 @@ mod tests {
                 r#""public_url":"","hidden_projects":null,"#,
                 r#""idle_gap_threshold_minutes":7,"claude_config_dir":"","#,
                 r#""claude_config_dirs":null,"claude_executable_path":"","#,
-                r#""credentials_checker_enabled":false},"locked":{},"model_from_env":false}"#,
+                r#""credentials_checker_enabled":false,"session_history_retention_days":0},"#,
+                r#""locked":{},"model_from_env":false}"#,
                 "\n"
             )
         );
@@ -2037,6 +2097,14 @@ mod tests {
                 "idle_gap_threshold_minutes must be between 1 and 240 minutes, got -1".to_string(),
             ),
             (
+                r#"{"session_history_retention_days":7}"#.to_string(),
+                "session_history_retention_days must be 0, 180 or 365, got 7".to_string(),
+            ),
+            (
+                r#"{"session_history_retention_days":-1}"#.to_string(),
+                "session_history_retention_days must be 0, 180 or 365, got -1".to_string(),
+            ),
+            (
                 r#"{"claude_config_dir":"relative/dir"}"#.to_string(),
                 "claude config dir must be an absolute path, got \\\"relative/dir\\\"".to_string(),
             ),
@@ -2279,6 +2347,102 @@ mod tests {
             ),
         );
         assert!(!rescanned, "an unchanged save must cost nothing");
+    }
+
+    /// The retention setting (#712): `0` on a migrated database, each accepted
+    /// value round-trips, a value outside the set stores nothing, and a body
+    /// that omits the key — a client that never heard of it — stores "for ever".
+    #[test]
+    fn the_history_retention_round_trips_and_an_omitted_key_is_for_ever() {
+        let _env = crate::paths::tests::env_lock();
+        if !nothing_is_locked() {
+            return;
+        }
+        let file = migrated_db();
+        let stored = || {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            load_stored(&conn).session_history_retention_days
+        };
+        let get = || {
+            let conn = super::super::db::open_read_only(file.path()).expect("open");
+            String::from_utf8(
+                super::super::gojson::to_vec(&resolve(load_stored(&conn))).expect("encode"),
+            )
+            .expect("utf8")
+        };
+        assert!(
+            get().contains(r#""session_history_retention_days":0}"#),
+            "a migrated database keeps history for ever: {}",
+            get()
+        );
+
+        for days in [180, 365] {
+            let (status, body) = put(
+                file.path(),
+                &format!(r#"{{"session_history_retention_days":{days}}}"#),
+            );
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert!(
+                body.contains(&format!(r#""session_history_retention_days":{days}}}"#)),
+                "{body}"
+            );
+            assert_eq!(stored(), days);
+            assert!(get().contains(&format!(r#""session_history_retention_days":{days}}}"#)));
+        }
+
+        for refused in ["7", "-1", "366"] {
+            let (status, _) = put(
+                file.path(),
+                &format!(r#"{{"session_history_retention_days":{refused}}}"#),
+            );
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{refused}");
+            assert_eq!(stored(), 365, "a refused value stores nothing: {refused}");
+        }
+
+        let (status, _) = put(file.path(), r#"{"public_url":"https://a.test"}"#);
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(stored(), 0, "an omitted key is the zero value");
+
+        put(file.path(), r#"{"session_history_retention_days":180}"#);
+        let (status, _) = put(file.path(), r#"{"session_history_retention_days":null}"#);
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(stored(), 0, "null is the zero value");
+    }
+
+    /// A changed, non-zero retention prunes now, through one rescan; an
+    /// unchanged one costs nothing, and a change to "for ever" has nothing to
+    /// prune (#712).
+    #[test]
+    fn a_changed_non_zero_history_retention_rescans_once() {
+        let _env = crate::paths::tests::env_lock();
+        if !nothing_is_locked() {
+            return;
+        }
+        let file = migrated_db();
+        let rescans = |body: &str| {
+            let mut count = 0;
+            let result = update_with(file.path(), body.as_bytes(), |_| count += 1, |_| {});
+            assert!(result.is_ok(), "{body}");
+            count
+        };
+
+        assert_eq!(rescans(r#"{"session_history_retention_days":365}"#), 1);
+        assert_eq!(
+            rescans(r#"{"session_history_retention_days":365}"#),
+            0,
+            "an unchanged window must cost nothing"
+        );
+        assert_eq!(rescans(r#"{"session_history_retention_days":180}"#), 1);
+        assert_eq!(
+            rescans(r#"{"session_history_retention_days":0}"#),
+            0,
+            "for ever prunes nothing, so there is nothing to scan for"
+        );
+        assert_eq!(
+            rescans(r#"{"session_history_retention_days":180,"idle_gap_threshold_minutes":25}"#),
+            1,
+            "two reasons to rescan are still one scan"
+        );
     }
 
     /// `normalizeClaudeConfigDirs`: normalize, drop blanks, drop duplicates, and

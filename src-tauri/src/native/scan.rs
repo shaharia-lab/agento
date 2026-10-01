@@ -516,6 +516,27 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
         },
     );
 
+    // The "Keep session history" prune (#712). **Here**, after the expiry pass
+    // and before the two reconciles: a transcript this scan found missing is
+    // already stamped, so one scan both expires and prunes it, and the
+    // reconciles below then see the cache as it will stay. Being past the
+    // no-readable-dir return above, an unplugged drive prunes nothing.
+    //
+    // The setting is read from the row rather than carried in `DataSettings`:
+    // no session read depends on it. Zero, the default, is "for ever".
+    let retention_days = super::settings::load_stored(&conn).session_history_retention_days;
+    match super::sessions::delete::prune(&mut conn, retention_days, chrono::Utc::now()) {
+        Ok(n) if n > 0 => log::info!(
+            "claude sessions: pruned {n} expired sessions older than {retention_days} days"
+        ),
+        Ok(_) => {}
+        // Logged and continued: a failed prune leaves history that the next
+        // scan trims, where failing the scan costs the corpus.
+        Err(e) => log::warn!(
+            "claude sessions: pruning expired sessions older than {retention_days} days: {e}"
+        ),
+    }
+
     // What Go publishes on its event bus, delivered to the one subscriber that
     // ever existed for it (#408). There is still no bus — a bus between two
     // functions is machinery for its own sake — so this is a direct call, the
@@ -1207,6 +1228,139 @@ mod tests {
             "an expired session's text leaves the index (#706), and the one \
              under an unlistable config dir is not expired, so it is kept",
         );
+    }
+
+    /// A scan that could list no config dir prunes nothing (#712): it returns
+    /// before the prune, so an unplugged drive never costs history, whatever
+    /// window is stored.
+    #[test]
+    fn a_scan_with_no_readable_dir_prunes_nothing() {
+        let _serialised = scan_state_lock();
+        let _env = crate::paths::tests::env_lock();
+        // A home with no `.claude`, so the walk finds nothing to list.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_var = crate::paths::tests::EnvVar::set("HOME", home.path());
+        let _run_dir = crate::paths::tests::EnvVar::unset("CLAUDE_CONFIG_DIR");
+
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(
+            "INSERT INTO user_settings (id, session_history_retention_days) VALUES (1, 180);
+             INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time,
+                  last_activity, transcript_expired_at)
+             VALUES ('old', '/w', '/nowhere/old.jsonl', '2020-01-01 09:00:00 +0000 UTC',
+                     '2020-01-01 09:00:00 +0000 UTC', '2020-01-01 10:00:00 +0000 UTC',
+                     '2020-02-01 08:30:00 +0000 UTC');",
+        )
+        .expect("seed");
+        drop(conn);
+
+        state().lock().expect("lock").no_dirs_at = None;
+        run_scan(file.path()).expect("a scan with nothing to walk still succeeds");
+        state().lock().expect("lock").no_dirs_at = None;
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM claude_session_cache", [], |r| {
+                r.get(0)
+            })
+            .expect("count");
+        assert_eq!(rows, 1, "the expired row is years past the window and kept");
+    }
+
+    /// The retention prune's wiring (#712): **one scan both expires and prunes**.
+    ///
+    /// `old` ended in March 2026 and `recent` a moment ago; both transcripts
+    /// are removed, with a 180-day window stored. The single scan that finds
+    /// them missing stamps both and deletes `old` with its insight, which only
+    /// holds while the prune runs after `apply_changes`. `recent` is expired
+    /// but inside the window, and `kept` is as old as `old` with its transcript
+    /// on disk, so neither is touched.
+    ///
+    /// Under the default of zero the same scan deletes nothing, which the first
+    /// half asserts before the window is stored.
+    #[cfg(unix)]
+    #[test]
+    fn a_scan_prunes_an_expired_session_older_than_the_retention_window() {
+        let _serialised = scan_state_lock();
+        let _env = crate::paths::tests::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_var = crate::paths::tests::EnvVar::set("HOME", home.path());
+        let _run_dir = crate::paths::tests::EnvVar::unset("CLAUDE_CONFIG_DIR");
+
+        let config_dir = home.path().join(".claude");
+        let old = seed_transcript(&config_dir, "-tmp-old", "old");
+        seed_transcript(&config_dir, "-tmp-kept", "kept");
+        let gone = seed_transcript(&config_dir, "-tmp-gone", "gone");
+        let recent = seed_transcript(&config_dir, "-tmp-recent", "recent");
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        std::fs::write(
+            &recent,
+            format!(
+                "{{\"type\":\"user\",\"timestamp\":\"{now}\",\"cwd\":\"/w\",\
+                  \"message\":{{\"role\":\"user\",\"content\":\"just now\"}}}}\n"
+            ),
+        )
+        .expect("recent transcript");
+
+        let file = migrated();
+        run_scan(file.path()).expect("the first scan");
+
+        let conn = super::super::db::open_read_write(file.path()).expect("open");
+        let cached = pairs(&conn, "claude_session_cache");
+        assert_eq!(cached.len(), 4, "{cached:?}");
+        for (session_id, project_path) in &cached {
+            conn.execute(
+                "INSERT INTO session_insights (session_id, project_path, scanned_at)
+                 VALUES (?1, ?2, '2026-03-15 12:00:00+00:00')",
+                rusqlite::params![session_id, project_path],
+            )
+            .expect("insight row");
+        }
+        drop(conn);
+
+        // The default, zero: an old session expires and stays.
+        std::fs::remove_file(&gone).expect("remove gone");
+        run_scan(file.path()).expect("the scan under the default");
+        let conn = super::super::db::open_read_write(file.path()).expect("open");
+        assert_eq!(
+            pairs(&conn, "claude_session_cache"),
+            cached,
+            "for ever is the default, and it prunes nothing"
+        );
+
+        conn.execute(
+            "INSERT INTO user_settings (id, session_history_retention_days) VALUES (1, 180)
+             ON CONFLICT(id) DO UPDATE SET
+                 session_history_retention_days = excluded.session_history_retention_days",
+            [],
+        )
+        .expect("store the window");
+        drop(conn);
+        std::fs::remove_file(&old).expect("remove old");
+        std::fs::remove_file(&recent).expect("remove recent");
+
+        run_scan(file.path()).expect("the pruning scan");
+
+        let conn = super::super::db::open_read_only(file.path()).expect("open");
+        let ids = |table: &str| -> Vec<String> {
+            pairs(&conn, table).into_iter().map(|(id, _)| id).collect()
+        };
+        assert_eq!(
+            ids("claude_session_cache"),
+            ["kept", "recent"],
+            "`old` was expired and pruned by this one scan, and `gone` with it"
+        );
+        assert_eq!(ids("session_insights"), ["kept", "recent"]);
+        let expired: Option<String> = conn
+            .query_row(
+                "SELECT transcript_expired_at FROM claude_session_cache WHERE session_id = 'recent'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("stamp");
+        assert!(expired.is_some(), "`recent` expired, inside the window");
     }
 
     /// `EnsureScan` admits one scan, so a double-click cannot start a second

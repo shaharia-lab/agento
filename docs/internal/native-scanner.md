@@ -33,8 +33,9 @@ Five rules that are silent when wrong:
   `(session_id, project_path)` while `file_path` is a non-unique index, so
   a claim shift legitimately brings the same row under a new path. The diff
   indexes the cache twice — by path and by row key — to tell them apart.
-- **A vanished transcript expires its row; the scanner never deletes it**
-  (#705) — only the user does, through `sessions/delete.rs` (#711). The
+- **A vanished transcript expires its row; the scan deletes one only under
+  a retention window the user stored** (#705, #712) — otherwise only the
+  user does, through `sessions/delete.rs` (#711). The
   expiry pass stamps `transcript_expired_at` and blanks `preview`, and keeps
   every figure, both user-owned columns, the titles and the PR links. It is
   idempotent — an expired row is not listed again, so the stamp is the time
@@ -49,6 +50,18 @@ Five rules that are silent when wrong:
   scanner version, pricing revision, idle threshold. The last cannot be a
   version constant but makes the same rows stale. Invalidation zeroes
   mtimes rather than dropping rows, so a re-read is an update.
+
+**The retention prune (#712)** is a step of the scan, not a worker:
+`sessions::delete::prune` runs in `run_scan` after `apply::apply_changes` and
+before the insights and search reconciles, so a transcript this scan found
+missing is already stamped and one scan both expires and prunes it. It reads
+`user_settings.session_history_retention_days` — `0` (for ever, the default),
+`180` or `365` — and deletes **expired rows only**, through #711's cascade,
+whose `last_activity` is strictly older than the window. Age is the session's
+end, never `transcript_expired_at`; a row whose stored file is on disk is kept
+at any age; and the no-readable-dir return is above it, so an unplugged drive
+prunes nothing. A failed prune is logged and the scan carries on. Saving a
+changed, non-zero window calls `scan::force_scan`, so it takes effect at once.
 
 Two encodings to get wrong: `cost_by_model` is JSON but empty stores as
 `""`, and `unpriced_models` is newline-joined rather than JSON, because a
