@@ -425,7 +425,7 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
     // is `auth.test` on the *bot* token, the same call the handler makes.
     let identity = slack(&env.bot_token, "auth.test", serde_json::json!({}))
         .await
-        .map_err(&fail)?;
+        .map_err(fail)?;
     let bot_user = identity
         .get("user_id")
         .and_then(serde_json::Value::as_str)
@@ -439,13 +439,13 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
         None,
     )
     .await
-    .map_err(&fail)?;
+    .map_err(fail)?;
     let thread: Thread = (bot_user.clone(), thread_ts.clone());
     let carry = |why: String| (why, Some(thread.clone()));
 
     let first = await_reply_after(env, &bot_user, &thread_ts, &thread_ts)
         .await
-        .map_err(&carry)?;
+        .map_err(carry)?;
     if first[0].trim().is_empty() {
         return Err(carry("the app replied with nothing at all".to_string()));
     }
@@ -488,10 +488,10 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
         Some(&thread_ts),
     )
     .await
-    .map_err(&carry)?;
+    .map_err(carry)?;
     let second = await_reply_after(env, &bot_user, &thread_ts, &follow_up_ts)
         .await
-        .map_err(&carry)?;
+        .map_err(carry)?;
     eprintln!("second reply: {:?}", second[0]);
 
     let chats = scalar(db_path, "SELECT COUNT(*) FROM chat_sessions");
