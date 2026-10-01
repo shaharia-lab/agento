@@ -1398,9 +1398,12 @@ const RETENTION_OPTIONS = [
   { value: "180", label: "6 months" },
 ];
 
-/** `0` is *keep forever*, so it is the longest window rather than the shortest. */
+/**
+ * Anything not positive is *keep forever* (the prune's own reading), so it is
+ * the longest window rather than the shortest.
+ */
 function retentionRank(days: number): number {
-  return days === 0 ? Infinity : days;
+  return days <= 0 ? Infinity : days;
 }
 
 function retentionLabel(days: number): string {

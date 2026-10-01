@@ -625,8 +625,9 @@ inspector says so. You can still star it.
 
 ### Deleting expired sessions
 
-Agento keeps an expired session until you delete it. There are two ways, and
-both ask you to confirm first:
+By default Agento keeps an expired session until you delete it; **Keep session
+history** in Settings → Data can also remove old ones automatically. To delete
+by hand there are two ways, and both ask you to confirm first:
 
 - **One session.** Select an expired session and press the trash button in the
   inspector. Sessions whose transcript is still on disk have no such button.
@@ -1052,8 +1053,8 @@ configuration works before you rely on it.
   working time. Between 1 and 240 minutes, 10 by default. Changing it re-reads
   your history in the background, because durations are stored rather than
   recomputed on every view.
-- **Keep session history**: how long Agento keeps a session after Claude Code
-  has deleted its transcript. **Forever** (the default), **1 year** or
+- **Keep session history**: how long Agento keeps a session whose transcript
+  Claude Code has deleted. **Forever** (the default), **1 year** or
   **6 months**. Only sessions whose transcript has expired are ever deleted, and
   the age is counted from when the session ended. A session whose transcript is
   still on disk is kept at any age. Choosing a shorter window tells you, before
