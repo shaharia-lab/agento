@@ -466,4 +466,47 @@ mod tests {
             "a read must leave every config dir as it found it"
         );
     }
+    /// With no home at all the default dir is `/root/.claude`, which a normal
+    /// user cannot read. That is still an answer, not a failure: the route
+    /// leads with that dir and says `default` or an explained `unknown`.
+    #[test]
+    fn without_a_home_the_route_still_answers_for_the_fallback_dir() {
+        let _env = crate::paths::tests::env_lock();
+        let scratch = tempfile::tempdir().expect("temp dir");
+        let _home_var = crate::paths::tests::EnvVar::unset("HOME");
+        let _profile_var = crate::paths::tests::EnvVar::unset("USERPROFILE");
+        let _dir_var = crate::paths::tests::EnvVar::unset("CLAUDE_CONFIG_DIR");
+
+        let db_path = scratch.path().join("agento.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).expect("open");
+            crate::native::migrate::apply(&mut conn).expect("migrate");
+        }
+
+        let answer = serve(
+            &Ctx { db_path },
+            &Request {
+                method: &Method::GET,
+                path: PATH,
+                query: "",
+                content_type: "",
+                secret_token: "",
+                body: &[],
+            },
+        )
+        .expect("the route answers");
+        assert_eq!(answer.status, StatusCode::OK);
+
+        let body: Value = serde_json::from_slice(&answer.body.expect("a body")).expect("json");
+        let dirs = body["dirs"].as_array().expect("dirs");
+        assert_eq!(dirs.len(), 1, "{body}");
+        assert_eq!(dirs[0]["config_dir"], "/root/.claude", "{body}");
+        match dirs[0]["source"].as_str() {
+            Some("default") => assert_eq!(dirs[0]["cleanup_period_days"], 30, "{body}"),
+            Some("unknown") => assert!(dirs[0]["reason"].is_string(), "{body}"),
+            // Only a test run as root, on a machine whose root has set the key.
+            Some("settings") => assert!(dirs[0]["cleanup_period_days"].is_u64(), "{body}"),
+            other => panic!("unexpected source {other:?} in {body}"),
+        }
+    }
 }
