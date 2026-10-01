@@ -239,6 +239,33 @@
   flex: none;
 }
 
+/* The "transcript is gone" marker on a history-only row (#713). Muted, because
+   the row is still a full record of what the session cost — it is a note about
+   the row, not a warning.
+
+   It has its own background for `.sess-snippet__hit`'s reason below: a focused
+   selected row forces `color: inherit !important` on every descendant, so a
+   colour-only marker would vanish exactly where the user is looking. */
+.sess-expired {
+  /* Shrinks with the title rather than `flex: none`: the Session column is
+     narrow with the inspector open, and a rigid chip left the title one
+     letter and an ellipsis. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-inset);
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+  line-height: 17px;
+}
+.window--focused .table tbody tr.is-selected .sess-expired {
+  background: rgba(255, 255, 255, 0.22);
+}
+
 /* The "why this row matched" line (#438). It is a second line inside the title
    cell, so it only exists on a content match — an ordinary listing keeps the
    28px row and this rule never applies. `.table tbody td` already clips the

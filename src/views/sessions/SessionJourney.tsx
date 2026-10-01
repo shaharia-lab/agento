@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { api } from "../../lib/api";
+import { ApiError, api, isTranscriptExpired } from "../../lib/api";
 import { useResource } from "../../lib/hooks";
 import { clockTime, compactNumber, duration, integer } from "../../lib/format";
 import { Icon, type IconName } from "../../lib/icons";
@@ -15,6 +15,7 @@ import {
   toolCall,
   toolResult,
 } from "./journeyData";
+import { expiredSentence } from "./sessionMetrics";
 import "../../styles/journey.css";
 
 /**
@@ -52,16 +53,11 @@ export function SessionJourney({ sessionId }: { sessionId: string }) {
 
   if (journey.error && !journey.data) {
     return (
-      <Empty
-        icon="alert"
+      <SessionLoadFailure
         title="Couldn't load this journey"
-        text={journey.error}
-        action={
-          <button className="btn" onClick={() => journey.reload()}>
-            <Icon name="refresh" size={13} />
-            Try again
-          </button>
-        }
+        error={journey.error}
+        cause={journey.cause}
+        onRetry={journey.reload}
       />
     );
   }
@@ -75,6 +71,65 @@ export function SessionJourney({ sessionId }: { sessionId: string }) {
   }
 
   return <Timeline journey={journey.data} />;
+}
+
+/**
+ * Why a session read failed, as one of three states (#713).
+ *
+ * The transcript and the journey both read the session's file, so both meet the
+ * same three answers and must word them the same way — hence one component,
+ * here rather than in `SessionDetail` because that file imports this one.
+ *
+ * - **410** — the transcript expired. Nothing to retry: the file is not coming
+ *   back, so the state carries no button that would only fail again.
+ * - **404** — no such session. Likewise terminal.
+ * - **anything else** — the retry state both views always had.
+ */
+export function SessionLoadFailure({
+  title,
+  error,
+  cause,
+  onRetry,
+}: {
+  /** The title of the retryable state — the two readings name themselves. */
+  title: string;
+  error: string;
+  cause: unknown;
+  onRetry(): void;
+}) {
+  if (isTranscriptExpired(cause)) {
+    return (
+      <Empty
+        icon="alert"
+        title="Transcript expired"
+        text={`${expiredSentence(
+          cause.body.expired_at
+        )} The session's totals are kept, but its messages can no longer be read.`}
+      />
+    );
+  }
+  if (cause instanceof ApiError && cause.status === 404) {
+    return (
+      <Empty
+        icon="alert"
+        title="Session not found"
+        text="This session is no longer in the index."
+      />
+    );
+  }
+  return (
+    <Empty
+      icon="alert"
+      title={title}
+      text={error}
+      action={
+        <button className="btn" onClick={onRetry}>
+          <Icon name="refresh" size={13} />
+          Try again
+        </button>
+      }
+    />
+  );
 }
 
 /** Above this many turns nothing auto-expands. See the header. */

@@ -114,6 +114,18 @@ export function shortDate(iso: string | undefined | null): string {
   return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
+/** A calendar day with its year — for a date that may be long past. */
+export function fullDate(iso: string | undefined | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (!isFinite(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 export function clockTime(iso: string | undefined | null): string {
   if (!iso) return "—";
   const d = new Date(iso);

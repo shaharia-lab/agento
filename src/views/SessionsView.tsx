@@ -40,17 +40,23 @@ import {
 import { SessionDetail } from "./sessions/SessionDetail";
 import { SessionInspector } from "./sessions/SessionInspector";
 import {
+  expiredSentence,
   modeBadge,
   modeLabel,
   tokensIn,
   tokensOut,
   totalCost,
 } from "./sessions/sessionMetrics";
-import { findSessionById, sessionMenuItems } from "./sessions/SessionLink";
+import {
+  continueFailure,
+  findSessionById,
+  sessionMenuItems,
+} from "./sessions/SessionLink";
 import {
   SessionExportPanel,
   type SessionExportTarget,
 } from "./sessions/SessionExport";
+import type { Eq, Expect } from "../lib/typeAssert";
 import "../styles/sessions.css";
 
 /**
@@ -97,6 +103,19 @@ function rangeSet(r: Range): boolean {
 /** Whether a session must have a linked PR, must have none, or either. */
 type LinkFilter = "" | "with" | "without";
 
+/**
+ * Whether a session's transcript must still be on disk (#708), spelled as
+ * `sessions/query.rs` parses `transcript=`. `""` is either, and is not sent.
+ *
+ * Pinned because the server answers a 400 for any other spelling and there is
+ * no TypeScript test to catch a respelled option (see `lib/typeAssert.ts`).
+ */
+const TRANSCRIPT_FILTERS = ["", "available", "expired"] as const;
+type TranscriptFilter = (typeof TRANSCRIPT_FILTERS)[number];
+export type PinTranscriptFilter = Expect<
+  Eq<TranscriptFilter, "" | "available" | "expired">
+>;
+
 interface Filters {
   project: string;
   /**
@@ -136,6 +155,7 @@ interface Filters {
   /** `""` matches every model. */
   model: string;
   links: LinkFilter;
+  transcript: TranscriptFilter;
   /** Main-thread messages only — the column the Msgs cell renders. */
   messages: Range;
   /** *Active* minutes, parent plus sub-agents; never the wall-clock span. */
@@ -158,6 +178,7 @@ const INITIAL_FILTERS: Filters = {
   permissionMode: "",
   model: "",
   links: "",
+  transcript: "",
   messages: NO_RANGE,
   duration: NO_RANGE,
   tokensIn: NO_RANGE,
@@ -179,6 +200,7 @@ function advancedCount(f: Filters): number {
   if (f.permissionMode) n += 1;
   if (f.model) n += 1;
   if (f.links) n += 1;
+  if (f.transcript) n += 1;
   for (const r of [f.messages, f.duration, f.tokensIn, f.tokensOut, f.cost]) {
     if (rangeSet(r)) n += 1;
   }
@@ -205,6 +227,7 @@ type FilterParamKey =
   | "permission_mode"
   | "model"
   | "links"
+  | "transcript"
   | "messages_min"
   | "messages_max"
   | "duration_min"
@@ -240,6 +263,7 @@ function filterParamsOf(search: string, f: Filters): FilterParams {
     permission_mode: f.permissionMode || undefined,
     model: f.model || undefined,
     links: f.links || undefined,
+    transcript: f.transcript || undefined,
 
     messages_min: bound(f.messages.min),
     messages_max: bound(f.messages.max),
@@ -387,6 +411,12 @@ const LINK_LABELS: Record<LinkFilter, string> = {
   "": "Any",
   with: "With a linked PR",
   without: "Without a linked PR",
+};
+
+const TRANSCRIPT_LABELS: Record<TranscriptFilter, string> = {
+  "": "Any",
+  available: "Available",
+  expired: "Expired",
 };
 
 function FilterField({
@@ -704,6 +734,9 @@ export function SessionsView({
     return inView ?? (lastSelected?.session_id === selectedId ? lastSelected : undefined);
   }, [items, selectedId, lastSelected]);
 
+  /** Its transcript is gone: the strip's file-reading actions are shut (#713). */
+  const selectedExpired = selected?.transcript_expired ?? false;
+
   const select = useCallback((s: ClaudeSessionSummary) => {
     setSelectedId(s.session_id);
     setLastSelected(s);
@@ -887,7 +920,7 @@ export function SessionsView({
         if (!res?.chat_id) throw new Error("the server returned no chat id");
         navigate("chats", { chatId: res.chat_id });
       } catch (err) {
-        setActionError({ action: "continue", message: describeError(err) });
+        setActionError({ action: "continue", message: continueFailure(err) });
       } finally {
         setBusy(undefined);
       }
@@ -946,6 +979,7 @@ export function SessionsView({
       projectPath: s.project_path,
       isFavorite: !!s.is_favorite,
       busy: busy !== undefined,
+      expired: s.transcript_expired,
       onView: () => setOpenId(s.session_id),
       onToggleFavorite: () => toggleFavorite(s),
       onContinue: () => continueInChat(s),
@@ -1281,6 +1315,33 @@ export function SessionsView({
                 </FilterField>
               )}
 
+              {/* `expired_sessions` counts the *filtered* set, so it is 0 the
+                  moment "Available" is applied — hence the second clause, or
+                  the control would vanish while it is the only thing that
+                  could clear itself. */}
+              {((facets.data?.expired_sessions ?? 0) > 0 ||
+                draft.transcript !== "") && (
+                <FilterField label="Transcript">
+                  <Dropdown
+                    small
+                    className="sess-filters__select"
+                    ariaLabel="Transcript availability"
+                    label={TRANSCRIPT_LABELS[draft.transcript]}
+                    value={draft.transcript}
+                    onChange={(v) =>
+                      setDraft((d) => ({
+                        ...d,
+                        transcript: v as TranscriptFilter,
+                      }))
+                    }
+                    options={TRANSCRIPT_FILTERS.map((v) => ({
+                      value: v,
+                      label: TRANSCRIPT_LABELS[v],
+                    }))}
+                  />
+                </FilterField>
+              )}
+
               <RangeField
                 label="Messages"
                 // SQL_MESSAGE_COUNT is bare `c.message_count`, where cost,
@@ -1506,6 +1567,16 @@ export function SessionsView({
                               <span className="sess-title__text">
                                 {s.display_title || "Untitled session"}
                               </span>
+                              {s.transcript_expired && (
+                                <span
+                                  className="sess-expired"
+                                  // The chip shrinks with the title in a
+                                  // narrow column; this is its full text then.
+                                  title="Transcript expired"
+                                >
+                                  Transcript expired
+                                </span>
+                              )}
                             </span>
                             <MatchSnippet snippet={s.match_snippet} />
                           </td>
@@ -1642,6 +1713,7 @@ export function SessionsView({
                     className="btn btn--primary sess-strip__btn"
                     title="View session"
                     aria-label="View session"
+                    disabled={selectedExpired}
                     onClick={() => setOpenId(selected.session_id)}
                   >
                     <Icon name="chat" size={13} />
@@ -1677,7 +1749,7 @@ export function SessionsView({
                   </button>
                   <button
                     className="btn sess-strip__btn"
-                    disabled={busy !== undefined}
+                    disabled={busy !== undefined || selectedExpired}
                     title={
                       busy === "continue" ? "Starting…" : "Continue in chat"
                     }
@@ -1687,6 +1759,14 @@ export function SessionsView({
                     <Icon name="play" size={13} />
                   </button>
                 </div>
+                {/* The reason is text, not a `title`: a disabled button takes
+                    no mouse events, so a tooltip on one never shows (#713). */}
+                {selectedExpired && (
+                  <div className="sess-note">
+                    {expiredSentence(selected.transcript_expired_at)} Viewing,
+                    continuing and exporting need the transcript.
+                  </div>
+                )}
                 {/* A successful continue navigates away and a successful copy
                     is silent, so the only thing left to render is a failure —
                     directly under the buttons, where it is now always in view. */}

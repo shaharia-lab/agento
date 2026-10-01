@@ -578,6 +578,7 @@ how many are narrowing the list while the panel is shut.
 | **Mode** | the session's permission mode — Bypass, Plan, Accept, Don't ask, Default |
 | **Model** | the model the session ran on |
 | **Linked PRs** | sessions with, or without, a linked pull request |
+| **Transcript** | sessions whose transcript is still on disk, or only the ones whose transcript has expired |
 | **Messages** | a turn count, **main thread only** — sub-agent turns are not counted, matching the Msgs column |
 | **Active minutes** | active duration, parent and sub-agents together |
 | **Tokens in / out** | billable input and output tokens, sub-agents included |
@@ -596,7 +597,7 @@ search and every filter at once.
 
 Mode, Model and Linked PRs appear only when the indexed sessions actually differ
 on them — one model on the machine means no Model dropdown, and it comes back the
-moment there are two.
+moment there are two. Transcript appears once at least one session has expired.
 
 **Actions on a session:**
 
@@ -612,6 +613,15 @@ where.
 Beside it are the session's own metrics: turns, steps per turn, longest
 autonomous chain, active duration, time Claude spent working, your own average
 reply time, and tool error rate.
+
+### Expired transcripts
+
+Claude Code deletes old transcript files on its own schedule. Agento keeps the
+session in the list when that happens, marked **Transcript expired**, with its
+tokens, cost and duration unchanged, because those were stored when the session
+was scanned. What is gone is the conversation itself, so viewing the session,
+continuing it in chat and exporting it are switched off for that row, and the
+inspector says so. You can still star it.
 
 ### Duration means active time
 

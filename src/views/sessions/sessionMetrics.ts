@@ -13,6 +13,7 @@
    every one of them unchanged.
    ========================================================================== */
 
+import { fullDate } from "../../lib/format";
 import type {
   ClaudeSessionSummary,
   SessionCost,
@@ -120,4 +121,19 @@ export function modeBadge(
   const label = lookup(MODE_LABELS, mode);
   if (label) return { label, tone: lookup(MODE_TONES, mode) ?? "" };
   return s.mode ? { label: s.mode, tone: "" } : null;
+}
+
+/* --- Expired transcripts (#713) ------------------------------------------ */
+
+/**
+ * "Transcript expired on 1 Sep 2026." — the one spelling of it, for the
+ * inspector's reason line, the 410 state and a continue that lost the race.
+ *
+ * The date is optional because the two sources disagree on having one: a row
+ * carries `transcript_expired_at`, a 410 carries `expired_at`, and a stamp
+ * neither could parse must not print "expired on —".
+ */
+export function expiredSentence(at: string | undefined | null): string {
+  const day = fullDate(at);
+  return day === "—" ? "Transcript expired." : `Transcript expired on ${day}.`;
 }

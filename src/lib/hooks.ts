@@ -4,6 +4,13 @@ import { ApiError } from "./api";
 export interface Resource<T> {
   data: T | undefined;
   error: string | undefined;
+  /**
+   * The value the fetch rejected with, beside its message — set and cleared
+   * exactly where `error` is. A view that must tell one failure from another
+   * (a 410 from a 404 from a 500) reads `ApiError.status` off this; `error`
+   * alone has already flattened all three to a string.
+   */
+  cause?: unknown;
   loading: boolean;
   /** Re-run the fetch, keeping the previous data visible while it runs. */
   reload(): void;
@@ -20,6 +27,7 @@ export function useResource<T>(
 ): Resource<T> {
   const [data, setData] = useState<T>();
   const [error, setError] = useState<string>();
+  const [cause, setCause] = useState<unknown>();
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
 
@@ -39,10 +47,12 @@ export function useResource<T>(
         if (cancelled) return;
         setData(result);
         setError(undefined);
+        setCause(undefined);
       })
       .catch((err: unknown) => {
         if (cancelled || controller.signal.aborted) return;
         setError(describeError(err));
+        setCause(err);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -57,7 +67,7 @@ export function useResource<T>(
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
-  return { data, error, loading, reload };
+  return { data, error, cause, loading, reload };
 }
 
 export function describeError(err: unknown): string {

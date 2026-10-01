@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { api } from "../../lib/api";
+import { api, isTranscriptExpired } from "../../lib/api";
 import { useResource } from "../../lib/hooks";
 import { compactNumber, dateTime, integer, tildePath, usd } from "../../lib/format";
 import { Icon } from "../../lib/icons";
@@ -9,13 +9,13 @@ import type {
   ClaudeSubagent,
   ClaudeTodo,
 } from "../../lib/types";
-import { Empty, Segmented } from "../../components/ui";
+import { Segmented } from "../../components/ui";
 import {
   EXPORT_PANEL_WIDTH,
   SessionExportPanel,
   type SessionExportTarget,
 } from "./SessionExport";
-import { SessionJourney } from "./SessionJourney";
+import { SessionJourney, SessionLoadFailure } from "./SessionJourney";
 import { SessionTranscript } from "./SessionTranscript";
 
 /**
@@ -67,6 +67,12 @@ export function SessionDetail({
   const todos = detail.data?.todos ?? [];
   const subagents = detail.data?.subagents ?? [];
   const title = detail.data?.display_title || session.display_title;
+  // The row says so, or the read just did — a transcript can expire while the
+  // list is showing a row scanned before it went. Either way the two actions
+  // below need the file, so they are shut rather than left to fail (#713); the
+  // pane underneath states why.
+  const expired =
+    (session.transcript_expired ?? false) || isTranscriptExpired(detail.cause);
 
   return (
     <>
@@ -92,7 +98,7 @@ export function SessionDetail({
         <div className="toolbar__sep" />
         <button
           className="btn"
-          disabled={continuing}
+          disabled={continuing || expired}
           onClick={() => onContinue(session)}
         >
           <Icon name="play" size={13} />
@@ -100,6 +106,7 @@ export function SessionDetail({
         </button>
         <button
           className="btn"
+          disabled={expired}
           onClick={(e) => {
             const r = e.currentTarget.getBoundingClientRect();
             setExporting({
@@ -140,16 +147,11 @@ export function SessionDetail({
       {tab === "journey" ? (
         <SessionJourney sessionId={session.session_id} />
       ) : detail.error && !detail.data ? (
-        <Empty
-          icon="alert"
+        <SessionLoadFailure
           title="Couldn't load this session"
-          text={detail.error}
-          action={
-            <button className="btn" onClick={() => detail.reload()}>
-              <Icon name="refresh" size={13} />
-              Try again
-            </button>
-          }
+          error={detail.error}
+          cause={detail.cause}
+          onRetry={detail.reload}
         />
       ) : !detail.data ? (
         <div className="sess-loading">

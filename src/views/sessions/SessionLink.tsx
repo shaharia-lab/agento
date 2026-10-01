@@ -27,13 +27,14 @@
  * statically.
  */
 import { useCallback, useMemo, useState } from "react";
-import { api, qs } from "../../lib/api";
+import { api, isTranscriptExpired, qs } from "../../lib/api";
 import { copyText } from "../../lib/clipboard";
 import { describeError } from "../../lib/hooks";
 import { useNavigate } from "../../lib/nav";
 import type { ClaudeSessionSummary, SessionPage } from "../../lib/types";
 import { ContextMenu, type ContextMenuItem } from "../../components/ui";
 import { SessionExportPanel, type SessionExportTarget } from "./SessionExport";
+import { expiredSentence } from "./sessionMetrics";
 import "../../styles/sessionlink.css";
 
 /**
@@ -77,6 +78,13 @@ export interface SessionMenuSpec {
   isFavorite?: boolean;
   /** Any of this session's actions already in flight. */
   busy: boolean;
+  /**
+   * The transcript is gone (#713). The three entries that read it — View,
+   * Continue and Export — are disabled rather than removed, so the menu keeps
+   * its shape and the favourite and copy entries, which need no file, keep
+   * working. Absent means live, which is what the wire's omitted key means.
+   */
+  expired?: boolean;
   onView(): void;
   onToggleFavorite(): void;
   onContinue(): void;
@@ -97,6 +105,7 @@ export function sessionMenuItems(spec: SessionMenuSpec): ContextMenuItem[] {
     {
       label: "View session",
       icon: "chat",
+      disabled: spec.expired,
       onSelect: spec.onView,
     },
     {
@@ -113,12 +122,13 @@ export function sessionMenuItems(spec: SessionMenuSpec): ContextMenuItem[] {
     {
       label: "Continue in chat",
       icon: "play",
-      disabled: spec.busy,
+      disabled: spec.busy || spec.expired,
       onSelect: spec.onContinue,
     },
     {
       label: "Export…",
       icon: "download",
+      disabled: spec.expired,
       onSelect: spec.onExport,
     },
     {
@@ -133,6 +143,18 @@ export function sessionMenuItems(spec: SessionMenuSpec): ContextMenuItem[] {
       onSelect: () => spec.onCopy("project path", spec.projectPath ?? ""),
     },
   ];
+}
+
+/**
+ * What a failed continue says. A 410 is its own sentence: the row may have been
+ * read before the transcript went, so the disabled entry never got the chance
+ * to stop the click, and the server's bare error would not say that retrying
+ * cannot help.
+ */
+export function continueFailure(err: unknown): string {
+  return isTranscriptExpired(err)
+    ? `${expiredSentence(err.body.expired_at)} It can no longer be continued in chat.`
+    : describeError(err);
 }
 
 export function SessionLink({
@@ -215,7 +237,7 @@ export function SessionLink({
       if (!res?.chat_id) throw new Error("the server returned no chat id");
       navigate("chats", { chatId: res.chat_id });
     } catch (err) {
-      setError(describeError(err));
+      setError(continueFailure(err));
     } finally {
       setBusy(false);
     }
@@ -234,6 +256,7 @@ export function SessionLink({
         projectPath: row?.project_path || projectPath || undefined,
         isFavorite: row ? !!row.is_favorite : undefined,
         busy,
+        expired: row?.transcript_expired,
         onView: open,
         onToggleFavorite: toggleFavorite,
         onContinue: continueInChat,

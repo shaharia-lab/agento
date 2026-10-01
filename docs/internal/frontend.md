@@ -332,6 +332,31 @@ inspector is open. It never parses a cron or does schedule arithmetic in the
 UI — the server answers with the scheduler's own fires. Edit mode keeps Timing,
 Reliability and Recent runs.
 
+**A disabled control states its reason beside it, never in a `title`.** A
+`disabled` button receives no mouse events, so a tooltip on one never shows;
+`ui.tsx`'s `Switch` says so at its `disabled` prop and that was the only place
+the rule was written until #713. The reason is visible text next to the control
+— `.sess-note` under the Sessions strip is the shape.
+
+**An expired session is a row, not an error** (#713). A `ClaudeSessionSummary`
+with `transcript_expired` keeps its place and its numbers in the list and gains
+the muted `.sess-expired` chip, which carries its own background because a
+focused selected row forces `color: inherit !important` on every descendant.
+The three actions that read the file — View session, Continue in chat and
+Export — are **disabled, not hidden**, in the strip, in `sessionMenuItems`
+(`SessionMenuSpec.expired`) and in `SessionDetail`'s toolbar; favourite and the
+copies keep working. The strip says why in one `.sess-note`, worded by
+`sessionMetrics.ts::expiredSentence`, the only spelling of that sentence.
+Double-click, Enter and a `SessionLink` hand-off still open the session, and a
+transcript can expire while it is open, so the read has its own state:
+`SessionJourney.tsx::SessionLoadFailure` renders a 410 as *Transcript expired*
+and a 404 as *Session not found*, both without a retry, and anything else as
+the retry state. It branches on `Resource.cause` — the thrown value
+`useResource` keeps beside `error`, which has already flattened the status
+away. The `Transcript` filter is offered when `facets.expired_sessions > 0`
+**or a value is selected**: the facet counts the filtered set, so it is 0 under
+`Available` and the control would otherwise remove itself.
+
 **The session inspector is `views/sessions/SessionInspector.tsx`** (#538), not a
 private function in `SessionsView.tsx`, for the reason `SaveBar` is a component:
 a shape only one file can reach is a shape the next caller copies. It takes
