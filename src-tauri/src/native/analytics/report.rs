@@ -407,9 +407,15 @@ pub fn filter_sessions<'a>(
         .iter()
         .filter(|s| {
             let at = s.last_activity.instant();
-            at >= p.from && at <= p.to && (p.project.is_empty() || s.project_path == p.project)
+            at >= p.from && at <= p.to && in_project(s, p)
         })
         .collect()
+}
+
+/// The project half of the filter, shared with [`history_reach`], which
+/// applies it without the window.
+fn in_project(s: &SessionSummary, p: &AnalyticsParams) -> bool {
+    p.project.is_empty() || s.project_path == p.project
 }
 
 /// How far back history reaches, and how far back transcripts do (#716):
@@ -424,16 +430,12 @@ fn history_reach(
     sessions: &[SessionSummary],
     p: &AnalyticsParams,
 ) -> (Option<GoTime>, Option<GoTime>) {
-    let in_project = || {
-        sessions
-            .iter()
-            .filter(|s| p.project.is_empty() || s.project_path == p.project)
-    };
-    if !in_project().any(|s| s.transcript_expired) {
+    let scoped = || sessions.iter().filter(|s| in_project(s, p));
+    if !scoped().any(|s| s.transcript_expired) {
         return (None, None);
     }
     let earliest = |live_only: bool| {
-        in_project()
+        scoped()
             .filter(|s| !live_only || !s.transcript_expired)
             .map(|s| s.start_time)
             .min_by_key(GoTime::instant)

@@ -265,6 +265,9 @@ export function AnalyticsView({
             onClick={() => {
               active.reload();
               if (wantsCompare) previous.reload();
+              // In Insights the history note has its own read, and a rescan is
+              // exactly what can move its dates.
+              if (mode === "insights") reach.reload();
             }}
           >
             <Icon name="refresh" size={14} />
@@ -303,7 +306,13 @@ export function AnalyticsView({
             title="Could not load analytics"
             text={error}
             action={
-              <button className="btn" onClick={() => active.reload()}>
+              <button
+                className="btn"
+                onClick={() => {
+                  active.reload();
+                  if (mode === "insights") reach.reload();
+                }}
+              >
                 Try again
               </button>
             }
@@ -363,12 +372,17 @@ function HistoryNote({
   /** Absent when no transcript remains on disk. */
   transcriptsSince: string | undefined;
 }) {
+  const history = fullDate(historySince);
+  const transcripts = transcriptsSince ? fullDate(transcriptsSince) : undefined;
   return (
     <div className="a-note a-history">
-      History goes back to {fullDate(historySince)}.{" "}
-      {transcriptsSince
-        ? `Transcripts go back to ${fullDate(transcriptsSince)}; older sessions keep their numbers but can no longer be opened.`
-        : "No transcripts remain on disk."}
+      {transcripts === undefined
+        ? `History goes back to ${history}. No transcripts remain on disk.`
+        : transcripts === history
+          ? // The expired session is not the oldest one, so "older sessions"
+            // would name sessions that do not exist.
+            `History and transcripts both go back to ${history}. Sessions whose transcript has expired keep their numbers but can no longer be opened.`
+          : `History goes back to ${history}. Transcripts go back to ${transcripts}; older sessions keep their numbers but can no longer be opened.`}
     </div>
   );
 }
