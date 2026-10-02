@@ -500,11 +500,3 @@ these are now simply Agento's bugs, and fixing them is unblocked.
   error.
 - **`/api/claude-sessions/projects` returns `decoded_path` identical to
   `encoded_name`**, so the decode never actually happens for the picker.
-- **The Claude settings surface writes with a truncating write.** A crash
-  between the truncate and the write leaves an empty `settings_profiles.json`,
-  orphaning every profile. A temp file plus `rename` is byte-identical in final
-  content and unobservable through the API.
-- **Two paths write a recorded `file_path` without `validatePathWithinDir`** —
-  `writeProfileSettings` and `moveProfileFile` — while four sibling call sites
-  check. A hand-edited index can therefore make an update write outside the
-  settings directory. Both sites say so in a comment.

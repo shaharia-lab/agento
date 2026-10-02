@@ -80,7 +80,8 @@ pub mod profiles;
 pub mod retention;
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::http::Method;
 use serde::de::IgnoredAny;
@@ -143,25 +144,111 @@ pub fn profiles_path(dir: &str) -> String {
 /// decision is recorded here rather than left as a silent `cfg` gap, which is
 /// what it was until #374.
 ///
-/// **Truncate-then-write, not temp-file-then-rename**, and that is a choice.
-/// `os.WriteFile` truncates, so a crash between the truncate and the write
-/// leaves an empty file — and for `settings_profiles.json` an empty index
-/// orphans every profile. An atomic replace would be strictly better *and*
-/// byte-identical in final content and unobservable through the API. It was
-/// left alone while a second implementation shared this file and would have
-/// survived a power cut differently; that constraint is gone, so this is now
-/// simply a bug to fix. It is on the known-bugs list in `CLAUDE.md`.
+/// **An atomic replace, not truncate-then-write** (#668). `os.WriteFile`
+/// truncates, so a crash, a power cut or a full disk between the truncate and
+/// the write left an empty file — an empty `settings.json` breaks Claude Code,
+/// and an empty `settings_profiles.json` orphans every profile. [`replace_file`]
+/// writes a sibling temp file, `fsync`s it and renames it over the target, so a
+/// reader sees the old bytes or the new ones and never a prefix. The final
+/// content is byte-identical and the change is unobservable through the API.
 pub fn write_file(path: &str, data: &[u8]) -> io::Result<()> {
     use std::io::Write;
+    replace_file(path, |file| file.write_all(data))
+}
+
+/// Replace `path` with whatever `write` puts in a fresh file, atomically.
+///
+/// `write` is a parameter so a test can fail halfway through; [`write_file`] is
+/// the only production caller. Three rules beyond temp-file-then-rename:
+///
+/// - **A symlink is written through, not replaced.** A dotfiles-managed
+///   `~/.claude/settings.json` is a link into a repository, and renaming over
+///   the link would silently detach it. The temp file is created beside the
+///   link's *target*, because a rename is only atomic within one directory.
+/// - **An existing file keeps its mode**; only a newly created one is `0600`.
+///   The rename gives the path a fresh inode, so the mode has to be carried
+///   across or a user's deliberate `0644` would tighten on every save.
+/// - **A failure removes the temp file and reports the original error**, so the
+///   previous target is intact and nothing is left beside it. A crash between
+///   the create and the rename does leave a dot-prefixed temp, which is inert:
+///   nothing on this surface lists the directory, profiles are index-driven.
+fn replace_file(
+    path: &str,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let target = resolve_symlink(Path::new(path))?;
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path names no file"))?
+        .to_string_lossy()
+        .into_owned();
+
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    let temp = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        NONCE.fetch_add(1, Ordering::Relaxed)
+    ));
+
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
-    file.write_all(data)
+    let mut file = options.open(&temp)?;
+
+    let result = (|| {
+        write(&mut file)?;
+        #[cfg(unix)]
+        if let Ok(existing) = std::fs::metadata(&target) {
+            file.set_permissions(existing.permissions())?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temp, &target)
+    })();
+    drop(file);
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+
+    // The rename is durable once the directory entry is; best-effort, because
+    // the bytes are already in place and a directory cannot be opened for this
+    // on every filesystem.
+    #[cfg(unix)]
+    if let Ok(dir) = std::fs::File::open(&parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// The file a write to `path` lands in: the link's target when `path` is a
+/// symlink, `path` itself otherwise.
+///
+/// A dangling link is followed one hop by hand — `canonicalize` cannot resolve
+/// a file that does not exist yet, and the truncating open this replaced created
+/// the link's target in that case.
+fn resolve_symlink(path: &Path) -> io::Result<PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => match std::fs::canonicalize(path) {
+            Ok(target) => Ok(target),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let link = std::fs::read_link(path)?;
+                Ok(match path.parent() {
+                    Some(parent) => parent.join(link),
+                    None => link,
+                })
+            }
+            Err(e) => Err(e),
+        },
+        _ => Ok(path.to_path_buf()),
+    }
 }
 
 /// `os.MkdirAll(dir, 0700)`.
@@ -1184,6 +1271,100 @@ mod tests {
         assert_eq!(file & 0o777, 0o600, "settings.json must be 0600");
         let dir_mode = std::fs::metadata(&dir).expect("stat").permissions().mode();
         assert_eq!(dir_mode & 0o777, 0o700, "the config dir must be 0700");
+    }
+
+    /// **A write that fails halfway leaves the previous file byte-identical**
+    /// (#668). The truncating write this replaced had already emptied the
+    /// target by the time the writer ran, so this is the empty-`settings.json`
+    /// case, with the failure injected where a full disk would put it.
+    #[test]
+    fn a_failed_write_leaves_the_previous_file_and_no_temp_behind() {
+        use std::io::Write;
+
+        let root = claude_dir();
+        let path = settings_json_path(&root.path().to_string_lossy());
+        write_file(&path, b"{\"keep\":true}").expect("write");
+
+        let err = replace_file(&path, |file| {
+            file.write_all(b"{\"half")?;
+            Err(io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "disk full", "the writer's own error");
+
+        assert_eq!(std::fs::read(&path).expect("read"), b"{\"keep\":true}");
+        let names: Vec<_> = std::fs::read_dir(root.path())
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["settings.json"], "no temp file may survive");
+    }
+
+    /// A successful replace leaves no temp file either, and a path that does
+    /// not exist yet is created.
+    #[test]
+    fn a_write_leaves_only_the_target_behind() {
+        let root = claude_dir();
+        let path = settings_json_path(&root.path().to_string_lossy());
+        write_file(&path, b"{\"a\":1}").expect("create");
+        write_file(&path, b"{}").expect("replace");
+
+        assert_eq!(std::fs::read(&path).expect("read"), b"{}");
+        assert_eq!(std::fs::read_dir(root.path()).expect("read dir").count(), 1);
+    }
+
+    /// The rename gives the path a fresh inode, so an existing file's mode has
+    /// to be carried across: a user's deliberate `0644` must not tighten to
+    /// `0600` on the first save.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_file_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = claude_dir();
+        let path = settings_json_path(&root.path().to_string_lossy());
+        std::fs::write(&path, "{}").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        write_file(&path, b"{\"a\":1}").expect("write");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+        assert_eq!(std::fs::read(&path).expect("read"), b"{\"a\":1}");
+    }
+
+    /// A dotfiles-managed `settings.json` is a symlink into a repository.
+    /// Renaming over the link would detach it silently, so the write lands in
+    /// the file the link points at and the link survives.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_target_is_written_through_and_the_link_survives() {
+        let root = claude_dir();
+        let dotfiles = claude_dir();
+        let real = dotfiles.path().join("claude-settings.json");
+        std::fs::write(&real, "{}").expect("write");
+        let path = settings_json_path(&root.path().to_string_lossy());
+        std::os::unix::fs::symlink(&real, &path).expect("symlink");
+
+        write_file(&path, b"{\"a\":1}").expect("write");
+
+        let link = std::fs::symlink_metadata(&path).expect("lstat");
+        assert!(link.file_type().is_symlink(), "the link must survive");
+        assert_eq!(std::fs::read(&real).expect("read"), b"{\"a\":1}");
+        assert_eq!(
+            std::fs::read_dir(dotfiles.path())
+                .expect("read dir")
+                .count(),
+            1,
+            "the temp file is created beside the real file and renamed away"
+        );
+
+        // A dangling link: the write creates the file it names.
+        let missing = dotfiles.path().join("not-yet.json");
+        let dangling = format!("{}/dangling.json", root.path().to_string_lossy());
+        std::os::unix::fs::symlink(&missing, &dangling).expect("symlink");
+        write_file(&dangling, b"{}").expect("write");
+        assert_eq!(std::fs::read(&missing).expect("read"), b"{}");
     }
 
     // ─── The two handlers, against the answers Go gave ────────────────────────

@@ -88,8 +88,8 @@ of them safe is that **every step this surface takes before a forward is
 idempotent**: seeding no-ops on a non-empty index, `MkdirAll` no-ops on an
 existing dir, `deduplicateID` re-derives the same id from the same index,
 `moveProfileFile`'s "no file to move" branch tolerates Rust having already moved
-it, and every write is a whole-file truncate rather than an append or an
-increment. Go re-runs the whole handler and lands on the same state.
+it, and every write is a whole-file replace (a temp file renamed over the
+target, #668) rather than an append or an increment. Go re-runs the whole handler and lands on the same state.
 
 That argument is load-bearing, and it is narrower than it looks: **a
 non-idempotent step added to this surface breaks the forward, not just itself.**

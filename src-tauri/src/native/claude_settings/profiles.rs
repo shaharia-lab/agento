@@ -550,12 +550,13 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
         }
         Some(Ok(value)) => {
             let out = marshal_indent(&value).map_err(WriteError::Fallback)?;
-            // Written without `validate_path_within_dir`, on purpose: Go's
-            // `writeProfileSettings` has no check either, so adding one here
-            // would refuse a write Go performs. The hoisted check above covers
-            // the recorded path this request arrived with; a path the *rename*
-            // produced is always `<dir>/settings_<id>.json`.
+            // Checked here as well as up front (#668): the hoisted check
+            // covers the recorded path this request arrived with and a path
+            // the rename produced is `<dir>/settings_<id>.json` by
+            // construction, so this cannot fire today — it is here so the
+            // write is safe on its own rather than by its caller's ordering.
             let path = profiles[idx].file_path.clone();
+            validate_path_within_dir(&path, dir)?;
             super::write_file(&path, &out)
                 .map_err(|e| WriteError::Fallback(format!("writing {path}: {e}")))?;
             if profiles[idx].is_default {
@@ -596,11 +597,11 @@ fn rename(
         // No file to move is not an error: the index is updated and the write
         // that follows creates it at the new path.
         //
-        // Also no `validate_path_within_dir` — correct parity, not an oversight:
-        // Go's `moveProfileFile` reads the recorded path unchecked. The
-        // destination is safe by construction (`resolveProfileFilePath` runs
-        // `safeProfileID` first), so only the *source* is unvalidated, and it is
-        // a read.
+        // The source is validated before it is read (#668), so a refusal
+        // precedes any move. `update` has already checked it; this keeps the
+        // helper from copying a file outside the settings dir in — and then
+        // deleting the original — if it is ever reached another way.
+        validate_path_within_dir(&profiles[idx].file_path, dir)?;
         if let Ok(data) = std::fs::read(&profiles[idx].file_path) {
             super::write_file(&new_file_path, &data)
                 .map_err(|e| WriteError::Fallback(format!("writing {new_file_path}: {e}")))?;
@@ -1347,6 +1348,75 @@ mod tests {
         let profiles = load(&d).expect("load");
         assert_eq!(profiles[0].id, "stray", "the index must be untouched");
         assert_eq!(profiles[0].file_path, stray);
+        assert!(
+            !std::path::Path::new(&format!("{d}/settings_moved.json")).exists(),
+            "nothing may have moved"
+        );
+    }
+
+    /// A profile whose recorded path is outside the settings dir, as a
+    /// hand-edited index would hold it.
+    fn stray_profile(d: &str, outside: &tempfile::TempDir) -> Profile {
+        let stray = format!("{}/settings_stray.json", path_of(outside));
+        std::fs::write(&stray, "{\"untouched\":true}").expect("write");
+        let profile = Profile {
+            id: "stray".to_string(),
+            name: "Stray".to_string(),
+            file_path: stray,
+            is_default: false,
+        };
+        save(d, std::slice::from_ref(&profile)).expect("save");
+        profile
+    }
+
+    /// An `update` carrying `settings` must not write a recorded path outside
+    /// the settings dir (#668).
+    #[test]
+    fn update_refuses_to_write_settings_outside_the_settings_dir() {
+        let root = dir();
+        let d = path_of(&root);
+        let outside = dir();
+        let profile = stray_profile(&d, &outside);
+
+        let err = update(&d, "stray", br#"{"settings":{"a":1}}"#).unwrap_err();
+        assert!(
+            matches!(err, WriteError::Fallback(ref m) if m.contains("escapes settings directory"))
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&profile.file_path).expect("read"),
+            "{\"untouched\":true}",
+            "nothing outside the dir may be written"
+        );
+        assert_eq!(
+            std::fs::read_dir(outside.path()).expect("read dir").count(),
+            1
+        );
+    }
+
+    /// **`rename` refuses a stray source on its own** (#668), not only because
+    /// `update` checked first: it would otherwise copy a file from outside the
+    /// settings dir in and delete the original.
+    #[test]
+    fn rename_refuses_a_recorded_path_outside_the_settings_dir() {
+        let root = dir();
+        let d = path_of(&root);
+        let outside = dir();
+        let profile = stray_profile(&d, &outside);
+        let mut profiles = vec![profile.clone()];
+
+        let err = rename(&mut profiles, 0, "stray", "Moved", &d).unwrap_err();
+        assert!(
+            matches!(err, WriteError::Fallback(ref m) if m.contains("escapes settings directory"))
+        );
+
+        assert_eq!(profiles[0].id, "stray", "the entry must be untouched");
+        assert_eq!(profiles[0].name, "Stray");
+        assert_eq!(profiles[0].file_path, profile.file_path);
+        assert!(
+            std::path::Path::new(&profile.file_path).exists(),
+            "the source must not have been removed"
+        );
         assert!(
             !std::path::Path::new(&format!("{d}/settings_moved.json")).exists(),
             "nothing may have moved"
