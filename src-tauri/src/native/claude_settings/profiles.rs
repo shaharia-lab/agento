@@ -1370,7 +1370,9 @@ mod tests {
     }
 
     /// An `update` carrying `settings` must not write a recorded path outside
-    /// the settings dir (#668).
+    /// the settings dir (#668). This pins the request as a whole: the hoisted
+    /// check answers first, so it does not pin the local check before the
+    /// write — `rename`'s test below does pin its own.
     #[test]
     fn update_refuses_to_write_settings_outside_the_settings_dir() {
         let root = dir();

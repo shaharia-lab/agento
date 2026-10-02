@@ -165,6 +165,7 @@ pub fn write_file(path: &str, data: &[u8]) -> io::Result<()> {
 ///   `~/.claude/settings.json` is a link into a repository, and renaming over
 ///   the link would silently detach it. The temp file is created beside the
 ///   link's *target*, because a rename is only atomic within one directory.
+/// - **A read-only file is refused**, as the truncating open refused it.
 /// - **An existing file keeps its mode**; only a newly created one is `0600`.
 ///   The rename gives the path a fresh inode, so the mode has to be carried
 ///   across or a user's deliberate `0644` would tighten on every save.
@@ -187,6 +188,21 @@ fn replace_file(
         .to_string_lossy()
         .into_owned();
 
+    // The truncating open refused a file without owner write permission, and
+    // a rename only needs the directory's — so a `chmod 444` settings file
+    // would be replaced silently. Refuse it the way the open did, before
+    // anything is created.
+    let existing = std::fs::metadata(&target).ok();
+    if existing
+        .as_ref()
+        .is_some_and(|m| m.permissions().readonly())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is read-only", target.display()),
+        ));
+    }
+
     static NONCE: AtomicU64 = AtomicU64::new(0);
     let temp = parent.join(format!(
         ".{file_name}.tmp-{}-{}",
@@ -206,14 +222,14 @@ fn replace_file(
     let result = (|| {
         write(&mut file)?;
         #[cfg(unix)]
-        if let Ok(existing) = std::fs::metadata(&target) {
+        if let Some(existing) = &existing {
             file.set_permissions(existing.permissions())?;
         }
-        file.sync_all()?;
-        std::fs::rename(&temp, &target)
+        file.sync_all()
     })();
+    // Closed before the rename, which Windows refuses over an open handle.
     drop(file);
-    if let Err(e) = result {
+    if let Err(e) = result.and_then(|()| std::fs::rename(&temp, &target)) {
         let _ = std::fs::remove_file(&temp);
         return Err(e);
     }
@@ -1331,6 +1347,26 @@ mod tests {
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
         assert_eq!(mode & 0o777, 0o644);
         assert_eq!(std::fs::read(&path).expect("read"), b"{\"a\":1}");
+    }
+
+    /// A rename needs only the directory's write permission, so without a
+    /// check a `chmod 444` settings file — a user pinning it against tools —
+    /// would be replaced on every save. It is refused, as the truncating open
+    /// refused it, and nothing is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_file_is_refused_and_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = claude_dir();
+        let path = settings_json_path(&root.path().to_string_lossy());
+        std::fs::write(&path, "{}").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+
+        let err = write_file(&path, b"{\"a\":1}").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&path).expect("read"), b"{}");
+        assert_eq!(std::fs::read_dir(root.path()).expect("read dir").count(), 1);
     }
 
     /// A dotfiles-managed `settings.json` is a symlink into a repository.
