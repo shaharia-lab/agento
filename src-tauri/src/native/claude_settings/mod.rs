@@ -159,7 +159,7 @@ pub fn write_file(path: &str, data: &[u8]) -> io::Result<()> {
 /// Replace `path` with whatever `write` puts in a fresh file, atomically.
 ///
 /// `write` is a parameter so a test can fail halfway through; [`write_file`] is
-/// the only production caller. Three rules beyond temp-file-then-rename:
+/// the only production caller. The rules beyond temp-file-then-rename:
 ///
 /// - **A symlink is written through, not replaced.** A dotfiles-managed
 ///   `~/.claude/settings.json` is a link into a repository, and renaming over
@@ -193,10 +193,7 @@ fn replace_file(
     // would be replaced silently. Refuse it the way the open did, before
     // anything is created.
     let existing = std::fs::metadata(&target).ok();
-    if existing
-        .as_ref()
-        .is_some_and(|m| m.permissions().readonly())
-    {
+    if existing.as_ref().is_some_and(owner_cannot_write) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("{} is read-only", target.display()),
@@ -242,6 +239,21 @@ fn replace_file(
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+/// Whether the owner lacks write permission — the bit the truncating open was
+/// refused on. `Permissions::readonly` is the wrong test on Unix: it is true
+/// only when *nobody* may write, so it would pass a `0464` file.
+fn owner_cannot_write(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o200 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.permissions().readonly()
+    }
 }
 
 /// The file a write to `path` lands in: the link's target when `path` is a
@@ -1361,12 +1373,15 @@ mod tests {
         let root = claude_dir();
         let path = settings_json_path(&root.path().to_string_lossy());
         std::fs::write(&path, "{}").expect("write");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        // `0464` as well as `0444`: the owner bit is the one that counts.
+        for mode in [0o444, 0o464] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
 
-        let err = write_file(&path, b"{\"a\":1}").unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(std::fs::read(&path).expect("read"), b"{}");
-        assert_eq!(std::fs::read_dir(root.path()).expect("read dir").count(), 1);
+            let err = write_file(&path, b"{\"a\":1}").unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{mode:o}");
+            assert_eq!(std::fs::read(&path).expect("read"), b"{}");
+            assert_eq!(std::fs::read_dir(root.path()).expect("read dir").count(), 1);
+        }
     }
 
     /// A dotfiles-managed `settings.json` is a symlink into a repository.
