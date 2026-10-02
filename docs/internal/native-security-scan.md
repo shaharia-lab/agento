@@ -7,7 +7,7 @@
 
 Everything lives in `src-tauri/src/native/security_scan/`: `rules.rs` (the
 vendored rule table and `CURRENT_RULESET_VERSION`), `scan.rs` (pure
-`text -> Vec<Finding>`), `store.rs` (the whitelist-aware persistence),
+`text -> Vec<Finding>`, and `mask_text`), `store.rs` (the whitelist-aware persistence),
 `worker.rs` (the background loop) and `api.rs` (the `/api/security-scan/*`
 routes). Each module's `//!` header is the full
 statement; the rules below are the ones a change is most likely to break.
@@ -70,3 +70,21 @@ statement; the rules below are the ones a change is most likely to break.
 - **`status` reports `enabled` and `running` separately** — the stored
   setting and `worker::is_running()`. They differ when the worker failed to
   spawn.
+
+## Masking a text (#680)
+
+- **`scan::mask_text(&str) -> String` is `scan::scan`'s findings, applied.**
+  Every finding's byte range is replaced by `store::mask` of it — the display
+  form `credential_findings.masked_snippet` already carries — and every other
+  byte is copied verbatim; a text with no findings comes back byte-identical.
+  Overlapping spans are merged into one replacement first.
+- **It follows `scan`, not the bare rule table.** A paired rule is masked only
+  where `scan` credits it (`mask_text_follows_scan_on_a_paired_rule`), because
+  masking the AWS secret shape alone would blank every 40-character base64 run.
+- **The whitelist plays no part.** It suppresses *reporting* a finding; a
+  payload is masked regardless.
+- **Its output is safe to store and its input is not.** An event payload is
+  stored only after it (#683 is the first caller). A secret shape no rule knows
+  is stored raw: the rule table is the single source, and
+  `every_rule_has_a_masking_vector` keeps a new rule from landing without a
+  masking vector.

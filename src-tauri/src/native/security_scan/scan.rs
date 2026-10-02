@@ -12,8 +12,14 @@
 //!    reported as that, not also as a bare PEM block.
 //!
 //! Findings come back ordered by `start`, then by rule table order.
+//!
+//! [`mask_text`] is the second export (#680): the same findings, applied. It
+//! answers the input with every finding replaced by [`store::mask`]'s display
+//! form and every other byte untouched. **Its output is safe to store and its
+//! input is not** — an event payload goes through it before it is written.
 
 use super::rules::{self, Confidence, PAIR_WINDOW};
+use super::store;
 
 /// One match. Byte offsets into the scanned text — **never the text itself**
 /// (see the module header of `security_scan`).
@@ -50,6 +56,45 @@ pub fn scan(text: &str) -> Vec<Finding> {
     let mut found = drop_contained(found);
     found.sort_by_key(|(order, f)| (f.start, *order));
     found.into_iter().map(|(_, f)| f).collect()
+}
+
+/// `text` with every [`scan`] finding masked, and nothing else changed.
+///
+/// It follows `scan` exactly, so a paired rule is masked only where `scan`
+/// credits it: an AWS-secret-shaped run with no key id nearby is left
+/// verbatim, or every 40-character base64 run would be blanked. The whitelist
+/// plays no part — it suppresses *reporting* a finding, not storing its value.
+/// A secret no rule knows passes through raw; the rule table is the one source.
+pub fn mask_text(text: &str) -> String {
+    let ranges = merge_ranges(&scan(text));
+    if ranges.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (start, end) in ranges {
+        // Regex match offsets are character boundaries, so the slices are safe.
+        out.push_str(&text[copied..start]);
+        out.push_str(&store::mask(&text[start..end]));
+        copied = end;
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// The findings' spans with overlapping ones joined, so two rules on one span
+/// — or straddling each other — are one replacement, not two masks spliced
+/// together. `findings` is ordered by `start`, as `scan` returns it. Spans
+/// that merely touch stay separate.
+fn merge_ranges(findings: &[Finding]) -> Vec<(usize, usize)> {
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for f in findings {
+        match merged.last_mut() {
+            Some((_, end)) if f.start < *end => *end = (*end).max(f.end),
+            _ => merged.push((f.start, f.end)),
+        }
+    }
+    merged
 }
 
 /// Pass 2. One rule's matches never overlap (`find_iter`), so each rule's
@@ -526,5 +571,260 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    // ── mask_text (#680) ──────────────────────────────────────────────────
+
+    /// One masking vector per rule: the rule, the secrets `scan` finds in the
+    /// text, and the text, which opens with `LEAD` and closes with `TAIL`.
+    struct Vector {
+        rule: &'static str,
+        secrets: Vec<String>,
+        text: String,
+    }
+
+    const LEAD: &str = "héllo — 日本語 🔑 ";
+    const TAIL: &str = " — fin ✓\n";
+
+    fn vector(rule: &'static str, secret: String) -> Vector {
+        let text = cat(&[LEAD, &secret, TAIL]);
+        Vector {
+            rule,
+            secrets: vec![secret],
+            text,
+        }
+    }
+
+    fn mask_vectors() -> Vec<Vector> {
+        let aws_id = cat(&["AK", "IA", "Q7ZX3MPLR2VN6TWB"]);
+        let aws_secret = body("wJalrXUtnFEMI/K7MDENG+bPxRfiCY9z", 40);
+        let pem = |kind: &str| {
+            cat(&[
+                "-----BEGIN ",
+                kind,
+                "PRIVATE KEY-----\n",
+                &pem_body().replace("\\n", "\n"),
+                "\n-----END ",
+                kind,
+                "PRIVATE KEY-----",
+            ])
+        };
+        let gcp_member = cat(&[
+            "\"private_key\": \"",
+            "-----BEGIN ",
+            "PRIVATE KEY-----\\n",
+            &pem_body(),
+            "\\n-----END ",
+            "PRIVATE KEY-----\\n\"",
+        ]);
+        vec![
+            vector("aws-access-key-id", aws_id.clone()),
+            Vector {
+                rule: "aws-secret-access-key",
+                text: cat(&[
+                    LEAD,
+                    "aws_access_key_id = ",
+                    &aws_id,
+                    "\naws_secret_access_key = ",
+                    &aws_secret,
+                    TAIL,
+                ]),
+                secrets: vec![aws_id, aws_secret],
+            },
+            Vector {
+                rule: "gcp-service-account-key",
+                text: cat(&[
+                    LEAD,
+                    "{\"type\": \"service_account\", ",
+                    &gcp_member,
+                    ", \"client_email\": \"x@demo.iam.gserviceaccount.com\"}",
+                    TAIL,
+                ]),
+                secrets: vec![gcp_member],
+            },
+            vector(
+                "azure-connection-string",
+                cat(&["AccountKey=", &body("Zm9vYmFyYmF6cXV4K3Nsb3Q/", 86), "=="]),
+            ),
+            vector("github-pat", cat(&["gh", "p_", &body(ALNUM, 36)])),
+            vector("github-oauth", cat(&["gh", "o_", &body(ALNUM, 36)])),
+            vector(
+                "github-fine-grained-pat",
+                cat(&["github", "_pat_", &body("11ABCDE0Y0_aB3dE5gH7jK9", 82)]),
+            ),
+            vector(
+                "slack-token",
+                cat(&["xo", "xb-", "1234567890-", "4815162342-", &body(ALNUM, 24)]),
+            ),
+            vector("stripe-live-key", cat(&["sk", "_live_", &body(ALNUM, 24)])),
+            vector("openai-api-key", cat(&["sk", "-", &body(ALNUM, 48)])),
+            vector(
+                "anthropic-api-key",
+                cat(&["sk", "-ant-", "api03-", &body("aB3_dE5-gH7jK9", 93), "AA"]),
+            ),
+            vector("npm-access-token", cat(&["np", "m_", &body(ALNUM, 36)])),
+            vector(
+                "database-url-credentials",
+                cat(&[
+                    "postgres://app:",
+                    "Tr0ub4dor-3xq",
+                    "@db.internal.example.com",
+                ]),
+            ),
+            vector("private-key", pem("RSA ")),
+            vector(
+                "jwt",
+                cat(&[
+                    "ey",
+                    "JhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.",
+                    "ey",
+                    "JzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkRlbW8ifQ.",
+                    "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+                ]),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_rule_has_a_masking_vector() {
+        // A rule added to the table without a vector here fails this, so no
+        // rule's masking goes unproved.
+        let covered: Vec<&str> = mask_vectors().iter().map(|v| v.rule).collect();
+        let table: Vec<&str> = rules::compiled().iter().map(|(r, _)| r.id).collect();
+        assert_eq!(covered, table);
+    }
+
+    // Failure messages below name the rule, never the text or the output: a
+    // failing log must not print a credential-shaped string.
+
+    #[test]
+    fn mask_text_masks_every_rules_vector() {
+        for v in mask_vectors() {
+            assert!(ids(&v.text).contains(&v.rule), "{} is not found", v.rule);
+            let masked = mask_text(&v.text);
+            for secret in &v.secrets {
+                assert!(!masked.contains(secret.as_str()), "{} survives", v.rule);
+                assert!(
+                    masked.contains(&store::mask(secret)),
+                    "{} is not in its masked form",
+                    v.rule
+                );
+            }
+            assert!(masked.starts_with(LEAD), "{} changed the prefix", v.rule);
+            assert!(masked.ends_with(TAIL), "{} changed the suffix", v.rule);
+        }
+    }
+
+    #[test]
+    fn mask_text_is_idempotent_on_every_rules_vector() {
+        for v in mask_vectors() {
+            let once = mask_text(&v.text);
+            assert!(mask_text(&once) == once, "{} is masked twice", v.rule);
+        }
+    }
+
+    #[test]
+    fn mask_text_leaves_the_bytes_around_and_between_two_secrets_alone() {
+        let npm = cat(&["np", "m_", &body(ALNUM, 36)]);
+        let pat = cat(&["gh", "p_", &body(ALNUM, 36)]);
+        let (prefix, between, suffix) = ("naïve préfixe: ", " — 中間 — ", " ✓ suffixe\n");
+        let masked = mask_text(&cat(&[prefix, &npm, between, &pat, suffix]));
+
+        let rest = masked.strip_prefix(prefix).expect("the prefix");
+        let rest = rest.strip_prefix(&store::mask(&npm)).expect("the first");
+        let rest = rest.strip_prefix(between).expect("the text between");
+        let rest = rest.strip_prefix(&store::mask(&pat)).expect("the second");
+        assert_eq!(rest, suffix);
+    }
+
+    #[test]
+    fn mask_text_follows_scan_on_a_paired_rule() {
+        let id = cat(&["AK", "IA", "Q7ZX3MPLR2VN6TWB"]);
+        let secret = body("wJalrXUtnFEMI/K7MDENG+bPxRfiCY9z", 40);
+
+        // Beside its key id: both go.
+        let masked = mask_text(&cat(&[&id, " ", &secret]));
+        assert_eq!(
+            masked,
+            cat(&[&store::mask(&id), " ", &store::mask(&secret)])
+        );
+
+        // The same shape alone, or past the window: verbatim.
+        let alone = cat(&["secret = ", &secret]);
+        assert!(mask_text(&alone) == alone);
+        let gap = " ".repeat(PAIR_WINDOW + 1);
+        let far = cat(&[&id, &gap, &secret]);
+        assert!(mask_text(&far) == cat(&[&store::mask(&id), &gap, &secret]));
+    }
+
+    #[test]
+    fn mask_text_returns_a_text_with_no_findings_byte_identical() {
+        for t in [
+            "",
+            "plain ascii, nothing to see",
+            "ünïcödé — 日本語のテキスト — 🔑🔒 — עברית",
+            "session 3b241101-e2bb-4255-8caf-4136c566a962 resumed",
+            "commit 3f786850e387550fdab836ed7e6dc881de23001b\nAuthor: x",
+        ] {
+            assert_eq!(mask_text(t), t);
+        }
+        // Placeholders, by index for the reason given above.
+        let shapes = [
+            cat(&["SLACK_BOT_TOKEN=xo", "xb-your-bot-token-here"]),
+            cat(&[
+                "DATABASE_URL=postgres://",
+                "user:password@localhost:5432/app",
+            ]),
+            cat(&[
+                "-----BEGIN RSA ",
+                "PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----",
+            ]),
+            cat(&["mask_live_", &body(ALNUM, 30)]),
+            cat(&[
+                "data:image/png;base64,",
+                &body("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", 4096),
+            ]),
+        ];
+        for (i, s) in shapes.iter().enumerate() {
+            assert!(mask_text(s) == *s, "shape #{i} was changed");
+        }
+    }
+
+    #[test]
+    fn overlapping_and_identical_spans_are_one_replacement() {
+        let f = |start, end| Finding {
+            rule_id: "x",
+            confidence: Confidence::High,
+            start,
+            end,
+        };
+        // Identical, straddling, touching, apart.
+        assert_eq!(merge_ranges(&[f(2, 9), f(2, 9)]), [(2, 9)]);
+        assert_eq!(merge_ranges(&[f(2, 9), f(5, 14)]), [(2, 14)]);
+        assert_eq!(merge_ranges(&[f(2, 9), f(9, 14)]), [(2, 9), (9, 14)]);
+        assert_eq!(
+            merge_ranges(&[f(0, 4), f(3, 6), f(5, 8), f(20, 30)]),
+            [(0, 8), (20, 30)]
+        );
+        assert!(merge_ranges(&[]).is_empty());
+    }
+
+    #[test]
+    fn mask_text_passes_a_large_adversarial_input_through_unchanged() {
+        // The input of `a_large_adversarial_input_finds_nothing_and_finishes`.
+        let unit = cat(&[
+            "-----BEGIN RSA ",
+            "PRIVATE KEY----- ey",
+            "J",
+            "abc.ey",
+            "J. postgres://a: xo",
+            "xb-1 sk",
+            "-ant- AK",
+            "IA ",
+            &body("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", 39),
+            " ",
+        ]);
+        let text = unit.repeat(2 * 1024 * 1024 / unit.len());
+        assert!(mask_text(&text) == text);
     }
 }

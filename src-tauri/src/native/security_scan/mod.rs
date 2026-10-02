@@ -7,7 +7,8 @@
 //! - [`rules`] is the vendored rule table: an id, a pattern, a provider label
 //!   and a fixed confidence tier per rule, plus [`rules::CURRENT_RULESET_VERSION`].
 //! - [`scan`] runs every rule over a piece of text and answers the matches as
-//!   byte ranges.
+//!   byte ranges. [`scan::mask_text`] applies them: the same text with
+//!   every match masked, which is the form an event payload is stored in (#680).
 //!
 //! [`store`] is the persistence over migration 41's tables: what needs
 //! (re)scanning, the whitelist-aware write, and the whitelist itself (#602).
