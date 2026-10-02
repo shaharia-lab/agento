@@ -59,10 +59,10 @@
 //! Migration **48** is the eighteenth: the automations data model —
 //! `job_history.triggered_by`, `continues_job_id` and `event_payload`,
 //! `trigger_rules.task_id`, `continue_on_reply` on both `trigger_rules` and
-//! `scheduled_tasks`, and the two per-task event counters. It is the first of
-//! them to backfill: every existing rule and every task with a Slack
-//! destination is switched to `continue_on_reply`, because those already
-//! continue on a reply (#681, epic #679).
+//! `scheduled_tasks`, and the two per-task event counters. It also backfills:
+//! every existing rule and every task with a Slack destination is switched to
+//! `continue_on_reply`, because those already continue on a reply (#681, epic
+//! #679).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most

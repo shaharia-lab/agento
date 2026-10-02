@@ -973,9 +973,9 @@ mod tests {
             updated_at          DATETIME NOT NULL,
             save_output         INTEGER NOT NULL DEFAULT 0,
             destinations        TEXT NOT NULL DEFAULT '[]',
-        continue_on_reply   INTEGER NOT NULL DEFAULT 0,
-        dropped_event_count INTEGER NOT NULL DEFAULT 0,
-        rate_limited_event_count INTEGER NOT NULL DEFAULT 0
+            continue_on_reply   INTEGER NOT NULL DEFAULT 0,
+            dropped_event_count INTEGER NOT NULL DEFAULT 0,
+            rate_limited_event_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE job_history (
             id                          TEXT PRIMARY KEY,
