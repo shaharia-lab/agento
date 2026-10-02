@@ -345,6 +345,7 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
                     model: failed.task.model.clone(),
                     answer: String::new(),
                     error: Some(failed.message.clone()),
+                    reply_to: None,
                 },
             );
             return;
@@ -396,6 +397,7 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
             model: recorded.job.model.clone(),
             answer: recorded.answer.clone(),
             error: recorded.failure.clone(),
+            reply_to: None,
         },
     );
     if let Some(message) = &recorded.failure {

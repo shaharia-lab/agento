@@ -31,6 +31,16 @@
 //! One [`Destination`] variant, one arm in [`Destination::from_config`],
 //! [`Destination::targets`] and [`Destination::deliver_one`]. The executor does
 //! not change: it only builds a [`DeliveryReport`] and calls [`dispatch`].
+//!
+//! # Reply to sender (#682)
+//!
+//! A `reply` entry has no sub-object: its target is the run's, not the
+//! configuration's — [`DeliveryReport::reply_to`], the Telegram chat or Slack
+//! thread the triggering event came from. A run nothing sent (a schedule, a
+//! manual run) has no origin, and its row finishes `skipped` with
+//! [`SKIPPED_NO_ORIGIN`]. The sender is outside Agento, so a failed run answers
+//! the fixed `ERROR_REPLY` and never the run's error text; an empty answer is
+//! `NO_RESPONSE_REPLY` — the two sentences the inline replies send today.
 
 use std::path::{Path, PathBuf};
 
@@ -62,6 +72,25 @@ pub struct DeliveryReport {
     pub answer: String,
     /// The run's error on a failed run; `None` on a successful one.
     pub error: Option<String>,
+    /// Where the event that started the run came from, for a `reply`
+    /// destination; `None` for a schedule or manual run.
+    pub reply_to: Option<ReplyTarget>,
+}
+
+/// The chat or thread a run's triggering message came from (#682).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplyTarget {
+    /// The first chunk of the reply quotes `message_id`.
+    Telegram {
+        integration_id: String,
+        chat_id: i64,
+        message_id: i64,
+    },
+    Slack {
+        integration_id: String,
+        channel: String,
+        thread_ts: String,
+    },
 }
 
 impl DeliveryReport {
@@ -91,6 +120,9 @@ impl Outcome {
 /// The reason a `success`-only destination records on a failed run.
 pub const SKIPPED_RUN_FAILED: &str = "run failed; this destination delivers on success only";
 
+/// What a `reply` destination records on a run no message started.
+pub const SKIPPED_NO_ORIGIN: &str = "this run was not started by a message";
+
 /// What a stored entry whose `type` this build does not know records.
 const SKIPPED_UNKNOWN_TYPE: &str = "unknown destination type";
 
@@ -100,6 +132,7 @@ enum Destination {
     Slack(SlackDestination),
     Telegram(TelegramDestination),
     Email(EmailDestination),
+    Reply,
     /// Test-only. `type` `fake` sends, `fake-fail` fails, `fake-hang` never
     /// finishes; each records the report it was handed (see [`fake_received`]).
     #[cfg(any(test, feature = "test-hooks"))]
@@ -128,6 +161,7 @@ impl Destination {
             "email" => Some(Self::Email(
                 config.email.as_deref().cloned().unwrap_or_default(),
             )),
+            "reply" => Some(Self::Reply),
             #[cfg(any(test, feature = "test-hooks"))]
             "fake" => Some(Self::Fake(FakeMode::Send)),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -142,12 +176,21 @@ impl Destination {
     ///
     /// The Slack target is the bare channel id; the Telegram one the chat id.
     /// An email destination is **one** target, its recipients joined by `, `:
-    /// it sends one message to all of them (#640), so it gets one row.
-    fn targets(&self) -> Vec<String> {
+    /// it sends one message to all of them (#640), so it gets one row. A reply
+    /// is one row for the run's origin — the chat id, or `<channel> · <ts>` —
+    /// and one row with an empty target when there is none.
+    fn targets(&self, report: &DeliveryReport) -> Vec<String> {
         match self {
             Self::Slack(slack) => slack.channel_ids.iter().cloned().collect(),
             Self::Telegram(telegram) => telegram.chat_ids.iter().cloned().collect(),
             Self::Email(email) => vec![email.recipients.join(", ")],
+            Self::Reply => vec![match &report.reply_to {
+                Some(ReplyTarget::Telegram { chat_id, .. }) => chat_id.to_string(),
+                Some(ReplyTarget::Slack {
+                    channel, thread_ts, ..
+                }) => format!("{channel} · {thread_ts}"),
+                None => String::new(),
+            }],
             #[cfg(any(test, feature = "test-hooks"))]
             Self::Fake(_) => vec!["fake".to_string()],
         }
@@ -178,6 +221,7 @@ impl Destination {
                 deliver_telegram(db_path, &telegram.integration_id, target, report).await
             }
             Self::Email(email) => deliver_email(db_path, &email.recipients, report).await,
+            Self::Reply => deliver_reply(db_path, report).await,
             #[cfg(any(test, feature = "test-hooks"))]
             Self::Fake(mode) => {
                 fake_record(report);
@@ -331,6 +375,76 @@ async fn deliver_email(db_path: &Path, recipients: &[String], report: &DeliveryR
     }
 }
 
+/// The answer to the sender who started the run (#682), on the integration the
+/// event arrived through. An integration that cannot send is `skipped` with the
+/// reason before any network call, as the configured arms are.
+async fn deliver_reply(db_path: &Path, report: &DeliveryReport) -> Outcome {
+    use crate::native::integrations::{registry, slack, telegram};
+    use crate::native::trigger::{receiver, telegram_api};
+
+    let text = reply_text(report);
+    match &report.reply_to {
+        None => Outcome::Skipped(SKIPPED_NO_ORIGIN.to_string()),
+        Some(ReplyTarget::Telegram {
+            integration_id,
+            chat_id,
+            message_id,
+        }) => {
+            let (path, id) = (db_path.to_path_buf(), integration_id.clone());
+            let token = match db::blocking("telegram reply token", move || {
+                receiver::telegram_delivery_token(&path, &id)
+            })
+            .await
+            {
+                Some(Ok(token)) => token,
+                Some(Err(reason)) => return Outcome::Skipped(reason.to_string()),
+                None => {
+                    return Outcome::Failed("could not read the Telegram integration".to_string())
+                }
+            };
+            match telegram_api::send_reply(&token, *chat_id, *message_id, text).await {
+                Ok(()) => Outcome::Sent,
+                Err(e) => Outcome::Failed(telegram::delivery::readable(&e, *chat_id)),
+            }
+        }
+        Some(ReplyTarget::Slack {
+            integration_id,
+            channel,
+            thread_ts,
+        }) => {
+            let (path, id) = (db_path.to_path_buf(), integration_id.clone());
+            let token = match db::blocking("slack reply token", move || {
+                registry::slack_delivery_token(&path, &id)
+            })
+            .await
+            {
+                Some(Ok(token)) => token,
+                Some(Err(reason)) => return Outcome::Skipped(reason.to_string()),
+                None => return Outcome::Failed("could not read the Slack integration".to_string()),
+            };
+            match slack::delivery::deliver_thread(&token, channel, thread_ts, text).await {
+                Ok(()) => Outcome::Sent,
+                Err(e) => Outcome::Failed(e),
+            }
+        }
+    }
+}
+
+/// What the sender reads: the answer, `NO_RESPONSE_REPLY` for an empty one,
+/// and `ERROR_REPLY` for a failed run — never `report.error`, which is
+/// written for the task's owner, not for whoever sent the message.
+fn reply_text(report: &DeliveryReport) -> &str {
+    use crate::native::trigger::dispatcher::{ERROR_REPLY, NO_RESPONSE_REPLY};
+
+    if !report.run_ok() {
+        ERROR_REPLY
+    } else if report.answer.is_empty() {
+        NO_RESPONSE_REPLY
+    } else {
+        &report.answer
+    }
+}
+
 /// Whether a destination with this `when` delivers for a run that ended
 /// `run_ok`. `always` always does; `success` — and an empty value, which
 /// validation stores as `success` — only for a successful run.
@@ -361,7 +475,7 @@ async fn deliver_all(db_path: &Path, destinations: &[TaskDestination], report: &
         let destination = Destination::from_config(config);
         let targets = destination
             .as_ref()
-            .map_or_else(|| vec![String::new()], Destination::targets);
+            .map_or_else(|| vec![String::new()], |d| d.targets(report));
         for target in targets {
             let Some(id) = record_pending(db_path, position, config, &target, report).await else {
                 // The row could not be written, so there is nothing to finish —
@@ -827,5 +941,292 @@ pub(crate) mod tests {
             )
             .expect("job row");
         assert_eq!(status, "success", "a failed delivery never touches the run");
+    }
+
+    // ─── Reply to sender (#682) ─────────────────────────────────────────────
+
+    fn reply(when: &str) -> TaskDestination {
+        fake("reply", when)
+    }
+
+    fn from_telegram(job_id: &str, status: &str, chat_id: i64) -> DeliveryReport {
+        DeliveryReport {
+            reply_to: Some(ReplyTarget::Telegram {
+                integration_id: "tg-1".into(),
+                chat_id,
+                message_id: 7,
+            }),
+            ..report(job_id, status)
+        }
+    }
+
+    fn job_status(path: &Path, job_id: &str) -> (String, String) {
+        rusqlite::Connection::open(path)
+            .expect("open")
+            .query_row(
+                "SELECT status, COALESCE(error_message, '') FROM job_history WHERE id = ?1",
+                [job_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("job row")
+    }
+
+    /// A fake Telegram that answers `chat not found` for chat -404 and `ok`
+    /// otherwise, keeping every request body.
+    async fn fake_telegram() -> std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> {
+        use crate::native::integrations::telegram::client::set_api_base;
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let log = seen.clone();
+        let app = axum::Router::new().fallback(move |body: String| {
+            let log = log.clone();
+            async move {
+                let payload: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+                let missing = payload["chat_id"] == -404;
+                log.lock().expect("lock").push(payload);
+                if missing {
+                    r#"{"ok":false,"description":"Bad Request: chat not found"}"#
+                } else {
+                    r#"{"ok":true}"#
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        set_api_base(Some(base));
+        seen
+    }
+
+    #[test]
+    fn the_sender_reads_the_answer_or_one_fixed_sentence() {
+        use crate::native::trigger::dispatcher::{ERROR_REPLY, NO_RESPONSE_REPLY};
+
+        assert_eq!(reply_text(&report("j", "success")), "the answer");
+        let empty = DeliveryReport {
+            answer: String::new(),
+            ..report("j", "success")
+        };
+        assert_eq!(reply_text(&empty), NO_RESPONSE_REPLY);
+        let failed = DeliveryReport {
+            answer: String::new(),
+            error: Some("claude exited 1: /home/u/secret".into()),
+            ..report("j", "failed")
+        };
+        assert_eq!(reply_text(&failed), ERROR_REPLY);
+    }
+
+    #[tokio::test]
+    async fn a_reply_without_an_origin_is_skipped_with_the_reason() {
+        let file = with_job("j-reply-none");
+        deliver_all(
+            file.path(),
+            &[reply("always")],
+            &report("j-reply-none", "success"),
+        )
+        .await;
+        assert_eq!(
+            rows(file.path(), "j-reply-none"),
+            vec![(
+                0,
+                "reply".into(),
+                String::new(),
+                "skipped".into(),
+                SKIPPED_NO_ORIGIN.into()
+            )]
+        );
+    }
+
+    /// The reply quotes the message the run came from, carries the answer,
+    /// and records the chat as its target.
+    #[tokio::test]
+    async fn a_telegram_reply_answers_the_message_it_came_from() {
+        use crate::native::integrations::telegram::client::{api_base_lock, set_api_base};
+
+        let _guard = api_base_lock().await;
+        let seen = fake_telegram().await;
+        let file = with_job("j-reply-tg");
+        seed_telegram(file.path(), "tg-1", true);
+        deliver_all(
+            file.path(),
+            &[reply("success")],
+            &from_telegram("j-reply-tg", "success", 42),
+        )
+        .await;
+        set_api_base(None);
+
+        assert_eq!(
+            rows(file.path(), "j-reply-tg"),
+            vec![(0, "reply".into(), "42".into(), "sent".into(), String::new())]
+        );
+        assert_eq!(
+            *seen.lock().expect("lock"),
+            vec![serde_json::json!({
+                "chat_id": 42, "reply_to_message_id": 7, "text": "the answer"
+            })]
+        );
+    }
+
+    /// The run's error is written for the task's owner; the sender is outside
+    /// Agento and gets `ERROR_REPLY`, the sentence the inline reply sends.
+    #[tokio::test]
+    async fn a_failed_run_replies_with_the_fixed_sentence_never_its_error() {
+        use crate::native::integrations::telegram::client::{api_base_lock, set_api_base};
+        use crate::native::trigger::dispatcher::ERROR_REPLY;
+
+        let _guard = api_base_lock().await;
+        let seen = fake_telegram().await;
+        let file = with_job("j-reply-err");
+        seed_telegram(file.path(), "tg-1", true);
+        let failed = DeliveryReport {
+            answer: String::new(),
+            error: Some("claude exited 1: /home/u/INTERNAL-DETAIL".into()),
+            ..from_telegram("j-reply-err", "failed", 42)
+        };
+        deliver_all(file.path(), &[reply("success"), reply("always")], &failed).await;
+        set_api_base(None);
+
+        let rows = rows(file.path(), "j-reply-err");
+        assert_eq!(
+            (rows[0].3.as_str(), rows[0].4.as_str()),
+            ("skipped", SKIPPED_RUN_FAILED),
+            "`success` is not met by a failed run"
+        );
+        assert_eq!(rows[1].3, "sent");
+        let seen = seen.lock().expect("lock");
+        assert_eq!(seen.len(), 1, "only the `always` reply was sent");
+        assert_eq!(seen[0]["text"], ERROR_REPLY);
+        assert!(!seen[0].to_string().contains("INTERNAL-DETAIL"));
+    }
+
+    /// A refused reply is the delivery's failure, in a sentence naming the
+    /// chat, and the run's own row keeps what the run wrote.
+    #[tokio::test]
+    async fn a_failed_reply_is_recorded_and_never_fails_the_run() {
+        use crate::native::integrations::telegram::client::{api_base_lock, set_api_base};
+
+        let _guard = api_base_lock().await;
+        let _seen = fake_telegram().await;
+        let file = with_job("j-reply-fail");
+        seed_telegram(file.path(), "tg-1", true);
+        deliver_all(
+            file.path(),
+            &[reply("always")],
+            &from_telegram("j-reply-fail", "success", -404),
+        )
+        .await;
+        set_api_base(None);
+
+        let rows = rows(file.path(), "j-reply-fail");
+        assert_eq!((rows[0].2.as_str(), rows[0].3.as_str()), ("-404", "failed"));
+        assert!(
+            rows[0].4.starts_with("chat -404 not found"),
+            "{}",
+            rows[0].4
+        );
+        assert!(!rows[0].4.contains("TG-DELIVERY-SECRET"));
+        assert_eq!(
+            job_status(file.path(), "j-reply-fail"),
+            ("success".into(), String::new())
+        );
+    }
+
+    /// A Slack origin is answered in its thread, with no summary, and the row
+    /// names the channel and the thread; an integration that cannot post is
+    /// `skipped` before any request.
+    #[tokio::test]
+    async fn a_slack_reply_posts_into_the_origin_thread() {
+        use crate::native::integrations::slack::client::{api_base_lock, set_api_base};
+
+        let _guard = api_base_lock().await;
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
+            Default::default();
+        let log = seen.clone();
+        let app = axum::Router::new().fallback(move |uri: axum::http::Uri, body: String| {
+            let log = log.clone();
+            async move {
+                let payload: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+                log.lock()
+                    .expect("lock")
+                    .push((uri.path().to_string(), payload));
+                r#"{"ok":true,"ts":"1700000000.000900"}"#
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        set_api_base(Some(base));
+
+        let file = with_job("j-reply-slack");
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute_batch(
+                r#"INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                             created_at, updated_at)
+                   VALUES ('s-1', 's-1', 'slack', 1,
+                           '{"auth_mode":"bot_token","bot_token":"xoxb-reply"}', '{}', '{}',
+                           '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC');"#,
+            )
+            .expect("seed");
+        let origin = |integration_id: &str| {
+            Some(ReplyTarget::Slack {
+                integration_id: integration_id.into(),
+                channel: "C0123ABCD".into(),
+                thread_ts: "1700000000.000100".into(),
+            })
+        };
+        let sent = DeliveryReport {
+            reply_to: origin("s-1"),
+            ..report("j-reply-slack", "success")
+        };
+        deliver_all(file.path(), &[reply("always")], &sent).await;
+        let gone = DeliveryReport {
+            reply_to: origin("s-gone"),
+            ..report("j-reply-slack", "success")
+        };
+        deliver_all(file.path(), &[reply("always")], &gone).await;
+        set_api_base(None);
+
+        let target = "C0123ABCD · 1700000000.000100".to_string();
+        let rows = rows(file.path(), "j-reply-slack");
+        assert_eq!(rows.len(), 2);
+        let mut statuses: Vec<_> = rows
+            .iter()
+            .map(|r| (r.1.clone(), r.2.clone(), r.3.clone(), r.4.clone()))
+            .collect();
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            vec![
+                ("reply".into(), target.clone(), "sent".into(), String::new()),
+                (
+                    "reply".into(),
+                    target,
+                    "skipped".into(),
+                    "the Slack integration was deleted".into()
+                ),
+            ]
+        );
+        assert_eq!(
+            *seen.lock().expect("lock"),
+            vec![(
+                "/chat.postMessage".to_string(),
+                serde_json::json!({
+                    "channel": "C0123ABCD",
+                    "mrkdwn": true,
+                    "text": "the answer",
+                    "thread_ts": "1700000000.000100"
+                })
+            )],
+            "one post, into the thread, and nothing for the deleted integration"
+        );
     }
 }

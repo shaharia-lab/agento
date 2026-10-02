@@ -1,7 +1,8 @@
 //! A scheduled task's output, posted to Slack (#637, epic #626).
 //!
 //! The `slack` arm of `schedule::delivery` calls [`deliver_channel`] once per
-//! configured channel, with the token `registry::slack_delivery_token` resolved.
+//! configured channel, with the token `registry::slack_delivery_token` resolved;
+//! its `reply` arm calls [`deliver_thread`] for a run a mention started (#682).
 //! Rules, each enforced here:
 //!
 //! - **Summary, then thread.** One top-level `chat.postMessage` naming the task,
@@ -147,6 +148,39 @@ pub async fn deliver_channel(
         }
     }
     ChannelOutcome::Sent { ts }
+}
+
+/// `body` into an existing thread, with no summary (#682): the `reply`
+/// destination answering the mention a run came from. The same
+/// [`mrkdwn::to_mrkdwn`] then [`mrkdwn::split`] as [`deliver_channel`]'s
+/// replies, and the same rule that a partial thread is a failure. Nothing is
+/// mapped: the thread already belongs to whoever started it.
+pub async fn deliver_thread(
+    token: &str,
+    channel: &str,
+    thread_ts: &str,
+    body: &str,
+) -> Result<(), String> {
+    let client = Client::new(token);
+    let ct = CancellationToken::new();
+    let chunks = mrkdwn::split(&mrkdwn::to_mrkdwn(body), mrkdwn::MAX_MESSAGE_CHARS);
+    let n = chunks.len();
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let reply = serde_json::json!({
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "text": chunk,
+            "mrkdwn": true,
+        });
+        if let Err(e) = post(&client, &ct, &reply).await {
+            return Err(if n == 1 {
+                readable(&e)
+            } else {
+                format!("reply {} of {n} failed: {}", i + 1, readable(&e))
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Write the thread under the summary `ts` to `inbound_threads`. Loud rather
@@ -601,6 +635,80 @@ mod tests {
         );
         assert_eq!(fake.posts().len(), 3, "nothing after the failed reply");
         assert_no_token(&results);
+    }
+
+    // ─── A reply into an existing thread (#682) ─────────────────────────────
+
+    #[tokio::test]
+    async fn a_thread_reply_posts_every_chunk_into_the_thread_and_nothing_else() {
+        let _guard = api_base_lock().await;
+        let fake = fake(ok).await;
+        let long = "word ".repeat(2000);
+        let result = deliver_thread(TOKEN, "C1", TS, &long).await;
+        set_api_base(None);
+
+        assert_eq!(result, Ok(()));
+        let expected = mrkdwn::split(&mrkdwn::to_mrkdwn(&long), mrkdwn::MAX_MESSAGE_CHARS);
+        assert!(expected.len() > 1, "the answer must need several chunks");
+        let posts = fake.posts();
+        assert!(posts.iter().all(|p| p.0 == "C1" && p.1 == TS), "{posts:?}");
+        let texts: Vec<_> = posts.iter().map(|p| p.2.clone()).collect();
+        assert_eq!(texts, expected, "no summary, one post per chunk, in order");
+        assert_eq!(
+            *fake.methods.lock().expect("lock"),
+            vec!["chat.postMessage"; expected.len()],
+            "nothing is mapped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partial_thread_reply_is_a_failure_that_says_which() {
+        let _guard = api_base_lock().await;
+        let fake = fake(|n, channel, thread| {
+            if n == 1 {
+                (200, vec![], r#"{"ok":false,"error":"invalid_auth"}"#.into())
+            } else {
+                ok(n, channel, thread)
+            }
+        })
+        .await;
+        let long = "word ".repeat(2000);
+        let n = mrkdwn::split(&mrkdwn::to_mrkdwn(&long), mrkdwn::MAX_MESSAGE_CHARS).len();
+        let result = deliver_thread(TOKEN, "C1", TS, &long).await;
+        set_api_base(None);
+
+        assert_eq!(
+            result,
+            Err(format!(
+                "reply 2 of {n} failed: the Slack token was rejected — reconnect the \
+                 integration (invalid_auth)"
+            ))
+        );
+        assert_eq!(fake.posts().len(), 2, "nothing after the failed reply");
+        assert!(!format!("{result:?}").contains(TOKEN));
+    }
+
+    #[tokio::test]
+    async fn a_one_chunk_thread_reply_fails_with_the_bare_sentence() {
+        let _guard = api_base_lock().await;
+        let _fake = fake(|_, _, _| {
+            (
+                200,
+                vec![],
+                r#"{"ok":false,"error":"channel_not_found"}"#.into(),
+            )
+        })
+        .await;
+        let result = deliver_thread(TOKEN, "C9", TS, "hi").await;
+        set_api_base(None);
+        assert_eq!(
+            result,
+            Err(
+                "channel not found — check the ID, and that the bot was invited if the \
+                 channel is private (channel_not_found)"
+                    .into()
+            )
+        );
     }
 
     // ─── The thread mapping (#642) ──────────────────────────────────────────

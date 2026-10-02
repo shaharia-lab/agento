@@ -275,7 +275,7 @@ export interface EmailDestinationConfig {
 
 /** One place a task's output is delivered; one sub-object per `type`. */
 export interface TaskDestination {
-  type: "slack" | "telegram" | "email";
+  type: "slack" | "telegram" | "email" | "reply";
   when: DeliveryWhen;
   slack?: SlackDestinationConfig;
   telegram?: TelegramDestinationConfig;

@@ -1439,7 +1439,9 @@ async fn a_failed_delivery_leaves_the_runs_status_alone() {
 
 /// A destination that never answers holds nothing the run owns: the run
 /// returns, its permit and in-flight entry are released, the next run fires,
-/// and the delivery is still `pending` for #635's reaper to find.
+/// and the delivery is still `pending` for #635's reaper to find. A `reply`
+/// destination ahead of it (#682) goes through the same `dispatch`: a run no
+/// message started records it `skipped` and is not held by it either.
 #[tokio::test]
 async fn a_hanging_destination_does_not_hold_the_run_or_its_permit() {
     if python3().is_none() {
@@ -1449,7 +1451,11 @@ async fn a_hanging_destination_does_not_hold_the_run_or_its_permit() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("agento.db");
     let task_id = migrated_with_task(&db, "cron", true);
-    set_destinations(&db, &task_id, r#"[{"type":"fake-hang","when":"always"}]"#);
+    set_destinations(
+        &db,
+        &task_id,
+        r#"[{"type":"reply","when":"always"},{"type":"fake-hang","when":"always"}]"#,
+    );
     let cli = fake_cli(dir.path(), ANSWERING_CLI);
 
     let _env = env_lock().lock().await;
@@ -1484,14 +1490,21 @@ async fn a_hanging_destination_does_not_hold_the_run_or_its_permit() {
         // The pending row is written on the delivery's own task; give it a
         // moment, then it stays pending because the post never finishes.
         for _ in 0..500 {
-            if !deliveries(&db, &format!("job-hang-{n}")).is_empty() {
+            if deliveries(&db, &format!("job-hang-{n}")).len() == 2 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(
             deliveries(&db, &format!("job-hang-{n}")),
-            vec![("fake-hang".into(), "pending".into(), String::new())]
+            vec![
+                (
+                    "reply".into(),
+                    "skipped".into(),
+                    agento_lib::native::schedule::delivery::SKIPPED_NO_ORIGIN.into()
+                ),
+                ("fake-hang".into(), "pending".into(), String::new()),
+            ]
         );
     }
     let jobs = job_rows(&db);

@@ -1977,7 +1977,7 @@ mod tests {
         let cases = [
             (
                 r#"{"name":"N","prompt":"p","destinations":[{"type":"pigeon"}]}"#.to_string(),
-                r#"validation error for "destinations[0].type": type must be slack, telegram or email"#,
+                r#"validation error for "destinations[0].type": type must be slack, telegram, email or reply"#,
             ),
             (
                 r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","when":"sometimes","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]}"#.to_string(),
@@ -2228,6 +2228,78 @@ mod tests {
         );
     }
 
+    /// A `reply` entry (#682) is a type and a `when`, and nothing else: its
+    /// target is the run's origin, so PUT stores it as sent and no migration
+    /// is needed — it lives in the same `destinations` array.
+    #[test]
+    fn a_reply_destination_round_trips_in_wire_order() {
+        let file = migrated_with_integrations();
+        let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        update_task(
+            file.path(),
+            &task.id,
+            br#"{"name":"N","prompt":"p","destinations":[{"type":"reply","when":"always"}]}"#,
+        )
+        .expect("put");
+        let one = encoded(&get_task(file.path(), &task.id).expect("get").expect("task"));
+        assert!(
+            one.contains(r#""destinations":[{"type":"reply","when":"always"}],"#),
+            "{one}"
+        );
+        assert_eq!(
+            stored_destinations(&file, &task.id),
+            r#"[{"type":"reply","when":"always"}]"#
+        );
+
+        // `when` keeps the shared default.
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","destinations":[{"type":"reply"}]}"#,
+        );
+        assert_eq!(
+            stored_destinations(&file, &task.id),
+            r#"[{"type":"reply","when":"success"}]"#
+        );
+    }
+
+    #[test]
+    fn a_reply_destination_with_any_sub_object_is_a_422_on_put() {
+        let file = migrated_with_integrations();
+        let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let reply = |name: &str, sub: &str| {
+            format!(
+                r#"{{"name":"N","prompt":"p","destinations":[{{"type":"reply","when":"always","{name}":{sub}}}]}}"#
+            )
+        };
+        let cases = [
+            (
+                reply(
+                    "slack",
+                    r#"{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}"#,
+                ),
+                r#"validation error for "destinations[0].slack": slack is only allowed on slack destinations"#,
+            ),
+            (
+                reply("telegram", r#"{"integration_id":"tg-1","chat_ids":["42"]}"#),
+                r#"validation error for "destinations[0].telegram": telegram is only allowed on telegram destinations"#,
+            ),
+            (
+                reply("email", r#"{"recipients":["a@example.com"]}"#),
+                r#"validation error for "destinations[0].email": email is only allowed on email destinations"#,
+            ),
+        ];
+        for (body, want) in &cases {
+            let err = update_task(file.path(), &task.id, body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), *want, "put {body}");
+            assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY, "put {body}");
+        }
+        assert_eq!(
+            stored_destinations(&file, &task.id),
+            "[]",
+            "nothing written"
+        );
+    }
+
     #[test]
     fn a_deleted_telegram_integration_is_grandfathered_on_put() {
         let file = migrated_with_integrations();
@@ -2307,7 +2379,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err.message(),
-            r#"validation error for "destinations[0].type": type must be slack, telegram or email"#
+            r#"validation error for "destinations[0].type": type must be slack, telegram, email or reply"#
         );
         // Wrong container shapes are a 400, not a zero value.
         for body in [
@@ -3801,10 +3873,13 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
 fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), WriteError> {
     for (i, dest) in destinations.iter_mut().enumerate() {
         let field = |name: &str| format!("destinations[{i}].{name}");
-        if !matches!(dest.r#type.as_str(), "slack" | "telegram" | "email") {
+        if !matches!(
+            dest.r#type.as_str(),
+            "slack" | "telegram" | "email" | "reply"
+        ) {
             return Err(WriteError::validation(
                 &field("type"),
-                "type must be slack, telegram or email",
+                "type must be slack, telegram, email or reply",
             ));
         }
         match dest.when.as_str() {
@@ -3829,6 +3904,11 @@ fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), Wri
                     format!("{name} is only allowed on {name} destinations"),
                 ));
             }
+        }
+        // A reply's target is the run's origin (#682), so it has nothing to
+        // configure and the loop above has already refused every sub-object.
+        if dest.r#type == "reply" {
+            continue;
         }
         if dest.r#type == "telegram" {
             validate_telegram(dest.telegram.as_deref(), &field)?;

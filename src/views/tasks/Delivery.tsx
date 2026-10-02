@@ -16,7 +16,9 @@
 
    A Slack row with an integration chosen picks its channels from the
    workspace's own list (#641); `SlackChannelPicker` falls back to the
-   comma-separated field when that list cannot be loaded.
+   comma-separated field when that list cannot be loaded. A "Reply to sender"
+   row (#682) has nothing to configure but `when`: its target is the chat or
+   thread the run's triggering message came from, decided at run time.
    ========================================================================== */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -49,8 +51,9 @@ const KINDS: Record<
     /** Whether the type delivers through an integration; email sends through
      *  the SMTP server from Settings → Notifications instead. */
     integration: boolean;
-    /** The ids field inside the type's sub-object. */
-    ids: "channel_ids" | "chat_ids" | "recipients";
+    /** The ids field inside the type's sub-object; `null` for a type with no
+     *  sub-object, whose target comes from the run. */
+    ids: "channel_ids" | "chat_ids" | "recipients" | null;
     idsLabel: string;
     noun: string;
     help: string;
@@ -90,7 +93,21 @@ const KINDS: Record<
     placeholder: "alice@example.com, bob@example.com",
     needsAuth: false,
   },
+  reply: {
+    label: "Reply to sender",
+    integration: false,
+    ids: null,
+    idsLabel: "",
+    noun: "",
+    help: "",
+    placeholder: "",
+    needsAuth: false,
+  },
 };
+
+/** What a reply row says in place of an integration picker. */
+const REPLY_VIA =
+  "Answers the Telegram chat or Slack thread whose message started the run. A run nothing sent records it as skipped.";
 
 /** `enabled && authenticated` — the predicate delivery itself applies before
  *  it sends, so the form never offers an integration a run would skip. */
@@ -120,6 +137,7 @@ export function parseChannelIds(text: string): string[] {
 
 /** The entry's own sub-object, whichever type it is. */
 function config(dest: TaskDestination): { integration_id: string; ids: string[] } {
+  if (dest.type === "reply") return { integration_id: "", ids: [] };
   if (dest.type === "email") {
     return { integration_id: "", ids: dest.email?.recipients ?? [] };
   }
@@ -144,6 +162,7 @@ export function destinationWarning(
   smtpConfigured: boolean | null = null
 ): string | null {
   if (dest.type === "email") return smtpConfigured === false ? SMTP_MISSING : null;
+  if (dest.type === "reply") return null;
   const kind = KINDS[dest.type] ?? KINDS.slack;
   const id = config(dest).integration_id;
   if (!integrations || !id) return null;
@@ -182,6 +201,7 @@ export function deliverySummary(
   const parts = [types.map((t) => KINDS[t].label).join(", ")];
   if (dests.length > 1) parts.push(plural(dests.length, "destination"));
   for (const t of types) {
+    if (KINDS[t].ids === null) continue;
     const n = dests
       .filter((d) => d.type === t)
       .reduce((sum, d) => sum + config(d).ids.length, 0);
@@ -197,6 +217,7 @@ function blankDestination(
   integrations: Integration[] | null
 ): TaskDestination {
   if (type === "email") return { type, when: "success", email: { recipients: [] } };
+  if (type === "reply") return { type, when: "success" };
   const usable = type === "telegram" ? isUsableTelegram : isUsableSlack;
   const integration_id = integrations?.find(usable)?.id ?? "";
   return type === "telegram"
@@ -253,6 +274,7 @@ export function DeliverySection({
     ...(all.some(isUsableSlack) || (!hasTelegram && !smtpConfigured) ? (["slack"] as const) : []),
     ...(hasTelegram ? (["telegram"] as const) : []),
     ...(smtpConfigured ? (["email"] as const) : []),
+    "reply",
   ];
   return (
     <FormSection
@@ -267,7 +289,8 @@ export function DeliverySection({
         destination gets a copy. Slack posts go to shared channels, so everyone
         in them sees the output, and the bot has to be invited to each channel.
         Telegram messages go to each chat, as plain text. Email goes to every
-        recipient as one message.
+        recipient as one message. A reply to the sender answers the chat or
+        thread whose message started the run.
       </div>
       {smtpConfigured === false && !destinations.some((d) => d.type === "email") && (
         <div className="formrow__help">
@@ -389,7 +412,11 @@ function DeliveryDestinationRow({
               onChange={(integration_id) => patch({ integration_id })}
             />
           ) : (
-            <span className="delivery__via">Sent with the SMTP server from Settings → Notifications</span>
+            <span className="delivery__via">
+              {dest.type === "reply"
+                ? REPLY_VIA
+                : "Sent with the SMTP server from Settings → Notifications"}
+            </span>
           )}
           <button type="button" className="btn btn--ghost" onClick={onRemove}>
             Remove
@@ -397,7 +424,7 @@ function DeliveryDestinationRow({
         </div>
         {warning && <div className="delivery__warning">{warning}</div>}
       </FormRow>
-      {dest.type === "slack" && id ? (
+      {kind.ids === null ? null : dest.type === "slack" && id ? (
         <FormRow
           label="Channels"
           help={`Each channel gets the summary and a thread with the output. Invite the bot to each one. ${SLACK_CONTINUE_HELP}`}

@@ -532,7 +532,22 @@ through `integrations/slack/delivery.rs` (#637; see
 `docs/internal/native-integrations-slack.md`, *Task delivery*); the Telegram
 arm sends per chat through `integrations/telegram/delivery.rs` (#639; see
 `docs/internal/native-integrations-telegram.md`, *Task delivery*). A new type is
-one `Destination` variant and its arms; the executor does not change. Tests
+one `Destination` variant and its arms; the executor does not change.
+
+**The fourth type, `reply`, has no sub-object** (#682): `{"type":"reply","when":…}`,
+and `validate_destinations` refuses `slack`, `telegram` or `email` on it. Its
+target is the run's, not the configuration's — `DeliveryReport::reply_to`, the
+Telegram chat (with the message to quote) or Slack thread the triggering event
+came from — so `Destination::targets` takes the report. A run with no origin
+(every schedule and manual run; the executor passes `None` until inbound runs
+go through it) finishes its one row `skipped` with `this run was not started by
+a message`. The row's `target` is the chat id or `<channel> · <thread_ts>`. The
+sender is outside Agento, so a failed run answers the dispatcher's fixed
+`ERROR_REPLY` and never `report.error`, and an empty answer is
+`NO_RESPONSE_REPLY`. Telegram goes through `trigger::telegram_api::send_reply`,
+Slack through `slack::delivery::deliver_thread` (no summary, no thread
+mapping). A `reply` entry is valid on any task, because a task does not know
+its triggers. Tests
 drive a `Fake` variant (types `fake`, `fake-fail`, `fake-hang`) compiled under
 `cfg(test)` or the `test-hooks` feature. Pinned by `delivery.rs`'s tests, the
 executor's `a_prepare_failure_delivers_to_always_and_skips_success_only`, and

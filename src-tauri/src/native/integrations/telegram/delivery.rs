@@ -82,7 +82,7 @@ fn body(run: &RunSummary) -> String {
 /// three descriptions a misconfigured destination produces become advice
 /// naming the chat, with Telegram's own words kept after it; anything else —
 /// a rate limit, a failed request — passes through as written.
-fn readable(e: &str, chat_id: i64) -> String {
+pub(crate) fn readable(e: &str, chat_id: i64) -> String {
     let Some(description) = e
         .split_once("telegram API error: ")
         .map(|(_, description)| description)
