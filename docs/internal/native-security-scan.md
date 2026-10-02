@@ -7,9 +7,9 @@
 
 Everything lives in `src-tauri/src/native/security_scan/`: `rules.rs` (the
 vendored rule table and `CURRENT_RULESET_VERSION`), `scan.rs` (pure
-`text -> Vec<Finding>`, and `mask_text`), `store.rs` (the whitelist-aware persistence),
-`worker.rs` (the background loop) and `api.rs` (the `/api/security-scan/*`
-routes). Each module's `//!` header is the full
+`text -> Vec<Finding>`, and `mask_text`), `store.rs` (the whitelist-aware
+persistence), `worker.rs` (the background loop) and `api.rs` (the
+`/api/security-scan/*` routes). Each module's `//!` header is the full
 statement; the rules below are the ones a change is most likely to break.
 
 ## The worker (#603)

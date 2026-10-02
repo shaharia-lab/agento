@@ -476,9 +476,8 @@ mod tests {
 
     // ── the false-positive bar ────────────────────────────────────────────
 
-    #[test]
-    fn known_false_positive_shapes_find_nothing() {
-        let shapes = [
+    fn false_positive_shapes() -> Vec<String> {
+        vec![
             // UUID v4
             "session 3b241101-e2bb-4255-8caf-4136c566a962 resumed".to_string(),
             // SHA-256 and SHA-1 hex digests, a git log line
@@ -506,7 +505,12 @@ mod tests {
             // Prefix-alikes that are too short or embedded in a word
             "the task-runner and disk-usage-monitor-daemon tools".to_string(),
             cat(&["mask_live_", &body(ALNUM, 30)]),
-        ];
+        ]
+    }
+
+    #[test]
+    fn known_false_positive_shapes_find_nothing() {
+        let shapes = false_positive_shapes();
         // Failure messages name the shape by index, never the text: a scanner
         // reading a failing log should not see a credential-shaped string.
         for (i, s) in shapes.iter().enumerate() {
@@ -518,12 +522,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_large_adversarial_input_finds_nothing_and_finishes() {
-        // Prefixes with no body, headers with no end: every rule starts a match
-        // thousands of times and completes none. The `regex` crate is linear
-        // time, so this is a correctness check on the patterns' bounds rather
-        // than a benchmark.
+    /// Prefixes with no body, headers with no end: every rule starts a match
+    /// thousands of times and completes none.
+    fn adversarial_text() -> String {
         let unit = cat(&[
             "-----BEGIN RSA ",
             "PRIVATE KEY----- ey",
@@ -536,8 +537,14 @@ mod tests {
             &body("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", 39),
             " ",
         ]);
-        let text = unit.repeat(2 * 1024 * 1024 / unit.len());
-        assert!(scan(&text).is_empty());
+        unit.repeat(2 * 1024 * 1024 / unit.len())
+    }
+
+    #[test]
+    fn a_large_adversarial_input_finds_nothing_and_finishes() {
+        // The `regex` crate is linear time, so this is a correctness check on
+        // the patterns' bounds rather than a benchmark.
+        assert!(scan(&adversarial_text()).is_empty());
     }
 
     #[test]
@@ -763,28 +770,11 @@ mod tests {
             "",
             "plain ascii, nothing to see",
             "ünïcödé — 日本語のテキスト — 🔑🔒 — עברית",
-            "session 3b241101-e2bb-4255-8caf-4136c566a962 resumed",
-            "commit 3f786850e387550fdab836ed7e6dc881de23001b\nAuthor: x",
         ] {
             assert_eq!(mask_text(t), t);
         }
-        // Placeholders, by index for the reason given above.
-        let shapes = [
-            cat(&["SLACK_BOT_TOKEN=xo", "xb-your-bot-token-here"]),
-            cat(&[
-                "DATABASE_URL=postgres://",
-                "user:password@localhost:5432/app",
-            ]),
-            cat(&[
-                "-----BEGIN RSA ",
-                "PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----",
-            ]),
-            cat(&["mask_live_", &body(ALNUM, 30)]),
-            cat(&[
-                "data:image/png;base64,",
-                &body("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", 4096),
-            ]),
-        ];
+        // By index, for the reason given above.
+        let shapes = false_positive_shapes();
         for (i, s) in shapes.iter().enumerate() {
             assert!(mask_text(s) == *s, "shape #{i} was changed");
         }
@@ -811,20 +801,7 @@ mod tests {
 
     #[test]
     fn mask_text_passes_a_large_adversarial_input_through_unchanged() {
-        // The input of `a_large_adversarial_input_finds_nothing_and_finishes`.
-        let unit = cat(&[
-            "-----BEGIN RSA ",
-            "PRIVATE KEY----- ey",
-            "J",
-            "abc.ey",
-            "J. postgres://a: xo",
-            "xb-1 sk",
-            "-ant- AK",
-            "IA ",
-            &body("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", 39),
-            " ",
-        ]);
-        let text = unit.repeat(2 * 1024 * 1024 / unit.len());
+        let text = adversarial_text();
         assert!(mask_text(&text) == text);
     }
 }
