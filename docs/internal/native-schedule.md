@@ -212,7 +212,8 @@ omissions are the feature rather than shortcuts:
   every other test green.
 
 Everything else is identical, including the module's own rule that **every path
-ends in a `job_history` row**. That row's id is **minted by the route**, not by
+ends in a `job_history` row** — a row that differs from a timer's only in its
+`triggered_by` (`manual` rather than `schedule`, #681). That row's id is **minted by the route**, not by
 `create_initial_job_history`, so the `202` can name the row the run is about to
 write; a scheduled run passes a fresh v4 uuid, which is what that line generated
 before. **The row does not exist when the `202` is sent**, and not merely for a
@@ -451,6 +452,38 @@ task's configuration and the form posts the whole task back on every edit. Every
 other task write — pause, resume, the run's write-back — goes through
 `update_task_in` on a re-read row and carries the list unchanged
 (`the_runs_write_back_keeps_the_tasks_destinations`).
+
+**The automations columns are data only, and nothing acts on them yet** (#681,
+epic #679). Migration 48 adds eight columns across three tables.
+
+- **`job_history.triggered_by`** is one of `tasks::TriggeredBy`'s six spellings
+  — `schedule`, `telegram`, `slack`, `webhook`, `manual`, `reply` — and is
+  written by `RunKind::triggered_by()` at both inserts,
+  `create_initial_job_history` and `record_failed_run`. Only `schedule` and
+  `manual` are written today. **Every row older than the migration reads
+  `schedule`**, including past manual runs, because those wrote an identical
+  row and cannot be told apart. `continues_job_id` and `event_payload` are `''`
+  until #683 writes them. On the wire `triggered_by` follows `response_text`
+  and is always present; the other two follow it and are **omitted when
+  empty**, so a scheduled run's row gains one key. `deliveries` stays last.
+- **`scheduled_tasks.continue_on_reply`** is a request field, replaced on `PUT`
+  like every other (absent and `null` store `false`). Slack delivery still maps
+  every thread whatever it says, until #686 reads it. **Migration 48 turned it
+  on for every task with a `slack` destination**, since those threads continue
+  today (#642), and for nothing else; a task created afterwards defaults to
+  off. The backfill's `CASE` guards are what keep a hand-edited `destinations`
+  from failing the upgrade.
+- **`dropped_event_count` and `rate_limited_event_count` are server-owned.**
+  `TaskRequest` has neither, `update_task_in` leaves both out of its `SET` list
+  — so no task write can reset them, the run's write-back included
+  (`the_runs_write_back_leaves_the_automations_columns_alone`) — and
+  `update_task` copies the stored values into its response only. Whatever
+  increments them (#690, #691) must write the column directly, not through
+  `update_task_in`.
+
+On the wire the three task fields sit between `destinations` and `status` and
+are always present. The rule's half — `trigger_rules.task_id` and its own
+`continue_on_reply` — is in `docs/internal/native-integrations.md`.
 
 **Delivery results live in `job_deliveries`, never on the run's row** (#635,
 epic #626). Migration 45's table holds one row per *channel* a run's output was

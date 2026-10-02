@@ -199,6 +199,22 @@ the other process's view immediately afterwards. Always go through
 busy timeout.
 
 
+**A trigger rule can name a task, and says whether a reply continues** (#681,
+epic #679). Migration 48 adds `trigger_rules.task_id` and
+`trigger_rules.continue_on_reply`; on the wire both follow `timeout_minutes`,
+before the timestamps, and are always present. `task_id` is `""` while the rule
+is not linked. It has **no foreign key** (`ADD COLUMN` cannot add a `NOT NULL`
+reference), so `check_rule_task` is the only guard: a non-empty id that names
+no task is a 422 on both routes, and a task deleted later leaves a dangling id
+the reader must tolerate. Both fields are **replaced** on `PUT` like the rest
+of the rule, which is why the Integrations form carries them in `RuleDraft` and
+in both `RuleWrite` builders although no control edits them yet. **Migration 48
+set `continue_on_reply` on every rule that existed**, because those already
+continue; a rule created afterwards defaults to off. Nothing reads either
+column at run time yet — the dispatcher's `load_rules` does not select them —
+and `agent_slug` is still required whether or not a task is linked. The task's
+half is in `docs/internal/native-schedule.md`.
+
 ## The OAuth flow (#318)
 
 `POST /api/integrations/{id}/auth/start` and `GET …/auth/status` share

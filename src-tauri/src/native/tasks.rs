@@ -191,6 +191,15 @@ pub struct ScheduledTask {
     /// bytes it had before the field existed — the `inbound` precedent (#570).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub destinations: Vec<TaskDestination>,
+    /// Whether a reply to this task's output continues the conversation
+    /// (#681). Stored and round-tripped only: Slack delivery maps every thread
+    /// whatever this says until #686 reads it.
+    pub continue_on_reply: bool,
+    /// Events this task did not run for (#681). **Server-owned**: no route
+    /// writes either counter, [`update_task_in`] leaves both columns out of
+    /// its `SET` list, and nothing increments them yet.
+    pub dropped_event_count: i64,
+    pub rate_limited_event_count: i64,
     /// "active" or "paused".
     pub status: String,
     pub run_count: i64,
@@ -232,6 +241,16 @@ pub struct JobHistory {
     pub total_cache_creation_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub response_text: String,
+    /// What started the run (#681) — one of [`TriggeredBy`]'s spellings.
+    /// Always present; a row older than the column reads `"schedule"`.
+    pub triggered_by: String,
+    /// The run a reply continues, and the event that started this one (#681).
+    /// **Both absent when empty**, so a scheduled run's row gains
+    /// `triggered_by` and nothing else.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub continues_job_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub event_payload: String,
     /// Where the run's output was delivered and how each went (#635), read
     /// from `job_deliveries`. **Last, and absent when empty** rather than `[]`,
     /// so a job with no deliveries keeps the bytes it had before the field
@@ -239,6 +258,34 @@ pub struct JobHistory {
     /// delivery does not fail the run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deliveries: Vec<JobDelivery>,
+}
+
+/// What started a run — `job_history.triggered_by` (#681).
+///
+/// The column stays text and [`JobHistory`] carries the string, so a value a
+/// later build writes is read back rather than refused. Only `Schedule` and
+/// `Manual` are written today; the event kinds arrive with #683.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggeredBy {
+    Schedule,
+    Telegram,
+    Slack,
+    Webhook,
+    Manual,
+    Reply,
+}
+
+impl TriggeredBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Schedule => "schedule",
+            Self::Telegram => "telegram",
+            Self::Slack => "slack",
+            Self::Webhook => "webhook",
+            Self::Manual => "manual",
+            Self::Reply => "reply",
+        }
+    }
 }
 
 /// One delivery of a run's output to one channel (#635) — a `job_deliveries`
@@ -292,14 +339,16 @@ const TASK_COLUMNS: &str =
     "SELECT id, name, description, prompt, agent_slug, working_directory, model,
        settings_profile_id, timeout_minutes, schedule_type, schedule_config,
        stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
-       last_run_status, next_run_at, created_at, updated_at, destinations
+       last_run_status, next_run_at, created_at, updated_at, destinations,
+       continue_on_reply, dropped_event_count, rate_limited_event_count
 FROM scheduled_tasks";
 
 const JOB_COLUMNS: &str =
     "SELECT id, task_id, task_name, agent_slug, status, started_at, finished_at,
        duration_ms, chat_session_id, model, prompt_preview, error_message,
        total_input_tokens, total_output_tokens,
-       total_cache_creation_tokens, total_cache_read_tokens, response_text
+       total_cache_creation_tokens, total_cache_read_tokens, response_text,
+       triggered_by, continues_job_id, event_payload
 FROM job_history";
 
 /// Every task, most recently created first, as the store orders them.
@@ -515,6 +564,9 @@ fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
                 Box::new(std::io::Error::other(e)),
             )
         })?,
+        continue_on_reply: row.get(22)?,
+        dropped_event_count: row.get(23)?,
+        rate_limited_event_count: row.get(24)?,
         status: row.get(14)?,
         run_count: row.get(15)?,
         last_run_at: nullable_timestamp(row, 16)?,
@@ -556,6 +608,9 @@ fn scan_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobHistory> {
         total_cache_creation_tokens: row.get(14)?,
         total_cache_read_tokens: row.get(15)?,
         response_text: row.get(16)?,
+        triggered_by: row.get(17)?,
+        continues_job_id: row.get(18)?,
+        event_payload: row.get(19)?,
         deliveries: Vec::new(),
     })
 }
@@ -917,7 +972,10 @@ mod tests {
             created_at          DATETIME NOT NULL,
             updated_at          DATETIME NOT NULL,
             save_output         INTEGER NOT NULL DEFAULT 0,
-            destinations        TEXT NOT NULL DEFAULT '[]'
+            destinations        TEXT NOT NULL DEFAULT '[]',
+        continue_on_reply   INTEGER NOT NULL DEFAULT 0,
+        dropped_event_count INTEGER NOT NULL DEFAULT 0,
+        rate_limited_event_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE job_history (
             id                          TEXT PRIMARY KEY,
@@ -936,7 +994,10 @@ mod tests {
             total_output_tokens         INTEGER NOT NULL DEFAULT 0,
             total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             total_cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
-            response_text               TEXT NOT NULL DEFAULT ''
+            response_text               TEXT NOT NULL DEFAULT '',
+            triggered_by                TEXT NOT NULL DEFAULT 'schedule',
+            continues_job_id            TEXT NOT NULL DEFAULT '',
+            event_payload               TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE job_deliveries (
             id          TEXT PRIMARY KEY,
@@ -1031,7 +1092,7 @@ mod tests {
         let tasks = list_tasks(file.path()).expect("list");
         assert_eq!(
             encoded(&tasks[0]),
-            r#"{"id":"full","name":"Cron \u003creport\u003e \u0026 co","description":"ünïcödé 😀","prompt":"summarise","agent_slug":"writer","working_directory":"/w","model":"claude-opus-4-1","settings_profile_id":"work-profile","timeout_minutes":45,"schedule_type":"cron","schedule_config":{"expression":"0 2 * * *"},"stop_after_count":10,"stop_after_time":"2027-06-01T12:00:00Z","save_output":true,"status":"paused","run_count":7,"last_run_at":"2026-08-14T23:15:04.5Z","last_run_status":"success","next_run_at":"2026-08-16T02:00:00Z","created_at":"2026-03-04T05:06:07.123456789Z","updated_at":"2026-03-04T05:06:08Z"}"#
+            r#"{"id":"full","name":"Cron \u003creport\u003e \u0026 co","description":"ünïcödé 😀","prompt":"summarise","agent_slug":"writer","working_directory":"/w","model":"claude-opus-4-1","settings_profile_id":"work-profile","timeout_minutes":45,"schedule_type":"cron","schedule_config":{"expression":"0 2 * * *"},"stop_after_count":10,"stop_after_time":"2027-06-01T12:00:00Z","save_output":true,"continue_on_reply":false,"dropped_event_count":0,"rate_limited_event_count":0,"status":"paused","run_count":7,"last_run_at":"2026-08-14T23:15:04.5Z","last_run_status":"success","next_run_at":"2026-08-16T02:00:00Z","created_at":"2026-03-04T05:06:07.123456789Z","updated_at":"2026-03-04T05:06:08Z"}"#
         );
     }
 
@@ -1044,7 +1105,7 @@ mod tests {
         let tasks = list_tasks(file.path()).expect("list");
         assert_eq!(
             encoded(&tasks[1]),
-            r#"{"id":"bare","name":"Bare","description":"","prompt":"do it","agent_slug":"writer","working_directory":"","model":"","settings_profile_id":"","timeout_minutes":30,"schedule_type":"run_immediately","schedule_config":{},"stop_after_count":0,"save_output":false,"status":"active","run_count":0,"last_run_status":"","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}"#
+            r#"{"id":"bare","name":"Bare","description":"","prompt":"do it","agent_slug":"writer","working_directory":"","model":"","settings_profile_id":"","timeout_minutes":30,"schedule_type":"run_immediately","schedule_config":{},"stop_after_count":0,"save_output":false,"continue_on_reply":false,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","run_count":0,"last_run_status":"","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}"#
         );
     }
 
@@ -1058,11 +1119,74 @@ mod tests {
         );
         assert_eq!(
             encoded(&history[0]),
-            r#"{"id":"job-new","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"running","started_at":"2026-08-15T01:00:00Z","duration_ms":0,"chat_session_id":"","model":"","prompt_preview":"","error_message":"","total_input_tokens":0,"total_output_tokens":0,"total_cache_creation_tokens":0,"total_cache_read_tokens":0,"response_text":""}"#
+            r#"{"id":"job-new","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"running","started_at":"2026-08-15T01:00:00Z","duration_ms":0,"chat_session_id":"","model":"","prompt_preview":"","error_message":"","total_input_tokens":0,"total_output_tokens":0,"total_cache_creation_tokens":0,"total_cache_read_tokens":0,"response_text":"","triggered_by":"schedule"}"#
         );
         assert_eq!(
             encoded(&history[1]),
-            r#"{"id":"job-old","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"success","started_at":"2026-08-14T02:00:00.123456789Z","finished_at":"2026-08-14T02:04:31.5Z","duration_ms":271500,"chat_session_id":"chat-1","model":"claude-opus-4-1","prompt_preview":"summarise \u003cb\u003efast\u003c/b\u003e","error_message":"","total_input_tokens":1200,"total_output_tokens":340,"total_cache_creation_tokens":90,"total_cache_read_tokens":7700,"response_text":"done \u0026 dusted"}"#
+            r#"{"id":"job-old","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"success","started_at":"2026-08-14T02:00:00.123456789Z","finished_at":"2026-08-14T02:04:31.5Z","duration_ms":271500,"chat_session_id":"chat-1","model":"claude-opus-4-1","prompt_preview":"summarise \u003cb\u003efast\u003c/b\u003e","error_message":"","total_input_tokens":1200,"total_output_tokens":340,"total_cache_creation_tokens":90,"total_cache_read_tokens":7700,"response_text":"done \u0026 dusted","triggered_by":"schedule"}"#
+        );
+    }
+
+    /// **The automations fields, in wire order** (#681).
+    ///
+    /// On a task the three sit between `destinations` and `status` and are
+    /// always present. On a run `triggered_by` follows `response_text` and is
+    /// always present, while `continues_job_id` and `event_payload` appear
+    /// only when set — the two asserts above pin that a scheduled run gains
+    /// one key and no more.
+    #[test]
+    fn the_automations_fields_ship_in_wire_order_on_a_task_and_a_run() {
+        let file = fixture();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(
+            r#"UPDATE scheduled_tasks
+                  SET continue_on_reply = 1, dropped_event_count = 4,
+                      rate_limited_event_count = 2
+                WHERE id = 'bare';
+               UPDATE job_history
+                  SET triggered_by = 'reply', continues_job_id = 'job-old',
+                      event_payload = '{"text":"a <b> & c"}'
+                WHERE id = 'job-new';"#,
+        )
+        .expect("set the new columns");
+        drop(conn);
+
+        let task = get_task(file.path(), "bare").expect("get").expect("task");
+        assert!(
+            encoded(&task).contains(
+                r#""save_output":false,"continue_on_reply":true,"dropped_event_count":4,"rate_limited_event_count":2,"status":"active","#
+            ),
+            "{}",
+            encoded(&task)
+        );
+
+        let job = get_job_history(file.path(), "job-new")
+            .expect("get")
+            .expect("job");
+        assert!(
+            encoded(&job).ends_with(
+                r#""response_text":"","triggered_by":"reply","continues_job_id":"job-old","event_payload":"{\"text\":\"a \u003cb\u003e \u0026 c\"}"}"#
+            ),
+            "{}",
+            encoded(&job)
+        );
+    }
+
+    /// The six spellings `job_history.triggered_by` may hold (#681), which
+    /// are also the ones the UI's `TriggeredBy` type names.
+    #[test]
+    fn triggered_by_spells_the_six_run_origins() {
+        let all = [
+            TriggeredBy::Schedule,
+            TriggeredBy::Telegram,
+            TriggeredBy::Slack,
+            TriggeredBy::Webhook,
+            TriggeredBy::Manual,
+            TriggeredBy::Reply,
+        ];
+        assert_eq!(
+            all.map(TriggeredBy::as_str),
+            ["schedule", "telegram", "slack", "webhook", "manual", "reply"]
         );
     }
 
@@ -1138,7 +1262,7 @@ mod tests {
             Some(GoTime::parse_go_string("2026-08-14 02:04:35 +0000 UTC").unwrap());
         insert_pending_delivery(file.path(), &failed).expect("insert");
 
-        let want = r#""response_text":"done \u0026 dusted","deliveries":[{"id":"d-failed","type":"slack","target":"Acme Slack · C0123ABCD","status":"failed","error":"channel_not_found \u003cC0\u003e","created_at":"2026-08-14T02:04:31.9Z","finished_at":"2026-08-14T02:04:35Z"},{"id":"d-pending","type":"slack","target":"Acme Slack · C0123ABCD","status":"pending","error":"","created_at":"2026-08-14T02:04:32Z"},{"id":"d-sent","type":"slack","target":"Acme Slack · C0123ABCD","status":"sent","error":"","created_at":"2026-08-14T02:04:33Z","finished_at":"2026-08-14T02:04:34.25Z"}]}"#;
+        let want = r#""response_text":"done \u0026 dusted","triggered_by":"schedule","deliveries":[{"id":"d-failed","type":"slack","target":"Acme Slack · C0123ABCD","status":"failed","error":"channel_not_found \u003cC0\u003e","created_at":"2026-08-14T02:04:31.9Z","finished_at":"2026-08-14T02:04:35Z"},{"id":"d-pending","type":"slack","target":"Acme Slack · C0123ABCD","status":"pending","error":"","created_at":"2026-08-14T02:04:32Z"},{"id":"d-sent","type":"slack","target":"Acme Slack · C0123ABCD","status":"sent","error":"","created_at":"2026-08-14T02:04:33Z","finished_at":"2026-08-14T02:04:34.25Z"}]}"#;
         let all = list_all_job_history(file.path(), 50, 0).expect("all");
         let task = list_task_job_history(file.path(), "full", 50).expect("task");
         let one = get_job_history(file.path(), "job-old")
@@ -1624,6 +1748,82 @@ mod tests {
         assert!(stored.stop_after_time.is_none());
     }
 
+    /// #681: `continue_on_reply` is a request field like any other — stored on
+    /// create, off unless asked for, and **replaced** on update, so a `PUT`
+    /// that omits it (or sends `null`) turns it off. The two event counters
+    /// are the server's: a body that names them is ignored on both routes, and
+    /// an edit neither resets the stored counts nor misreports them.
+    #[test]
+    fn continue_on_reply_is_replaced_and_the_event_counters_are_not_writable() {
+        let file = migrated();
+        let plain = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        assert!(!plain.continue_on_reply, "a new task defaults to off");
+
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","continue_on_reply":true,
+                "dropped_event_count":50,"rate_limited_event_count":60}"#,
+        );
+        assert!(task.continue_on_reply);
+        assert_eq!(
+            (task.dropped_event_count, task.rate_limited_event_count),
+            (0, 0)
+        );
+
+        // The server counts some events.
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE scheduled_tasks
+                    SET dropped_event_count = 3, rate_limited_event_count = 2
+                  WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("count events");
+
+        let answer = update_task(
+            file.path(),
+            &task.id,
+            br#"{"name":"N","prompt":"p","continue_on_reply":true,
+                 "dropped_event_count":50,"rate_limited_event_count":60}"#,
+        )
+        .expect("update");
+        let wire = r#""continue_on_reply":true,"dropped_event_count":3,"rate_limited_event_count":2,"status":"#;
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert!(
+            body.contains(wire),
+            "the response reports the stored counts: {body}"
+        );
+        let stored = get_task(file.path(), &task.id)
+            .expect("read")
+            .expect("task");
+        assert!(stored.continue_on_reply);
+        assert_eq!(
+            (stored.dropped_event_count, stored.rate_limited_event_count),
+            (3, 2)
+        );
+
+        for body in [
+            &br#"{"name":"N","prompt":"p"}"#[..],
+            &br#"{"name":"N","prompt":"p","continue_on_reply":null}"#[..],
+        ] {
+            rusqlite::Connection::open(file.path())
+                .expect("open")
+                .execute("UPDATE scheduled_tasks SET continue_on_reply = 1", [])
+                .expect("turn it back on");
+            update_task(file.path(), &task.id, body).expect("update");
+            let stored = get_task(file.path(), &task.id)
+                .expect("read")
+                .expect("task");
+            assert!(!stored.continue_on_reply, "omitted or null resets it");
+            assert_eq!(
+                (stored.dropped_event_count, stored.rate_limited_event_count),
+                (3, 2),
+                "an edit never resets the counters"
+            );
+        }
+    }
+
     #[test]
     fn validation_failures_are_422_with_gos_wording() {
         let file = migrated();
@@ -1708,9 +1908,10 @@ mod tests {
         let id = created["id"].as_str().expect("id").to_string();
 
         // Key order `type, when, slack` then `integration_id, channel_ids`, the
-        // list between `save_output` and `status`, and an omitted `when`
-        // defaulted to `success`.
-        let want = r#""save_output":false,"destinations":[{"type":"slack","when":"success","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0456EFGH"]}}],"status":"active","#;
+        // list after `save_output` and ahead of #681's three, and an omitted
+        // `when` defaulted to `success`. A Slack task created after migration
+        // 48 does not continue on a reply: the backfill was not a new default.
+        let want = r#""save_output":false,"destinations":[{"type":"slack","when":"success","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0456EFGH"]}}],"continue_on_reply":false,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#;
         let one = encoded(&get_task(file.path(), &id).expect("get").expect("task"));
         assert!(one.contains(want), "{one}");
         let listed = encoded(&list_tasks(file.path()).expect("list")[0]);
@@ -1733,7 +1934,9 @@ mod tests {
         let bytes = encoded(&get_task(file.path(), &task.id).expect("get").expect("task"));
         assert!(!bytes.contains("destinations"), "{bytes}");
         assert!(
-            bytes.contains(r#""save_output":false,"status":"active","#),
+            bytes.contains(
+                r#""save_output":false,"continue_on_reply":false,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#
+            ),
             "{bytes}"
         );
         assert_eq!(stored_destinations(&file, &task.id), "[]");
@@ -2989,8 +3192,9 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 timeout_minutes = ?8, schedule_type = ?9, schedule_config = ?10,
                 stop_after_count = ?11, stop_after_time = ?12, save_output = ?13, status = ?14,
                 run_count = ?15, last_run_at = ?16, last_run_status = ?17,
-                next_run_at = ?18, updated_at = ?19, destinations = ?20
-             WHERE id = ?21",
+                next_run_at = ?18, updated_at = ?19, destinations = ?20,
+                continue_on_reply = ?21
+             WHERE id = ?22",
             rusqlite::params![
                 task.name,
                 task.description,
@@ -3012,6 +3216,7 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 nullable_time(task.next_run_at.as_ref()),
                 now,
                 destinations,
+                task.continue_on_reply,
                 task.id,
             ],
         )
@@ -3038,9 +3243,10 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
             (id, name, description, prompt, agent_slug, working_directory, model,
              settings_profile_id, timeout_minutes, schedule_type, schedule_config,
              stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
-             last_run_status, next_run_at, created_at, updated_at, destinations)
+             last_run_status, next_run_at, created_at, updated_at, destinations,
+             continue_on_reply)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20, ?21, ?22)",
+                 ?18, ?19, ?20, ?21, ?22, ?23)",
         rusqlite::params![
             task.id,
             task.name,
@@ -3064,6 +3270,7 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
             super::gotime::to_go_string_utc(task.created_at),
             super::gotime::to_go_string_utc(task.updated_at),
             destinations,
+            task.continue_on_reply,
         ],
     )
     .map_err(|e| format!("creating task: {e}"))?;
@@ -3078,8 +3285,10 @@ pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String
             (id, task_id, task_name, agent_slug, status, started_at, finished_at,
              duration_ms, chat_session_id, model, prompt_preview, error_message,
              total_input_tokens, total_output_tokens,
-             total_cache_creation_tokens, total_cache_read_tokens, response_text)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             total_cache_creation_tokens, total_cache_read_tokens, response_text,
+             triggered_by, continues_job_id, event_payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                 ?18, ?19, ?20)",
         rusqlite::params![
             job.id,
             job.task_id,
@@ -3098,6 +3307,9 @@ pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String
             job.total_cache_creation_tokens,
             job.total_cache_read_tokens,
             job.response_text,
+            job.triggered_by,
+            job.continues_job_id,
+            job.event_payload,
         ],
     )
     .map_err(|e| format!("creating job history: {e}"))?;
@@ -3417,18 +3629,24 @@ struct TaskRequest {
     /// object belongs is a 400 rather than a zero entry, while a `null`
     /// element is the zero entry — which validation then refuses by its type.
     destinations: Option<super::gojson::GoList<super::gojson::GoStruct<TaskDestination>>>,
+    /// Replaced like every other field (#681): absent and `null` both store
+    /// `false`. The two event counters beside it on the row are deliberately
+    /// **not** here — they are the server's, so a body naming them is ignored.
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    continue_on_reply: bool,
 }
 
 impl TaskRequest {
     /// The `storage.ScheduledTask` both handlers build from the request — the
-    /// fifteen fields they copy (`destinations` since #634), and nothing else.
+    /// sixteen fields they copy (`destinations` since #634, `continue_on_reply`
+    /// since #681), and nothing else.
     ///
-    /// The other seven are the row's own, and they split three ways. `id` is
+    /// The other nine are the row's own, and they split three ways. `id` is
     /// minted on a create and re-set from the URL on an update; `updated_at` is
-    /// restamped by every write. Four are taken from the **stored row** by
-    /// `update_task` — `created_at`, `run_count`, `last_run_at` and
-    /// `last_run_status` — which is what stops an edit resetting a task's
-    /// history. `next_run_at` is the exception in both directions: nothing in
+    /// restamped by every write. Six are taken from the **stored row** by
+    /// `update_task` — `created_at`, `run_count`, `last_run_at`,
+    /// `last_run_status` and the two event counters — which is what stops an
+    /// edit resetting a task's history. `next_run_at` is the exception in both directions: nothing in
     /// this crate ever writes it, and an update **clears** it rather than
     /// carrying it over. See `update_task`'s own doc comment.
     fn into_task(self) -> ScheduledTask {
@@ -3451,6 +3669,9 @@ impl TaskRequest {
                 .destinations
                 .map(|list| list.0.into_iter().map(|entry| entry.0).collect())
                 .unwrap_or_default(),
+            continue_on_reply: self.continue_on_reply,
+            dropped_event_count: 0,
+            rate_limited_event_count: 0,
             status: self.status,
             run_count: 0,
             last_run_at: None,
@@ -3879,9 +4100,11 @@ pub(crate) fn create_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, 
 
 /// `taskService.UpdateTask`.
 ///
-/// Four fields are carried over from the stored row rather than taken from the
-/// body — `run_count`, `last_run_at`, `last_run_status` and `created_at` — and
-/// that is what stops an edit from resetting a task's history. `next_run_at` is
+/// Six fields are carried over from the stored row rather than taken from the
+/// body — `run_count`, `last_run_at`, `last_run_status`, `created_at` and the
+/// two event counters (#681) — and that is what stops an edit from resetting a
+/// task's history. The counters are carried for the response alone:
+/// `update_task_in` never writes them. `next_run_at` is
 /// **not** among them, so an update clears it; nothing writes it, so this is
 /// only observable on a row some other tool wrote.
 fn update_task(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
@@ -3904,6 +4127,8 @@ fn update_task(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, W
     task.last_run_at = existing.last_run_at;
     task.last_run_status = existing.last_run_status;
     task.created_at = existing.created_at;
+    task.dropped_event_count = existing.dropped_event_count;
+    task.rate_limited_event_count = existing.rate_limited_event_count;
 
     validate_task(&mut task)?;
     check_destination_integrations(&tx, &task.destinations, &existing.destinations)?;

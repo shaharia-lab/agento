@@ -306,7 +306,8 @@ pub struct AvailableTool {
 /// declaration order **is** its key order on the wire, and every other type here
 /// carries `created_at`/`updated_at` last. Each spells "the dispatcher's own
 /// default" as the zero value, so a rule written before that migration reads
-/// back with all five empty and behaves exactly as it did.
+/// back with all five empty and behaves exactly as it did. The automations
+/// pair (#681) follows them for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TriggerRule {
     pub id: String,
@@ -323,6 +324,14 @@ pub struct TriggerRule {
     pub permission_mode: String,
     /// 0 means the dispatcher's `RUN_TIMEOUT`, not "time out immediately".
     pub timeout_minutes: i64,
+    /// The task this rule starts (#681), `""` while it is not linked to one.
+    /// No foreign key: a write refuses an id that names no task, and a task
+    /// deleted afterwards leaves a dangling id for the reader to handle.
+    pub task_id: String,
+    /// Whether a reply continues the conversation (#681). Stored and
+    /// round-tripped only until #686 reads it; migration 48 turned it on for
+    /// every rule that existed, because those already continue.
+    pub continue_on_reply: bool,
     pub created_at: GoTime,
     pub updated_at: GoTime,
 }
@@ -658,7 +667,8 @@ const TRIGGER_RULE_COLUMNS: &str = "SELECT id, integration_id, name, agent_slug,
                     filter_prefix, filter_keywords, filter_chat_ids,
                     model, working_directory, settings_profile_id,
                     permission_mode, timeout_minutes,
-                    created_at, updated_at
+                    created_at, updated_at,
+                    task_id, continue_on_reply
              FROM trigger_rules";
 
 fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
@@ -667,6 +677,7 @@ fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
     let chat_ids: String = row.get(7)?;
     let created_at: String = row.get(13)?;
     let updated_at: String = row.get(14)?;
+    let continue_on_reply: i64 = row.get(16)?;
     Ok(TriggerRule {
         id: row.get(0)?,
         integration_id: row.get(1)?,
@@ -681,6 +692,8 @@ fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
         settings_profile_id: row.get(10)?,
         permission_mode: row.get(11)?,
         timeout_minutes: row.get(12)?,
+        task_id: row.get(15)?,
+        continue_on_reply: continue_on_reply != 0,
         created_at: super::gotime::from_sql_text(&created_at, 13)?,
         updated_at: super::gotime::from_sql_text(&updated_at, 14)?,
     })
@@ -1636,6 +1649,33 @@ struct TriggerRuleRequest {
     permission_mode: String,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     timeout_minutes: i64,
+    /// The rule→task link and the continuation flag (#681), replaced like
+    /// everything else here: an omitted key unlinks the rule and turns the
+    /// flag off.
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    task_id: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    continue_on_reply: bool,
+}
+
+/// A rule may link only to a task that exists (#681). Empty is "not linked"
+/// and is never looked up; the column has no foreign key, so this check at the
+/// write is the only thing that keeps a mistyped id out.
+fn check_rule_task(conn: &rusqlite::Connection, task_id: &str) -> Result<(), WriteError> {
+    if task_id.is_empty() {
+        return Ok(());
+    }
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM scheduled_tasks WHERE id = ?1)",
+            [task_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| WriteError::Fallback(format!("looking up task {task_id:?}: {e}")))?;
+    if !exists {
+        return Err(WriteError::validation("task_id", "task not found"));
+    }
+    Ok(())
 }
 
 /// The checks `create` and `update` share, after `agent_slug`.
@@ -1696,6 +1736,7 @@ fn create_trigger_rule(
             id: integration_id.to_string(),
         });
     }
+    check_rule_task(&conn, &req.task_id)?;
 
     // One `now` for both columns and for the response: Go takes a single
     // `time.Now()` and writes it to both, so two calls here could store a rule
@@ -1716,6 +1757,8 @@ fn create_trigger_rule(
         settings_profile_id: req.settings_profile_id,
         permission_mode: req.permission_mode,
         timeout_minutes: req.timeout_minutes,
+        task_id: req.task_id,
+        continue_on_reply: req.continue_on_reply,
         created_at: stamp,
         updated_at: stamp,
     };
@@ -1754,6 +1797,7 @@ fn update_trigger_rule(
         ));
     }
     validate_rule_settings(&req)?;
+    check_rule_task(&conn, &req.task_id)?;
 
     // `UpdateRule` keeps the stored id, integration and creation time and
     // replaces everything else — a field the caller omitted is cleared, not kept.
@@ -1772,6 +1816,8 @@ fn update_trigger_rule(
         settings_profile_id: req.settings_profile_id,
         permission_mode: req.permission_mode,
         timeout_minutes: req.timeout_minutes,
+        task_id: req.task_id,
+        continue_on_reply: req.continue_on_reply,
         created_at: existing.created_at,
         updated_at: parse_written(&now)?,
     };
@@ -1782,8 +1828,8 @@ fn update_trigger_rule(
             filter_prefix = ?4, filter_keywords = ?5, filter_chat_ids = ?6,
             model = ?7, working_directory = ?8, settings_profile_id = ?9,
             permission_mode = ?10, timeout_minutes = ?11,
-            updated_at = ?12
-         WHERE id = ?13",
+            updated_at = ?12, task_id = ?13, continue_on_reply = ?14
+         WHERE id = ?15",
         rusqlite::params![
             &rule.name,
             &rule.agent_slug,
@@ -1797,6 +1843,8 @@ fn update_trigger_rule(
             &rule.permission_mode,
             rule.timeout_minutes,
             &now,
+            &rule.task_id,
+            i64::from(rule.continue_on_reply),
             &rule.id,
         ],
     )
@@ -1837,8 +1885,8 @@ fn insert_rule(
             (id, integration_id, name, agent_slug, enabled,
              filter_prefix, filter_keywords, filter_chat_ids,
              model, working_directory, settings_profile_id, permission_mode,
-             timeout_minutes, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             timeout_minutes, created_at, updated_at, task_id, continue_on_reply)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             &rule.id,
             &rule.integration_id,
@@ -1855,6 +1903,8 @@ fn insert_rule(
             rule.timeout_minutes,
             now,
             now,
+            &rule.task_id,
+            i64::from(rule.continue_on_reply),
         ],
     )
     .map_err(|e| WriteError::Fallback(format!("creating trigger rule: {e}")))?;
@@ -1968,7 +2018,9 @@ mod tests {
             permission_mode     TEXT NOT NULL DEFAULT '',
             timeout_minutes     INTEGER NOT NULL DEFAULT 0,
             created_at          DATETIME NOT NULL,
-            updated_at          DATETIME NOT NULL
+            updated_at          DATETIME NOT NULL,
+            task_id             TEXT NOT NULL DEFAULT '',
+            continue_on_reply   INTEGER NOT NULL DEFAULT 0
         );";
 
     /// The secret is a distinctive string so a leak is unmistakable in any
@@ -3710,8 +3762,39 @@ mod tests {
         assert!(body.contains(r#""filter_keywords":["x"]"#), "{body}");
         // A `TriggerRule` is a struct in Go, so this order is declaration order.
         assert!(body.starts_with(r#"{"id":"#), "{body}");
+        // #681: a rule created after migration 48 is unlinked and does not
+        // continue on a reply — the backfill was for the rules that existed.
+        assert!(
+            body.contains(
+                r#""timeout_minutes":0,"task_id":"","continue_on_reply":false,"created_at":"#
+            ),
+            "{body}"
+        );
 
         let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        // The link and the flag are written, and read back by the list.
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO scheduled_tasks (id, name, prompt) VALUES ('task-1', 'T', 'p')",
+            [],
+        )
+        .expect("seed task");
+        drop(conn);
+        let linked = update_trigger_rule(
+            file.path(),
+            "int-1",
+            &id,
+            br#"{"agent_slug":"a","task_id":"task-1","continue_on_reply":true}"#,
+        )
+        .expect("link rule");
+        let wire =
+            r#""timeout_minutes":0,"task_id":"task-1","continue_on_reply":true,"created_at":"#;
+        assert!(body_of(&linked).contains(wire), "{}", body_of(&linked));
+        let listed = list_trigger_rules(file.path(), "int-1").expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].task_id, "task-1");
+        assert!(listed[0].continue_on_reply);
 
         // An omitted field is cleared, not preserved — `UpdateRule` replaces.
         let updated = update_trigger_rule(file.path(), "int-1", &id, br#"{"agent_slug":"b"}"#)
@@ -3725,6 +3808,18 @@ mod tests {
         );
         // A nil Go slice is `null`; an omitted keyword list is nil, not `[]`.
         assert!(body.contains(r#""filter_keywords":null"#), "{body}");
+        // …and so are the link and the flag: replace, like every other field.
+        assert!(
+            body.contains(r#""task_id":"","continue_on_reply":false,"#),
+            "{body}"
+        );
+        assert_eq!(
+            stored(
+                &file,
+                "SELECT task_id || '/' || continue_on_reply FROM trigger_rules"
+            ),
+            "/0"
+        );
 
         let deleted = delete_trigger_rule(file.path(), "int-1", &id).expect("delete rule");
         assert_eq!(deleted.status, axum::http::StatusCode::NO_CONTENT);
@@ -3758,7 +3853,7 @@ mod tests {
         // the filters and the timestamps, not merely their presence.
         assert!(
             body.contains(
-                r#""filter_chat_ids":null,"model":"claude-opus-4-6","working_directory":"/srv/work","settings_profile_id":"p-7","permission_mode":"plan","timeout_minutes":45,"created_at":"#
+                r#""filter_chat_ids":null,"model":"claude-opus-4-6","working_directory":"/srv/work","settings_profile_id":"p-7","permission_mode":"plan","timeout_minutes":45,"task_id":"","continue_on_reply":false,"created_at":"#
             ),
             "{body}"
         );
@@ -3859,6 +3954,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #681: `task_id` has no foreign key, so the write is what refuses an id
+    /// that names no task — on both routes, and before anything is stored.
+    #[test]
+    fn a_rule_linked_to_a_task_that_does_not_exist_is_422() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+        create_trigger_rule(file.path(), "int-1", br#"{"agent_slug":"a"}"#).expect("seed rule");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        let body = &br#"{"agent_slug":"b","task_id":"no-such-task"}"#[..];
+        for err in [
+            create_trigger_rule(file.path(), "int-1", body).expect_err("create"),
+            update_trigger_rule(file.path(), "int-1", &id, body).expect_err("update"),
+        ] {
+            assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                err.message()
+                    .starts_with(r#"validation error for "task_id""#),
+                "{}",
+                err.message()
+            );
+        }
+        assert_eq!(
+            stored(
+                &file,
+                "SELECT COUNT(*) || '/' || MAX(agent_slug) FROM trigger_rules"
+            ),
+            "1/a",
+            "neither refusal wrote anything"
+        );
     }
 
     /// The accepted side of the same two rules, derived from the constants

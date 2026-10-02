@@ -209,6 +209,10 @@ export interface TriggerRule {
   permission_mode: string;
   /** 0..240; 0 means the dispatcher's own run timeout. */
   timeout_minutes: number;
+  /** The task this rule starts (#681); "" while it is not linked to one. */
+  task_id: string;
+  /** Whether a reply continues the conversation (#681). */
+  continue_on_reply: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -295,6 +299,11 @@ export interface ScheduledTask {
   save_output: boolean;
   /** Omitted when the task has none (#634). */
   destinations?: TaskDestination[] | null;
+  /** Whether a reply to this task's output continues the conversation (#681). */
+  continue_on_reply: boolean;
+  /** Events the task did not run for (#681). Server-owned: a write ignores both. */
+  dropped_event_count: number;
+  rate_limited_event_count: number;
   status: TaskStatus;
   run_count: number;
   last_run_at?: string | null;
@@ -342,9 +351,23 @@ export interface JobHistory {
   total_cache_creation_tokens: number;
   total_cache_read_tokens: number;
   response_text: string;
+  /** What started the run (#681); a run older than the field reads "schedule". */
+  triggered_by: TriggeredBy;
+  /** The run a reply continues (#681). Omitted when it continues none. */
+  continues_job_id?: string;
+  /** The event that started the run (#681). Omitted when there was none. */
+  event_payload?: string;
   /** Omitted when the run delivered nowhere (#635). */
   deliveries?: JobDelivery[] | null;
 }
+
+export type TriggeredBy =
+  | "schedule"
+  | "telegram"
+  | "slack"
+  | "webhook"
+  | "manual"
+  | "reply";
 
 export type DeliveryStatus = "pending" | "sent" | "failed" | "skipped";
 

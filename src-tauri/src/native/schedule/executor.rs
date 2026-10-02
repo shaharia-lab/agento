@@ -53,8 +53,9 @@ pub enum RunKind {
     /// A timer fired. Advances `run_count` and `last_run_*`, and applies the
     /// two auto-pause rules.
     Scheduled,
-    /// `POST /api/tasks/{id}/run`. Produces an identical `job_history` row and
-    /// touches **none** of the schedule's own accounting.
+    /// `POST /api/tasks/{id}/run`. Produces the same `job_history` row but for
+    /// its `triggered_by` (#681), and touches **none** of the schedule's own
+    /// accounting.
     Manual,
 }
 
@@ -76,6 +77,17 @@ impl RunKind {
     /// run must spend nothing in any of them.
     fn advances_schedule(self) -> bool {
         matches!(self, Self::Scheduled)
+    }
+
+    /// What the run's `job_history` row records as having started it (#681).
+    /// Written by both functions that insert a row — `create_initial_job_history`
+    /// and `record_failed_run` — so a run that fails before it starts still
+    /// says who asked for it.
+    fn triggered_by(self) -> tasks::TriggeredBy {
+        match self {
+            Self::Scheduled => tasks::TriggeredBy::Schedule,
+            Self::Manual => tasks::TriggeredBy::Manual,
+        }
     }
 }
 
@@ -648,6 +660,9 @@ fn create_initial_job_history(
         total_cache_creation_tokens: 0,
         total_cache_read_tokens: 0,
         response_text: String::new(),
+        triggered_by: run.kind.triggered_by().as_str().to_string(),
+        continues_job_id: String::new(),
+        event_payload: String::new(),
         deliveries: Vec::new(),
     };
     if let Err(e) = tasks::insert_job_history(db_path, &job) {
@@ -1127,6 +1142,9 @@ fn record_failed_run(
         total_cache_creation_tokens: 0,
         total_cache_read_tokens: 0,
         response_text: String::new(),
+        triggered_by: run.kind.triggered_by().as_str().to_string(),
+        continues_job_id: String::new(),
+        event_payload: String::new(),
         deliveries: Vec::new(),
     };
     if let Err(e) = tasks::insert_job_history(scheduler.db_path(), &job) {
@@ -1371,6 +1389,7 @@ mod tests {
         assert_eq!(stored.status, "running");
         assert_eq!(stored.chat_session_id, "chat-1");
         assert!(stored.finished_at.is_none());
+        assert_eq!(stored.triggered_by, "schedule");
 
         let result = RunResult {
             input_tokens: 5,
@@ -1397,6 +1416,55 @@ mod tests {
         // The narrower UPDATE column list: the finish must not rewrite what the
         // insert recorded.
         assert_eq!(done.prompt_preview, "the prompt");
+        assert_eq!(done.triggered_by, "schedule");
+    }
+
+    /// #681: the row says what started the run, on both of the paths that
+    /// insert one — a run that started, and a run that failed before it could.
+    /// Neither kind invents a continuation or a payload.
+    #[test]
+    fn a_runs_row_records_whether_the_schedule_or_a_person_started_it() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks (id, name, prompt, created_at, updated_at)
+             VALUES ('t1', 'T', 'p', '2026-01-01 00:00:00 +0000 UTC',
+                     '2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed task");
+        drop(conn);
+
+        let mut task = sample_task();
+        task.id = "t1".to_string();
+        let scheduler = test_scheduler(file.path());
+        for (kind, expected) in [
+            (RunKind::Scheduled, "schedule"),
+            (RunKind::Manual, "manual"),
+        ] {
+            let started = Run {
+                kind,
+                job_id: uuid::Uuid::new_v4().to_string(),
+                started_at: Utc::now(),
+            };
+            create_initial_job_history(file.path(), &task, "chat-1", "the prompt", &started);
+            let failed = Run {
+                kind,
+                job_id: uuid::Uuid::new_v4().to_string(),
+                started_at: Utc::now(),
+            };
+            record_failed_run(&scheduler, &mut task, "", "no such agent", &failed);
+
+            for id in [&started.job_id, &failed.job_id] {
+                let stored = tasks::get_job_history(file.path(), id)
+                    .expect("read")
+                    .expect("the row");
+                assert_eq!(stored.triggered_by, expected, "{kind:?}");
+                assert_eq!(stored.continues_job_id, "", "{kind:?}");
+                assert_eq!(stored.event_payload, "", "{kind:?}");
+            }
+        }
     }
 
     /// Finding #1 of PR #365's third review: a pause landed while the run was
@@ -1491,6 +1559,46 @@ mod tests {
             .expect("row");
         assert_eq!(task.run_count, 1, "the run itself was recorded");
         assert_eq!(task.destinations.len(), 1);
+    }
+
+    /// #681: the write-back rewrites the row through `update_task_in`, and the
+    /// snapshot it started from knows none of the three automations columns.
+    /// `continue_on_reply` survives because the row is re-read first; the two
+    /// counters survive because that `UPDATE` does not name them at all — so
+    /// an event counted while the run was in flight is not lost to it.
+    #[test]
+    fn the_runs_write_back_leaves_the_automations_columns_alone() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status,
+                 continue_on_reply, dropped_event_count, rate_limited_event_count,
+                 created_at, updated_at)
+             VALUES ('t1','T','p','interval','{\"every_minutes\":5}','active', 1, 3, 2,
+                     '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed");
+        drop(conn);
+
+        // The snapshot the timer loaded carries none of them.
+        let mut snapshot = sample_task();
+        snapshot.id = "t1".to_string();
+        snapshot.status = "active".to_string();
+        assert!(!snapshot.continue_on_reply);
+
+        let scheduler = test_scheduler(file.path());
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+
+        let task = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        assert_eq!(task.run_count, 1, "the run itself was recorded");
+        assert!(task.continue_on_reply);
+        assert_eq!(task.dropped_event_count, 3);
+        assert_eq!(task.rate_limited_event_count, 2);
     }
 
     #[test]
@@ -2106,6 +2214,9 @@ mod tests {
             stop_after_time: None,
             save_output: false,
             destinations: Vec::new(),
+            continue_on_reply: false,
+            dropped_event_count: 0,
+            rate_limited_event_count: 0,
             status: "active".to_string(),
             run_count: 0,
             last_run_at: None,

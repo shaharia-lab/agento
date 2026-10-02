@@ -1614,6 +1614,13 @@ interface RuleDraft {
   settings_profile_id: string;
   permission_mode: string;
   timeout_minutes: string;
+  /**
+   * #681's pair. No control edits either yet, so the draft only carries what
+   * the stored rule holds — the write is replace, and a save that left them
+   * out would unlink the rule and turn its continuation off.
+   */
+  task_id: string;
+  continue_on_reply: boolean;
 }
 
 const BLANK_RULE: RuleDraft = {
@@ -1628,6 +1635,8 @@ const BLANK_RULE: RuleDraft = {
   settings_profile_id: "",
   permission_mode: "",
   timeout_minutes: "",
+  task_id: "",
+  continue_on_reply: false,
 };
 
 /** A stored rule, as the form edits it. */
@@ -1645,6 +1654,8 @@ function draftOf(r: TriggerRule): RuleDraft {
     settings_profile_id: r.settings_profile_id,
     permission_mode: r.permission_mode,
     timeout_minutes: r.timeout_minutes > 0 ? String(r.timeout_minutes) : "",
+    task_id: r.task_id,
+    continue_on_reply: r.continue_on_reply,
   };
 }
 
@@ -1653,7 +1664,7 @@ function draftOf(r: TriggerRule): RuleDraft {
  *
  * `POST`/`PUT /integrations/{id}/triggers` is **replace, not preserve**: every
  * field of the request decodes a missing key as its zero value, so a body that
- * names ten of the eleven columns resets the eleventh. That is what made the
+ * names twelve of the thirteen columns resets the thirteenth. That is what made the
  * row's *enabled* switch erase a rule's model, working directory, profile,
  * permission mode and timeout — it sent six.
  *
@@ -1680,6 +1691,8 @@ interface RuleWrite {
   settings_profile_id: string;
   permission_mode: string;
   timeout_minutes: number;
+  task_id: string;
+  continue_on_reply: boolean;
 }
 
 /** From the form: what was typed, normalised. */
@@ -1696,6 +1709,8 @@ function ruleBody(d: RuleDraft): RuleWrite {
     settings_profile_id: d.settings_profile_id.trim(),
     permission_mode: d.permission_mode.trim(),
     timeout_minutes: Number(d.timeout_minutes) || 0,
+    task_id: d.task_id,
+    continue_on_reply: d.continue_on_reply,
   };
 }
 
@@ -1713,6 +1728,8 @@ function ruleBodyToggled(r: TriggerRule, enabled: boolean): RuleWrite {
     settings_profile_id: r.settings_profile_id,
     permission_mode: r.permission_mode,
     timeout_minutes: r.timeout_minutes,
+    task_id: r.task_id,
+    continue_on_reply: r.continue_on_reply,
   };
 }
 

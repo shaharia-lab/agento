@@ -56,6 +56,13 @@
 //! Migration **47** is the seventeenth:
 //! `user_settings.session_history_retention_days`, how long an expired
 //! session's history is kept, where 0 is for ever (#712, epic #703).
+//! Migration **48** is the eighteenth: the automations data model —
+//! `job_history.triggered_by`, `continues_job_id` and `event_payload`,
+//! `trigger_rules.task_id`, `continue_on_reply` on both `trigger_rules` and
+//! `scheduled_tasks`, and the two per-task event counters. It is the first of
+//! them to backfill: every existing rule and every task with a Slack
+//! destination is switched to `continue_on_reply`, because those already
+//! continue on a reply (#681, epic #679).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -287,8 +294,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 47, "expected 47 migrations");
-        assert_eq!(expected_version(), 47);
+        assert_eq!(all.len(), 48, "expected 48 migrations");
+        assert_eq!(expected_version(), 48);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -382,7 +389,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 47);
+        assert_eq!(current_version(&conn).expect("version"), 48);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -600,7 +607,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 47);
+        assert_eq!(current_version(&conn).expect("version"), 48);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -619,6 +626,100 @@ mod tests {
                 "{table}: every existing row keeps a transcript and is claude's"
             );
         }
+    }
+
+    /// **Migration 48 records today's behaviour rather than changing it**
+    /// (#681).
+    ///
+    /// Seeded at 47, because the backfill is about the rows an install already
+    /// has. Every existing rule continues on a reply and so does every task
+    /// with a Slack destination, whose thread #642 maps unconditionally; a
+    /// task that delivers nowhere, or only to Telegram, does not. A run
+    /// recorded before the upgrade was started by the schedule as far as
+    /// anything stored can tell.
+    ///
+    /// The last four tasks are the hand-edited `destinations` the `UPDATE`
+    /// must survive: `json_each` raises on text that is not JSON and
+    /// `json_extract` raises on a string element, and either would fail the
+    /// whole upgrade and leave the app unable to start.
+    #[test]
+    fn existing_rules_and_slack_tasks_continue_on_reply_after_the_upgrade() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 47);
+        conn.execute_batch(
+            r#"INSERT INTO integrations (id, name, type, enabled, created_at, updated_at)
+                    VALUES ('int-1', 'Telegram', 'telegram', 1, '', '');
+               INSERT INTO trigger_rules (id, integration_id, agent_slug, enabled)
+                    VALUES ('rule-on', 'int-1', 'a', 1), ('rule-off', 'int-1', 'a', 0);
+               INSERT INTO scheduled_tasks (id, name, prompt, destinations) VALUES
+                    ('slack', 'T', 'p', '[{"type":"slack","when":"always","slack":{"integration_id":"i","channels":["C0123ABCD"]}}]'),
+                    ('mixed', 'T', 'p', '[{"type":"telegram"},{"type":"slack"}]'),
+                    ('telegram', 'T', 'p', '[{"type":"telegram","when":"always"}]'),
+                    ('plain', 'T', 'p', '[]'),
+                    ('not-json', 'T', 'p', 'slack, by hand'),
+                    ('strings', 'T', 'p', '["slack", 7, null]'),
+                    ('object', 'T', 'p', '{"type":"slack"}'),
+                    ('blank', 'T', 'p', '');
+               INSERT INTO job_history (id, task_id, task_name, started_at)
+                    VALUES ('j1', 'plain', 'T', '2026-01-01 00:00:00 +0000 UTC');"#,
+        )
+        .expect("seed rows at 47");
+
+        apply(&mut conn).expect("apply 48 and later");
+        assert_eq!(current_version(&conn).expect("version"), 48);
+
+        let flagged = |table: &str| -> Vec<String> {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT id FROM {table} WHERE continue_on_reply = 1 ORDER BY id"
+                ))
+                .expect("prepare");
+            let ids = stmt
+                .query_map([], |row| row.get(0))
+                .expect("query")
+                .collect::<Result<Vec<String>, _>>()
+                .expect("rows");
+            ids
+        };
+        assert_eq!(flagged("trigger_rules"), ["rule-off", "rule-on"]);
+        assert_eq!(flagged("scheduled_tasks"), ["mixed", "slack"]);
+
+        let (rule_task, dropped, limited): (String, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT task_id FROM trigger_rules WHERE id = 'rule-on'),
+                        dropped_event_count, rate_limited_event_count
+                   FROM scheduled_tasks WHERE id = 'slack'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the link and the counters");
+        assert_eq!((rule_task.as_str(), dropped, limited), ("", 0, 0));
+
+        let (by, continues, payload): (String, String, String) = conn
+            .query_row(
+                "SELECT triggered_by, continues_job_id, event_payload
+                   FROM job_history WHERE id = 'j1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the run's new columns");
+        assert_eq!(
+            (by.as_str(), continues.as_str(), payload.as_str()),
+            ("schedule", "", "")
+        );
+
+        // What is written after the upgrade defaults to off: the backfill is
+        // for what existed, not a new default.
+        conn.execute_batch(
+            r#"INSERT INTO trigger_rules (id, integration_id, agent_slug)
+                    VALUES ('rule-new', 'int-1', 'a');
+               INSERT INTO scheduled_tasks (id, name, prompt, destinations)
+                    VALUES ('slack-new', 'T', 'p', '[{"type":"slack"}]');"#,
+        )
+        .expect("rows written after the upgrade");
+        assert_eq!(flagged("trigger_rules"), ["rule-off", "rule-on"]);
+        assert_eq!(flagged("scheduled_tasks"), ["mixed", "slack"]);
     }
 
     /// **The install's `machine_id` is made once, by the migration, and kept**
@@ -738,7 +839,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 47);
+        assert_eq!(current_version(&conn).expect("version"), 48);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -849,7 +950,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 47);
+        assert_eq!(current_version(&conn).expect("version"), 48);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -858,7 +959,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 47);
+        assert_eq!(recorded, 48);
     }
 
     #[test]
