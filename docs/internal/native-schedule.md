@@ -239,8 +239,9 @@ one and the first to finish would clear an entry the second still owns.
 **An event starts a run through `executor::run_event`, and nothing else**
 (#683, epic #679). A transport — Telegram, Slack, the webhook, a reply —
 authenticates its sender, builds an `EventInput` (whose constructor refuses
-`schedule` and `manual` as a source) and calls it; no transport does yet
-(#684, #685, #696). It is `run_manual`'s shape — mark in flight, take one of
+`schedule` and `manual` as a source) and calls it. Slack does
+(`slack/inbound.rs::run_linked`, #685); Telegram and the webhook do not yet
+(#684, #696). It is `run_manual`'s shape — mark in flight, take one of
 the three permits, re-read the task — with these rules:
 
 - **Three refusals, and none writes a row**, since no run started:

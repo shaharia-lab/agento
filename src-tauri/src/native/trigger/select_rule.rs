@@ -96,6 +96,7 @@ mod tests {
             },
             settings: Default::default(),
             timeout_minutes: 0,
+            task_id: String::new(),
         }
     }
 

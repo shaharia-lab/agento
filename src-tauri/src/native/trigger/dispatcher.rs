@@ -185,6 +185,10 @@ pub struct Rule {
     /// Migration 39's fifth. `0` is "the dispatcher's own default", **not** a
     /// run that times out instantly — see [`run_timeout`].
     pub timeout_minutes: i64,
+    /// The task this rule starts through `executor::run_event` (#685); empty
+    /// for a rule that runs its own agent, which is every rule migration 48
+    /// found.
+    pub task_id: String,
 }
 
 /// `findMatchingRule`: the first **enabled** rule that matches, in the order the
@@ -231,7 +235,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
         .prepare(
             "SELECT id, name, agent_slug, enabled, filter_prefix, filter_keywords,
                     filter_chat_ids, model, working_directory, settings_profile_id,
-                    permission_mode, timeout_minutes
+                    permission_mode, timeout_minutes, task_id
              FROM trigger_rules
              WHERE integration_id = ?1
              ORDER BY created_at ASC",
@@ -260,6 +264,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
                     permission_mode: usable_permission_mode(permission_mode),
                 },
                 timeout_minutes: row.get(11)?,
+                task_id: row.get(12)?,
             })
         })
         .map_err(|e| format!("querying trigger rules: {e}"))?;
@@ -972,6 +977,7 @@ mod tests {
             filters: RuleFilters::default(),
             settings: Default::default(),
             timeout_minutes: minutes,
+            task_id: String::new(),
         };
 
         assert_eq!(run_timeout(&rule(0)), RUN_TIMEOUT);

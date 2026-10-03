@@ -210,10 +210,13 @@ the reader must tolerate. Both fields are **replaced** on `PUT` like the rest
 of the rule, which is why the Integrations form carries them in `RuleDraft` and
 in both `RuleWrite` builders although no control edits them yet. **Migration 48
 set `continue_on_reply` on every rule that existed**, because those already
-continue; a rule created afterwards defaults to off. Nothing reads either
-column at run time yet — the dispatcher's `load_rules` does not select them —
-and `agent_slug` is still required whether or not a task is linked. The task's
-half is in `docs/internal/native-schedule.md`.
+continue; a rule created afterwards defaults to off. **`task_id` is read at run
+time by Slack only** (#685): the dispatcher's `load_rules` selects it into
+`Rule.task_id`, and `slack/inbound.rs` starts that task for a top-level mention
+(`docs/internal/native-integrations-slack.md`). Telegram's dispatcher carries
+the field and ignores it until #684. `continue_on_reply` is still read by
+nothing (#686), and `agent_slug` is still required whether or not a task is
+linked. The task's half is in `docs/internal/native-schedule.md`.
 
 ## The OAuth flow (#318)
 

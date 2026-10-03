@@ -15,10 +15,12 @@
 //!    a new thread. A mention inside a thread is a **resume** when
 //!    `(integration, channel, thread_ts)` is in `inbound_threads`, and is
 //!    ignored at `debug` when it is not — Agento answers in threads it started
-//!    and nowhere else (epic #562, decision 1). A row is written by exactly two
-//!    things: an inbound start ([`Inbound::start_chat`]) and a scheduled task's
-//!    Slack delivery (`slack::delivery`, #642), which maps the thread under the
-//!    run's summary to the run's chat. Both are threads Agento posted, so the
+//!    and nowhere else (epic #562, decision 1). A row is written by exactly
+//!    three things: an inbound start ([`Inbound::start_chat`]); a scheduled
+//!    task's Slack delivery (`slack::delivery`, #642), which maps the thread
+//!    under the run's summary to the run's chat; and a linked rule's event run
+//!    ([`Inbound::run_linked`], #685), which maps the mention's thread to the
+//!    chat that run created. All three are threads Agento answers in, so the
 //!    rule holds; a delivery maps **one** thread per run, because the table is
 //!    `UNIQUE (chat_id)`.
 //! 2. **Which rule.** [`select_rule_for_channel`] — most specific first, and a
@@ -71,12 +73,23 @@
 //!
 //! ## Rules that are not obvious from the code
 //!
-//! - **Both paths run through [`agent_run::run_resumed`].** A start creates the
-//!   chat first and then resumes it — the chat has no `sdk_session_id` yet, so
-//!   `resume_spec` passes no `--resume` and the first turn is an ordinary
-//!   headless run whose session id is written back. One implementation means
-//!   the busy lock, the write-back and the *additive* usage accounting are the
-//!   same on the first turn and the fiftieth.
+//! - **An unlinked start and every resume run through
+//!   [`agent_run::run_resumed`].** A start creates the chat first and then
+//!   resumes it — the chat has no `sdk_session_id` yet, so `resume_spec` passes
+//!   no `--resume` and the first turn is an ordinary headless run whose session
+//!   id is written back. One implementation means the busy lock, the write-back
+//!   and the *additive* usage accounting are the same on the first turn and the
+//!   fiftieth.
+//! - **A top-level mention under a rule that names a task is not a chat turn
+//!   at all** (#685). It is handed to `executor::run_event` as an event: the
+//!   task's own instructions are the prompt and the mention's words are a
+//!   delimited data block inside it, the run is a `job_history` row with
+//!   `triggered_by = slack`, and the answer reaches the thread as the task's
+//!   `reply` delivery rather than from here — so a linked task with no `reply`
+//!   destination runs, is recorded, and says nothing in Slack. The rule's
+//!   `agent_slug` and execution settings are not read on that path. A reply
+//!   *inside* a thread is unchanged whatever the rule says: it resumes the
+//!   mapped chat, linked rule or not.
 //! - **The two failure sentences are the dispatcher's constants**, not
 //!   re-spellings. Telegram and Slack answering differently for the same failure
 //!   is the drift those `pub(crate)` consts exist to prevent.
@@ -105,6 +118,10 @@ use tokio::sync::mpsc;
 use crate::claude::CancellationToken;
 use crate::native::agent_run;
 use crate::native::db;
+use crate::native::schedule::delivery::ReplyTarget;
+use crate::native::schedule::executor::{self, EventInput, EventRefused};
+use crate::native::schedule::runtime::{self, Scheduler};
+use crate::native::tasks;
 use crate::native::trigger::dispatcher::{self, Rule, ERROR_REPLY, NO_RESPONSE_REPLY};
 use crate::native::trigger::match_rule::{match_rule, RuleFilters};
 use crate::native::trigger::select_rule::select_rule_for_channel;
@@ -156,6 +173,9 @@ struct Inbound {
     client: Client,
     bot_user_id: tokio::sync::OnceCell<String>,
     queues: Mutex<HashMap<ThreadKey, mpsc::UnboundedSender<Job>>>,
+    /// `None` outside tests, where [`Inbound::scheduler`] answers the
+    /// process-wide one instead.
+    scheduler: Option<Arc<Scheduler>>,
 }
 
 /// The `app_mention` handler for one integration.
@@ -164,12 +184,34 @@ struct Inbound {
 /// the registry through `resolve_slack_token`, so the `auth` column's OAuth arm
 /// works here exactly as it does for the hosted tools.
 pub fn handler(db_path: &Path, integration_id: &str, bot_token: &str) -> EventHandler {
+    build(db_path, integration_id, bot_token, None)
+}
+
+/// [`handler`], running linked rules on `scheduler` rather than on the
+/// process-wide one — which a test binary never starts.
+#[cfg(test)]
+fn handler_with_scheduler(
+    db_path: &Path,
+    integration_id: &str,
+    bot_token: &str,
+    scheduler: Arc<Scheduler>,
+) -> EventHandler {
+    build(db_path, integration_id, bot_token, Some(scheduler))
+}
+
+fn build(
+    db_path: &Path,
+    integration_id: &str,
+    bot_token: &str,
+    scheduler: Option<Arc<Scheduler>>,
+) -> EventHandler {
     let state = Arc::new(Inbound {
         db_path: db_path.to_path_buf(),
         integration_id: integration_id.to_string(),
         client: Client::new(bot_token),
         bot_user_id: tokio::sync::OnceCell::new(),
         queues: Mutex::new(HashMap::new()),
+        scheduler,
     });
     Arc::new(move |mention: AppMention| {
         let state = Arc::clone(&state);
@@ -351,6 +393,13 @@ impl Inbound {
 
         let (chat_id, kind) = match mapped {
             Some(chat_id) => (chat_id, "resume"),
+            // A rule that names a task starts that task, not a chat of the
+            // rule's own (#685). Only here: a mapped thread resumed above
+            // whatever its rule now says.
+            None if !job.rule.task_id.is_empty() => {
+                self.run_linked(job, prompt).await;
+                return;
+            }
             None => match self.start_chat(job, prompt).await {
                 Some(chat_id) => (chat_id, "start"),
                 None => {
@@ -396,6 +445,163 @@ impl Inbound {
         self.post(&job.mention.channel, &job.thread_ts, &reply)
             .await;
         self.touch_thread(job).await;
+    }
+
+    /// The scheduler a linked rule's task runs on.
+    ///
+    /// Read per turn rather than once at construction: `lib.rs` starts the
+    /// integration registry before the scheduler, so a handler built at
+    /// startup would have captured `None` for the life of the process.
+    fn scheduler(&self) -> Option<Arc<Scheduler>> {
+        self.scheduler.clone().or_else(runtime::running)
+    }
+
+    /// A top-level mention under a rule that names a task: one event run of
+    /// that task (#685).
+    ///
+    /// `text` is what [`filtered_prompt`] left, and it travels as the event's
+    /// payload — data inside the task's own instructions, never the prompt.
+    /// Nothing is posted here on success: the answer is the task's `reply`
+    /// delivery, into the thread named by the origin this hands over.
+    ///
+    /// The refusals, each of which wrote no `job_history` row:
+    ///
+    /// - **Paused** is silence, as a disabled channel rule is. Pause is the
+    ///   user's off switch for the automation.
+    /// - **A task that is gone, could not be read, or has no scheduler to run
+    ///   on** answers [`ERROR_REPLY`]. It does **not** fall back to
+    ///   [`Inbound::start_chat`]: that would run the sender's words as the
+    ///   prompt, which is the thing linking a rule to a task is there to stop.
+    async fn run_linked(&self, job: &Job, text: &str) {
+        let task_id = job.rule.task_id.as_str();
+        log::info!(
+            "slack mention matched integration_id={:?} channel={:?} thread={:?} rule_id={:?} \
+             task_id={task_id:?} kind=event",
+            self.integration_id,
+            job.mention.channel,
+            job.thread_ts,
+            job.rule.id
+        );
+
+        let Some(scheduler) = self.scheduler() else {
+            log::warn!(
+                "a slack rule's task cannot run, this process has no scheduler rule_id={:?} \
+                 task_id={task_id:?}",
+                job.rule.id
+            );
+            self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
+                .await;
+            return;
+        };
+        let origin = ReplyTarget::Slack {
+            integration_id: self.integration_id.clone(),
+            channel: job.mention.channel.clone(),
+            thread_ts: job.thread_ts.clone(),
+        };
+        let Some(event) = EventInput::new(
+            tasks::TriggeredBy::Slack,
+            text.to_string(),
+            Some(origin),
+            uuid::Uuid::new_v4().to_string(),
+        ) else {
+            // `Slack` is an event source, so `new` cannot refuse it.
+            log::error!("a slack mention was refused as an event task_id={task_id:?}");
+            return;
+        };
+
+        // The ten-slot bound, around the run as it is in `turn`: the event run
+        // then takes one of the scheduler's three inside it.
+        let ran = {
+            let Ok(_permit) = dispatcher::semaphore().acquire().await else {
+                log::warn!("dispatcher stopped, dropping a slack event task_id={task_id:?}");
+                return;
+            };
+            executor::run_event(scheduler, task_id, event).await
+        };
+        match ran {
+            Ok(job_id) => {
+                self.map_run(job, &job_id).await;
+                self.touch_thread(job).await;
+            }
+            Err(EventRefused::Paused) => {
+                log::info!(
+                    "slack mention ignored, the rule's task is paused rule_id={:?} \
+                     task_id={task_id:?}",
+                    job.rule.id
+                );
+            }
+            Err(refused @ (EventRefused::NoSuchTask | EventRefused::Unavailable)) => {
+                log::warn!(
+                    "a slack rule's task did not run rule_id={:?} task_id={task_id:?} \
+                     reason={refused:?}",
+                    job.rule.id
+                );
+                self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
+                    .await;
+            }
+        }
+    }
+
+    /// Map the mention's thread to the chat the event run created, so a reply
+    /// in it resumes that chat instead of being dropped as a thread Agento did
+    /// not start. Loud rather than fatal, as [`Inbound::start_chat`]'s insert
+    /// is: the run has already happened.
+    ///
+    /// Also where a linked task with no `reply` destination is named, once per
+    /// run — it ran and was recorded, and Slack heard nothing.
+    async fn map_run(&self, job: &Job, job_id: &str) {
+        let (db_path, run_id, task_id) = (
+            self.db_path.clone(),
+            job_id.to_string(),
+            job.rule.task_id.clone(),
+        );
+        let read = db::blocking("slack event run read", move || {
+            let chat_id = tasks::get_job_history(&db_path, &run_id)?
+                .map(|row| row.chat_session_id)
+                .unwrap_or_default();
+            let replies = tasks::get_task(&db_path, &task_id)?
+                .is_some_and(|task| task.destinations.iter().any(|d| d.r#type == "reply"));
+            Ok::<_, String>((chat_id, replies))
+        })
+        .await;
+        let (chat_id, replies) = match read {
+            Some(Ok(read)) => read,
+            Some(Err(e)) => {
+                log::warn!("reading a slack event run job_id={job_id:?}: {e}");
+                return;
+            }
+            None => return,
+        };
+        if !replies {
+            log::warn!(
+                "a slack rule's task has no reply destination, so nothing was posted \
+                 rule_id={:?} task_id={:?} job_id={job_id:?}",
+                job.rule.id,
+                job.rule.task_id
+            );
+        }
+        // A run that failed before it had a chat has nothing to resume.
+        if chat_id.is_empty() {
+            return;
+        }
+
+        let permalink = self.permalink(&job.mention.channel, &job.thread_ts).await;
+        let (db_path, integration_id) = (self.db_path.clone(), self.integration_id.clone());
+        let (channel, thread_ts) = (job.mention.channel.clone(), job.thread_ts.clone());
+        if let Some(Err(e)) = db::blocking("slack event thread map", move || {
+            insert_thread(
+                &db_path,
+                &integration_id,
+                &channel,
+                &thread_ts,
+                &chat_id,
+                &permalink,
+            )
+        })
+        .await
+        {
+            log::warn!("failed to map a slack event run's thread to its chat: {e}");
+        }
     }
 
     /// The chat this thread is already mapped to.

@@ -395,6 +395,22 @@ not.
 A mention in a thread Agento did not start is ignored — it is somebody else's
 conversation, and joining it uninvited is worse than staying quiet.
 
+#### A rule that starts a task
+
+A rule can name a scheduled **task** instead of running its own agent. A
+mention that opens a thread then starts one run of that task: the task's own
+instructions are the prompt, what was said is handed to it as data, and the run
+appears in **Jobs** as started by Slack. The rule's agent, model and permission
+mode are not used for it.
+
+**The task answers in the thread only if it has a *Reply to sender*
+destination** (see *Delivery* under Tasks). Without one the task still runs and
+is recorded, and nothing is posted in Slack. A paused task is not run and says
+nothing. Later mentions in the same thread continue that run's chat, as in any
+other thread.
+
+There is no control for linking a rule yet; a rule is linked through the API.
+
 #### It only goes one way
 
 Slack drives the chat; the chat does not drive Slack. Turns you take in the
