@@ -34,8 +34,7 @@ Please include:
   fix before anything is made public.
 - Fixes are disclosed through
   [GitHub Security Advisories](https://github.com/shaharia-lab/agento/security/advisories),
-  published once a fixed release is available. You will be credited there unless you ask
-  not to be.
+  published once a fixed release is available.
 
 ## What Is Fine to File Publicly
 
