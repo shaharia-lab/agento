@@ -43,8 +43,12 @@ jobs:
 
       # The prebuilt release binary, pinned by checksum. Not `cargo install`:
       # that compiles for several minutes on every run. Not an installer
-      # action: the organisation's `allowed_actions` list has none, and a
+      # action: the repository's `allowed_actions` list has none, and a
       # workflow naming an action outside it fails at startup with no job logs.
+      # And not `rustsec/audit-check`, which is on that list: it reports by
+      # creating check runs and issues, so it needs a write token — which a
+      # pull request from a fork does not get — where a step that exits
+      # non-zero needs only the `contents: read` above.
       - name: Install cargo-audit
         run: |
           name="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}"
@@ -70,6 +74,12 @@ jobs:
       # No `npm ci` first: `npm audit` resolves the tree from package-lock.json
       # alone, so nothing is downloaded and no install script runs. `--omit=dev`
       # is what the app ships; the build toolchain is not in the bundle.
+      # The same Node, and so the same npm, that ci.yml installs with.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        if: always()
+        with:
+          node-version: 22
+
       - name: npm advisories (npm audit)
         if: always()
         run: npm audit --omit=dev --audit-level=high
