@@ -336,9 +336,12 @@ declines to start one.
   - **The thread is mapped after the run**, to the run's `chat_session_id`, by
     the same `insert_thread` a start uses — the third writer of
     `inbound_threads`. A later mention in that thread is then an ordinary
-    resume, answered inline. A failed insert is a `warn`: a linked task that
-    also has a `slack` destination maps its summary thread to the same chat
-    first, and the table is `UNIQUE (chat_id)`, so the second insert loses.
+    resume, answered inline. A failed insert is a `warn`. A linked task that
+    also has a `slack` destination has two inserts racing for one
+    `UNIQUE (chat_id)` row — this one and the delivery's summary thread (#642),
+    which is spawned and not awaited — so the second fails, and which of the
+    two threads ends up mapped is not determined (#686). When the delivery
+    wins, a follow-up in the mention's thread is dropped as unmapped.
   - **Both global bounds apply.** The dispatcher's ten-slot permit is taken
     around `run_event`, which then takes one of the scheduler's three, so an
     event run waiting for the scheduler holds a dispatcher permit (#691).

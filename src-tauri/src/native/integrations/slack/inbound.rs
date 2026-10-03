@@ -548,7 +548,8 @@ impl Inbound {
     /// is: the run has already happened.
     ///
     /// Also where a linked task with no `reply` destination is named, once per
-    /// run — it ran and was recorded, and Slack heard nothing.
+    /// run — it ran and was recorded, and the thread was not answered. A task
+    /// deleted while it ran is not named: there is nothing left to configure.
     async fn map_run(&self, job: &Job, job_id: &str) {
         let (db_path, run_id, task_id) = (
             self.db_path.clone(),
@@ -560,7 +561,7 @@ impl Inbound {
                 .map(|row| row.chat_session_id)
                 .unwrap_or_default();
             let replies = tasks::get_task(&db_path, &task_id)?
-                .is_some_and(|task| task.destinations.iter().any(|d| d.r#type == "reply"));
+                .map(|task| task.destinations.iter().any(|d| d.r#type == "reply"));
             Ok::<_, String>((chat_id, replies))
         })
         .await;
@@ -572,9 +573,9 @@ impl Inbound {
             }
             None => return,
         };
-        if !replies {
+        if replies == Some(false) {
             log::warn!(
-                "a slack rule's task has no reply destination, so nothing was posted \
+                "a slack rule's task has no reply destination, so the thread was not answered \
                  rule_id={:?} task_id={:?} job_id={job_id:?}",
                 job.rule.id,
                 job.rule.task_id

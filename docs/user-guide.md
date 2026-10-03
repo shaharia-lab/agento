@@ -400,8 +400,8 @@ conversation, and joining it uninvited is worse than staying quiet.
 A rule can name a scheduled **task** instead of running its own agent. A
 mention that opens a thread then starts one run of that task: the task's own
 instructions are the prompt, what was said is handed to it as data, and the run
-appears in **Jobs** as started by Slack. The rule's agent, model and permission
-mode are not used for it.
+is recorded in **Job history** like any other. The rule's agent, model and
+permission mode are not used for it.
 
 **The task answers in the thread only if it has a *Reply to sender*
 destination** (see *Delivery* under Tasks). Without one the task still runs and
