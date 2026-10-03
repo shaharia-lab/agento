@@ -461,6 +461,7 @@ mod tests {
             .await
             .map(|response| response.result().to_string())
             .expect_err("the body ends early");
+        println!("REPRO671 fixed message: {message}");
         // No disjunction with the send-path sentence: if the failure ever
         // migrates there, this must fail loudly rather than quietly stop
         // asserting the thing it exists for.
@@ -475,6 +476,34 @@ mod tests {
         );
 
         set_api_base(None);
+    }
+
+    /// TEMPORARY (#671 reproduction, never merged): the fixture as it was.
+    #[tokio::test]
+    async fn repro_671_original_fixture() {
+        let _guard = api_base_lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n{\"ok\":true")
+                    .await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        set_api_base(Some(format!("http://{addr}")));
+        let message = Client::new(SECRET)
+            .call(&CancellationToken::new(), "getChat", b"{}".to_vec())
+            .await
+            .map(|response| response.result().to_string())
+            .expect_err("the body ends early");
+        set_api_base(None);
+        println!("REPRO671 original message: {message}");
+        assert!(message.starts_with("reading response: "), "{message}");
     }
 
     /// Reads one whole request off `socket`: the head, then as many body bytes
