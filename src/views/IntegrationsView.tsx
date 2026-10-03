@@ -29,6 +29,7 @@ import type {
   AvailableTool,
   ClaudeSettingsProfile,
   Integration,
+  ScheduledTask,
   ServiceConfig,
   TriggerRule,
   WebhookStatus,
@@ -1615,9 +1616,10 @@ interface RuleDraft {
   permission_mode: string;
   timeout_minutes: string;
   /**
-   * #681's pair. No control edits either yet, so the draft only carries what
-   * the stored rule holds — the write is replace, and a save that left them
-   * out would unlink the rule and turn its continuation off.
+   * #681's pair. `task_id` is the **Linked task** picker's (#687);
+   * `continue_on_reply` has no control yet (#686), so the draft only carries
+   * what the stored rule holds — the write is replace, and a save that left it
+   * out would turn the rule's continuation off.
    */
   task_id: string;
   continue_on_reply: boolean;
@@ -1767,6 +1769,15 @@ function TriggerRules({
         .catch(() => null),
     []
   );
+  // Optional for the same reason profiles are: a rule with no linked task is
+  // the normal case, so a failed read must not fail the section. A failure
+  // resolves to `undefined`, the same value as "not loaded yet", which is what
+  // keeps it from being read as "every linked task is missing" — see
+  // `linkedTask`.
+  const tasks = useResource(
+    (signal) => api.get<ScheduledTask[] | null>("/tasks", signal).catch(() => undefined),
+    []
+  );
   const picker = useDirPicker();
 
   const [draft, setDraft] = useState<RuleDraft>();
@@ -1777,6 +1788,10 @@ function TriggerRules({
   const list = rules.data ?? [];
   const agentList = agents.data ?? [];
   const profileList = profiles.data ?? [];
+  // `undefined` is both "still loading" and "the read failed"; a Go `null` is
+  // a loaded, empty list.
+  const tasksLoaded = tasks.data !== undefined;
+  const taskList = tasks.data ?? [];
   const targets = provider.triggerTargets ?? TRIGGER_TARGETS_FALLBACK;
 
   async function run(action: () => Promise<unknown>) {
@@ -1808,8 +1823,8 @@ function TriggerRules({
     <div className="formsec">
       <div className="formsec__title">Trigger rules</div>
       <div className="formrow__help">
-        An inbound message matching a rule starts the chosen agent. Rules are evaluated in
-        order and a message only fires the first that matches.
+        An inbound message matching a rule starts the chosen agent, or the rule's linked
+        task. Rules are evaluated in order and a message only fires the first that matches.
       </div>
 
       <div className="grouplist">
@@ -1828,6 +1843,8 @@ function TriggerRules({
               draft={draft}
               agents={agentList}
               profiles={profileList}
+              tasks={taskList}
+              tasksLoaded={tasksLoaded}
               targets={targets}
               browse={picker.browse}
               busy={busy}
@@ -1840,7 +1857,7 @@ function TriggerRules({
               <div className="rulerow__body">
                 <span style={{ fontWeight: 500 }}>{r.name || "Untitled rule"}</span>
                 <span className="rulerow__meta">
-                  <span>→ {r.agent_slug || "no agent"}</span>
+                  <RuleTarget rule={r} tasks={taskList} tasksLoaded={tasksLoaded} />
                   {r.filter_prefix && <span>prefix “{r.filter_prefix}”</span>}
                   {r.filter_keywords && r.filter_keywords.length > 0 && (
                     <span>keywords: {r.filter_keywords.join(", ")}</span>
@@ -1921,6 +1938,8 @@ function TriggerRules({
             draft={draft}
             agents={agentList}
             profiles={profileList}
+            tasks={taskList}
+            tasksLoaded={tasksLoaded}
             targets={targets}
             browse={picker.browse}
             busy={busy}
@@ -1951,6 +1970,50 @@ function TriggerRules({
 }
 
 /**
+ * What a rule's task link resolves to (#687).
+ *
+ * `trigger_rules.task_id` has no foreign key and deleting a task does not
+ * clear it, so a stored id can name nothing. That is reported, never hidden —
+ * and only once the task list has actually loaded, because "not in a list that
+ * has not arrived" is not "missing".
+ */
+type LinkedTask =
+  | { kind: "none" }
+  | { kind: "unknown" }
+  | { kind: "missing" }
+  | { kind: "found"; task: ScheduledTask };
+
+function linkedTask(taskId: string, tasks: ScheduledTask[], loaded: boolean): LinkedTask {
+  if (!taskId) return { kind: "none" };
+  const task = tasks.find((t) => t.id === taskId);
+  if (task) return { kind: "found", task };
+  return loaded ? { kind: "missing" } : { kind: "unknown" };
+}
+
+/** A rule row's `→` target: the linked task when there is one, else the agent. */
+function RuleTarget({
+  rule,
+  tasks,
+  tasksLoaded,
+}: {
+  rule: TriggerRule;
+  tasks: ScheduledTask[];
+  tasksLoaded: boolean;
+}) {
+  const link = linkedTask(rule.task_id, tasks, tasksLoaded);
+  if (link.kind === "none") return <span>→ {rule.agent_slug || "no agent"}</span>;
+  return (
+    <>
+      <span>→ task: {link.kind === "found" ? link.task.name || link.task.id : rule.task_id}</span>
+      {link.kind === "found" && link.task.status === "paused" && (
+        <span className="badge badge--amber">paused</span>
+      )}
+      {link.kind === "missing" && <span className="badge badge--amber">missing</span>}
+    </>
+  );
+}
+
+/**
  * The non-default execution settings of a rule, as short chips.
  *
  * A profile is named rather than shown as its id: the id is a uuid, and a row
@@ -1975,6 +2038,8 @@ function RuleForm({
   draft,
   agents,
   profiles,
+  tasks,
+  tasksLoaded,
   targets,
   browse,
   busy,
@@ -1985,6 +2050,9 @@ function RuleForm({
   draft: RuleDraft;
   agents: Agent[];
   profiles: ClaudeSettingsProfile[];
+  tasks: ScheduledTask[];
+  /** False while the task list is loading, and when its read failed. */
+  tasksLoaded: boolean;
   targets: TriggerTargets;
   browse: ReturnType<typeof useDirPicker>["browse"];
   busy: boolean;
@@ -2011,6 +2079,7 @@ function RuleForm({
    * the honest half of what the lock was for.
    */
   const agentModel = agent?.model ?? "";
+  const link = linkedTask(draft.task_id, tasks, tasksLoaded);
   const timeout = Number(draft.timeout_minutes);
   const timeoutValid =
     draft.timeout_minutes === "" ||
@@ -2053,6 +2122,59 @@ function RuleForm({
           </label>
         )}
       </div>
+
+      {/* The rule→task link (#687). The stored id stays an option whatever the
+          task list says — missing, or not loaded — so a save that leaves this
+          control alone sends it back unchanged, which the update accepts. */}
+      <div className="row" style={{ gap: "var(--sp-3)" }}>
+        <Dropdown
+          small
+          value={draft.task_id}
+          onChange={(task_id) => onChange({ ...draft, task_id })}
+          ariaLabel="Linked task"
+          label={`Task: ${
+            link.kind === "none"
+              ? "none"
+              : link.kind === "found"
+              ? link.task.name || link.task.id
+              : link.kind === "missing"
+              ? `${draft.task_id} (missing)`
+              : draft.task_id
+          }`}
+          options={[
+            { value: "", label: "No task" },
+            ...(link.kind === "missing"
+              ? [{ value: draft.task_id, label: `${draft.task_id} (missing)` }]
+              : link.kind === "unknown"
+              ? [{ value: draft.task_id, label: draft.task_id }]
+              : []),
+            ...tasks.map((t) => ({
+              value: t.id,
+              label: `${t.name || t.id}${t.status === "paused" ? " (paused)" : ""}`,
+            })),
+          ]}
+        />
+      </div>
+      <div className="formrow__help">
+        A linked task runs in place of this rule's agent and settings, with the message
+        passed to it as data. The settings below apply only while no task is linked.
+      </div>
+      {link.kind === "found" && link.task.status === "paused" && (
+        <div className="msgline msgline--warn">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>This task is paused, so a matching message starts nothing.</span>
+        </div>
+      )}
+      {link.kind === "missing" && (
+        <div className="msgline msgline--warn">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>The linked task no longer exists. Choose another, or No task.</span>
+        </div>
+      )}
 
       <div className="row" style={{ gap: "var(--sp-3)" }}>
         <label className="field field--sm" style={{ flex: 1 }}>

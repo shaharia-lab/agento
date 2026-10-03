@@ -345,6 +345,24 @@ summary gains ` · ⚠`, so an untouched save round-trips it. Warnings wait unti
 *within* the owned name, not only equal to it. The channel field keeps its raw
 text row-locally and writes the parsed array through `edit()`.
 
+**A trigger rule's task link, and what a run shows about its trigger** (#687).
+`RuleForm` (`IntegrationsView.tsx`) has a **Task** `Dropdown` over `GET
+/api/tasks`: `No task` is `task_id: ""`, and a stored id the loaded list does
+not hold stays selectable as `<id> (missing)`, so a save that leaves the control
+alone round-trips it. `linkedTask` is the one decision, and it has four answers:
+`none`, `found`, `missing` and `unknown`. `unknown` is a list that is still
+loading or whose read failed, and it shows no warning and no badge, because "not
+in a list that never arrived" is not "missing". The rule row reads `→ task:
+<name>` with a `badge--amber` of `paused` or `missing`. The agent and the five
+execution controls stay editable while a task is linked. In `JobsView`,
+`event_payload` is rendered as a JSX text child in a `.logblock` and nothing
+else: it is what an outside sender sent, so it never goes through `Markdown` or
+`dangerouslySetInnerHTML`. The **Continues** row selects the continued run with
+`openRun`, which does what the #542 hand-off effect does, so a run outside the
+loaded page or a deleted one behaves as a hand-off does. `triggerLabel`
+(`TasksView.tsx`, beside `StatusBadge`) is the one spelling of
+`triggered_by`, a `Record<TriggeredBy, string>` so a new wire value fails `tsc`.
+
 **The Tasks inspector previews an unsaved task** (#633): in create mode it
 renders `TaskPreviewBody` from `POST /api/tasks/preview`, requested through
 `useDebounced(draft, 250)` and `useResource`'s abort signal, and only while the

@@ -1660,7 +1660,8 @@ struct TriggerRuleRequest {
 
 /// A rule may link only to a task that exists (#681). Empty is "not linked"
 /// and is never looked up; the column has no foreign key, so this check at the
-/// write is the only thing that keeps a mistyped id out.
+/// write is the only thing that keeps a mistyped id out. `update` runs it only
+/// for an id that differs from the stored one (#687).
 fn check_rule_task(conn: &rusqlite::Connection, task_id: &str) -> Result<(), WriteError> {
     if task_id.is_empty() {
         return Ok(());
@@ -1797,7 +1798,13 @@ fn update_trigger_rule(
         ));
     }
     validate_rule_settings(&req)?;
-    check_rule_task(&conn, &req.task_id)?;
+    // Only a *changed* link is looked up (#687). A task deleted after the rule
+    // was linked leaves a dangling id here, and the form and the row's enabled
+    // switch both send the stored id back: refusing it would make that rule
+    // impossible to edit or turn off until it was relinked.
+    if req.task_id != existing.task_id {
+        check_rule_task(&conn, &req.task_id)?;
+    }
 
     // `UpdateRule` keeps the stored id, integration and creation time and
     // replaces everything else — a field the caller omitted is cleared, not kept.
@@ -3985,6 +3992,70 @@ mod tests {
             ),
             "1/a",
             "neither refusal wrote anything"
+        );
+    }
+
+    /// #687: nothing clears `task_id` when its task is deleted, so the update
+    /// accepts the stored id back — a save that leaves the link alone and the
+    /// row's enabled switch both send it — and still refuses a *new* unknown one.
+    #[test]
+    fn a_rule_whose_task_was_deleted_can_still_be_updated() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO scheduled_tasks (id, name, prompt) VALUES ('task-1', 'T', 'p')",
+                [],
+            )
+            .expect("seed task");
+        create_trigger_rule(
+            file.path(),
+            "int-1",
+            br#"{"agent_slug":"a","enabled":true,"task_id":"task-1"}"#,
+        )
+        .expect("linked rule");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        Connection::open(file.path())
+            .expect("open")
+            .execute("DELETE FROM scheduled_tasks WHERE id = 'task-1'", [])
+            .expect("delete task");
+
+        let answer = update_trigger_rule(
+            file.path(),
+            "int-1",
+            &id,
+            br#"{"agent_slug":"b","enabled":false,"task_id":"task-1"}"#,
+        )
+        .unwrap_or_else(|e| panic!("the stored id is accepted back: {}", e.message()));
+        assert_eq!(answer.status, axum::http::StatusCode::OK);
+        assert_eq!(
+            stored(
+                &file,
+                "SELECT agent_slug || '/' || enabled || '/' || task_id FROM trigger_rules"
+            ),
+            "b/0/task-1",
+            "the write landed and kept the link"
+        );
+
+        let err = update_trigger_rule(
+            file.path(),
+            "int-1",
+            &id,
+            br#"{"agent_slug":"c","task_id":"another-missing-task"}"#,
+        )
+        .expect_err("a different unknown id");
+        assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            err.message()
+                .starts_with(r#"validation error for "task_id""#),
+            "{}",
+            err.message()
+        );
+        assert_eq!(
+            stored(&file, "SELECT agent_slug FROM trigger_rules"),
+            "b",
+            "the refusal wrote nothing"
         );
     }
 

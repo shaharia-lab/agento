@@ -10,6 +10,7 @@ import type {
   SettingsResponse,
   TaskPreview,
   TaskRunStarted,
+  TriggeredBy,
 } from "../lib/types";
 import {
   describeError,
@@ -1320,11 +1321,17 @@ function RecentRuns({
           type="button"
           className="runrow runrow--link"
           key={j.id}
-          title={`${dateTime(j.started_at)} — open this run`}
+          title={`${dateTime(j.started_at)} · ${triggerLabel(j.triggered_by)} — open this run`}
           onClick={() => onOpen(j.id)}
         >
           <span className={`dot ${statusDot(j.status)}`} />
           <span className="runrow__when">{relativeTime(j.started_at)}</span>
+          {/* Named only when it is not the schedule (#687): this is a task's
+              own list, so the schedule is the unremarkable case and a label on
+              every row would say nothing. */}
+          {j.triggered_by !== "schedule" && (
+            <span className="runrow__val">{triggerLabel(j.triggered_by)}</span>
+          )}
           {j.deliveries?.some((d) => d.status === "failed") && (
             <span className="runrow__warn" title="Delivery failed: open this run">
               <Icon name="alert" size={12} />
@@ -1505,6 +1512,28 @@ function ScheduleEditor({
       )}
     </>
   );
+}
+
+/* --- What started a run (also used by JobsView) --------------------------- */
+
+/**
+ * `job_history.triggered_by`, as the one word every view shows for it (#687).
+ *
+ * A `Record` over the union so a seventh value on the wire type fails `tsc`
+ * here instead of rendering a blank cell.
+ */
+const TRIGGER_LABEL: Record<TriggeredBy, string> = {
+  schedule: "Schedule",
+  manual: "Manual",
+  telegram: "Telegram",
+  slack: "Slack",
+  webhook: "Webhook",
+  reply: "Reply",
+};
+
+/** The label for a run's trigger; a value this build does not know shows raw. */
+export function triggerLabel(t: string): string {
+  return (TRIGGER_LABEL as Record<string, string | undefined>)[t] ?? t;
 }
 
 /* --- Shared outcome badge (also used by JobsView) ------------------------- */

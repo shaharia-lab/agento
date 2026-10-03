@@ -302,6 +302,9 @@ A Telegram integration can also run agents on incoming messages. Add a trigger
 rule saying which messages match and which agent handles them. The agent's reply
 goes back to the same chat.
 
+The rule form has the same **Task** picker as a Slack rule's. A Telegram message
+does not start the linked task yet: it still runs the rule's own agent.
+
 ### Slack Socket Mode
 
 A Slack integration can also run agents on **mentions of the app** in a channel.
@@ -379,7 +382,8 @@ Then:
    not deliver `app_mention` from a channel the app is not in.
 6. Add a **trigger rule** on the same integration: which agent runs, and which
    channels it answers in. Leave the channel list blank to answer in every
-   channel the app is in.
+   channel the app is in. To start a scheduled task instead of the agent, pick
+   it under **Task** (see [A rule that starts a task](#a-rule-that-starts-a-task)).
 
 Now `@Agento what changed in this repo today?` in that channel starts a run, and
 the answer arrives as a threaded reply.
@@ -409,7 +413,12 @@ is recorded, and nothing is posted in Slack. A paused task is not run and says
 nothing. Later mentions in the same thread continue that run's chat, as in any
 other thread.
 
-There is no control for linking a rule yet; a rule is linked through the API.
+Link a rule in its form: the **Task** picker lists every task, and **No task**
+unlinks it. The rule's row then reads `→ task: <name>` instead of `→ <agent>`.
+A row marked `paused` names a task that is paused, and the form says a matching
+message starts nothing. A row marked `missing` names a task that was deleted:
+the rule can still be edited and switched off, and the form asks you to choose
+another task or **No task**.
 
 #### It only goes one way
 
@@ -568,6 +577,15 @@ Every run leaves a record — scheduled or started with **Run now** — of which
 task, when it started, how long it
 took, whether it succeeded, the tokens and cost, and the output if you asked for
 it to be saved.
+
+The **Trigger** column says what started each run: `Schedule`, `Manual` (Run
+now), `Telegram`, `Slack`, `Webhook` or `Reply`. Searching for one of those
+words finds its runs. A task's **Recent runs** names the trigger too, for every
+run the schedule did not start.
+
+A run started by a message shows what was sent under **Event payload**, as plain
+text with a copy button. It is stored with secrets masked. A run that continues
+an earlier one has a **Continues** row that selects that run.
 
 Failed runs carry the reason. A run that hit its timeout says so. A run that
 delivered its output somewhere lists each channel under **Delivery**, with

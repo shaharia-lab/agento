@@ -205,10 +205,15 @@ epic #679). Migration 48 adds `trigger_rules.task_id` and
 before the timestamps, and are always present. `task_id` is `""` while the rule
 is not linked. It has **no foreign key** (`ADD COLUMN` cannot add a `NOT NULL`
 reference), so `check_rule_task` is the only guard: a non-empty id that names
-no task is a 422 on both routes, and a task deleted later leaves a dangling id
-the reader must tolerate. Both fields are **replaced** on `PUT` like the rest
-of the rule, which is why the Integrations form carries them in `RuleDraft` and
-in both `RuleWrite` builders although no control edits them yet. **Migration 48
+no task is a 422 on `POST`, and on `PUT` when it differs from the stored id. A
+task deleted later leaves a dangling id the reader must tolerate, and **`PUT`
+accepts the stored id back unchecked** (#687): the form and the row's enabled
+switch both send it, so refusing it would leave that rule impossible to edit or
+turn off (`a_rule_whose_task_was_deleted_can_still_be_updated`). Both fields are
+**replaced** on `PUT` like the rest of the rule, which is why the Integrations
+form carries them in `RuleDraft` and in both `RuleWrite` builders; `task_id` is
+edited by the form's **Task** picker (#687) and `continue_on_reply` by no
+control yet (#686). **Migration 48
 set `continue_on_reply` on every rule that existed**, because those already
 continue; a rule created afterwards defaults to off. **`task_id` is read at run
 time by Slack only** (#685): the dispatcher's `load_rules` selects it into
