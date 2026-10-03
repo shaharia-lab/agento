@@ -2656,8 +2656,9 @@ mod tests {
     }
 
     /// One failure per `prepare` arm, each through the real entry point: one
-    /// row, `failed`, the event's source, the masked payload — and no counter
-    /// moved on a task sitting on its `stop_after_count`.
+    /// row, `failed`, the event's source, the masked payload, the event's origin
+    /// handed to delivery — and no counter moved on a task sitting on its
+    /// `stop_after_count`.
     #[tokio::test]
     async fn every_prepare_failure_of_an_event_run_writes_exactly_one_row() {
         // (task prompt, agent, sabotage, expected error prefix)
@@ -2672,7 +2673,14 @@ mod tests {
             ),
             ("p", "no-such-agent", "", "resolve agent:"),
         ];
-        for (prompt, agent, sabotage, prefix) in cases {
+        let origin = ReplyTarget::Telegram {
+            integration_id: "tg-1".into(),
+            chat_id: 42,
+            message_id: 7,
+        };
+        for (n, (prompt, agent, sabotage, prefix)) in cases.into_iter().enumerate() {
+            // Distinct per case: the fake destination's log is process-wide.
+            let job_id = format!("j-event-prepare-{n}");
             let file = with_active_task(prompt);
             let conn = rusqlite::Connection::open(file.path()).expect("open");
             conn.execute("UPDATE scheduled_tasks SET agent_slug = ?1", [agent])
@@ -2683,14 +2691,21 @@ mod tests {
             drop(conn);
             let scheduler = test_scheduler(file.path());
 
-            let answered = run_event(Arc::clone(&scheduler), "t1", event_input("j-fail")).await;
-            assert_eq!(answered, Ok("j-fail".to_string()), "{prefix}");
+            let event = EventInput::new(
+                tasks::TriggeredBy::Telegram,
+                "hello".into(),
+                Some(origin.clone()),
+                job_id.clone(),
+            )
+            .expect("an event source");
+            let answered = run_event(Arc::clone(&scheduler), "t1", event).await;
+            assert_eq!(answered, Ok(job_id.clone()), "{prefix}");
 
             let rows = job_rows_of(file.path());
             assert_eq!(rows.len(), 1, "{prefix}");
-            assert_eq!(rows[0].id, "j-fail", "{prefix}");
+            assert_eq!(rows[0].id, job_id, "{prefix}");
             assert_eq!(rows[0].status, "failed", "{prefix}");
-            assert_eq!(rows[0].triggered_by, "slack", "{prefix}");
+            assert_eq!(rows[0].triggered_by, "telegram", "{prefix}");
             assert_eq!(rows[0].event_payload, "hello", "{prefix}");
             assert!(
                 rows[0].error_message.starts_with(prefix),
@@ -2711,6 +2726,13 @@ mod tests {
                 !scheduler.is_running("t1"),
                 "{prefix}: the in-flight mark went"
             );
+
+            // The failure is delivered too, to where the event came from.
+            settled_deliveries(file.path(), &job_id, 1).await;
+            let received = super::super::delivery::fake_received(&job_id);
+            assert_eq!(received.len(), 1, "{prefix}");
+            assert_eq!(received[0].status, "failed", "{prefix}");
+            assert_eq!(received[0].reply_to, Some(origin.clone()), "{prefix}");
         }
     }
 

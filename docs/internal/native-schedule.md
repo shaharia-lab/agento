@@ -500,8 +500,8 @@ epic #679). Migration 48 adds eight columns across three tables.
   written by `run_event` (#683). **Every row older than the migration reads
   `schedule`**, including past manual runs, because those wrote an identical
   row and cannot be told apart. `event_payload` is an event run's masked payload
-  (#683) and `''` otherwise; `continues_job_id` is `''` until #686 writes it. On the wire `triggered_by` follows `response_text`
-  and is always present; the other two follow it and are **omitted when
+  (#683) and `''` otherwise; `continues_job_id` is `''` until #686 writes it.
+  On the wire `triggered_by` follows `response_text` and is always present; the other two follow it and are **omitted when
   empty**, so a scheduled run's row gains one key. `deliveries` stays last.
 - **`scheduled_tasks.continue_on_reply`** is a request field, replaced on `PUT`
   like every other (absent and `null` store `false`). Slack delivery still maps
@@ -577,8 +577,8 @@ second `reply` entry (it could only answer the same sender twice). Its
 target is the run's, not the configuration's — `DeliveryReport::reply_to`, the
 Telegram chat (with the message to quote) or Slack thread the triggering event
 came from — so `Destination::targets` takes the report. A run with no origin
-(every schedule and manual run; only `run_event` passes an origin) finishes its one row `skipped` with `this run was not started by
-a message`. The row's `target` is the chat id or `<channel> · <thread_ts>`. The
+(every schedule and manual run; only `run_event` passes an origin) finishes
+its one row `skipped` with `this run was not started by a message`. The row's `target` is the chat id or `<channel> · <thread_ts>`. The
 sender is outside Agento, so a failed run answers the dispatcher's fixed
 `ERROR_REPLY` and never `report.error`, and an empty answer is
 `NO_RESPONSE_REPLY`. Telegram goes through `trigger::telegram_api::send_reply`,
