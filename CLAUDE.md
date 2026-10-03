@@ -459,12 +459,12 @@ endpoint is served in-process. What remains is listed here.
   produce one** (#670). `WriteError::Fallback` is for a database, filesystem,
   encoder or invariant failure; input the client can fix answers 400
   (malformed), 422 (well-formed, one field invalid) or 404 (names nothing).
-  `POST /api/fs/mkdir` answers 422 on `path` when the user may not write there
-  or a file is in the way. Three 500s remain that a user can meet without
-  anything being broken, each about stored state rather than the request: `PUT /api/notifications/settings`
-  on an install with no `user_settings` row, a `PUT`/`DELETE` on a stored
-  WhatsApp integration, and a first profile list when `settings.json` on disk
-  is not UTF-8 or is nested past 128 levels.
+  `POST /api/fs/mkdir` answers 422 on `path` when the path itself is why the
+  directory cannot be created. Three 500s remain that a user can meet without
+  anything being broken, each about stored state rather than the request:
+  `PUT /api/notifications/settings` on an install with no `user_settings` row,
+  a `PUT`/`DELETE` on a stored WhatsApp integration, and a first profile list
+  when `settings.json` on disk is not UTF-8 or is nested past 128 levels.
 - `useAppStats` counters refresh on a 30s poll and on window focus, not on
   mutation, so a create in one view lags in the sidebar briefly.
 - Session table is not virtualised; 900+ rows render eagerly after "Load more".
