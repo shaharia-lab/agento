@@ -243,13 +243,25 @@ there. `the_guard_only_ever_lets_the_value_rise` is the table as a test, and
 the handler tests assert every file's bytes and modification time after each
 refusal.
 
+**The guard is decided on the bytes the write replaces.** Claude Code edits
+this file too, so a check made on one read and a write built from another
+would leave a window in which a value Claude Code had just raised, or set to
+`0`, is overwritten with a lower one. `put` therefore runs the guard twice:
+once on `read_retention`, so a file that cannot be read at all is a 422 with
+its reason, and again as the `allow` closure of
+`patch::set_top_level_key_if`, which is handed the exact bytes the splice is
+built from. `patch` then refuses the write (`ChangedUnderneath`) if the file
+differs from those bytes just before it is replaced. What remains is `patch`'s
+own window between that second read and the rename, stated in its doc and not
+solved. `a_value_raised_or_zeroed_before_the_write_is_not_lowered` pins it.
+
 `patch`'s own refusals map as: `ChangedUnderneath` is a 409 with its message;
 a dir that is not indexed and the four unreadable-file cases are 422; an I/O
-failure is the default 500. The guard reads the file before `patch` does, so a
-file that turns unreadable in between is still refused by `patch`.
+failure is the default 500.
 
-**This is the only route that calls `set_top_level_key`.** Do not add a second
-caller without the guard.
+**This is the only route that calls `set_top_level_key_if`**, and outside
+tests `patch` has no entry point without an `allow`. Do not add a caller whose
+`allow` is not the guard.
 
 The prompt that calls it, and the `claude_retention_prompt_answered` flag on
 `user_settings` (migration 49) that records it as answered, are in
@@ -259,9 +271,12 @@ row and an omitted key decodes to `false`.
 
 ## Writing one key of a config dir's `settings.json` (#719)
 
-`claude_settings::patch::set_top_level_key(indexed, dir, key, value)` sets one
-top-level key and leaves every other byte of the file as it was. `value` is
-already-encoded JSON. It has **no route of its own**: the retention `PUT`
+`claude_settings::patch::set_top_level_key_if(indexed, dir, key, value, allow)`
+sets one top-level key and leaves every other byte of the file as it was.
+`value` is already-encoded JSON, and `allow` is asked first, with the bytes the
+splice is built from (`None` for no file); a `false` writes nothing and answers
+`Ok(false)`. `set_top_level_key`, without `allow`, exists for tests only. It
+has **no route of its own**: the retention `PUT`
 (#720, above) is its only caller and reaches it only through the raise-only
 guard, because a general "set one key" route would be a way to lower
 `cleanupPeriodDays`, which deletes transcripts.

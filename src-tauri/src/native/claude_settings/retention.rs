@@ -48,9 +48,16 @@
 //! Before the guard, the request itself must name an indexed config dir and a
 //! whole number from 1 to [`MAX_CLEANUP_PERIOD_DAYS`]; a missing, `null`,
 //! fractional, negative or string value is a 422 on that field, never a zero
-//! value. The write is [`super::patch::set_top_level_key`] (#719), which changes
+//! value. The write is [`super::patch::set_top_level_key_if`] (#719), which changes
 //! that one key and no other byte, and the answer is the `GET`'s document,
 //! read again after the write.
+//!
+//! **The guard is decided on the bytes the write replaces.** Claude Code
+//! edits this file too, so [`put`] passes [`guard`] to
+//! [`super::patch::set_top_level_key_if`] as its `allow`: it runs on the
+//! bytes the splice is built from, and the write is refused if the file
+//! differs from them just before it is replaced. What is left is `patch`'s
+//! own window, between that second read and the rename, stated in its doc.
 
 use std::io;
 
@@ -58,7 +65,7 @@ use axum::http::Method;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use super::patch::{set_top_level_key, PatchError};
+use super::patch::{set_top_level_key_if, PatchError};
 use super::{go_json_valid, is_utf8, settings_json_path};
 use crate::native::writes::{decode_body, finish, WriteError};
 use crate::native::{db, gojson, settings, Answer, Ctx, Endpoint, Request};
@@ -79,8 +86,8 @@ const PATH: &str = "/api/settings/claude-retention";
 pub const ROUTES: &[(&str, &str)] = &[("GET", PATH), ("PUT", PATH)];
 
 /// This module's entry in `native::ENDPOINTS`. The `PUT` is the only route
-/// that calls [`super::patch::set_top_level_key`], and it does so only
-/// through [`guard`]: there is no general "set one key" route, because one
+/// that calls [`super::patch::set_top_level_key_if`], and its `allow` is
+/// [`guard`]: there is no general "set one key" route, because one
 /// would be a way to lower `cleanupPeriodDays`.
 pub const ENDPOINT: Endpoint = Endpoint {
     name: "claude retention",
@@ -133,6 +140,22 @@ fn present<'de, D: Deserializer<'de>>(de: D) -> Result<Option<Value>, D::Error> 
 
 /// Read one config dir's `cleanupPeriodDays`. Never fails and never writes.
 fn read_retention(dir: &str) -> RetentionEntry {
+    match std::fs::read(settings_json_path(dir)) {
+        Ok(data) => retention_of(dir, Some(&data)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => retention_of(dir, None),
+        Err(e) => RetentionEntry {
+            config_dir: dir.to_string(),
+            cleanup_period_days: None,
+            source: Source::Unknown,
+            reason: Some(format!("the file could not be read ({e})")),
+        },
+    }
+}
+
+/// What a `settings.json` holding `data` says about `cleanupPeriodDays`;
+/// `None` is no file. Pure, so the `PUT`'s guard can be decided on the very
+/// bytes the write replaces.
+fn retention_of(dir: &str, data: Option<&[u8]>) -> RetentionEntry {
     let entry = |days: Option<i64>, source: Source, reason: Option<String>| RetentionEntry {
         config_dir: dir.to_string(),
         cleanup_period_days: days,
@@ -142,21 +165,19 @@ fn read_retention(dir: &str) -> RetentionEntry {
     let default = || entry(Some(DEFAULT_CLEANUP_PERIOD_DAYS), Source::Default, None);
     let unknown = |reason: String| entry(None, Source::Unknown, Some(reason));
 
-    let data = match std::fs::read(settings_json_path(dir)) {
-        Ok(data) => data,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return default(),
-        Err(e) => return unknown(format!("the file could not be read ({e})")),
+    let Some(data) = data else {
+        return default();
     };
-    if !is_utf8(&data) {
+    if !is_utf8(data) {
         return unknown("the file is not valid UTF-8".to_string());
     }
-    if !go_json_valid(&data) {
+    if !go_json_valid(data) {
         return unknown("the file is not valid JSON".to_string());
     }
     if data.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
         return unknown("the file is not a JSON object".to_string());
     }
-    let file: SettingsFile = match serde_json::from_slice(&data) {
+    let file: SettingsFile = match serde_json::from_slice(data) {
         Ok(file) => file,
         // A valid object serde still refuses: the key twice, or a value nested
         // past its recursion limit.
@@ -283,6 +304,17 @@ fn patch_error(e: PatchError) -> WriteError {
 /// `PUT`: decode, check the request, apply [`guard`], write, read back.
 /// Every refusal happens before anything is written.
 fn put(dirs: &[String], body: &[u8]) -> Result<Answer, WriteError> {
+    put_with(dirs, body, || {})
+}
+
+/// [`put`] with its seam: `before_write` runs after the request has passed
+/// the guard and before the write reads the file. Tests use it to stand in
+/// for Claude Code editing the file in between.
+fn put_with(
+    dirs: &[String],
+    body: &[u8],
+    before_write: impl FnOnce(),
+) -> Result<Answer, WriteError> {
     let request: RetentionRequest = decode_body(body)?;
     let days = requested_days(request.cleanup_period_days.as_ref())?;
     let dir = match request.config_dir {
@@ -294,9 +326,30 @@ fn put(dirs: &[String], body: &[u8]) -> Result<Answer, WriteError> {
             ))
         }
     };
-    if guard(&read_retention(&dir), days)? == Write::Apply {
-        set_top_level_key(dirs, &dir, "cleanupPeriodDays", &days.to_string())
-            .map_err(patch_error)?;
+    // Refused here first, so a file that cannot even be read is a 422 with
+    // its reason rather than the write's I/O failure.
+    guard(&read_retention(&dir), days)?;
+    before_write();
+    // Then decided again on the bytes the write replaces: Claude Code edits
+    // this file too, and a value it raised (or set to 0) since the read above
+    // must not be overwritten with a lower one.
+    let mut refused = None;
+    set_top_level_key_if(
+        dirs,
+        &dir,
+        "cleanupPeriodDays",
+        &days.to_string(),
+        |data| match guard(&retention_of(&dir, data), days) {
+            Ok(write) => write == Write::Apply,
+            Err(e) => {
+                refused = Some(e);
+                false
+            }
+        },
+    )
+    .map_err(patch_error)?;
+    if let Some(e) = refused {
+        return Err(e);
     }
     let body = gojson::to_vec(&response_for(dirs))
         .map_err(|e| WriteError::Fallback(format!("encoding claude retention: {e}")))?;
@@ -1026,6 +1079,45 @@ mod tests {
         let written = read_retention(&scratch.dir(""));
         assert_eq!(written.cleanup_period_days, Some(365));
         assert_eq!(written.source, Source::Settings);
+    }
+
+    /// Claude Code edits the file after the request passed the guard: the
+    /// rule is decided again on the bytes the write replaces, so a value it
+    /// raised, or set to `0`, is not overwritten with a lower one.
+    #[test]
+    fn a_value_raised_or_zeroed_before_the_write_is_not_lowered() {
+        for (edited, error) in [
+            (
+                &br#"{"cleanupPeriodDays":400}"#[..],
+                "validation error for \"cleanup_period_days\": 365 is lower than the \
+                 current 400; Agento only extends Claude Code's retention",
+            ),
+            (
+                br#"{"cleanupPeriodDays":0}"#,
+                "validation error for \"cleanup_period_days\": the current value is 0, which \
+                 Claude Code rejects, so it never cleans up; any number would start deleting \
+                 transcripts, so Agento leaves it as it is",
+            ),
+            (
+                b"{oops",
+                "validation error for \"config_dir\": the file is not valid JSON; Agento does \
+                 not write a settings.json it could not read",
+            ),
+        ] {
+            let scratch = Scratch::new(Some(br#"{"cleanupPeriodDays":90}"#), b"{}");
+            let dirs = [scratch.dir(""), scratch.dir("-work"), scratch.dir("-other")];
+            let body = format!(
+                r#"{{"config_dir":{},"cleanup_period_days":365}}"#,
+                serde_json::to_string(&dirs[1]).expect("dir")
+            );
+            let refused = put_with(&dirs, body.as_bytes(), || {
+                std::fs::write(scratch.file("-work"), edited).expect("claude code writes");
+            })
+            .expect_err("refused");
+            assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(refused.message(), error);
+            assert_eq!(std::fs::read(scratch.file("-work")).expect("work"), edited);
+        }
     }
 
     #[test]

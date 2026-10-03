@@ -76,6 +76,12 @@ export function RetentionPrompt({ onExtended }: { onExtended(): void }) {
     (signal) => api.get<SettingsResponse>("/settings", signal),
     []
   );
+  // Nothing below is mounted, and no `settings.json` is read, once answered.
+  if (!settings.data || settings.data.settings.claude_retention_prompt_answered) return null;
+  return <UnansweredPrompt onExtended={onExtended} />;
+}
+
+function UnansweredPrompt({ onExtended }: { onExtended(): void }) {
   const retention = useResource(
     (signal) => api.get<ClaudeRetention>("/settings/claude-retention", signal),
     []
@@ -88,17 +94,20 @@ export function RetentionPrompt({ onExtended }: { onExtended(): void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [hidden, setHidden] = useState(false);
-  // The dirs as the last successful extend left them: the closing state.
-  const [extended, setExtended] = useState<ClaudeRetentionDir[]>();
+  // Every dir this prompt has already raised, as the `PUT` answered it. A
+  // retry after a later step failed must not raise one of these again: the
+  // dir now offers only higher presets, and a write cannot be taken back.
+  const [written, setWritten] = useState<Record<string, ClaudeRetentionDir>>({});
+  // Set once the extend and the answered flag are both stored: the closing state.
+  const [extended, setExtended] = useState(false);
 
   const dirs = retention.data?.dirs ?? [];
   if (hidden) return null;
-  if (!extended) {
-    if (!settings.data || settings.data.settings.claude_retention_prompt_answered) return null;
-    if (!dirs.some(known)) return null;
-  }
+  if (!extended && !dirs.some(known)) return null;
 
-  const extendable = dirs.filter((d) => extendOptions(d).length > 0);
+  const extendable = dirs.filter(
+    (d) => !written[d.config_dir] && extendOptions(d).length > 0
+  );
   const target = (d: ClaudeRetentionDir): string => {
     const options = extendOptions(d).map((o) => String(o.days));
     const choice = picked[d.config_dir];
@@ -139,22 +148,22 @@ export function RetentionPrompt({ onExtended }: { onExtended(): void }) {
         return;
       }
       const chosen = extendable.filter((d) => target(d) !== LEAVE);
-      if (chosen.length === 0) {
+      if (chosen.length === 0 && Object.keys(written).length === 0) {
         setError("Choose a retention for at least one config directory.");
         return;
       }
-      let latest: ClaudeRetention | undefined;
       for (const d of chosen) {
         const body: ClaudeRetentionRequest = {
           config_dir: d.config_dir,
           cleanup_period_days: Number(target(d)),
         };
-        latest = await api.put<ClaudeRetention>("/settings/claude-retention", body);
+        const answer = await api.put<ClaudeRetention>("/settings/claude-retention", body);
+        const now = answer.dirs?.find((x) => x.config_dir === d.config_dir);
+        if (now) setWritten((w) => ({ ...w, [d.config_dir]: now }));
         onExtended();
       }
       await markAnswered();
-      const written = new Set(chosen.map((d) => d.config_dir));
-      setExtended((latest?.dirs ?? []).filter((d) => written.has(d.config_dir)));
+      setExtended(true);
     } catch (err) {
       setError(describeError(err));
       // A dir written before the failure shows its new value.
@@ -170,7 +179,7 @@ export function RetentionPrompt({ onExtended }: { onExtended(): void }) {
         <div className="retention-prompt__head">
           <Icon name="check" size={14} />
           <span>
-            {extended
+            {Object.values(written)
               .map(
                 (d) =>
                   `Claude Code's retention is now ${daysText(d.cleanup_period_days ?? 0)} in ${retentionFile(d)}.`
@@ -199,7 +208,8 @@ export function RetentionPrompt({ onExtended }: { onExtended(): void }) {
 
       <div className="retention-prompt__options" role="radiogroup" aria-label="Transcript retention">
         {CHOICES.map((c) => {
-          const unavailable = c.id === "extend" && extendable.length === 0;
+          const unavailable =
+            c.id === "extend" && extendable.length === 0 && Object.keys(written).length === 0;
           return (
             <div key={c.id} className="col" style={{ gap: "var(--sp-2)" }}>
               <label className="retention-prompt__option">
@@ -220,9 +230,15 @@ export function RetentionPrompt({ onExtended }: { onExtended(): void }) {
                 <div className="retention-prompt__dirs">
                   {dirs.map((d) => {
                     const options = extendOptions(d);
+                    const done = written[d.config_dir];
                     return (
                       <div key={d.config_dir} className="retention-prompt__dir" title={d.config_dir}>
-                        {options.length === 0 ? (
+                        {done ? (
+                          <span className="retention-prompt__note">
+                            {tildePath(d.config_dir)}: extended to{" "}
+                            {daysText(done.cleanup_period_days ?? 0)}.
+                          </span>
+                        ) : options.length === 0 ? (
                           <span className="retention-prompt__note">
                             {tildePath(d.config_dir)}: nothing to extend. cleanupPeriodDays{" "}
                             {noExtendReason(d)}.
