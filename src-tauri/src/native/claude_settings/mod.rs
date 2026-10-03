@@ -76,6 +76,7 @@
 //! [`super::settings`] already answers it: by re-reading the settings row, which
 //! is the authority the snapshot itself is installed from.
 
+pub(crate) mod patch;
 pub mod profiles;
 pub mod retention;
 

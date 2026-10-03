@@ -49,8 +49,9 @@ const PATH: &str = "/api/settings/claude-retention";
 /// over the union of every owner's const.
 pub const ROUTES: &[(&str, &str)] = &[("GET", PATH)];
 
-/// This module's entry in `native::ENDPOINTS`. GET-only on purpose: writing
-/// the key is #719's, under its own route.
+/// This module's entry in `native::ENDPOINTS`. GET-only on purpose: the
+/// write is [`super::patch::set_top_level_key`] (#719), and its route is the
+/// retention prompt's (#720), which adds the raise-only guard with it.
 pub const ENDPOINT: Endpoint = Endpoint {
     name: "claude retention",
     claims,
@@ -466,6 +467,25 @@ mod tests {
             "a read must leave every config dir as it found it"
         );
     }
+    /// A key written by `patch` reads back as that number from the file, and
+    /// a second indexed dir keeps its own answer.
+    #[test]
+    fn a_patched_key_reads_back_as_settings() {
+        let work = dir_with(br#"{"model":"opus"}"#);
+        let other = dir_with(br#"{"cleanupPeriodDays":14}"#);
+        let dirs = [
+            work.path().to_string_lossy().into_owned(),
+            other.path().to_string_lossy().into_owned(),
+        ];
+        super::super::patch::set_top_level_key(&dirs, &dirs[0], "cleanupPeriodDays", "365")
+            .expect("write");
+
+        let response = response_for(&dirs);
+        assert_eq!(response.dirs[0].source, Source::Settings);
+        assert_eq!(response.dirs[0].cleanup_period_days, Some(365));
+        assert_eq!(response.dirs[1].cleanup_period_days, Some(14));
+    }
+
     /// With no home at all the default dir is `/root/.claude`, which a normal
     /// user cannot read. That is still an answer, not a failure: the route
     /// leads with that dir and says `default` or an explained `unknown`.

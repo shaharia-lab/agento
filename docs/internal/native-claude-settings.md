@@ -196,8 +196,8 @@ turn Settings → Data into an error; the only 500 is an unreadable database.
 **It is a read and only a read.** The claim is GET-only, and
 `the_route_answers_every_indexed_dir_and_writes_nothing` compares every file's
 bytes and modification time before and after, including a default dir that has
-no `settings.json` and must not gain one. Writing the key is #719's, under its
-own route.
+no `settings.json` and must not gain one. Writing the key is
+`claude_settings::patch` (#719, below); its route is #720's.
 
 Two limits, stated rather than solved. Only the user-level file is read, while
 Claude Code also takes the key from managed, project-level and
@@ -208,3 +208,39 @@ words `0` as its own sentence instead of "after 0 days".
 
 The route has no Go counterpart, so it is recorded in
 `parity/desktop_routes.json` through `claude_settings::retention::ROUTES`.
+
+## Writing one key of a config dir's `settings.json` (#719)
+
+`claude_settings::patch::set_top_level_key(indexed, dir, key, value)` sets one
+top-level key and leaves every other byte of the file as it was. `value` is
+already-encoded JSON. It has **no route**: the retention prompt (#720) is its
+only intended caller and adds the route together with the raise-only guard,
+because a general "set one key" route would be a way to lower
+`cleanupPeriodDays`, which deletes transcripts.
+
+**It splices bytes; it never decodes the document.** `serde_json` is built
+without `preserve_order`, so a `Value` round trip sorts keys, and any decode
+respells `1e2` as `100`. `patch::splice` scans the top-level object for byte
+spans and builds `prefix + value + suffix`:
+
+- key present: only the value's bytes change;
+- key absent: appended after the last member, with the separator (line ending
+  and indentation) and the spacing around `:` copied from the last member, so a
+  one-line file stays one line and a CRLF file gets a CRLF line;
+- key absent from `{}`: the object becomes `{\n  "key": value\n}`;
+- no file: created holding only that key, `0600`, in a dir created `0700`.
+
+Key names are decoded to compare them, so `"cleanup\u0050eriodDays"` is the key.
+The value must be exactly one JSON value, so it cannot inject members.
+
+**Refusals write nothing**, each a distinct `PatchError`: a `dir` not in
+`settings::indexed_claude_config_dirs` (compared as stored), a file that is not
+UTF-8, not valid JSON, not an object, or that names the key twice (the cases
+`retention` reports as `unknown`). Agento does not repair the user's file.
+
+**Claude Code writes this file too.** The file is read again just before the
+write and the write is refused (`ChangedUnderneath`) if the bytes changed. A
+small window remains between that read and the rename; it is not solved. The
+write is `write_file`, #668's atomic replace, so a failed write leaves the
+previous file intact and a symlinked `settings.json` is written through.
+`claude_settings/tests_patch.rs` pins all of it over temp dirs.
