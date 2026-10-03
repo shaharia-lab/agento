@@ -61,10 +61,10 @@ fn a_one_line_file_keeps_its_bytes_around_the_value() {
 
 #[test]
 fn a_key_spelled_with_an_escape_is_the_same_key() {
-    let src = r#"{"cleanupPeriodDays":30}"#;
+    let src = r#"{"cleanup\u0050eriodDays":30}"#;
     assert_eq!(
         splice(src, KEY, "90").expect("splice"),
-        r#"{"cleanupPeriodDays":90}"#
+        r#"{"cleanup\u0050eriodDays":90}"#
     );
 }
 
@@ -152,7 +152,7 @@ fn a_file_that_cannot_be_decided_about_is_refused() {
             PatchError::DuplicateKey,
         ),
         (
-            r#"{"cleanupPeriodDays":1,"cleanupPeriodDays":2}"#,
+            r#"{"cleanupPeriodDays":1,"cleanup\u0050eriodDays":2}"#,
             PatchError::DuplicateKey,
         ),
     ] {

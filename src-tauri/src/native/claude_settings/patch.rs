@@ -14,7 +14,7 @@
 //! `100`. So [`splice`] finds the byte span of the key's value with a scanner
 //! over the original text and builds `prefix + new value + suffix`. Nothing
 //! is decoded and nothing is re-encoded. Only the key names are decoded, to
-//! compare them, so a key spelled with an escape (`"cleanupPeriodDays"`)
+//! compare them, so a key spelled with an escape (`"cleanup\u0050eriodDays"`)
 //! is the key Claude Code sees.
 //!
 //! - **Present:** only the value's bytes change.
