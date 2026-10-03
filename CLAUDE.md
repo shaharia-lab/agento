@@ -429,12 +429,12 @@ endpoint is served in-process. What remains is listed here.
   cannot do. Its test step is filtered to `native::gopath`,
   `native::sessions::projects`, one profiles guard, two `claude::process`
   tests and the Telegram client's truncated-body test (#671), and **floored at
-  26 tests**, because `cargo test` treats "the filter matched nothing" as success
+  28 tests**, because `cargo test` treats "the filter matched nothing" as success
   and an allowlist with no floor is a job that goes silently vacuous on a
   rename.
 
-  The filter is measured, not assumed. An unfiltered `cargo test --lib` there is
-  red at **1394/1422** (it was 1388 before `core.autocrlf=false` was set on the
+  The filter is measured, not assumed. An unfiltered `cargo test --lib` there was
+  red at **1394/1422** when measured (it was 1388 before `core.autocrlf=false` was set on the
   checkout; those six were pure CRLF against the byte-exact goldens). The 28th
   was fixed by #671 and is in the filter; **the other 27 are Unix-shaped
   fixtures** rather than defects — `settings::tests` 10,

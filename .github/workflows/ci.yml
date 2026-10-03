@@ -182,7 +182,7 @@ jobs:
   # counts — it is red at **1394/1422**, so six of those were pure CRLF against
   # the byte-exact goldens and are now fixed rather than excluded.
   #
-  # Of the 28 that remain, **27 are Unix-shaped test fixtures rather than
+  # Of the 28 that failed then, **27 are Unix-shaped test fixtures rather than
   # defects**: `native::settings::tests` (10), `native::claude_settings` (9),
   # `native::fs::tests` (5), `native::scanner::walk` (2) and
   # `native::uploads::tests` (1) assert Unix path spellings —
@@ -273,7 +273,7 @@ jobs:
             | tee filtered.log
           passed=$(grep -oE '^test result: ok\. [0-9]+ passed' filtered.log | grep -oE '[0-9]+' | head -1)
           echo "ran ${passed:-0} tests"
-          if [ -z "$passed" ] || [ "$passed" -lt 26 ]; then
-            echo "::error::expected at least 26 tests to run, got ${passed:-0} — the filter has gone stale"
+          if [ -z "$passed" ] || [ "$passed" -lt 28 ]; then
+            echo "::error::expected at least 28 tests to run, got ${passed:-0} — the filter has gone stale"
             exit 1
           fi
