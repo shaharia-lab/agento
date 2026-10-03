@@ -83,20 +83,21 @@ pub struct FsListResponse {
 
 /// `handleFSList`.
 ///
-/// **Every error here is a 500, and two of them should not be.** The inherited
-/// behaviour answers 404 for a missing path, 400 for anything else unreadable
-/// and 500 only when the home directory cannot be resolved. Those three bodies
-/// were never written, because at the time an `Err` reached an implementation
-/// that had them. Nothing does now, so the directory picker reports "internal
-/// server error" for a path the user simply mistyped.
-///
-/// Known gap rather than a decision — it is on the list in `CLAUDE.md`. Fixing
-/// it means giving this function a typed error and three bodies.
-pub fn list(raw_path: &str) -> Result<FsListResponse, String> {
+/// The errors are typed, because the picker can only say something useful
+/// about a path the user typed if the status says what was wrong with it:
+/// a missing path is **404**, anything else `read_dir` refuses — a plain
+/// file, a directory without read permission — is **400**, and **500** is
+/// left for the failures that are the server's own: no home directory to
+/// resolve `""`/`"~"` against, or an entry failing mid-listing. The bodies
+/// go through [`WriteError`], the vocabulary `mkdir` below already answers
+/// with, so they reach the wire in the `{"error": …}` shape every other
+/// `/api` error uses — and the messages are fixed strings: the path the
+/// client sent may be echoed, the `io::Error` may not (#669).
+pub fn list(raw_path: &str) -> Result<FsListResponse, WriteError> {
     // `""` and `"~"` — and nothing else — mean the home directory.
     let expanded = if raw_path.is_empty() || raw_path == "~" {
         paths::home()
-            .ok_or("could not determine home directory")?
+            .ok_or_else(|| WriteError::Internal("could not determine home directory".to_string()))?
             .to_string_lossy()
             .into_owned()
     } else {
@@ -106,15 +107,20 @@ pub fn list(raw_path: &str) -> Result<FsListResponse, String> {
     let clean = gopath::clean(&expanded);
 
     let mut entries = Vec::new();
-    let reader =
-        std::fs::read_dir(&clean).map_err(|e| format!("cannot read directory {clean:?}: {e}"))?;
+    let reader = std::fs::read_dir(&clean).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => {
+            WriteError::NotFoundMessage(format!("folder not found: {clean}"))
+        }
+        _ => WriteError::BadRequest(format!("cannot read directory: {clean}")),
+    })?;
     for entry in reader {
-        let entry = entry.map_err(|e| format!("reading an entry of {clean:?}: {e}"))?;
+        let entry = entry
+            .map_err(|e| WriteError::Fallback(format!("reading an entry of {clean:?}: {e}")))?;
         // `file_type`, never `metadata`: Go's `DirEntry.IsDir` does not follow
         // symlinks, so a link to a directory is not listed.
         let file_type = entry
             .file_type()
-            .map_err(|e| format!("stat-ing an entry of {clean:?}: {e}"))?;
+            .map_err(|e| WriteError::Fallback(format!("stat-ing an entry of {clean:?}: {e}")))?;
         if !file_type.is_dir() {
             continue;
         }
@@ -271,8 +277,16 @@ fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, Strin
     if req.path == PATH_MKDIR {
         return finish(mkdir(req.body));
     }
-    let listing = list(&path_param(req.query))?;
-    let body = super::gojson::to_vec(&listing).map_err(|e| format!("encoding fs listing: {e}"))?;
+    finish(listing_answer(&path_param(req.query)))
+}
+
+/// The listing as an answerable result — [`list`] plus its encoding — so
+/// `serve` can put it through `finish` next to `mkdir`, and a mistyped path
+/// answers its 404/400 rather than the seam's 500.
+fn listing_answer(raw_path: &str) -> Result<super::Answer, WriteError> {
+    let listing = list(raw_path)?;
+    let body = super::gojson::to_vec(&listing)
+        .map_err(|e| WriteError::Fallback(format!("encoding fs listing: {e}")))?;
     Ok(super::Answer::json(body))
 }
 
@@ -387,6 +401,69 @@ mod tests {
         let listing = list(&format!("{root}/alpha/../bravo")).expect("listing");
         assert_eq!(listing.path, format!("{root}/bravo"));
         assert_eq!(listing.parent, root);
+    }
+
+    /// A path that does not exist is a **404** whose body names it as
+    /// missing — the answer the picker turns into "folder not found"
+    /// rather than "internal server error" for a typo (#669).
+    #[test]
+    fn a_missing_path_is_a_404_folder_not_found() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = format!("{}/no-such-dir", dir.path().to_str().expect("utf8 path"));
+
+        let err = list(&missing).unwrap_err();
+        assert_eq!(
+            err,
+            WriteError::NotFoundMessage(format!("folder not found: {missing}"))
+        );
+        assert_eq!(err.status(), super::super::StatusCode::NOT_FOUND);
+    }
+
+    /// A path that exists but is not a directory cannot be listed, and
+    /// that is the request's fault rather than the server's: **400**.
+    #[test]
+    fn a_plain_file_is_a_400() {
+        let dir = tree();
+        let file = format!("{}/notes.txt", dir.path().to_str().expect("utf8 path"));
+
+        let err = list(&file).unwrap_err();
+        assert_eq!(
+            err,
+            WriteError::BadRequest(format!("cannot read directory: {file}"))
+        );
+        assert_eq!(err.status(), super::super::StatusCode::BAD_REQUEST);
+    }
+
+    /// A directory without read permission is the same **400**: `read_dir`
+    /// refuses it, and the refusal is about the path, not the machinery.
+    /// The test is meaningless as root, where the mode is never consulted,
+    /// so it detects that and skips itself rather than failing.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_is_a_400() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).expect("subdir");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        // Root reads through a 0o000 mode. If the read succeeds there is
+        // nothing this test can prove here, so restore and stop.
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+                .expect("restore");
+            return;
+        }
+
+        let path = locked.to_str().expect("utf8 path");
+        let err = list(path).unwrap_err();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        assert_eq!(
+            err,
+            WriteError::BadRequest(format!("cannot read directory: {path}"))
+        );
+        assert_eq!(err.status(), super::super::StatusCode::BAD_REQUEST);
     }
 
     /// Field order is the Go struct's declaration order.

@@ -450,11 +450,6 @@ endpoint is served in-process. What remains is listed here.
   `claude_sdk.rs` and `scheduled_run.rs` make their fake Claude CLI executable
   through `std::os::unix::fs::PermissionsExt`, so they do not compile there —
   which is what `--lib` excludes.
-- **`GET /api/fs` answers 500 where it should answer 404 or 400.** The
-  directory picker reports "internal server error" for a path the user simply
-  mistyped. The three typed bodies (404 missing, 400 unreadable, 500 no home)
-  were never written, because at the time an `Err` here reached an
-  implementation that had them. Fixing it means giving `fs::list` a typed error.
 - **Several surfaces answer 500 for input they cannot decide about**, rather
   than reproducing an answer they cannot be sure of: a non-ASCII settings-profile
   name, a request body that is not UTF-8, duplicate JSON keys, a document past
