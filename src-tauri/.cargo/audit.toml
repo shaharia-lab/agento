@@ -1,0 +1,24 @@
+# cargo-audit configuration, read when `cargo audit` runs from `src-tauri/`
+# (the *Dependency audit* workflow, and locally — see docs/development.md).
+#
+# The ignore list is for one case only: a vulnerability with no fixed version
+# to move to, or one whose fix cannot be taken yet. Prefer `cargo update -p
+# <crate>` every time it is possible.
+#
+# Every entry carries a comment, on the line above it, stating
+#   1. why the advisory does not apply to Agento or cannot be fixed yet, and
+#   2. the condition under which the entry is removed.
+# An entry without both is rejected in review.
+#
+# Shape:
+#
+#   ignore = [
+#       # <crate> <version>: <why>. Remove when <condition>.
+#       "RUSTSEC-0000-0000",
+#   ]
+#
+# Unmaintained, unsound and yanked notices are warnings, not failures, so they
+# do not belong here — Tauri's GTK3 bindings on Linux carry several.
+
+[advisories]
+ignore = []

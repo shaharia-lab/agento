@@ -1,4 +1,12 @@
 version: 2
+# What this file does to *security* updates, which are enabled on the
+# repository (#667): the `update-types` ignores below apply to version updates
+# only — Dependabot drops them when it resolves a security update, so a fix
+# that needs a minor or major bump is still proposed. An ignore that names
+# `versions` does apply to both, which today means `typescript` and
+# `eslint-plugin-react-hooks`, both build-time only. `open-pull-requests-limit`
+# and `groups` (version updates unless `applies-to` says otherwise) do not
+# touch security updates either.
 updates:
   # Rust: the app's backend. Patch updates only, single grouped PR.
   #
