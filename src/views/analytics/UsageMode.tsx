@@ -295,10 +295,10 @@ function TopSessions({
                   {i + 1}
                 </td>
                 <td className="truncate" style={{ maxWidth: 320 }}>
-                  {/* No `projectPath`: `SessionRanking.project` is analytics'
-                      `decoded_path`, which is not the sessions list's
-                      `project_path` — so "Copy project path" waits for the
-                      hydrated row rather than copying the wrong string. */}
+                  {/* No `projectPath`: "Copy project path" waits for the
+                      hydrated row. `SessionRanking.project` is the same
+                      `project_path` the sessions list keys on, so nothing
+                      here would copy a wrong string; it is simply not passed. */}
                   <SessionLink sessionId={r.session_id} title={r.title} />
                 </td>
                 <td

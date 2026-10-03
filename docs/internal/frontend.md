@@ -154,11 +154,12 @@ src/
                  hand-off in `SessionsView` resolves through it too — the by-id
                  route is only the fallback for a session with no list row,
                  because `SessionDetail` fetches the transcript itself on mount
-                 and taking it first reads every message twice. A caller must
-                 **not** pass `decoded_path` as `projectPath`: analytics ranks
-                 on it and the sessions list keys on `project_path` literally,
-                 so "Copy project path" would copy a string nothing filters
-                 on. Carries `styles/sessionlink.css` itself, the
+                 and taking it first reads every message twice. `projectPath`
+                 is the row's `project_path` and nothing else path-shaped.
+                 Analytics' `SessionRanking.project` and the picker's
+                 `decoded_path` are that same value (`docs/internal/native.md`,
+                 *Wire-format traps*), but the rankings pass nothing and
+                 "Copy project path" waits for the hydrated row. Carries `styles/sessionlink.css` itself, the
                  `components/charts.tsx` shape, since its consumers are in
                  sections that do not import `styles/sessions.css`.
                  **A caller that only has an id must resolve the row before

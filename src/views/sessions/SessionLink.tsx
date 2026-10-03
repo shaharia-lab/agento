@@ -168,13 +168,13 @@ export function SessionLink({
   /**
    * A genuine `project_path`, where the calling surface has one.
    *
-   * It must **not** be filled with anything path-shaped: analytics ranks on
-   * `decoded_path`, which is the dash-encoded name for some sessions and a
-   * real path for others — a documented divergence — so "Copy project path"
-   * would copy a string the sessions list does not key on, and *which* string
-   * would depend on whether the hydration round-trip beat the click. A caller
-   * with no true path passes nothing and the item stays disabled until the
-   * row lands.
+   * It must be the value the sessions list keys on, not merely something
+   * path-shaped: `project_path` is the raw dash-encoded directory name for a
+   * project whose directory no longer exists on disk, so a path a caller
+   * worked out for itself can differ from it, and *which* string "Copy
+   * project path" copied would then depend on whether the hydration
+   * round-trip beat the click. A caller with no stored `project_path` passes
+   * nothing and the item stays disabled until the row lands.
    */
   projectPath?: string;
 }) {

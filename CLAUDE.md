@@ -495,9 +495,3 @@ these are now simply Agento's bugs, and fixing them is unblocked.
 - **An agent's `permission_mode` cannot be persisted.** `AgentRequest` has no
   such field, so the API silently drops it even though the config type and the
   validator both know about it.
-- **The project filter means different things on two endpoints** —
-  `decoded_path` on `/api/claude-analytics`, `project_path` on
-  `/api/claude-sessions`. Sending the wrong one returns an empty result with no
-  error.
-- **`/api/claude-sessions/projects` returns `decoded_path` identical to
-  `encoded_name`**, so the decode never actually happens for the picker.

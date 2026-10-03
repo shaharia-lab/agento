@@ -486,10 +486,17 @@ are authored there directly.
   exactly that; decoding it into a `serde_json::Value` and re-encoding would
   ship `{"a":1,"z":1.5}` — reordered and respelled, with nothing to signal it.
   `native/gojson.rs::compact` is the byte pass that avoids it.
-- **The project filter differs between endpoints.** `/claude-analytics` matches
-  `decoded_path`; `/claude-sessions` matches `project_path` literally, which is
-  the dash-encoded name for some sessions and a real path for others. Sending
-  the wrong one returns an empty result with no error — a silent wrong answer.
+- **The project filter is one value on every endpoint, and it is not always a
+  path.** `/claude-analytics` (`analytics/report.rs::in_project`) and
+  `/claude-sessions` (`sessions/query.rs::build_filter`) both compare
+  `project_path` for equality, and `/claude-sessions/projects` ships that same
+  value as `decoded_path` (`sessions/projects.rs::list`), so what the picker
+  offers is what both filters match. Why it is not always a path:
+  `scanner/walk.rs::decode_project_path` answers the raw dash-encoded directory
+  name whenever the decoded path does not exist on disk, so a project whose
+  directory was moved or deleted is keyed — and filtered — on its encoded name.
+  A value that matches no stored `project_path` returns an empty result with no
+  error.
 - **Go `omitempty` drops zero values** the JSON otherwise implies are always
   present (`InsightCard.percent/count/model`, `ProjectBreakdown.folded_projects`,
   `SessionFacets.config_dirs`). Default with `?? 0`; do not trust the type.
