@@ -6,10 +6,14 @@ name: Site check
 # The link check earns its place: docs/ cross-links by heading anchor
 # (`troubleshooting.md#the-claude-code-cli`), and renaming a heading breaks
 # those silently — the markdown still renders, the link just goes nowhere.
+#
+# `docs/internal/` is excluded because the site does not publish it; pages.yml
+# says why that is safe and when the `!` line has to go.
 on:
   pull_request:
     paths:
       - 'docs/**'
+      - '!docs/internal/**'
       - 'web/**'
       - 'src-tauri/tauri.conf.json'
       - '.github/workflows/site-check.yml'

@@ -8,11 +8,21 @@ name: Site
 # the version and so cannot be addressed by GitHub's `releases/latest/download`
 # redirect. Without the release trigger the site would advertise the previous
 # version until somebody happened to push a docs change.
+#
+# `docs/internal/` is excluded from the push filter because it is not published:
+# web/scripts/sync-docs.mjs copies only the files listed in
+# web/docs.manifest.mjs, plus docs/screenshots/. Those notes change in almost
+# every feature PR, so without the exclusion nearly every merge republished an
+# unchanged site (#743). **Remove the `!` line if anything under docs/internal/
+# ever becomes a build input**, or those changes will stop deploying. It has to
+# stay after `docs/**`: patterns are applied in order, and a negation listed
+# before the pattern it narrows does nothing.
 on:
   push:
     branches: [main]
     paths:
       - 'docs/**'
+      - '!docs/internal/**'
       - 'web/**'
       - 'src-tauri/tauri.conf.json'
       - '.github/workflows/pages.yml'
