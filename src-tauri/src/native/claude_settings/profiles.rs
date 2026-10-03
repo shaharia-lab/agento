@@ -586,6 +586,11 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
 ///
 /// A rename collision is an explicit 409 rather than the auto-deduplication
 /// create and duplicate perform — the two really do differ.
+///
+/// **A new name with no ASCII letter or digit keeps the id** (#670). Its slug
+/// would be the `profile` fallback, which says nothing about the name: moving
+/// the profile onto it would be a rename the user did not ask for, and a 409
+/// naming an id they never typed as soon as a second such profile existed.
 fn rename(
     profiles: &mut [Profile],
     idx: usize,
@@ -593,7 +598,11 @@ fn rename(
     new_name: &str,
     dir: &str,
 ) -> Result<(), WriteError> {
-    let new_id = slugify(new_name);
+    let new_id = if new_name.chars().any(|c| c.is_ascii_alphanumeric()) {
+        slugify(new_name)
+    } else {
+        current_id.to_string()
+    };
     if new_id != current_id {
         if profiles
             .iter()
@@ -754,6 +763,34 @@ mod tests {
             assert_eq!(id, want, "name {name:?}");
             resolve_profile_file_path(&d, &id).expect("a slug is always a safe id");
         }
+    }
+
+    /// Renaming to a name with no ASCII letter or digit changes the name and
+    /// nothing else (#670): the id and the file stay, so two such profiles
+    /// never collide on the `profile` fallback.
+    #[test]
+    fn a_rename_to_a_name_with_no_ascii_keeps_the_id_and_the_file() {
+        let root = dir();
+        let d = path_of(&root);
+        create(&d, r#"{"name":"日本語"}"#.as_bytes()).expect("create");
+        create(&d, r#"{"name":"한국어"}"#.as_bytes()).expect("create");
+
+        let renamed =
+            body_of(update(&d, "profile-2", r#"{"name":"中文"}"#.as_bytes()).expect("rename"));
+        assert!(
+            renamed.contains(r#""id":"profile-2","name":"中文""#),
+            "{renamed}"
+        );
+        assert!(std::path::Path::new(&format!("{d}/settings_profile-2.json")).exists());
+
+        // An ASCII-named profile renamed the same way keeps its id too.
+        create(&d, br#"{"name":"Work"}"#).expect("create");
+        let renamed = body_of(update(&d, "work", r#"{"name":"仕事"}"#.as_bytes()).expect("rename"));
+        assert!(
+            renamed.contains(r#""id":"work","name":"仕事""#),
+            "{renamed}"
+        );
+        assert!(std::path::Path::new(&format!("{d}/settings_work.json")).exists());
     }
 
     /// The whole life of a profile with a non-ASCII name (#670): created with

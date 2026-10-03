@@ -497,11 +497,8 @@ fn split_url(raw: &str) -> Result<(String, String), WriteError> {
             return Err(refuse());
         }
     }
-    // The **whole authority**, port included: both Go validators test `u.Host`,
-    // which keeps the port. Returning only the pre-colon part made
-    // `https://:8080` — a valid `Host` of `:8080` to Go — look like no host at
-    // all and answer 422. Emptiness is the only thing the callers test, so
-    // including the port changes nothing else.
+    // The host returned is the **whole authority**, port included. Emptiness
+    // is the only thing the callers test.
     //
     // Last, the parser every request to this site is built with (#670). A URL
     // that passed everything above and that `url` still refuses — a port past

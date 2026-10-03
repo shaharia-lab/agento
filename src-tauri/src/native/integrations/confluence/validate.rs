@@ -49,7 +49,7 @@ pub enum Refusal {
     /// The caller answers it as a 400 on `credentials.site_url` (#670). It can
     /// only arise before the network call, which is why it needs no kind:
     /// nothing was asked, so nothing was refused.
-    Unreproducible(String),
+    SiteUrl(String),
 }
 
 /// `io.LimitReader(resp.Body, 1*1024*1024)` — validate.go's own cap.
@@ -89,7 +89,7 @@ pub async fn validate_credentials(
     // `url.Parse`'s wording; see the module header.
     let clean = super::validate_site_url(site_url).map_err(|e| {
         if e.starts_with("invalid site URL: ") {
-            Refusal::Unreproducible(e)
+            Refusal::SiteUrl(e)
         } else {
             // A site URL this build refuses outright never reached Atlassian,
             // so it says nothing about the token.
@@ -101,7 +101,7 @@ pub async fn validate_credentials(
     let url = reqwest::Url::parse(&format!("{clean}/wiki/api/v2/spaces?limit=1"))
         // The cleaned site URL does not make a request URL: the same refusal
         // as the ones above, and nothing has been called yet.
-        .map_err(|e| Refusal::Unreproducible(format!("invalid site URL: {e}")))?;
+        .map_err(|e| Refusal::SiteUrl(format!("invalid site URL: {e}")))?;
 
     let request = http_client()
         .ok_or_else(|| Refusal::Reproducible(CheckFailure::unreachable(failed.clone())))?

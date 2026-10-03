@@ -77,6 +77,9 @@ a 500 any more:
   else, so `Café` gets the id `caf` and a name with no ASCII letter or digit
   gets `profile` (then `profile-2`, by the usual deduplication). The id stays
   ASCII because it is a file name and the UI puts it in a URL path unescaped.
+  **Renaming** a profile to a name with no ASCII letter or digit keeps its id
+  and file and changes only the name, so it can never hit the rename 409 on
+  the `profile` fallback.
 - **A value nested past serde's 128-level recursion limit** but inside the
   scanner's 10000 (`json.Valid` is fine — `IgnoredAny` skips iteratively, and
   the 10000 cap is checked by hand — but a `Value` decode is not) is

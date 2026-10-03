@@ -206,11 +206,30 @@ pub fn mkdir(body: &[u8]) -> Result<super::Answer, WriteError> {
     })
     .map_err(|e| WriteError::Fallback(format!("encoding mkdir response: {e}")))?;
 
-    // Nothing below this line may return `Fallback`.
-    create_dir_all_0750(&clean)
-        .map_err(|e| WriteError::Fallback(format!("creating {clean:?}: {e}")))?;
+    // The one effect, and the last fallible step.
+    create_dir_all_0750(&clean).map_err(|e| {
+        if cannot_be_created_there(&clean, &e) {
+            WriteError::validation("path", format!("cannot create {clean:?}: {e}"))
+        } else {
+            WriteError::Fallback(format!("creating {clean:?}: {e}"))
+        }
+    })?;
 
     Ok(super::Answer::json(encoded))
+}
+
+/// Whether a failed `MkdirAll` is about the path the request named (#670): the
+/// user may not write there, or a regular file sits where a directory has to
+/// be. Those are a 422 on `path`; anything else — a full disk, an I/O error —
+/// is the machinery and stays a 500.
+///
+/// The file case is read off the filesystem rather than off the error, because
+/// `io::ErrorKind::NotADirectory` is newer than this crate's MSRV.
+fn cannot_be_created_there(clean: &str, error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+        || std::path::Path::new(clean)
+            .ancestors()
+            .any(|at| at.exists() && !at.is_dir())
 }
 
 /// `os.MkdirAll(path, 0750)`.
@@ -418,6 +437,30 @@ mod tests {
     }
 
     // ─── `POST /api/fs/mkdir` (#296) ──────────────────────────────────────────
+
+    /// A path that cannot be created because a regular file is in the way is a
+    /// 422 on `path` (#670), whether the file is the target or a parent of it.
+    /// It was a 500.
+    #[test]
+    fn mkdir_through_a_regular_file_is_a_422_on_path() {
+        let blocker = tempfile::NamedTempFile::new().expect("temp file");
+        let file = blocker.path().to_string_lossy().into_owned();
+        for target in [file.clone(), format!("{file}/inside")] {
+            let body = format!("{{\"path\":{}}}", serde_json::json!(target));
+            let err = mkdir(body.as_bytes()).unwrap_err();
+            assert_eq!(
+                err.status(),
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "{target}"
+            );
+            assert!(
+                err.message()
+                    .starts_with("validation error for \"path\": cannot create "),
+                "{}",
+                err.message()
+            );
+        }
+    }
 
     fn mkdir_body(dir: &str) -> String {
         format!(

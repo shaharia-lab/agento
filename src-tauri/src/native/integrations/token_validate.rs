@@ -308,7 +308,7 @@ async fn call(
                 // that field (#670) — it was a 500 while only another
                 // implementation could word it. It arises before the request,
                 // so nothing was asked and no stored state changes.
-                Refusal::Unreproducible(why) => CallFailure::validation(
+                Refusal::SiteUrl(why) => CallFailure::validation(
                     "credentials.site_url",
                     "",
                     CheckFailure::unreachable(why),
