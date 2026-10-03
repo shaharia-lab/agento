@@ -136,6 +136,11 @@ export interface InboundCopy {
    * Which scrubbed-read flag says the token the worker needs is stored. Slack
    * needs its app-level token; a Telegram row's only credential is its bot
    * token. `PUT /api/integrations/{id}/inbound` answers 422 without it.
+   *
+   * `has_credentials` is an approximation for Telegram: it is true for any
+   * non-empty blob, and the backend asks for a non-blank `bot_token`. A row
+   * storing `{"bot_token":""}` therefore offers the switch and shows the 422
+   * under it, which is the same sentence either way.
    */
   tokenFlag: "has_app_token" | "has_credentials";
 }

@@ -88,7 +88,8 @@ header states each rule below with its reason.
   alone, and migration 50 turns `inbound_enabled` on for every Telegram row
   whose `webhook_status` was `active`. So `registry::start_worker_only` hosts a
   poll worker on a row that has no tool server, through
-  `Registry::put_worker_if_current`. Slack never takes that path.
+  `Registry::put_worker_if_current` — a row that is not authenticated, and
+  equally one whose tool server failed to start. Slack never takes that path.
 - **The registry owns the worker** as `InboundWorker::Telegram`, in the same
   map, epoch and generation bookkeeping as Slack's socket. Dropping the handle
   cancels the poll in flight. The boot clear covers `type IN ('slack',
@@ -102,7 +103,8 @@ header states each rule below with its reason.
 
 Pinned by `telegram/polling_tests.rs` — library tests, because the Telegram API
 base is a `cfg(test)` seam a `tests/` binary cannot reach — and by
-`registry.rs`'s `a_telegram_poll_worker_follows_the_switch_and_the_token_but_not_the_auth`,
+`registry.rs`'s `a_telegram_poll_worker_follows_the_switch_and_the_token_but_not_the_auth`
+and `a_row_with_no_server_keeps_a_telegram_poll_worker_and_clears_the_rest`,
 `integrations.rs`'s `the_inbound_switch_follows_a_telegram_rows_bot_token` and
 `migrate.rs`'s `migration_50_turns_inbound_on_for_an_active_telegram_webhook`.
 

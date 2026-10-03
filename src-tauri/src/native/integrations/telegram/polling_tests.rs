@@ -383,6 +383,72 @@ async fn the_webhook_is_deleted_before_the_first_poll_and_the_row_says_so() {
     assert_eq!((secret.as_str(), status.as_str()), ("", "inactive"));
 }
 
+/// A webhook Telegram will not let go of is a failed attempt like any other:
+/// nothing polls behind it, the row says why, and the worker keeps trying until
+/// the delete goes through. Polling regardless would only collect 409s.
+#[tokio::test]
+async fn a_failed_webhook_delete_is_retried_and_nothing_polls_behind_it() {
+    let _guard = api_base_lock().await;
+    // 1 = Telegram refusing the delete.
+    let refusing = Arc::new(AtomicU8::new(1));
+    let mode = Arc::clone(&refusing);
+    let fake = fake_telegram(Arc::new(move |method, body, _| {
+        if method == "deleteWebhook" && mode.load(Ordering::SeqCst) == 1 {
+            Reply::refused("Bad Gateway")
+        } else {
+            quiet(body)
+        }
+    }))
+    .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = fixture(dir.path(), "tg-stuck-webhook");
+    let options = PollOptions {
+        base_backoff: Duration::from_millis(150),
+        max_backoff: Duration::from_millis(300),
+        ..fast()
+    };
+
+    let worker = accepted(&db, "tg-stuck-webhook", options);
+    eventually("reconnecting", || {
+        inbound(&db, "tg-stuck-webhook").0 == STATUS_RECONNECTING
+    })
+    .await;
+    eventually("error after the third failure", || {
+        inbound(&db, "tg-stuck-webhook").0 == STATUS_ERROR
+    })
+    .await;
+    assert_eq!(
+        inbound(&db, "tg-stuck-webhook").1,
+        "removing the webhook before polling: telegram API error: Bad Gateway"
+    );
+    assert!(fake.count("deleteWebhook") >= 3, "each attempt asks again");
+    assert_eq!(
+        fake.count("getUpdates"),
+        0,
+        "no poll may be sent while the webhook is still set"
+    );
+    let status: String = rusqlite::Connection::open(&db)
+        .expect("open")
+        .query_row(
+            "SELECT webhook_status FROM integrations WHERE id = 'tg-stuck-webhook'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read");
+    assert_eq!(
+        status, "active",
+        "the row is cleared only once the delete worked"
+    );
+
+    refusing.store(0, Ordering::SeqCst);
+    eventually("connected once the delete goes through", || {
+        inbound(&db, "tg-stuck-webhook") == (STATUS_CONNECTED.to_string(), String::new())
+    })
+    .await;
+    drop(worker);
+    set_api_base(None);
+}
+
 /// A redelivery — a restart, or a poll whose confirmation never reached
 /// Telegram — must not run the rule twice. The rule names an agent that does
 /// not exist, so a run is exactly one error reply: the cheapest thing that

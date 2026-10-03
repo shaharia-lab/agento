@@ -607,7 +607,7 @@ pub async fn start_all(db_path: &Path) -> Result<(), String> {
     // writer is most likely to hold the lock. The read below is a WAL read and
     // never waits on a writer, which is why it is not the same question.
     let clear_db = db_path.to_path_buf();
-    crate::native::db::blocking("slack inbound clear at boot", move || {
+    crate::native::db::blocking("inbound clear at boot", move || {
         super::slack::socket::clear_all_inbound_status_blocking(&clear_db);
     })
     .await;
@@ -673,18 +673,17 @@ async fn start_one(db_path: &Path, row: &HostingRow, generation: u64) -> Result<
     // usable token has gone, an in-process server failing to bind — leaves a row
     // with no worker. Returning the `Err` without clearing would leave the dead
     // worker's `connected` standing until the next boot, which is the same lie
-    // every other no-worker path in this function is careful to avoid.
+    // every other no-worker path in this function is careful to avoid. A
+    // Telegram row is the exception that keeps receiving (#676): its poll
+    // worker needs the bot token and not the tool server, so
+    // `start_worker_only` starts one where it can and clears otherwise.
     let server = match start_for_type(row).await {
         Ok(server) => server,
         Err(e) => {
-            if has_inbound_transport(&row.integration_type) {
-                // Only if this start is still the current one — a failure that
-                // arrives after a concurrent reload's worker was accepted must
-                // not drop it. See `retire_socket_if_current`.
-                if let Some(epoch) = registry().retire_socket_if_current(&row.id, generation) {
-                    super::slack::socket::clear_status(db_path, &row.id, epoch).await;
-                }
-            }
+            // Only if this start is still the current one — a failure that
+            // arrives after a concurrent reload's worker was accepted must
+            // not drop it. See `retire_socket_if_current`.
+            start_worker_only(db_path, row, generation).await;
             return Err(e);
         }
     };
@@ -737,10 +736,12 @@ async fn start_one(db_path: &Path, row: &HostingRow, generation: u64) -> Result<
 /// What a row that hosts no tool server still gets: a Telegram poll worker
 /// when it asks for one, and otherwise a cleared inbound status (#676).
 ///
-/// [`start_one`] cannot serve this case, because it records a worker beside the
-/// server it built and there is none here. Slack never takes the first arm: its
-/// worker needs the row to be authenticated, which is what was just found
-/// missing.
+/// Two callers, and the row has no server for a different reason at each:
+/// `reload` found it disabled or unauthenticated, and [`start_one`] found that
+/// its server would not start. Both have already lost the previous worker to
+/// `reload`'s stop, so a Telegram row must be given a new one here or its
+/// inbound is dead with the switch on. Slack never takes the first arm: its
+/// worker replies through the row's own authorisation.
 async fn start_worker_only(db_path: &Path, row: &HostingRow, generation: u64) {
     if !has_inbound_transport(&row.integration_type) || host_poll_worker(db_path, row, generation) {
         return;
@@ -3258,6 +3259,86 @@ mod tests {
         assert!(!registry().is_hosted("tg-off"));
 
         registry().stop("tg-on");
+        super::super::telegram::client::set_api_base(None);
+    }
+
+    /// What a row with no tool server is left with, which is `start_one`'s
+    /// failed-start arm as well as `reload`'s not-startable one (#676). A
+    /// Telegram row that can poll must come out with a worker — `reload` has
+    /// already stopped the previous one — and any other row with a cleared
+    /// status. The server failure itself cannot be staged with a usable token
+    /// (it is a bind failure), so the arm's one call is driven directly.
+    #[tokio::test]
+    async fn a_row_with_no_server_keeps_a_telegram_poll_worker_and_clears_the_rest() {
+        let _guard = super::super::telegram::client::api_base_lock().await;
+        // Nothing listens here: the workers fail to connect, which is enough.
+        super::super::telegram::client::set_api_base(Some("http://127.0.0.1:1".to_string()));
+
+        let file = db();
+        insert(
+            &file,
+            "tg-noserver",
+            "telegram",
+            true,
+            Some(r#"{"validated":true}"#),
+            r#"{"bot_token":"123:poll-secret"}"#,
+            "{}",
+        );
+        insert(
+            &file,
+            "sl-noserver",
+            "slack",
+            true,
+            Some(r#"{"validated":true}"#),
+            &slack_credentials(Some(SLACK_APP_TOKEN)),
+            SLACK_SERVICES,
+        );
+        for id in ["tg-noserver", "sl-noserver"] {
+            set_inbound(&file, id, true);
+            crate::native::integrations::slack::socket::write_status_blocking(
+                file.path(),
+                id,
+                crate::native::integrations::slack::socket::STATUS_CONNECTED,
+                "",
+            );
+        }
+
+        for id in ["tg-noserver", "sl-noserver"] {
+            let row = get_for_hosting(file.path(), id)
+                .expect("read")
+                .expect("a row");
+            let generation = registry().generation(id);
+            start_worker_only(file.path(), &row, generation).await;
+        }
+
+        assert!(
+            registry().is_socket_running("tg-noserver"),
+            "a Telegram row polls on its bot token, server or no server"
+        );
+        assert!(!registry().is_hosted("tg-noserver"));
+        assert!(!registry().is_socket_running("sl-noserver"));
+        let status: String = Connection::open(file.path())
+            .expect("open")
+            .query_row(
+                "SELECT inbound_status FROM integrations WHERE id = 'sl-noserver'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read the inbound state");
+        assert_eq!(status, "", "the dead worker's status must not stand");
+
+        // A superseded start touches nothing: the generation it quotes is stale.
+        let row = get_for_hosting(file.path(), "tg-noserver")
+            .expect("read")
+            .expect("a row");
+        let stale = registry().generation("tg-noserver");
+        registry().stop("tg-noserver");
+        start_worker_only(file.path(), &row, stale).await;
+        assert!(
+            !registry().is_socket_running("tg-noserver"),
+            "a refused worker is dropped, not recorded"
+        );
+
         super::super::telegram::client::set_api_base(None);
     }
 }

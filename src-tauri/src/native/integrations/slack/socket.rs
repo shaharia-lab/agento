@@ -423,7 +423,7 @@ pub(crate) async fn status_writer(
             continue;
         }
         let (path, id) = (db_path.clone(), integration_id.clone());
-        db::blocking("slack inbound status", move || {
+        db::blocking("inbound status", move || {
             write_status_blocking(&path, &id, status, &error);
         })
         .await;
@@ -994,7 +994,7 @@ pub async fn clear_status(db_path: &Path, integration_id: &str, epoch: u64) {
         return;
     }
     let (path, id) = (db_path.to_path_buf(), integration_id.to_string());
-    db::blocking("slack inbound clear", move || {
+    db::blocking("inbound clear", move || {
         clear_status_blocking(&path, &id);
     })
     .await;
