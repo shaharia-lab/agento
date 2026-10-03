@@ -28,7 +28,7 @@ use std::path::Path;
 
 use tokio::sync::Semaphore;
 
-use super::match_rule::{match_rule, RuleFilters};
+use super::match_rule::{match_rule, sender_allowed, RuleFilters};
 use super::receiver::{TelegramMsg, TelegramUpdate};
 use crate::native::agent_run;
 use crate::native::agents::Agent;
@@ -213,6 +213,11 @@ fn find_matching_rule(
         // the answer is the same one: the first enabled rule that matches, in
         // store order.
         .filter(|rule| rule.enabled)
+        // Senders are denied by default (#674): a rule is considered only for
+        // a chat its list names, so an empty, null or unparseable
+        // `filter_chat_ids` matches nobody. Asked here, ahead of `match_rule`,
+        // whose own chat clause reads empty as "everything" for Slack.
+        .filter(|rule| sender_allowed(&rule.filters.chat_ids, &chat_id))
         .find_map(|rule| match_rule(&rule.filters, &msg.text, &chat_id).map(|p| (rule, p)))
 }
 
@@ -276,9 +281,9 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
     Ok(out)
 }
 
-/// A stored `[]string` column. An unparseable or null value is an empty list,
-/// which the matcher reads as "no filter" — the same answer Go's zero slice
-/// gives.
+/// A stored `[]string` column. An unparseable or null value is an empty list:
+/// "no filter" for keywords, and for Telegram's `filter_chat_ids` an allowlist
+/// that names nobody (#674).
 fn decode_list(raw: &str) -> Vec<String> {
     serde_json::from_str::<Option<Vec<Option<String>>>>(raw)
         .ok()
@@ -692,7 +697,7 @@ mod tests {
             true,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
         add_rule(
@@ -701,7 +706,7 @@ mod tests {
             true,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-02-01 00:00:00 +0000 UTC",
         );
 
@@ -720,7 +725,7 @@ mod tests {
             false,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
         assert!(find_matching_rule(&db, "tg", &msg("anything", 42)).is_none());
@@ -732,7 +737,7 @@ mod tests {
             true,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-02-01 00:00:00 +0000 UTC",
         );
         assert_eq!(
@@ -778,29 +783,95 @@ mod tests {
             true,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
         assert!(find_matching_rule(&db, "other", &msg("hi", 42)).is_none());
     }
 
     #[test]
-    fn a_null_or_broken_filter_column_is_no_filter_rather_than_no_match() {
+    fn a_null_or_broken_keyword_column_is_no_filter_rather_than_no_match() {
         // Go decodes these into a nil slice, which `matchesKeywords` reads as
         // "everything". A port treating the failure as "match nothing" would
         // silently stop a working rule.
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(dir.path());
+        for (id, keywords) in [("null", "null"), ("broken", "not json")] {
+            add_rule(
+                &db,
+                id,
+                true,
+                "",
+                keywords,
+                r#"["42"]"#,
+                "2026-01-01 00:00:00 +0000 UTC",
+            );
+        }
+        assert!(find_matching_rule(&db, "tg", &msg("anything", 42)).is_some());
+    }
+
+    /// #674: the allowed-chats list is the one filter where "unset" is not
+    /// "everything". Whatever the column holds that names no chat — empty,
+    /// null, unparseable, a blank entry — the rule answers nobody.
+    #[test]
+    fn a_rule_that_names_no_chat_answers_nobody() {
+        for chat_ids in [
+            "[]",
+            "null",
+            "",
+            "not json",
+            r#"[""]"#,
+            "[null]",
+            r#"{"42":1}"#,
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db = migrated(dir.path());
+            add_rule(
+                &db,
+                "open",
+                true,
+                "",
+                "[]",
+                chat_ids,
+                "2026-01-01 00:00:00 +0000 UTC",
+            );
+            assert!(
+                find_matching_rule(&db, "tg", &msg("anything", 42)).is_none(),
+                "filter_chat_ids {chat_ids:?}"
+            );
+        }
+    }
+
+    /// The allowed, not-allowed and fall-through cases at the dispatcher: a
+    /// sender one rule does not name is not answered by it, and is still
+    /// answered by a later rule that does name it.
+    #[test]
+    fn a_sender_is_matched_only_by_a_rule_that_names_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
         add_rule(
             &db,
-            "nulls",
+            "first",
             true,
             "",
-            "null",
-            "not json",
+            "[]",
+            r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
-        assert!(find_matching_rule(&db, "tg", &msg("anything", 42)).is_some());
+        add_rule(
+            &db,
+            "second",
+            true,
+            "",
+            "[]",
+            r#"["7","-100"]"#,
+            "2026-02-01 00:00:00 +0000 UTC",
+        );
+        let matched = |chat| find_matching_rule(&db, "tg", &msg("hi", chat)).map(|(r, _)| r.id);
+        assert_eq!(matched(42).as_deref(), Some("first"));
+        assert_eq!(matched(-100).as_deref(), Some("second"));
+        assert_eq!(matched(99), None);
+        assert_eq!(matched(4), None, "an exact compare, not a prefix");
     }
 
     #[test]

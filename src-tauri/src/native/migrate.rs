@@ -69,6 +69,10 @@
 //! `inbound_enabled` on for every Telegram row whose webhook was `active`, so a
 //! trigger that worked over the webhook keeps working over the long poll that
 //! replaces it (#676).
+//! Migration **51** is the twenty-first and adds no column either: it turns
+//! off every enabled Telegram trigger rule whose `filter_chat_ids` names no
+//! chat, because such a rule now answers nobody and the write refuses one
+//! (#674). The rule and its settings are kept; listing a chat turns it back on.
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -300,8 +304,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 50, "expected 50 migrations");
-        assert_eq!(expected_version(), 50);
+        assert_eq!(all.len(), 51, "expected 51 migrations");
+        assert_eq!(expected_version(), 51);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -395,7 +399,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 50);
+        assert_eq!(current_version(&conn).expect("version"), 51);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -613,7 +617,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 50);
+        assert_eq!(current_version(&conn).expect("version"), 51);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -673,7 +677,7 @@ mod tests {
         .expect("seed rows at 47");
 
         apply(&mut conn).expect("apply 48 and later");
-        assert_eq!(current_version(&conn).expect("version"), 50);
+        assert_eq!(current_version(&conn).expect("version"), 51);
 
         let flagged = |table: &str| -> Vec<String> {
             let mut stmt = conn
@@ -845,7 +849,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 50);
+        assert_eq!(current_version(&conn).expect("version"), 51);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -956,6 +960,86 @@ mod tests {
         assert_eq!(updated_at, "then", "a backfill is not a user edit");
     }
 
+    /// Migration 51 (#674): an enabled Telegram rule whose `filter_chat_ids`
+    /// names no chat comes out turned off, whatever shape "names no chat"
+    /// takes in the column. A rule that lists one, a rule already off and a
+    /// Slack rule (where an empty list is the workspace default) are untouched.
+    #[test]
+    fn migration_51_turns_off_telegram_rules_that_list_no_chat() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 50);
+        for (id, kind) in [("tg", "telegram"), ("sl", "slack")] {
+            conn.execute(
+                "INSERT INTO integrations
+                    (id, name, type, enabled, credentials, services, created_at, updated_at)
+                 VALUES (?1, ?1, ?2, 1, '{}', '{}', 'then', 'then')",
+                [id, kind],
+            )
+            .expect("seed integration");
+        }
+        for (id, integration, enabled, chat_ids) in [
+            ("tg-empty", "tg", 1, "[]"),
+            ("tg-null", "tg", 1, "null"),
+            ("tg-blank", "tg", 1, ""),
+            ("tg-broken", "tg", 1, "not json"),
+            ("tg-object", "tg", 1, r#"{"42":1}"#),
+            ("tg-string", "tg", 1, r#""42""#),
+            ("tg-blank-entry", "tg", 1, r#"["",null]"#),
+            ("tg-number-entry", "tg", 1, "[42]"),
+            ("tg-listed", "tg", 1, r#"["42"]"#),
+            ("tg-listed-among-blanks", "tg", 1, r#"["","-100"]"#),
+            ("tg-off-empty", "tg", 0, "[]"),
+            ("sl-empty", "sl", 1, "[]"),
+            ("sl-listed", "sl", 1, r#"["C1"]"#),
+        ] {
+            conn.execute(
+                "INSERT INTO trigger_rules
+                    (id, integration_id, name, agent_slug, enabled, filter_chat_ids,
+                     model, created_at, updated_at)
+                 VALUES (?1, ?2, ?1, 'a', ?3, ?4, 'opus', 'then', 'then')",
+                rusqlite::params![id, integration, enabled, chat_ids],
+            )
+            .expect("seed rule");
+        }
+
+        apply(&mut conn).expect("apply 51");
+
+        let on: Vec<String> = conn
+            .prepare("SELECT id FROM trigger_rules WHERE enabled = 1 ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            on,
+            [
+                "sl-empty",
+                "sl-listed",
+                "tg-listed",
+                "tg-listed-among-blanks"
+            ]
+        );
+        // Turned off, not rewritten: the rule keeps everything else it held.
+        let kept: (i64, String, String, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(model), MAX(model), MAX(updated_at) FROM trigger_rules",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read");
+        assert_eq!(kept, (13, "opus".into(), "opus".into(), "then".into()));
+        let chat_ids: String = conn
+            .query_row(
+                "SELECT filter_chat_ids FROM trigger_rules WHERE id = 'tg-broken'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read");
+        assert_eq!(chat_ids, "not json");
+    }
+
     /// The property this whole function exists for, and the one sequential
     /// idempotence does **not** prove: two processes applying at once must both
     /// succeed rather than one failing on duplicate DDL — which is exactly what
@@ -1002,7 +1086,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 50);
+        assert_eq!(current_version(&conn).expect("version"), 51);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -1011,7 +1095,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 50);
+        assert_eq!(recorded, 51);
     }
 
     #[test]

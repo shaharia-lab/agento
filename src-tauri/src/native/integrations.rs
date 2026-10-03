@@ -1759,6 +1759,44 @@ fn validate_rule_settings(req: &TriggerRuleRequest) -> Result<(), WriteError> {
     Ok(())
 }
 
+/// A Telegram rule must name the chats it answers (#674).
+///
+/// `filter_chat_ids` is that rule's sender allowlist, and the dispatcher reads
+/// an empty one as nobody (`match_rule::sender_allowed`), so a rule stored
+/// without one could never fire. It is refused here rather than stored, so
+/// the write and the filter agree and neither is the only guard. Every entry
+/// is a numeric chat id in its canonical spelling, the form the dispatcher
+/// compares against (`msg.chat.id.to_string()`): `+42`, `042` and `@name`
+/// would be stored and then never match.
+///
+/// Telegram only. On a Slack rule the same column is a channel selection, and
+/// empty there is the workspace-wide default (`select_rule`).
+fn validate_rule_senders(
+    integration_type: &str,
+    req: &TriggerRuleRequest,
+) -> Result<(), WriteError> {
+    if integration_type != "telegram" {
+        return Ok(());
+    }
+    let chat_ids = req.filter_chat_ids.as_ref().map(|list| list.0.as_slice());
+    let chat_ids = chat_ids.unwrap_or_default();
+    if chat_ids.is_empty() {
+        return Err(WriteError::validation(
+            "filter_chat_ids",
+            "at least one chat id is required: a Telegram rule answers only the chats it lists",
+        ));
+    }
+    for chat in chat_ids {
+        if chat.parse::<i64>().map(|n| n.to_string()).as_deref() != Ok(chat.as_str()) {
+            return Err(WriteError::validation(
+                "filter_chat_ids",
+                format!("chat id {chat:?} is not a numeric Telegram chat id"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `handleCreateTriggerRule` → `triggerService.CreateRule`.
 fn create_trigger_rule(
     db_path: &Path,
@@ -1780,12 +1818,13 @@ fn create_trigger_rule(
     validate_rule_settings(&req)?;
 
     let conn = open_for_write(db_path)?;
-    if !integration_exists(&conn, integration_id)? {
+    let Some(integration_type) = integration_type_of(&conn, integration_id)? else {
         return Err(WriteError::NotFound {
             resource: "integration".to_string(),
             id: integration_id.to_string(),
         });
-    }
+    };
+    validate_rule_senders(&integration_type, &req)?;
     check_rule_task(&conn, &req.task_id)?;
 
     // One `now` for both columns and for the response: Go takes a single
@@ -1847,6 +1886,10 @@ fn update_trigger_rule(
         ));
     }
     validate_rule_settings(&req)?;
+    // The on/off switch posts the stored rule back, so this also refuses
+    // turning on a rule that migration 51 turned off, until it lists a chat.
+    let integration_type = integration_type_of(&conn, &existing.integration_id)?;
+    validate_rule_senders(integration_type.as_deref().unwrap_or_default(), &req)?;
     // Only a *changed* link is looked up (#687). A task deleted after the rule
     // was linked leaves a dangling id here, and the form and the row's enabled
     // switch both send the stored id back: refusing it would make that rule
@@ -1996,15 +2039,6 @@ fn integration_type_of(
     })
     .optional()
     .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
-}
-
-fn integration_exists(conn: &rusqlite::Connection, id: &str) -> Result<bool, WriteError> {
-    conn.query_row("SELECT 1 FROM integrations WHERE id = ?1", [id], |_| {
-        Ok(true)
-    })
-    .optional()
-    .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
-    .map(|found| found.unwrap_or(false))
 }
 
 /// Re-read a timestamp this process just formatted.
@@ -3886,17 +3920,231 @@ mod tests {
         );
     }
 
+    /// A Slack row, for the rule tests that are about the write itself: their
+    /// bodies name no channel, which Slack allows and Telegram refuses (#674).
     fn seed_integration(file: &tempfile::NamedTempFile, id: &str) {
+        seed_integration_of(file, id, "slack");
+    }
+
+    fn seed_integration_of(file: &tempfile::NamedTempFile, id: &str, kind: &str) {
         Connection::open(file.path())
             .expect("open")
             .execute(
                 "INSERT INTO integrations (id, name, type, enabled, credentials, services,
                                            created_at, updated_at)
-                 VALUES (?1, 'n', 'telegram', 1, '{}', '{}', '2026-01-01 00:00:00 +0000 UTC',
+                 VALUES (?1, 'n', ?2, 1, '{}', '{}', '2026-01-01 00:00:00 +0000 UTC',
                          '2026-01-01 00:00:00 +0000 UTC')",
-                [id],
+                [id, kind],
             )
             .expect("seed");
+    }
+
+    /// Every body that names no usable chat, and the message each is refused
+    /// with. The first four are "unset"; the rest name something that is not a
+    /// chat id the dispatcher could ever compare equal to.
+    fn refused_sender_lists() -> Vec<(&'static str, String)> {
+        let required =
+            "at least one chat id is required: a Telegram rule answers only the chats it lists";
+        let not_numeric =
+            |chat: &str| format!("chat id {chat:?} is not a numeric Telegram chat id");
+        vec![
+            (r#"{"agent_slug":"a","enabled":true}"#, required.to_string()),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_chat_ids":null}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_chat_ids":[]}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":false,"filter_chat_ids":[]}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":[null]}"#,
+                not_numeric(""),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["42",""]}"#,
+                not_numeric(""),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["*"]}"#,
+                not_numeric("*"),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["@me"]}"#,
+                not_numeric("@me"),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["+42"]}"#,
+                not_numeric("+42"),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["042"]}"#,
+                not_numeric("042"),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":[" 42"]}"#,
+                not_numeric(" 42"),
+            ),
+        ]
+    }
+
+    fn assert_refused_on_senders(err: &WriteError, want: &str, body: &str) {
+        assert_eq!(
+            err.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        assert_eq!(
+            err.message(),
+            format!(r#"validation error for "filter_chat_ids": {want}"#),
+            "{body}"
+        );
+    }
+
+    /// #674, the create: a Telegram rule that lists no chat is refused on the
+    /// field, and nothing is stored.
+    #[test]
+    fn a_telegram_rule_that_lists_no_chat_cannot_be_created() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        for (body, want) in refused_sender_lists() {
+            let err = create_trigger_rule(file.path(), "tg", body.as_bytes())
+                .expect_err("no allowed chat");
+            assert_refused_on_senders(&err, &want, body);
+        }
+        assert_eq!(
+            stored(&file, "SELECT CAST(COUNT(*) AS TEXT) FROM trigger_rules"),
+            "0"
+        );
+    }
+
+    /// #674, the update: the same refusal, and the stored rule keeps the list
+    /// it had. The write is replace, so a body that omits the key would
+    /// otherwise clear it.
+    #[test]
+    fn a_telegram_rule_cannot_be_updated_into_listing_no_chat() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        create_trigger_rule(
+            file.path(),
+            "tg",
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["42"]}"#,
+        )
+        .expect("create");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        for (body, want) in refused_sender_lists() {
+            let err = update_trigger_rule(file.path(), "tg", &id, body.as_bytes())
+                .expect_err("no allowed chat");
+            assert_refused_on_senders(&err, &want, body);
+            assert_eq!(
+                stored(
+                    &file,
+                    "SELECT filter_chat_ids || '/' || enabled FROM trigger_rules"
+                ),
+                r#"["42"]/1"#,
+                "{body}"
+            );
+        }
+    }
+
+    /// #674, the allowed case: a list of canonical chat ids is stored as sent,
+    /// negative group ids included.
+    #[test]
+    fn a_telegram_rule_that_lists_its_chats_is_stored() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        let created = create_trigger_rule(
+            file.path(),
+            "tg",
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["42","-1001234567890"]}"#,
+        )
+        .expect("create");
+        assert_eq!(created.status, axum::http::StatusCode::CREATED);
+        let body = body_of(&created);
+        assert!(
+            body.contains(r#""filter_chat_ids":["42","-1001234567890"]"#),
+            "{body}"
+        );
+
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        update_trigger_rule(
+            file.path(),
+            "tg",
+            &id,
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["7"]}"#,
+        )
+        .expect("update");
+        assert_eq!(
+            stored(&file, "SELECT filter_chat_ids FROM trigger_rules"),
+            r#"["7"]"#
+        );
+    }
+
+    /// A rule stored before the requirement, as migration 51 leaves it: off,
+    /// with no list. The row's on/off switch posts the stored rule back with
+    /// `enabled` flipped, and that is refused until the rule lists a chat.
+    #[test]
+    fn a_stored_telegram_rule_with_no_chat_cannot_be_turned_on() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO trigger_rules
+                    (id, integration_id, name, agent_slug, enabled, filter_chat_ids,
+                     created_at, updated_at)
+                 VALUES ('old', 'tg', 'Old', 'a', 0, '[]',
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("seed rule");
+
+        let body = r#"{"name":"Old","agent_slug":"a","enabled":true,"filter_chat_ids":null}"#;
+        let err = update_trigger_rule(file.path(), "tg", "old", body.as_bytes())
+            .expect_err("still lists no chat");
+        assert_refused_on_senders(
+            &err,
+            "at least one chat id is required: a Telegram rule answers only the chats it lists",
+            body,
+        );
+        assert_eq!(
+            stored(&file, "SELECT CAST(enabled AS TEXT) FROM trigger_rules"),
+            "0"
+        );
+
+        // Listing one is what turns it back on.
+        update_trigger_rule(
+            file.path(),
+            "tg",
+            "old",
+            br#"{"name":"Old","agent_slug":"a","enabled":true,"filter_chat_ids":["42"]}"#,
+        )
+        .expect("update");
+        assert_eq!(
+            stored(&file, "SELECT CAST(enabled AS TEXT) FROM trigger_rules"),
+            "1"
+        );
+    }
+
+    /// The requirement is Telegram's. A Slack rule's list is a channel
+    /// selection, and one with none is the workspace-wide default.
+    #[test]
+    fn a_slack_rule_may_still_list_no_channel() {
+        let file = migrated();
+        seed_integration_of(&file, "sl", "slack");
+        for body in [
+            &br#"{"agent_slug":"a","enabled":true}"#[..],
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":[]}"#,
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["C0123ABCD"]}"#,
+        ] {
+            let created = create_trigger_rule(file.path(), "sl", body).expect("create");
+            assert_eq!(created.status, axum::http::StatusCode::CREATED);
+        }
     }
 
     #[test]

@@ -302,6 +302,16 @@ A Telegram integration can also run agents on incoming messages. Add a trigger
 rule saying which messages match and which agent handles them. The agent's reply
 goes back to the same chat.
 
+**Chat IDs** is required. A rule answers only the chats it lists, by numeric id:
+your own id for a private chat with the bot, or a group's id, which is negative.
+A message from any other chat starts nothing and gets no reply. To find an id,
+message `@userinfobot` on Telegram, or add `@RawDataBot` to the group for a
+moment.
+
+A rule saved by an earlier version with no chat ids is turned off when Agento
+updates, and its row says so. Edit the rule, add the chats it should answer, and
+turn it back on.
+
 The rule form has the same **Task** picker as a Slack rule's. A Telegram message
 does not start the linked task yet: it still runs the rule's own agent.
 

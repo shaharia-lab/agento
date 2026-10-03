@@ -91,6 +91,17 @@ fn matches_chat_ids(allowed: &[String], chat_id: &str) -> bool {
     allowed.is_empty() || allowed.iter().any(|id| id == chat_id)
 }
 
+/// Whether a Telegram rule's allowlist names this chat (#674).
+///
+/// **Empty is nobody here**, the opposite of [`matches_chat_ids`]: a Telegram
+/// rule answers only a chat it lists, so a rule that lists none answers none.
+/// A blank entry names no chat either. The Telegram dispatcher asks this
+/// before [`match_rule`]; Slack does not, because there the list is a channel
+/// selection made by `select_rule`, where empty is the workspace default.
+pub fn sender_allowed(allowed: &[String], chat_id: &str) -> bool {
+    !chat_id.is_empty() && allowed.iter().any(|id| id == chat_id)
+}
+
 /// `strings.EqualFold` over bytes, with Go's UTF-8 decoding.
 ///
 /// Byte slices rather than `&str` because the caller may hand it a slice that
@@ -233,6 +244,27 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn a_sender_is_allowed_only_when_the_list_names_it() {
+        let list = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Allowed: named, alone or among others.
+        assert!(sender_allowed(&list(&["42"]), "42"));
+        assert!(sender_allowed(
+            &list(&["7", "-1001234567890"]),
+            "-1001234567890"
+        ));
+        // Not allowed: the list names someone else. Exact compare, no prefix.
+        assert!(!sender_allowed(&list(&["42"]), "99"));
+        assert!(!sender_allowed(&list(&["42"]), "4"));
+        assert!(!sender_allowed(&list(&["42"]), "420"));
+        // Unset: nobody, where `matches_chat_ids` says everybody.
+        assert!(!sender_allowed(&[], "42"));
+        assert!(matches_chat_ids(&[], "42"));
+        // A blank entry is not a wildcard, and a blank chat id matches nothing.
+        assert!(!sender_allowed(&list(&[""]), "42"));
+        assert!(!sender_allowed(&list(&[""]), ""));
     }
 
     #[test]

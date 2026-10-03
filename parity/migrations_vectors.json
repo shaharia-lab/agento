@@ -220,6 +220,10 @@
     {
       "version": 50,
       "sql": "UPDATE integrations SET inbound_enabled = 1\n WHERE type = 'telegram' AND webhook_status = 'active';\n"
+    },
+    {
+      "version": 51,
+      "sql": "UPDATE trigger_rules SET enabled = 0\n WHERE enabled = 1\n   AND integration_id IN (SELECT id FROM integrations WHERE type = 'telegram')\n   AND NOT EXISTS (\n       SELECT 1 FROM json_each(\n           CASE WHEN json_valid(trigger_rules.filter_chat_ids)\n                THEN CASE WHEN json_type(trigger_rules.filter_chat_ids) = 'array'\n                          THEN trigger_rules.filter_chat_ids ELSE '[]' END\n                ELSE '[]' END) AS entry\n        WHERE entry.type = 'text' AND entry.value != '');\n"
     }
   ]
 }

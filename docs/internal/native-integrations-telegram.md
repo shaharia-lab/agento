@@ -108,6 +108,39 @@ and `a_row_with_no_server_keeps_a_telegram_poll_worker_and_clears_the_rest`,
 `integrations.rs`'s `the_inbound_switch_follows_a_telegram_rows_bot_token` and
 `migrate.rs`'s `migration_50_turns_inbound_on_for_an_active_telegram_webhook`.
 
+## Trigger rules: who may start a run (#674)
+
+On a Telegram rule `filter_chat_ids` is the sender allowlist, and empty means
+nobody. Three places hold that, so none is the only guard:
+
+- **The dispatcher.** `trigger::dispatcher::find_matching_rule` considers a
+  rule only when `match_rule::sender_allowed` finds the message's chat id in
+  the rule's list. An empty, `null`, unparseable or blank-entry column names no
+  chat. `match_rule`'s own chat clause still reads empty as "everything",
+  because Slack shares it and its vectors are frozen; Telegram never reaches
+  that clause with an empty list.
+- **The write.** `integrations.rs::validate_rule_senders` answers 422 on
+  `filter_chat_ids` for a Telegram rule that lists no chat, or an entry that is
+  not an `i64` in its canonical spelling, on `POST` and `PUT` alike and whatever
+  `enabled` says. A Slack rule is not checked: there the column selects
+  channels, and empty is the workspace default.
+- **The form.** `catalog.ts`'s Telegram `triggerTargets.required` makes the
+  field required, shuts Save with the reason beside it, and shuts the row
+  switch of a stored rule that lists none.
+
+Migration 51 turns off every enabled Telegram rule that lists no chat and
+changes nothing else on the row. Such a rule cannot be turned on again until it
+lists one, because the row switch posts the stored rule back and the write
+refuses it.
+
+Pinned by `match_rule.rs`'s `a_sender_is_allowed_only_when_the_list_names_it`,
+`dispatcher.rs`'s `a_rule_that_names_no_chat_answers_nobody` and
+`a_sender_is_matched_only_by_a_rule_that_names_it`, `integrations.rs`'s
+`a_telegram_rule_that_lists_no_chat_cannot_be_created`,
+`a_telegram_rule_cannot_be_updated_into_listing_no_chat` and
+`a_stored_telegram_rule_with_no_chat_cannot_be_turned_on`, and `migrate.rs`'s
+`migration_51_turns_off_telegram_rules_that_list_no_chat`.
+
 ## Task delivery (#639)
 
 A scheduled task with a `telegram` destination sends its output here after every

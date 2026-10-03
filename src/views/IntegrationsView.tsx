@@ -1725,6 +1725,11 @@ function ruleBodyToggled(r: TriggerRule, enabled: boolean): RuleWrite {
   };
 }
 
+/** Whether a stored rule lacks the target list its provider requires (#674). */
+function missingTargets(r: TriggerRule, targets: TriggerTargets): boolean {
+  return !!targets.required && !(r.filter_chat_ids ?? []).some((id) => id !== "");
+}
+
 function splitList(v: string): string[] | null {
   const parts = v
     .split(",")
@@ -1866,6 +1871,17 @@ function TriggerRules({
                     </span>
                   ))}
                 </span>
+                {/* A rule stored before the list was required (#674) reads
+                    back off and empty. The write refuses to turn it on, so
+                    the switch is shut and this line is its reason. */}
+                {missingTargets(r, targets) && (
+                  <div className="msgline msgline--warn">
+                    <span className="msgline__icon">
+                      <Icon name="alert" size={13} />
+                    </span>
+                    <span>{targets.required?.off}</span>
+                  </div>
+                )}
               </div>
               {confirmDelete === r.id ? (
                 <span className="confirm">
@@ -1890,7 +1906,7 @@ function TriggerRules({
                 <>
                   <Switch
                     on={r.enabled}
-                    disabled={busy}
+                    disabled={busy || missingTargets(r, targets)}
                     /* The write is replace, so the body carries every column —
                        and carries it verbatim, because this control edits one
                        boolean. See `RuleWrite`. */
@@ -2074,8 +2090,17 @@ function RuleForm({
   const timeoutValid =
     draft.timeout_minutes === "" ||
     (Number.isInteger(timeout) && timeout >= 0 && timeout <= RULE_MAX_TIMEOUT_MINUTES);
+  // The provider's required list (#674), checked as the write checks it.
+  const required = targets.required;
+  const targetIds = splitList(draft.filter_chat_ids) ?? [];
+  const targetsMissing = !!required && targetIds.length === 0;
+  const targetsInvalid = required ? targetIds.filter((id) => !required.pattern.test(id)) : [];
   const ready =
-    draft.name.trim() !== "" && draft.agent_slug.trim() !== "" && timeoutValid;
+    draft.name.trim() !== "" &&
+    draft.agent_slug.trim() !== "" &&
+    timeoutValid &&
+    !targetsMissing &&
+    targetsInvalid.length === 0;
 
   return (
     <div className="rulerow" style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--sp-4)" }}>
@@ -2198,6 +2223,11 @@ function RuleForm({
         </label>
       </div>
       <div className="formrow__help">{targets.help}</div>
+      {required && targetsInvalid.length > 0 && (
+        <div className="msgline msgline--error">
+          {required.invalid} {targetsInvalid.map((id) => `“${id}”`).join(", ")}.
+        </div>
+      )}
 
       {/* The execution settings a rule may override (#563). Every one is
           optional: left alone, the run gets whatever the dispatcher already
@@ -2290,6 +2320,17 @@ function RuleForm({
         <div className="msgline msgline--error">
           Timeout must be a whole number of minutes between 0 and{" "}
           {RULE_MAX_TIMEOUT_MINUTES}.
+        </div>
+      )}
+
+      {/* Why Save is shut, in text beside it: a disabled button shows no
+          tooltip. */}
+      {required && targetsMissing && (
+        <div className="msgline msgline--warn">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>{required.missing}</span>
         </div>
       )}
 

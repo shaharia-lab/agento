@@ -470,11 +470,11 @@ async fn an_update_delivered_twice_runs_once() {
     rusqlite::Connection::open(&db)
         .expect("open")
         .execute(
-            "INSERT INTO trigger_rules
+            r#"INSERT INTO trigger_rules
                 (id, integration_id, name, agent_slug, enabled, filter_prefix,
                  filter_keywords, filter_chat_ids, created_at, updated_at)
-             VALUES ('r', 'tg-twice', 'r', 'no-such-agent', 1, '', '[]', '[]',
-                     '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+             VALUES ('r', 'tg-twice', 'r', 'no-such-agent', 1, '', '[]', '["42"]',
+                     '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')"#,
             [],
         )
         .expect("seed rule");

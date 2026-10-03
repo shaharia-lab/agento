@@ -361,6 +361,10 @@ polling. If it comes back, find what is setting it and stop that.
 
 - The integration has no enabled trigger rule, or none whose prefix, keywords
   and chat ids match the message.
+- The chat is not in the rule's **Chat IDs**. A rule answers only the chats it
+  lists, and a message from any other chat is ignored without a reply.
+- The rule is off because it lists no chat ids. Its row says so; edit it and add
+  at least one.
 - The message has no text. Photos, stickers and joins are received and ignored.
 - The bot is in a group with privacy mode on, so Telegram only gives it
   commands and replies. `@BotFather` → `/setprivacy` changes that.

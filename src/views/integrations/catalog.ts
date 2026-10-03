@@ -81,6 +81,27 @@ export interface TriggerTargets {
    * `app_mention` begins with a bot id no user typed.
    */
   filterHelp: string;
+  /**
+   * Set when a rule must list at least one target to be saved (#674), with
+   * the words for the two places that requirement shows.
+   *
+   * Telegram sets it: there the list is who may start a run, the write
+   * refuses a rule without one, and the dispatcher answers nobody for an
+   * empty one. Slack does not: its list selects channels, and a rule with
+   * none is the workspace-wide default.
+   */
+  required?: RequiredTargets;
+}
+
+export interface RequiredTargets {
+  /** One entry as the write accepts it. */
+  pattern: RegExp;
+  /** Beside the form's disabled Save, while the list is empty. */
+  missing: string;
+  /** Under the field, ahead of the entries that do not match `pattern`. */
+  invalid: string;
+  /** On a stored rule's row while its list is empty, beside its shut switch. */
+  off: string;
 }
 
 export interface Provider {
@@ -406,11 +427,19 @@ export const PROVIDERS: Provider[] = [
       /* The strings this provider already showed, moved here unchanged by
          #569 so the field's wording is per-provider rather than Telegram's
          with a Slack special case in the form. */
-      placeholder: "Chat IDs, comma separated (blank = any chat)",
-      help: "Telegram chat ids, comma-separated; empty = every chat the bot is in.",
+      placeholder: "Chat IDs, comma separated (required)",
+      help: "Telegram chat ids, comma-separated. Required: a rule answers only the chats listed here. A message from any other chat starts nothing and gets no reply.",
       noun: "chat",
       filterHelp:
-        "Checked against the message as sent: the prefix must start it, a keyword may appear anywhere in it. Leave both empty to answer every message.",
+        "Checked against the message as sent: the prefix must start it, a keyword may appear anywhere in it. Leave both empty to answer every message from a listed chat.",
+      required: {
+        /* The write's own rule: a signed integer in its canonical spelling,
+           which is how the dispatcher spells the chat it compares against. */
+        pattern: /^(0|-?[1-9]\d*)$/,
+        missing: "Add at least one chat ID to save this rule.",
+        invalid: "Not a numeric chat ID:",
+        off: "Off: this rule lists no chat IDs. A rule answers only the chats it lists, so edit it and add at least one to turn it on.",
+      },
     },
   },
   {
