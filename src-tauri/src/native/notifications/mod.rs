@@ -318,12 +318,14 @@ fn update_settings(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteEr
 /// point of the button: it lets someone verify credentials before committing to
 /// turning notifications on.
 ///
-/// Only the success path is answered with its own body. A failure is a 500 with
-/// the reason in the log, because the inherited 400 carries wording from the
-/// mail library and the runtime that this build cannot reproduce — see
-/// `smtp.rs`. That is safe for exactly one reason: the send reports success only
-/// after the server has accepted the message, so an error means nothing was
-/// delivered.
+/// A failed send is a **400 carrying the reason** (#670): every way
+/// [`smtp::send`] fails — an address that does not parse, no recipients, a
+/// refused connection, a rejected login — is the saved SMTP settings being
+/// wrong, which the person pressing the button can fix and a 500 would hide
+/// from them. Answering it is safe for exactly one reason: the send reports
+/// success only after the server has accepted the message, so an error means
+/// nothing was delivered. A stored settings blob that does not decode is still
+/// a 500 — that one is not the user's.
 fn test_notification(db_path: &Path) -> Result<super::Answer, WriteError> {
     let conn = db::open_read_only(db_path).map_err(WriteError::Fallback)?;
     let settings = decode_settings(&super::settings::load_stored(&conn).notification_settings)
@@ -336,7 +338,8 @@ fn test_notification(db_path: &Path) -> Result<super::Answer, WriteError> {
     let answer = super::gojson::to_vec(&TestResponse { status: "ok" })
         .map_err(|e| WriteError::Fallback(format!("encoding test response: {e}")))?;
 
-    smtp::send(&settings.provider, &smtp::test_mail()).map_err(WriteError::Fallback)?;
+    smtp::send(&settings.provider, &smtp::test_mail())
+        .map_err(|reason| WriteError::BadRequest(format!("test notification failed: {reason}")))?;
     Ok(super::Answer::json(answer))
 }
 
@@ -697,6 +700,41 @@ mod tests {
 
         // …while the column holds the real one.
         assert!(stored_json(&file).contains(r#""password":"hunter2""#));
+    }
+
+    /// A test send that fails is a 400 saying why (#670), because every cause
+    /// is the saved SMTP settings: here no recipient at all, then a server that
+    /// refuses the connection.
+    #[test]
+    fn a_failed_test_send_is_a_400_carrying_the_reason() {
+        let file = migrated();
+        update_settings(
+            file.path(),
+            br#"{"provider":{"host":"127.0.0.1","port":1,"from_address":"a@example.com",
+                 "to_addresses":" , ","encryption":"none"}}"#,
+        )
+        .expect("save");
+        let err = test_notification(file.path()).unwrap_err();
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message(),
+            "test notification failed: no recipients configured"
+        );
+
+        update_settings(
+            file.path(),
+            br#"{"provider":{"host":"127.0.0.1","port":1,"from_address":"a@example.com",
+                 "to_addresses":"b@example.com","encryption":"none"}}"#,
+        )
+        .expect("save");
+        let err = test_notification(file.path()).unwrap_err();
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            err.message()
+                .starts_with("test notification failed: sending mail: "),
+            "{}",
+            err.message()
+        );
     }
 
     /// #337 on this route, which is the **worst** instance of it in the write

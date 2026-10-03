@@ -785,9 +785,9 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
     Ok(super::Answer::json(body))
 }
 
-/// `handleDeleteChat`. A missing chat is a 500 in Go — the store returns a
-/// plain error, so the `NotFoundError` branch never fires and the handler
-/// writes its own fixed 500 body, reproduced here since #278.
+/// `handleDeleteChat`. A missing chat is a 404 with the body the `PATCH`
+/// answers for one (#670); it was a fixed 500 while that was the inherited
+/// answer. A failed `DELETE` statement is still the 500.
 fn delete_one(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     let conn = open_for_write(db_path)?;
     let affected = conn
@@ -797,8 +797,7 @@ fn delete_one(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
             WriteError::Internal("failed to delete chat".to_string())
         })?;
     if affected == 0 {
-        log::warn!("deleting session {id:?}: not found");
-        return Err(WriteError::Internal("failed to delete chat".to_string()));
+        return Err(WriteError::NotFoundMessage("chat not found".to_string()));
     }
     log::info!("chat session deleted session_id={id:?}");
     Ok(super::Answer::no_content())
@@ -1705,15 +1704,13 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_missing_chat_answers_gos_own_500() {
+    fn deleting_a_missing_chat_is_a_404() {
         let file = migrated();
         let err = delete_one(file.path(), "ghost").unwrap_err();
-        // Go's store returns a plain error for a missing row, so the handler
-        // writes its fixed 500 body — reproduced here since #278.
-        assert!(
-            matches!(err, WriteError::Internal(ref m) if m == "failed to delete chat"),
-            "{err:?}"
-        );
+        // The same status and body the `PATCH` answers for a missing chat
+        // (#670); it was a fixed 500.
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), "chat not found");
     }
 
     #[test]

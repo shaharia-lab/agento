@@ -14,15 +14,17 @@
 //! meaning here would move a working configuration to a port that never
 //! answers, from a release note nobody reads.
 //!
-//! # Why a failure is a 500 rather than a worded 400
+//! # A failure is a 400 with this build's own wording
 //!
-//! The inherited behaviour answers a failed test send with `400` and the
+//! The inherited behaviour answered a failed test send with `400` and the
 //! underlying error text — `dial tcp …: connect: connection refused`, `failed
-//! to create mail client: …`. Those strings come from the mail library and the
-//! runtime it was written against; none is reproducible here, and inventing a
-//! paraphrase would put a different sentence on the user's screen. So the
-//! failure arm answers a 500 with the reason in the log, the precedent
-//! `integration_credentials.rs` set for exactly this.
+//! to create mail client: …`. Those strings came from another mail library and
+//! runtime, so while a second implementation existed this build answered a 500
+//! rather than a different sentence. #670 restored the 400: the cause is the
+//! saved SMTP settings, and the reason — lettre's wording, prefixed by the step
+//! that failed — is what tells the user which one to fix. lettre's errors
+//! format the socket error or the server's reply, and the ones built here name
+//! an address or the host; none formats the password it was configured with.
 //!
 //! **A retry must not re-send.** The rule is in [`send`] and in its one caller:
 //! nothing that can fail may run after the server has accepted the message.
@@ -57,8 +59,8 @@ pub fn test_mail() -> Mail {
 
 /// `SMTPProvider.Send`.
 ///
-/// Every failure is a `String`, and every one of them becomes a 500 — see the
-/// module header. The messages are for the log, not for the wire.
+/// Every failure is a `String`. The test send puts it on the wire in a 400
+/// (see the module header); a delivery records it on the run.
 pub fn send(config: &SmtpConfig, mail: &Mail) -> Result<(), String> {
     let message = build_message(config, mail)?;
     let transport = build_transport(config)?;

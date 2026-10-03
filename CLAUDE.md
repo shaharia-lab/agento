@@ -455,12 +455,15 @@ endpoint is served in-process. What remains is listed here.
   mistyped. The three typed bodies (404 missing, 400 unreadable, 500 no home)
   were never written, because at the time an `Err` here reached an
   implementation that had them. Fixing it means giving `fs::list` a typed error.
-- **Several surfaces answer 500 for input they cannot decide about**, rather
-  than reproducing an answer they cannot be sure of: a non-ASCII settings-profile
-  name, a request body that is not UTF-8, duplicate JSON keys, a document past
-  serde's recursion limit, a site URL `url::Url` rejects. Each is documented at
-  its site. They were invisible while something else could answer; they are
-  user-visible 500s now, and each is a small piece of work to resolve properly.
+- **A 500 from a write means the machinery broke, and no client input should
+  produce one** (#670). `WriteError::Fallback` is for a database, filesystem,
+  encoder or invariant failure; input the client can fix answers 400
+  (malformed), 422 (well-formed, one field invalid) or 404 (names nothing).
+  Three 500s remain that a user can meet without anything being broken, each
+  about stored state rather than the request: `PUT /api/notifications/settings`
+  on an install with no `user_settings` row, a `PUT`/`DELETE` on a stored
+  WhatsApp integration, and a first profile list when `settings.json` on disk
+  is not UTF-8 or is nested past 128 levels.
 - `useAppStats` counters refresh on a 30s poll and on window focus, not on
   mutation, so a create in one view lags in the sidebar briefly.
 - Session table is not virtualised; 900+ rows render eagerly after "Load more".

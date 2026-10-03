@@ -69,20 +69,35 @@ a `409` whose message says *"already exists"*, because it raises a
 `ConflictError`; and a rename onto another profile's slug is a 409 while
 **create** with the same name silently deduplicates to `-2`.
 
-What forwards rather than being guessed at: a **non-ASCII profile name** (Go
-slugifies by Unicode category and then rejects the id it built, unless every
-character happened to be dropped — two answers from tables Rust's
-`char::is_alphabetic` does not match); a **relative** recorded path
-(`filepath.Abs` resolves it against the Go server's working directory, not ours);
-a document deeper than serde's 128-level recursion limit but inside Go's 10000
-(`json.Valid` is fine — `IgnoredAny` skips iteratively, and the 10000 cap is
-checked by hand — but a `Value` decode is not); **bytes that are not UTF-8** (see
-below); and everything Go answers with a 500.
+**What a request can get wrong, and what it answers (#670).** None of these is
+a 500 any more:
+
+- **A non-ASCII profile name is accepted.** The name is stored as typed; the id
+  is `slugify`'s, which keeps ASCII letters and digits and drops everything
+  else, so `Café` gets the id `caf` and a name with no ASCII letter or digit
+  gets `profile` (then `profile-2`, by the usual deduplication). The id stays
+  ASCII because it is a file name and the UI puts it in a URL path unescaped.
+- **A value nested past serde's 128-level recursion limit** but inside the
+  scanner's 10000 (`json.Valid` is fine — `IgnoredAny` skips iteratively, and
+  the 10000 cap is checked by hand — but a `Value` decode is not) is
+  `400 invalid JSON settings: the value is nested more than 128 levels deep` on
+  `PUT /api/claude-settings`, and a 422 on `settings` with the same reason on a
+  profile update.
+- **A value the syntax check admits and the parse refuses** — a lone surrogate
+  escape such as `"\ud800"` — is `400 invalid JSON settings: the value could
+  not be parsed`, and on a profile update a 422 on `settings`.
+- **A request body that is not UTF-8** is `400 invalid JSON body` (see below).
+
+What still answers 500, because no request can fix it: a **relative** recorded
+path or one outside the settings dir in a hand-edited index, a profiles index
+that does not parse, a `settings.json` on disk that is not UTF-8 or is nested
+past 128 levels when the first list seeds the default profile from it, and a
+filesystem failure.
 
 **Why a forward is safe here is not "it happens before any mutation" — several
 do not.** `create` runs `ensureDefaultProfileExists`, which writes the index,
-*before* `slugify` reaches the non-ASCII forward; `put_settings` runs `MkdirAll`
-before its undecidable-value forward; `update`, `delete`, `duplicate` and
+*before* its own file write can fail; `put_settings` runs `MkdirAll`
+before it refuses a value it cannot parse; `update`, `delete`, `duplicate` and
 `set_default` can forward after a profile file has already moved. What makes all
 of them safe is that **every step this surface takes before a forward is
 idempotent**: seeding no-ops on a non-empty index, `MkdirAll` no-ops on an

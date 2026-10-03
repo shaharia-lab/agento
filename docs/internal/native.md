@@ -407,10 +407,16 @@ Four rules the write path is built on:
   `["My Agent"]` would create an agent. A `null` body, conversely, is a zero
   value with no error, so it reaches the handler and fails validation with a
   422.
-- **Deleting a missing agent or chat answers 500, not 404** — the store returns
-  a plain error and the not-found arm never fires. Job history's delete *is* a
-  real 404, because its service checks first. Both are inherited behaviour; see
-  the known-bugs list under Status.
+- **Deleting a missing agent or chat answers 404** (#670): `agent "<slug>" not
+  found` and `chat not found`, the same bodies their update routes answer. Both
+  were 500s inherited from a store that returned a plain error.
+- **`WriteError::Fallback` is never the answer to client input** (#670). It is
+  a database, filesystem, encoder or invariant failure. Input the client can
+  fix is `InvalidBody`/`BadRequest` (400, malformed), `Validation` (422, a
+  well-formed body with one unusable field, named) or `NotFound` (404). When a
+  value comes from a file or a row rather than the request — a `settings.json`
+  that is not UTF-8, a stored credentials blob that is not JSON — it stays a
+  500, because no request can fix it.
 
 ## The write surface is enumerated, not described (#296)
 

@@ -325,10 +325,15 @@ pub fn is_utf8(src: &[u8]) -> bool {
     std::str::from_utf8(src).is_ok()
 }
 
-/// The `Fallback`/`Undecidable` reason every [`is_utf8`] guard reports.
+/// The reason every [`is_utf8`] guard reports. It reaches the wire in a 4xx
+/// body (#670), so it says what was wrong and nothing about either parser.
 fn not_utf8_reason(what: &str) -> String {
-    format!("{what} is not UTF-8; Go substitutes U+FFFD and serde refuses to parse")
+    format!("{what} is not valid UTF-8")
 }
+
+/// The [`Decoded::Undecidable`] reason for a value past serde's recursion
+/// limit. Worded for the wire, like [`not_utf8_reason`].
+const NESTED_TOO_DEEPLY: &str = "the value is nested more than 128 levels deep";
 
 /// `json.Valid`: one complete JSON value, trailing whitespace allowed and
 /// nothing else.
@@ -414,8 +419,11 @@ pub enum Decoded {
     /// *different* 400 message, and on the profile path a 422 — so the two
     /// cases cannot be collapsed.
     NumberOutOfRange,
-    /// Neither parser is the authority, so this is declined rather than
-    /// guessed at.
+    /// A value this build will not parse though `encoding/json` would have:
+    /// bytes that are not UTF-8, or nesting past serde's 128-level recursion
+    /// limit. The reason is worded for the wire. When the bytes came from the
+    /// request it is a 4xx naming what was wrong (#670); when they came from a
+    /// file on disk it stays a 500, because no request can fix that.
     Undecidable(String),
 }
 
@@ -574,7 +582,7 @@ pub fn go_any(body: &[u8]) -> Decoded {
         // so 129 levels stop it where Go carries on to 10000. That one is
         // declined; an ordinary syntax error is a plain decode failure, which
         // `ensureDefaultProfileExists` handles by seeding an empty object.
-        Err(e) if is_recursion_limit(&e) => Decoded::Undecidable(e.to_string()),
+        Err(e) if is_recursion_limit(&e) => Decoded::Undecidable(NESTED_TOO_DEEPLY.to_string()),
         Err(_) => Decoded::NotJson,
     }
 }
@@ -775,14 +783,19 @@ pub fn put_settings(dir: &str, body: &[u8]) -> Result<super::Answer, WriteError>
         Decoded::NumberOutOfRange => {
             return Err(WriteError::BadRequest("invalid JSON settings".to_string()))
         }
-        Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
-        // Step 1 captured a complete value and checked its bytes, so this means
-        // the two parsers disagree about what JSON is. Decline rather than pick
-        // a side: the arm that used to answer 400 here was reachable through
-        // non-UTF-8 bytes, where Go writes the file and answers 200.
+        // The body is the client's, so both of these are its to fix (#670):
+        // a 400 carrying the same lead as the arm above plus what was wrong.
+        Decoded::Undecidable(reason) => {
+            return Err(WriteError::BadRequest(format!(
+                "invalid JSON settings: {reason}"
+            )))
+        }
+        // Step 1 captured a complete value, so this is a value the skip-parse
+        // admits and the materializing parse refuses — a lone surrogate escape
+        // such as `"\ud800"` is the reachable one.
         Decoded::NotJson => {
-            return Err(WriteError::Fallback(
-                "the decoded value does not re-parse; only Go can say".to_string(),
+            return Err(WriteError::BadRequest(
+                "invalid JSON settings: the value could not be parsed".to_string(),
             ))
         }
     };
@@ -1520,6 +1533,26 @@ mod tests {
         let err = put_settings(&dir, too_deep.as_bytes()).unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "invalid JSON body");
+
+        // Past serde's 128-level limit but inside the scanner's 10000: a 400
+        // that says so (#670), where this used to be a 500.
+        let band = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        let err = put_settings(&dir, band.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message(),
+            "invalid JSON settings: the value is nested more than 128 levels deep"
+        );
+
+        // A lone surrogate escape passes the syntax check and fails the parse
+        // that builds the string: also a 400 naming the settings (#670).
+        let lone = [br#"{"a":""#.as_slice(), &[92], b"ud800\"}"].concat();
+        let err = put_settings(&dir, &lone).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message(),
+            "invalid JSON settings: the value could not be parsed"
+        );
 
         // A scalar is a JSON value, so it is written as one.
         assert_eq!(

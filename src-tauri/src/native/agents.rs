@@ -387,16 +387,18 @@ fn update(db_path: &Path, slug: &str, body: &[u8]) -> Result<super::Answer, Writ
     Ok(answer)
 }
 
-/// `agentService.Delete`. A missing agent is a 500 — inherited, not a 404.
+/// `agentService.Delete`. A missing agent is a 404, as it is on the update
+/// (#670); it was a 500 while a second implementation answered one.
 fn delete(db_path: &Path, slug: &str) -> Result<super::Answer, WriteError> {
     let conn = open_for_write(db_path)?;
     let affected = conn
         .execute("DELETE FROM agents WHERE slug = ?1", [slug])
         .map_err(|e| WriteError::Fallback(format!("deleting agent {slug:?}: {e}")))?;
     if affected == 0 {
-        // Nothing was written, so the 500 is honest: it reports a delete that
-        // did not happen rather than hiding one that did.
-        return Err(WriteError::Fallback(format!("agent {slug:?} not found")));
+        return Err(WriteError::NotFound {
+            resource: "agent".to_string(),
+            id: slug.to_string(),
+        });
     }
     log::info!("agent deleted slug={slug:?}");
     Ok(super::Answer::no_content())
@@ -452,13 +454,13 @@ fn normalize_config_dir(agent: &mut Agent) -> Result<(), WriteError> {
                 format!("claude config dir {normalized:?} does not exist"),
             ))
         }
-        // The original wrapped a runtime error whose text is not reproducible,
-        // so this answers the same status class with the reason in the log
-        // rather than inventing a message the user would see.
+        // Any other `stat` failure — a parent the user may not search, a
+        // name too long — is still about the path the request named (#670).
         Err(e) => {
-            return Err(WriteError::Fallback(format!(
-                "claude config dir {normalized:?} is not readable: {e}"
-            )))
+            return Err(WriteError::validation(
+                "claude_config_dir",
+                format!("claude config dir {normalized:?} is not readable: {e}"),
+            ))
         }
     }
 
@@ -499,17 +501,19 @@ fn normalize_claude_config_dir(raw: &str) -> String {
 
 /// `SQLiteAgentStore.Save` — one upsert, `created_at` untouched on conflict.
 fn save(tx: &rusqlite::Transaction, agent: &Agent) -> Result<(), WriteError> {
-    // `validateAgentForSave` rejects an unknown thinking value with a plain
-    // error, which is a 500. Detect it *before* writing, so the 500 reports a
-    // save that did not happen.
+    // `validateAgentForSave`'s check on the thinking value: a 422 on the
+    // field (#670), raised before anything is written.
     if !matches!(
         agent.thinking.as_str(),
         "" | "adaptive" | "disabled" | "enabled"
     ) {
-        return Err(WriteError::Fallback(format!(
-            "invalid thinking value {:?}: must be adaptive, disabled, or enabled",
-            agent.thinking
-        )));
+        return Err(WriteError::validation(
+            "thinking",
+            format!(
+                "invalid thinking value {:?}: must be adaptive, disabled, or enabled",
+                agent.thinking
+            ),
+        ));
     }
 
     let capabilities = super::gojson::to_vec_marshal(&agent.capabilities)
@@ -1028,17 +1032,64 @@ mod tests {
         assert!(stored(&file, "bye").is_none());
     }
 
-    /// A missing agent is a 500, inherited. The important half is that nothing
-    /// is written first: the status has to report a delete that did not
-    /// happen.
+    /// A missing agent is a 404 naming the slug (#670), and nothing else is
+    /// touched.
     #[test]
-    fn deleting_a_missing_agent_forwards_rather_than_inventing_a_404() {
+    fn deleting_a_missing_agent_is_a_404() {
         let file = migrated();
         create(file.path(), br#"{"name":"Keep","slug":"keep"}"#).expect("create");
 
         let err = delete(file.path(), "ghost").unwrap_err();
-        assert!(matches!(err, WriteError::Fallback(_)), "{err:?}");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), r#"agent "ghost" not found"#);
         assert!(stored(&file, "keep").is_some(), "unrelated rows untouched");
+    }
+
+    /// A thinking value outside the three is a 422 on `thinking`, from create
+    /// and update alike, and neither writes (#670).
+    #[test]
+    fn an_unknown_thinking_value_is_a_422_on_the_field() {
+        let file = migrated();
+        let err = create(file.path(), br#"{"name":"New","thinking":"loud"}"#).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            err.message().contains(r#"validation error for "thinking""#),
+            "{}",
+            err.message()
+        );
+        assert!(stored(&file, "new").is_none(), "nothing was created");
+
+        create(file.path(), br#"{"name":"Keep","slug":"keep"}"#).expect("create");
+        let err = update(file.path(), "keep", br#"{"name":"Keep","thinking":"loud"}"#).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            stored(&file, "keep").expect("row").thinking,
+            "adaptive",
+            "the stored value is untouched"
+        );
+    }
+
+    /// A config dir whose `stat` fails for a reason other than absence is a
+    /// 422 on `claude_config_dir` (#670) — here a path through a regular file,
+    /// which is `ENOTDIR`.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_claude_config_dir_is_a_422_on_the_field() {
+        let file = migrated();
+        let blocker = tempfile::NamedTempFile::new().expect("temp file");
+        let dir = format!("{}/inside", blocker.path().display());
+        let body = format!(r#"{{"name":"New","claude_config_dir":{dir:?}}}"#);
+
+        let err = create(file.path(), body.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            err.message()
+                .contains(r#"validation error for "claude_config_dir""#)
+                && err.message().contains("is not readable"),
+            "{}",
+            err.message()
+        );
+        assert!(stored(&file, "new").is_none(), "nothing was created");
     }
 
     /// A body that is not JSON is a 400 with Go's fixed message — not the
