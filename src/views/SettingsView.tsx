@@ -10,6 +10,7 @@ import { api, ApiError, qs } from "../lib/api";
 import { describeError, useResource, type Resource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath, usd } from "../lib/format";
 import { DESTROY } from "../lib/formVerbs";
+import { daysText, retentionFile } from "../lib/claudeRetention";
 import { SaveBar } from "../components/SaveBar";
 import { Icon, type IconName } from "../lib/icons";
 import { Checkbox, Dropdown, Empty, FormRow, Switch } from "../components/ui";
@@ -199,9 +200,12 @@ function useEditable<T>(
 export function SettingsView({
   theme,
   onThemeChange,
+  claudeRetentionNonce,
 }: {
   theme: "light" | "dark" | "system";
   onThemeChange(t: "light" | "dark" | "system"): void;
+  /** Changes when the retention prompt writes cleanupPeriodDays (#720). */
+  claudeRetentionNonce: number;
 }) {
   const [pane, setPane] = useState<Pane>("general");
   const [saving, setSaving] = useState(false);
@@ -434,6 +438,7 @@ export function SettingsView({
                   }
                   onPatch={patchUser}
                   idleGapError={idleGapError}
+                  claudeRetentionNonce={claudeRetentionNonce}
                 />
               )}
 
@@ -1412,15 +1417,6 @@ function retentionLabel(days: number): string {
   return RETENTION_OPTIONS.find((o) => o.value === String(days))?.label ?? `${days} days`;
 }
 
-/** `<dir>/settings.json`, the one file the retention read looks at. */
-function retentionFile(d: ClaudeRetentionDir): string {
-  return `${tildePath(d.config_dir)}/settings.json`;
-}
-
-function daysText(days: number): string {
-  return days === 1 ? "1 day" : `${days} days`;
-}
-
 /**
  * One config dir's line. `alone` picks the sentence form, for the usual single
  * dir; with several, each line leads with its path instead.
@@ -1442,18 +1438,22 @@ function claudeRetentionLine(d: ClaudeRetentionDir, alone: boolean): string {
     : `${tildePath(d.config_dir)}: ${daysText(d.cleanup_period_days)}${suffix}`;
 }
 
-/** Claude Code's own `cleanupPeriodDays`, per indexed config dir. Read-only (#718). */
-function ClaudeRetentionRow() {
+/**
+ * Claude Code's own `cleanupPeriodDays`, per indexed config dir (#718). This
+ * row only shows it; `reloadKey` re-reads it after the retention prompt's
+ * extend (#720), the one place Agento writes it.
+ */
+function ClaudeRetentionRow({ reloadKey }: { reloadKey: number }) {
   const retention = useResource(
     (signal) => api.get<ClaudeRetention>("/settings/claude-retention", signal),
-    []
+    [reloadKey]
   );
   const dirs = retention.data?.dirs ?? [];
 
   return (
     <FormRow
       label="Claude Code retention"
-      help="Read from cleanupPeriodDays in each indexed Claude config directory's settings.json. Agento does not change it, and Claude Code may take a different value from managed or project settings."
+      help="Read from cleanupPeriodDays in each indexed Claude config directory's settings.json. Agento changes it only when you choose to extend it in the retention prompt, and never lowers it. Claude Code may take a different value from managed or project settings."
     >
       {retention.error ? (
         <div className="msgline msgline--error">{retention.error}</div>
@@ -1488,12 +1488,14 @@ function DataPane({
   storedRetention,
   onPatch,
   idleGapError,
+  claudeRetentionNonce,
 }: {
   user: UserSettings;
   /** The server's copy, which the draft is compared against to warn before a prune. */
   storedRetention: number;
   onPatch(patch: Partial<UserSettings>): void;
   idleGapError: string | undefined;
+  claudeRetentionNonce: number;
 }) {
   const [newProject, setNewProject] = useState("");
   const hidden = user.hidden_projects ?? [];
@@ -1554,7 +1556,7 @@ function DataPane({
             </div>
           )}
         </FormRow>
-        <ClaudeRetentionRow />
+        <ClaudeRetentionRow reloadKey={claudeRetentionNonce} />
       </div>
 
       <div className="divider" />

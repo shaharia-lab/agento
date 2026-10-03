@@ -3,6 +3,7 @@ import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { CommandPalette, type Command } from "./components/CommandPalette";
+import { RetentionPrompt } from "./components/RetentionPrompt";
 import { ChatsView } from "./views/ChatsView";
 import { AgentsView } from "./views/AgentsView";
 import { IntegrationsView } from "./views/IntegrationsView";
@@ -122,6 +123,9 @@ export default function App() {
   // Only warn once the check has actually run — `undefined` means "not yet".
   const claudeMissing = host !== undefined && host.claude_cli === null;
   const [claudeNoticeDismissed, setClaudeNoticeDismissed] = useState(false);
+  // Bumped when the retention prompt raises cleanupPeriodDays, so Settings →
+  // Data re-reads the number it shows.
+  const [claudeRetentionNonce, setClaudeRetentionNonce] = useState(0);
 
   /* --- Commands ---------------------------------------------------------- */
   const commands = useMemo<Command[]>(() => {
@@ -399,6 +403,7 @@ export default function App() {
                 </button>
               </div>
             )}
+            <RetentionPrompt onExtended={() => setClaudeRetentionNonce((n) => n + 1)} />
             {view === "chats" && (
               <ChatsView
                 inspectorOpen={inspectorOpen}
@@ -465,7 +470,11 @@ export default function App() {
             )}
             {view === "credentials-checker" && <CredentialsCheckerView />}
             {view === "settings" && (
-              <SettingsView theme={theme} onThemeChange={setTheme} />
+              <SettingsView
+                theme={theme}
+                onThemeChange={setTheme}
+                claudeRetentionNonce={claudeRetentionNonce}
+              />
             )}
             {view === "about" && <AboutView />}
           </main>

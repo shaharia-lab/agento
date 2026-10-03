@@ -45,13 +45,10 @@
 //!
 //! # The one caller
 //!
-//! The retention prompt (#720) is the only intended caller, and it adds the
-//! route together with its raise-only guard. There is deliberately no route
-//! here: a general "set one key" route would be a way to lower
-//! `cleanupPeriodDays`, which permanently deletes transcripts.
-
-// The caller is #720's route; until it lands only the tests reach this.
-#![cfg_attr(not(test), allow(dead_code))]
+//! `PUT /api/settings/claude-retention` (#720, [`super::retention`]) is the
+//! only caller, and it reaches this only through its raise-only guard. There
+//! is deliberately no route here: a general "set one key" route would be a
+//! way to lower `cleanupPeriodDays`, which permanently deletes transcripts.
 
 use std::fmt;
 use std::io;

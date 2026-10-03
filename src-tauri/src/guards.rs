@@ -879,6 +879,43 @@ pub(crate) mod tests {
         }
     }
 
+    /// The one route that writes a user's `settings.json` key by key (#720)
+    /// sits behind both guards like any other write: no `Content-Type` is a
+    /// 415, a `read` token is a 403, and the `GET` beside it is still a read.
+    #[test]
+    fn the_retention_write_needs_json_and_a_write_token() {
+        let path = "/api/settings/claude-retention";
+        assert_eq!(
+            reject(&request(Method::PUT, path, "localhost", "")),
+            Some(CONTENT_TYPE_MISSING)
+        );
+        let read = mint(Scope::Read);
+        assert_eq!(
+            reject(&authed_request(
+                Method::PUT,
+                path,
+                "localhost",
+                "application/json",
+                Some(&read)
+            )),
+            Some(INSUFFICIENT_SCOPE)
+        );
+        assert_eq!(
+            reject(&authed_request(
+                Method::GET,
+                path,
+                "localhost",
+                "",
+                Some(&read)
+            )),
+            None
+        );
+        assert_eq!(
+            reject(&request(Method::PUT, path, "localhost", "application/json")),
+            None
+        );
+    }
+
     /// ...and a `write` token serves all seven, which is what the app's own
     /// session carries.
     #[test]

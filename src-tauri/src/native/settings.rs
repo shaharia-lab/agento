@@ -144,6 +144,15 @@ pub struct UserSettings {
     /// the reason the two fields above it are.
     #[serde(deserialize_with = "null_is_zero_value")]
     pub session_history_retention_days: i64,
+    /// Whether the one-time retention prompt has been answered (#720, epic
+    /// #703). Last for the reason the fields above it are.
+    ///
+    /// **Once true it stays true.** A `PUT` replaces the whole row and an
+    /// omitted key decodes to `false`, so a Settings form loaded before the
+    /// prompt was answered would otherwise post the prompt back into view;
+    /// [`apply_update`] keeps a stored `true`.
+    #[serde(deserialize_with = "null_is_zero_value")]
+    pub claude_retention_prompt_answered: bool,
 }
 
 /// Read the settings row as stored. A missing row, a read error, or malformed
@@ -168,7 +177,8 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                     COALESCE(claude_config_dirs, ''),
                     COALESCE(claude_executable_path, ''),
                     COALESCE(credentials_checker_enabled, 0),
-                    COALESCE(session_history_retention_days, 0)
+                    COALESCE(session_history_retention_days, 0),
+                    COALESCE(claude_retention_prompt_answered, 0)
              FROM user_settings WHERE id = 1",
             [],
             |r| {
@@ -177,6 +187,7 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                 let hidden_raw: String = r.get(9)?;
                 let extra_raw: String = r.get(12)?;
                 let credentials_checker: i64 = r.get(14)?;
+                let retention_prompt_answered: i64 = r.get(16)?;
                 Ok(UserSettings {
                     default_working_dir: r.get(0)?,
                     default_model: r.get(1)?,
@@ -194,6 +205,7 @@ pub fn load_stored(conn: &Connection) -> UserSettings {
                     claude_executable_path: r.get(13)?,
                     credentials_checker_enabled: credentials_checker != 0,
                     session_history_retention_days: r.get(15)?,
+                    claude_retention_prompt_answered: retention_prompt_answered != 0,
                 })
             },
         )
@@ -732,6 +744,7 @@ fn apply_update(
     validate_claude_config_dirs(&incoming, current)?;
     validate_claude_executable_path(&incoming, current)?;
 
+    incoming.claude_retention_prompt_answered |= current.claude_retention_prompt_answered;
     incoming.claude_executable_path = normalize(&incoming.claude_executable_path);
     incoming.claude_config_dir = normalize(&incoming.claude_config_dir);
     incoming.claude_config_dirs = normalize_claude_config_dirs(&incoming.claude_config_dirs);
@@ -1005,8 +1018,9 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
              notification_settings, event_bus_worker_pool_size, public_url,
              hidden_projects, idle_gap_threshold_minutes,
              claude_config_dir, claude_config_dirs, claude_executable_path,
-             credentials_checker_enabled, session_history_retention_days)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             credentials_checker_enabled, session_history_retention_days,
+             claude_retention_prompt_answered)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(id) DO UPDATE SET
             default_working_dir = excluded.default_working_dir,
             default_model = excluded.default_model,
@@ -1023,7 +1037,8 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
             claude_config_dirs = excluded.claude_config_dirs,
             claude_executable_path = excluded.claude_executable_path,
             credentials_checker_enabled = excluded.credentials_checker_enabled,
-            session_history_retention_days = excluded.session_history_retention_days",
+            session_history_retention_days = excluded.session_history_retention_days,
+            claude_retention_prompt_answered = excluded.claude_retention_prompt_answered",
         rusqlite::params![
             settings.default_working_dir,
             settings.default_model,
@@ -1041,6 +1056,7 @@ fn save(conn: &Connection, settings: &UserSettings) -> Result<(), String> {
             settings.claude_executable_path,
             i64::from(settings.credentials_checker_enabled),
             settings.session_history_retention_days,
+            i64::from(settings.claude_retention_prompt_answered),
         ],
     )
     .map(|_| ())
@@ -1257,7 +1273,8 @@ mod tests {
             claude_config_dirs         TEXT    NOT NULL DEFAULT '[]',
             claude_executable_path     TEXT    NOT NULL DEFAULT '',
             credentials_checker_enabled INTEGER NOT NULL DEFAULT 0,
-            session_history_retention_days INTEGER NOT NULL DEFAULT 0
+            session_history_retention_days INTEGER NOT NULL DEFAULT 0,
+            claude_retention_prompt_answered INTEGER NOT NULL DEFAULT 0
         );";
 
     fn fixture(row: Option<&str>) -> Connection {
@@ -1283,13 +1300,14 @@ mod tests {
                   notification_settings, event_bus_worker_pool_size, public_url,
                   hidden_projects, idle_gap_threshold_minutes,
                   claude_config_dir, claude_config_dirs, claude_executable_path,
-                  credentials_checker_enabled, session_history_retention_days)
+                  credentials_checker_enabled, session_history_retention_days,
+                  claude_retention_prompt_answered)
                VALUES (1, 'working-dir', 'the-model', 1,
                        1, 13, 'the-font',
                        'the-notifications', 7, 'the-url',
                        '["/hidden/one"]', 25,
                        '/run/dir', '["/extra/dir"]', '/the/claude',
-                       1, 365)"#,
+                       1, 365, 1)"#,
         ));
 
         let stored = load_stored(&conn);
@@ -1315,6 +1333,7 @@ mod tests {
         assert_eq!(stored.claude_executable_path, "/the/claude");
         assert!(stored.credentials_checker_enabled);
         assert_eq!(stored.session_history_retention_days, 365);
+        assert!(stored.claude_retention_prompt_answered);
 
         // The narrowed view must agree with the row it was derived from — one
         // reader is the point.
@@ -1396,7 +1415,8 @@ mod tests {
                 r#""public_url":"","hidden_projects":["/home/u/secret"],"#,
                 r#""idle_gap_threshold_minutes":0,"claude_config_dir":"","#,
                 r#""claude_config_dirs":[],"claude_executable_path":"","#,
-                r#""credentials_checker_enabled":false,"session_history_retention_days":0},"#,
+                r#""credentials_checker_enabled":false,"session_history_retention_days":0,"#,
+                r#""claude_retention_prompt_answered":false},"#,
                 r#""locked":{},"model_from_env":false}"#,
                 "\n"
             )
@@ -1780,7 +1800,8 @@ mod tests {
                 r#""hidden_projects":["/home/u/secret","/home/u/other"],"#,
                 r#""idle_gap_threshold_minutes":25,"claude_config_dir":"","#,
                 r#""claude_config_dirs":null,"claude_executable_path":"","#,
-                r#""credentials_checker_enabled":false,"session_history_retention_days":0},"#,
+                r#""credentials_checker_enabled":false,"session_history_retention_days":0,"#,
+                r#""claude_retention_prompt_answered":false},"#,
                 r#""locked":{},"model_from_env":false}"#,
                 "\n"
             )
@@ -1828,7 +1849,8 @@ mod tests {
                 r#""public_url":"","hidden_projects":null,"#,
                 r#""idle_gap_threshold_minutes":7,"claude_config_dir":"","#,
                 r#""claude_config_dirs":null,"claude_executable_path":"","#,
-                r#""credentials_checker_enabled":false,"session_history_retention_days":0},"#,
+                r#""credentials_checker_enabled":false,"session_history_retention_days":0,"#,
+                r#""claude_retention_prompt_answered":false},"#,
                 r#""locked":{},"model_from_env":false}"#,
                 "\n"
             )
@@ -2378,7 +2400,7 @@ mod tests {
             .expect("utf8")
         };
         assert!(
-            get().contains(r#""session_history_retention_days":0}"#),
+            get().contains(r#""session_history_retention_days":0,"#),
             "a migrated database keeps history for ever: {}",
             get()
         );
@@ -2390,11 +2412,11 @@ mod tests {
             );
             assert_eq!(status, axum::http::StatusCode::OK, "{body}");
             assert!(
-                body.contains(&format!(r#""session_history_retention_days":{days}}}"#)),
+                body.contains(&format!(r#""session_history_retention_days":{days},"#)),
                 "{body}"
             );
             assert_eq!(stored(), days);
-            assert!(get().contains(&format!(r#""session_history_retention_days":{days}}}"#)));
+            assert!(get().contains(&format!(r#""session_history_retention_days":{days},"#)));
         }
 
         for refused in ["7", "-1", "366"] {
@@ -2414,6 +2436,42 @@ mod tests {
         let (status, _) = put(file.path(), r#"{"session_history_retention_days":null}"#);
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(stored(), 0, "null is the zero value");
+    }
+
+    /// The retention prompt's flag (#720): `false` on a migrated database,
+    /// stored by a `PUT`, and never cleared by a later `PUT` that omits it or
+    /// sends `false` — the Settings form posts the whole row, and a draft
+    /// loaded before the prompt was answered must not bring the prompt back.
+    #[test]
+    fn the_retention_prompt_flag_is_stored_and_stays_answered() {
+        let _env = crate::paths::tests::env_lock();
+        if !nothing_is_locked() {
+            return;
+        }
+        let file = migrated_db();
+        let stored = || {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            load_stored(&conn).claude_retention_prompt_answered
+        };
+        assert!(!stored(), "a migrated database has not answered the prompt");
+
+        let (status, body) = put(file.path(), r#"{"claude_retention_prompt_answered":true}"#);
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(
+            body.contains(r#""claude_retention_prompt_answered":true}"#),
+            "{body}"
+        );
+        assert!(stored());
+
+        for later in [
+            r#"{"public_url":"https://a.test"}"#,
+            r#"{"claude_retention_prompt_answered":false}"#,
+            r#"{"claude_retention_prompt_answered":null}"#,
+        ] {
+            let (status, body) = put(file.path(), later);
+            assert_eq!(status, axum::http::StatusCode::OK, "{later}: {body}");
+            assert!(stored(), "{later} must not bring the prompt back");
+        }
     }
 
     /// A changed, non-zero retention prunes now, through one rescan; an

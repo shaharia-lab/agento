@@ -193,11 +193,11 @@ dir alone and answers 500 for invalid JSON, which is right for the editor. This
 route never fails over a file's content, so a broken `settings.json` cannot
 turn Settings → Data into an error; the only 500 is an unreadable database.
 
-**It is a read and only a read.** The claim is GET-only, and
+**The `GET` is a read and only a read.**
 `the_route_answers_every_indexed_dir_and_writes_nothing` compares every file's
 bytes and modification time before and after, including a default dir that has
-no `settings.json` and must not gain one. Writing the key is
-`claude_settings::patch` (#719, below); its route is #720's.
+no `settings.json` and must not gain one. Writing the key is the `PUT` on the
+same path (#720, below), through `claude_settings::patch` (#719).
 
 Two limits, stated rather than solved. Only the user-level file is read, while
 Claude Code also takes the key from managed, project-level and
@@ -206,16 +206,64 @@ is not "delete at once": Claude Code 2.1.285 rejects it (`cleanupPeriodDays
 must be at least 1`) and skips cleanup until it is fixed, so the Data pane
 words `0` as its own sentence instead of "after 0 days".
 
-The route has no Go counterpart, so it is recorded in
+Neither route has a Go counterpart, so both are recorded in
 `parity/desktop_routes.json` through `claude_settings::retention::ROUTES`.
+
+## Raising Claude Code's retention, and never lowering it (#720)
+
+`PUT /api/settings/claude-retention`, `write` scope, body
+`{"config_dir": "<absolute path>", "cleanup_period_days": <whole number>}`.
+It answers 200 with the `GET`'s document, read again after the write.
+
+**The value may only be raised.** Lowering `cleanupPeriodDays` makes Claude
+Code permanently delete every transcript older than the new value, so the
+handler refuses anything that would shorten retention, with a 422 and nothing
+written. The request is checked first:
+
+- `cleanup_period_days` missing or `null` is `is required`; a fraction, a
+  negative, `0`, a string, or anything above 36500 is `must be a whole number
+  from 1 to 36500`. Neither is ever decoded as a zero value. `90.0` counts as
+  90, as it does on the read.
+- `config_dir` must be one of `settings::indexed_claude_config_dirs`, compared
+  as stored.
+
+Then `retention::guard`, a pure function over what `read_retention` reports for
+that dir:
+
+| on disk | requested | answer |
+|---|---|---|
+| `source: "unknown"` | any | 422. Agento does not write a file it could not read |
+| `0` | any | 422. Claude Code rejects `0` and skips cleanup, so any valid number would *start* deletion |
+| `n`, from the file or the default 30 | lower than `n` | 422, `<requested> is lower than the current <n>` |
+| `n`, from the file | `n` | 200, nothing written |
+| `n` | higher than `n`, or `n` when it is the default | 200, the key written |
+
+An absent file or key therefore counts as 30, and anything under 30 is refused
+there. `the_guard_only_ever_lets_the_value_rise` is the table as a test, and
+the handler tests assert every file's bytes and modification time after each
+refusal.
+
+`patch`'s own refusals map as: `ChangedUnderneath` is a 409 with its message;
+a dir that is not indexed and the four unreadable-file cases are 422; an I/O
+failure is the default 500. The guard reads the file before `patch` does, so a
+file that turns unreadable in between is still refused by `patch`.
+
+**This is the only route that calls `set_top_level_key`.** Do not add a second
+caller without the guard.
+
+The prompt that calls it, and the `claude_retention_prompt_answered` flag on
+`user_settings` (migration 49) that records it as answered, are in
+`docs/internal/frontend.md`. `PUT /api/settings` keeps that flag true once it
+is true (`settings::apply_update`), because the Settings form posts the whole
+row and an omitted key decodes to `false`.
 
 ## Writing one key of a config dir's `settings.json` (#719)
 
 `claude_settings::patch::set_top_level_key(indexed, dir, key, value)` sets one
 top-level key and leaves every other byte of the file as it was. `value` is
-already-encoded JSON. It has **no route**: the retention prompt (#720) is its
-only intended caller and adds the route together with the raise-only guard,
-because a general "set one key" route would be a way to lower
+already-encoded JSON. It has **no route of its own**: the retention `PUT`
+(#720, above) is its only caller and reaches it only through the raise-only
+guard, because a general "set one key" route would be a way to lower
 `cleanupPeriodDays`, which deletes transcripts.
 
 **It splices bytes; it never decodes the document.** `serde_json` is built

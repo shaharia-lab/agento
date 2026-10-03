@@ -498,10 +498,10 @@ mod tests {
         assert!(claims(&Method::GET, "/api/settings/claude-config-dirs"));
         assert!(claims(&Method::PUT, "/api/settings"));
         assert!(!claims(&Method::PUT, "/api/settings/claude-config-dirs"));
-        // Claude Code's own retention, read per config dir (#718). A read and
-        // only a read: writing the key is #719's, under its own route.
+        // Claude Code's own retention, read per config dir (#718) and raised,
+        // never lowered, by the retention prompt's `PUT` (#720).
         assert!(claims(&Method::GET, "/api/settings/claude-retention"));
-        assert!(!claims(&Method::PUT, "/api/settings/claude-retention"));
+        assert!(claims(&Method::PUT, "/api/settings/claude-retention"));
         assert!(!claims(&Method::POST, "/api/settings/claude-retention"));
         assert!(!claims(&Method::DELETE, "/api/settings/claude-retention"));
         // Claude Code's own settings.json and the profiles beside it: a

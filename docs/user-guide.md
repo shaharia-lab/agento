@@ -628,6 +628,27 @@ was scanned. What is gone is the conversation itself, so viewing the session,
 continuing it in chat and exporting it are switched off for that row, and the
 inspector says so. You can still star it.
 
+The first time Agento sees how long Claude Code keeps transcripts, a notice at
+the top of the window says so (for example, "Claude Code deletes transcripts
+after 30 days.") and offers three choices:
+
+- **Keep summaries in Agento** (selected by default): nothing changes in Claude
+  Code. Agento keeps each session's summary after the transcript is gone.
+- **Extend Claude Code's retention**: choose **90 days**, **1 year** or
+  **5 years** and Agento raises `cleanupPeriodDays` in that config directory's
+  `settings.json`, changing nothing else in the file. With several config
+  directories you choose for each one, or leave it as it is. Only values higher
+  than the current one are offered. Agento never lowers this number, because a
+  lower value makes Claude Code delete older transcripts for good. A directory
+  set to `0`, or one whose `settings.json` cannot be read, cannot be extended
+  here, and the notice says why.
+- **Do nothing**: nothing is changed.
+
+**Confirm** applies your choice and the notice does not come back. Closing it
+with **×** changes nothing and also does not ask again. After an extend,
+Claude Code applies the new value itself, and managed or project settings can
+still override it.
+
 ### Deleting expired sessions
 
 By default Agento keeps an expired session until you delete it; **Keep session
@@ -1074,8 +1095,9 @@ configuration works before you rely on it.
   before deleting it, shown so you can see the number that makes sessions
   expire. It is read from `cleanupPeriodDays` in the `settings.json` of each
   indexed Claude config directory, one line per directory when you have several,
-  and it is 30 days when the file does not set it. Agento only shows it and
-  never changes it. If a `settings.json` cannot be read, the line says which
+  and it is 30 days when the file does not set it. Agento changes it only when
+  you choose to extend it in the retention notice (see *Expired transcripts*),
+  and never lowers it. If a `settings.json` cannot be read, the line says which
   file and why. Claude Code can also take this value from managed or project
   settings, which Agento does not read.
 - **Hidden projects**: keep a project out of every chart and list. Its data is

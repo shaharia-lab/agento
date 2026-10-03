@@ -87,6 +87,26 @@ src/
                  stylesheet (styles/charts.css) so a consumer outside the
                  analytics section does not have to import that section's sheet.
                  The `.a-` class prefix is history, not scope
+    RetentionPrompt.tsx  the one-time retention prompt (#720), mounted in
+                 `App.tsx`'s banner area above every view. It reads
+                 `GET /api/settings` and `GET /api/settings/claude-retention`
+                 itself and renders nothing once
+                 `claude_retention_prompt_answered` is true, or while no
+                 indexed dir has a known retention. Three radio options, `Keep
+                 summaries in Agento` pre-selected; only `Extend Claude Code's
+                 retention` writes, one `PUT /api/settings/claude-retention`
+                 per chosen dir. **It has no control that can lower the
+                 value**: the presets come from `lib/claudeRetention.ts`'s
+                 `extendOptions`, which offers only those strictly above the
+                 dir's current value and none for a dir at `0` or `unknown`
+                 (the reason is shown as text beside the dir, #713). Confirm
+                 and the × both record the prompt as answered through the
+                 settings `PUT`, after a fresh `GET`, because that `PUT`
+                 replaces the whole row and a copy read at mount would undo a
+                 save made since. The server keeps the flag true once set, so
+                 a Settings draft loaded earlier cannot bring the prompt back.
+                 A failed write shows the server's message inline and leaves
+                 the prompt open. Its stylesheet is styles/retentionprompt.css
     SaveBar.tsx  the one action strip at the foot of a form (#519) — the six
                  savebar views' shared submit/partner pair, its verbs taken
                  from lib/formVerbs.ts and not overridable. Lifted out of

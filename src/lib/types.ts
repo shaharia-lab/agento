@@ -407,11 +407,17 @@ export interface UserSettings {
    * default), otherwise 180 or 365. Age is the session's end, not its expiry.
    */
   session_history_retention_days: number;
+  /**
+   * Whether the one-time retention prompt has been answered (#720). Once true
+   * the server keeps it true, whatever a later PUT sends.
+   */
+  claude_retention_prompt_answered: boolean;
 }
 
 /**
  * `GET /api/settings/claude-retention` (#718): Claude Code's own transcript
- * retention, one entry per indexed config dir, default first. Read-only.
+ * retention, one entry per indexed config dir, default first. The `PUT`
+ * answers the same document.
  */
 export interface ClaudeRetention {
   dirs: ClaudeRetentionDir[] | null;
@@ -428,6 +434,16 @@ export interface ClaudeRetentionDir {
    */
   source: "settings" | "default" | "unknown";
   reason?: string;
+}
+
+/**
+ * `PUT /api/settings/claude-retention` (#720). Raise-only: the server answers
+ * 422 for a value lower than the one on disk, for a dir at `0` and for a dir
+ * whose `source` is `unknown`.
+ */
+export interface ClaudeRetentionRequest {
+  config_dir: string;
+  cleanup_period_days: number;
 }
 
 /**
