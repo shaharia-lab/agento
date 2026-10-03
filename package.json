@@ -1,7 +1,7 @@
 {
   "name": "agento-desktop",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
   "scripts": {
     "check:claude-md": "scripts/check-claude-md-size.sh",
