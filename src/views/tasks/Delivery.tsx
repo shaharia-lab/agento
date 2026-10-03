@@ -274,7 +274,9 @@ export function DeliverySection({
     ...(all.some(isUsableSlack) || (!hasTelegram && !smtpConfigured) ? (["slack"] as const) : []),
     ...(hasTelegram ? (["telegram"] as const) : []),
     ...(smtpConfigured ? (["email"] as const) : []),
-    "reply",
+    // One at most: a reply has one possible target, so a second would answer
+    // the same sender twice.
+    ...(destinations.some((d) => d.type === "reply") ? [] : (["reply"] as const)),
   ];
   return (
     <FormSection

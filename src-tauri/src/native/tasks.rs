@@ -2263,7 +2263,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_destination_with_any_sub_object_is_a_422_on_put() {
+    fn every_reply_destination_rule_is_a_422_on_put() {
         let file = migrated_with_integrations();
         let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
         let reply = |name: &str, sub: &str| {
@@ -2286,6 +2286,10 @@ mod tests {
             (
                 reply("email", r#"{"recipients":["a@example.com"]}"#),
                 r#"validation error for "destinations[0].email": email is only allowed on email destinations"#,
+            ),
+            (
+                r#"{"name":"N","prompt":"p","destinations":[{"type":"reply","when":"success"},{"type":"reply","when":"always"}]}"#.to_string(),
+                r#"validation error for "destinations[1].type": only one reply destination is allowed"#,
             ),
         ];
         for (body, want) in &cases {
@@ -3871,6 +3875,7 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
 /// and the defaulted value is what is stored. Field paths are indexed
 /// (`destinations[0].slack.channel_ids`) so the form can point at the entry.
 fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), WriteError> {
+    let mut replies = false;
     for (i, dest) in destinations.iter_mut().enumerate() {
         let field = |name: &str| format!("destinations[{i}].{name}");
         if !matches!(
@@ -3907,7 +3912,15 @@ fn validate_destinations(destinations: &mut [TaskDestination]) -> Result<(), Wri
         }
         // A reply's target is the run's origin (#682), so it has nothing to
         // configure and the loop above has already refused every sub-object.
+        // A second one could only answer the same sender twice.
         if dest.r#type == "reply" {
+            if replies {
+                return Err(WriteError::validation(
+                    &field("type"),
+                    "only one reply destination is allowed",
+                ));
+            }
+            replies = true;
             continue;
         }
         if dest.r#type == "telegram" {

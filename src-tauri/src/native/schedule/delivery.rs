@@ -1087,6 +1087,7 @@ pub(crate) mod tests {
             error: Some("claude exited 1: /home/u/INTERNAL-DETAIL".into()),
             ..from_telegram("j-reply-err", "failed", 42)
         };
+        // Two entries only to show both `when`s; validation admits one.
         deliver_all(file.path(), &[reply("success"), reply("always")], &failed).await;
         set_api_base(None);
 

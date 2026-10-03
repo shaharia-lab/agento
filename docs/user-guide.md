@@ -504,6 +504,11 @@ connected (see [Integrations](#integrations)) or an SMTP server is set up in
   <task>: Completed` (or `Failed`), and the body is a short header followed by
   the full output. It is sent whether or not notifications are switched on,
   because adding the destination is the opt-in.
+- **+ Add Reply to sender destination** has only **When** to choose. It answers
+  the Telegram chat or Slack thread whose message started the run, with the
+  run's answer — or "Sorry, something went wrong." for a failed run, never the
+  error itself. A run nothing sent (a schedule or **Run now**) records it as
+  skipped with *this run was not started by a message*. A task has at most one.
 - The output is still kept in Agento as usual (subject to **Save output**);
   delivery sends a copy. Slack channels are shared, so everyone in them sees the
   output. Invite the bot to each channel, or Slack refuses the post.

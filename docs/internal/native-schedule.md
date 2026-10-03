@@ -535,7 +535,8 @@ arm sends per chat through `integrations/telegram/delivery.rs` (#639; see
 one `Destination` variant and its arms; the executor does not change.
 
 **The fourth type, `reply`, has no sub-object** (#682): `{"type":"reply","when":…}`,
-and `validate_destinations` refuses `slack`, `telegram` or `email` on it. Its
+and `validate_destinations` refuses `slack`, `telegram` or `email` on it, and a
+second `reply` entry (it could only answer the same sender twice). Its
 target is the run's, not the configuration's — `DeliveryReport::reply_to`, the
 Telegram chat (with the message to quote) or Slack thread the triggering event
 came from — so `Destination::targets` takes the report. A run with no origin

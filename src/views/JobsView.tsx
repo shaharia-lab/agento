@@ -572,7 +572,11 @@ export function JobsView({
 /* --- The run's deliveries (#638) ----------------------------------------- */
 
 /** A delivery type's display name; an unknown one shows raw. */
-const DELIVERY_TYPE_LABEL: Record<string, string> = { slack: "Slack", telegram: "Telegram" };
+const DELIVERY_TYPE_LABEL: Record<string, string> = {
+  slack: "Slack",
+  telegram: "Telegram",
+  reply: "Reply to sender",
+};
 
 /** A delivery status's badge; `failed` is the one that needs attention. */
 const DELIVERY_BADGE: Record<DeliveryStatus, { label: string; tone: string }> = {
