@@ -9,8 +9,8 @@
 > notes, not instructions: the goldens are frozen (`parity/README.md`).
 
 **Only one process may schedule.** Two schedulers over one `scheduled_tasks`
-table fire every task twice and re-register the Telegram webhook under whichever
-registered last. `runtime::shell_owns_scheduler` is now simply "is there a
+table fire every task twice, and two workers long-polling one Telegram bot
+token are each refused with a 409 in turn. `runtime::shell_owns_scheduler` is now simply "is there a
 database".
 
 **Three pieces, and they had to move together:**

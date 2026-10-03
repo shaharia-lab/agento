@@ -305,6 +305,32 @@ goes back to the same chat.
 The rule form has the same **Task** picker as a Slack rule's. A Telegram message
 does not start the linked task yet: it still runs the rule's own agent.
 
+### Telegram long polling
+
+Agento receives Telegram messages by asking Telegram for them over an outbound
+connection, called long polling. It needs no public URL, no tunnel and no
+inbound firewall rule.
+
+1. Store the bot token on the integration and save.
+2. Turn on **Inbound → Long polling**. The badge beside it reads `CONNECTING`,
+   then `CONNECTED` within a second or two.
+3. Add at least one trigger rule. With no rules, messages are received and
+   ignored.
+
+Turning it on removes any webhook registered for the bot, because Telegram
+does not deliver to a webhook and a poll at once. Messages sent while Agento
+was closed are delivered when it next starts, as long as Telegram still holds
+them (about a day).
+
+A Telegram trigger that already worked through a webhook in an earlier version
+is switched to long polling when you upgrade, and needs nothing from you.
+
+Only one program can poll a bot at a time. If the badge reads `ERROR` and names
+a second poller, see
+[Troubleshooting](troubleshooting.md#telegram-says-something-else-is-polling-this-bot-token).
+
+Turning **Long polling** off stops receiving immediately and nothing is deleted.
+
 ### Slack Socket Mode
 
 A Slack integration can also run agents on **mentions of the app** in a channel.
@@ -1076,7 +1102,8 @@ instead, revoke that token by name in **Settings → Security**.
   any chat, task or rule without a working directory of its own runs in. Agento
   creates it if it does not exist.
 - **Default model**: used when neither the chat nor the agent picks one.
-- **Public URL**: only relevant if you also run the server.
+- **Public URL**: not needed for anything in the app today. Telegram and Slack
+  triggers both receive over outbound connections.
 - **Updates**: how Agento behaves when a new version exists. See
   [Updates](installation.md#updates).
 

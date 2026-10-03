@@ -198,8 +198,8 @@ shim would not. **Do not remove it** to "simplify".
 
 Dev uses a separate data directory on purpose: two Agento processes sharing
 `~/.agento` share one SQLite file *and* one scheduler, so a scheduled task
-fires twice and the Telegram webhook gets re-registered underneath whichever
-instance registered it last.
+fires twice and two workers long-poll one Telegram bot token, each refused
+with a 409 in turn.
 
 ---
 

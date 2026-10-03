@@ -65,6 +65,10 @@
 //! #679). Migration **49** is the nineteenth:
 //! `user_settings.claude_retention_prompt_answered`, whether the one-time
 //! retention prompt has been answered, default no (#720, epic #703).
+//! Migration **50** is the twentieth and adds no column: it turns
+//! `inbound_enabled` on for every Telegram row whose webhook was `active`, so a
+//! trigger that worked over the webhook keeps working over the long poll that
+//! replaces it (#676).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -296,8 +300,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 49, "expected 49 migrations");
-        assert_eq!(expected_version(), 49);
+        assert_eq!(all.len(), 50, "expected 50 migrations");
+        assert_eq!(expected_version(), 50);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -391,7 +395,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 49);
+        assert_eq!(current_version(&conn).expect("version"), 50);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -609,7 +613,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 49);
+        assert_eq!(current_version(&conn).expect("version"), 50);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -669,7 +673,7 @@ mod tests {
         .expect("seed rows at 47");
 
         apply(&mut conn).expect("apply 48 and later");
-        assert_eq!(current_version(&conn).expect("version"), 49);
+        assert_eq!(current_version(&conn).expect("version"), 50);
 
         let flagged = |table: &str| -> Vec<String> {
             let mut stmt = conn
@@ -841,7 +845,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 49);
+        assert_eq!(current_version(&conn).expect("version"), 50);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -906,6 +910,52 @@ mod tests {
         );
     }
 
+    /// Migration 50 (#676): a Telegram row whose webhook was active comes out
+    /// with the inbound switch on, so its triggers move to the long poll with
+    /// no user action. Nothing else is touched — a Telegram row with no active
+    /// webhook never received anything, and a Slack row's switch is its own.
+    #[test]
+    fn migration_50_turns_inbound_on_for_an_active_telegram_webhook() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 49);
+        for (id, kind, status) in [
+            ("tg-active", "telegram", "active"),
+            ("tg-inactive", "telegram", "inactive"),
+            ("tg-never", "telegram", ""),
+            ("tg-error", "telegram", "error"),
+            ("sl", "slack", "active"),
+        ] {
+            conn.execute(
+                "INSERT INTO integrations
+                    (id, name, type, enabled, credentials, services, webhook_status,
+                     created_at, updated_at)
+                 VALUES (?1, ?1, ?2, 1, '{}', '{}', ?3, 'then', 'then')",
+                rusqlite::params![id, kind, status],
+            )
+            .expect("seed");
+        }
+
+        apply(&mut conn).expect("apply 50");
+
+        let switched: Vec<String> = conn
+            .prepare("SELECT id FROM integrations WHERE inbound_enabled = 1 ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(switched, ["tg-active"]);
+        let updated_at: String = conn
+            .query_row(
+                "SELECT updated_at FROM integrations WHERE id = 'tg-active'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read");
+        assert_eq!(updated_at, "then", "a backfill is not a user edit");
+    }
+
     /// The property this whole function exists for, and the one sequential
     /// idempotence does **not** prove: two processes applying at once must both
     /// succeed rather than one failing on duplicate DDL — which is exactly what
@@ -952,7 +1002,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 49);
+        assert_eq!(current_version(&conn).expect("version"), 50);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -961,7 +1011,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 49);
+        assert_eq!(recorded, 50);
     }
 
     #[test]

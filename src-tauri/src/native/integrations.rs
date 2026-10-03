@@ -490,15 +490,39 @@ fn has_credentials_sql() -> String {
 /// because nothing of the value crosses the boundary — only whether there is
 /// one.
 fn has_app_token_sql() -> String {
+    has_token_sql("app_token")
+}
+
+/// [`has_app_token_sql`]'s rule for any one credential key (#676): Slack's
+/// inbound worker needs `app_token`, Telegram's needs `bot_token`, and the
+/// inbound switch asks the same question of each.
+///
+/// `key` is a constant from [`inbound_token_key`], never request data — it is
+/// formatted into the statement.
+fn has_token_sql(key: &str) -> String {
     // The same four bytes `has_credentials_sql` trims.
     const WS: &str = "char(32) || char(9) || char(10) || char(13)";
     format!(
         "CASE WHEN json_valid(credentials) THEN
-                CASE WHEN json_type(credentials, '$.app_token') = 'text'
-                     THEN TRIM(json_extract(credentials, '$.app_token'), {WS}) != ''
+                CASE WHEN json_type(credentials, '$.{key}') = 'text'
+                     THEN TRIM(json_extract(credentials, '$.{key}'), {WS}) != ''
                      ELSE 0 END
               ELSE 0 END"
     )
+}
+
+/// The credential an integration type's inbound worker cannot run without, or
+/// `None` for a type with no inbound transport.
+///
+/// One table, read by the two writes that must agree: `update_inbound`, which
+/// refuses to enable a row that stores none, and `update`, which turns the
+/// switch off when a write removes it.
+fn inbound_token_key(integration_type: &str) -> Option<&'static str> {
+    match integration_type {
+        "slack" => Some("app_token"),
+        "telegram" => Some("bot_token"),
+        _ => None,
+    }
 }
 
 /// [`has_app_token_sql`] over bytes this process already holds, for the writes
@@ -507,10 +531,15 @@ fn has_app_token_sql() -> String {
 /// Kept in step with the SQL by [`tests::the_two_has_app_token_rules_agree`],
 /// exactly as [`stores_a_credential`] is with [`has_credentials_sql`].
 pub(crate) fn stores_an_app_token(raw: &str) -> bool {
+    stores_a_token(raw, "app_token")
+}
+
+/// [`has_token_sql`] over bytes this process already holds.
+fn stores_a_token(raw: &str, key: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(raw)
         .ok()
         .as_ref()
-        .and_then(|v| v.get("app_token"))
+        .and_then(|v| v.get(key))
         .and_then(|v| v.as_str())
         // `str::trim`, deliberately not — see `stores_a_credential`.
         .is_some_and(|token| !token.trim_matches([' ', '\t', '\n', '\r']).is_empty())
@@ -1253,16 +1282,25 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     //   arm: an omitted blob preserves the credential, so it preserves the
     //   switch too.
     // - **The type.** `type` is written straight from the request body and this
-    //   write validates nothing, so a row can become `telegram` with the switch
+    //   write validates nothing, so a row can become `github` with the switch
     //   still on — and there is no way back, because `update_inbound` answers
-    //   400 for a non-Slack row whichever way the switch is being moved. That
-    //   refusal is the one the acceptance criteria pin, so the stranding is
-    //   fixed here, at the write that causes it, rather than by weakening it.
+    //   400 for a type with no inbound transport whichever way the switch is
+    //   being moved. A change *between* the two types that have one clears it
+    //   as well: the switch was turned on for the other transport, and the
+    //   credential it was checked against is not the one the new type needs.
+    //
+    // The credential is the type's own (#676): `app_token` for Slack,
+    // `bot_token` for Telegram — see `inbound_token_key`.
     //
     // Cleared in the same statement, on both arms, rather than left for the
     // worker to discover.
-    let clears_inbound = req.integration_type != "slack"
-        || credentials.is_some_and(|blob| !stores_an_app_token(blob));
+    let clears_inbound = match inbound_token_key(&req.integration_type) {
+        None => true,
+        Some(key) => {
+            existing.integration_type != req.integration_type
+                || credentials.is_some_and(|blob| !stores_a_token(blob, key))
+        }
+    };
     match credentials {
         Some(blob) => conn.execute(
             "UPDATE integrations SET
@@ -1390,8 +1428,8 @@ fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     Ok(super::Answer::no_content())
 }
 
-/// `PUT /api/integrations/{id}/inbound` — the Slack inbound on/off switch
-/// (#566).
+/// `PUT /api/integrations/{id}/inbound` — the inbound on/off switch: Slack's
+/// Socket Mode connection (#566) and Telegram's long poll (#676).
 ///
 /// **A route of its own rather than a field on `PUT /api/integrations/{id}`**,
 /// and that is the decision worth reading. The integration write is byte-exact
@@ -1405,13 +1443,13 @@ fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 /// that was half changed.
 ///
 /// - **404** when no row has that id.
-/// - **400** for any type but `slack`. There is one inbound implementation and
-///   it is Socket Mode; a Telegram row's inbound half is a webhook, and it has
-///   its own routes.
-/// - **422**, naming `credentials.app_token`, when enabling a row that stores
-///   no app-level token — the switch would otherwise turn on a worker that can
-///   only fail to connect. Disabling is always allowed, so a row whose
-///   credentials were later scrubbed can still be turned off.
+/// - **400** for a type with no inbound transport — anything but `slack` and
+///   `telegram` ([`inbound_token_key`]).
+/// - **422** when enabling a row that does not store the token its worker
+///   needs, naming `credentials.app_token` for Slack and
+///   `credentials.bot_token` for Telegram — the switch would otherwise turn on
+///   a worker that can only fail to connect. Disabling is always allowed, so a
+///   row whose credentials were later scrubbed can still be turned off.
 ///
 /// `inbound_status` and `inbound_error` are **not** touched. They are the
 /// worker's to write (#567), and a disable that cleared them would erase the
@@ -1429,17 +1467,23 @@ fn update_inbound(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer
             id: id.to_string(),
         });
     };
-    if target.integration_type != "slack" {
+    let Some(token_key) = inbound_token_key(&target.integration_type) else {
         return Err(WriteError::BadRequest(format!(
             "integration {id:?} is of type {:?}, which has no inbound connection",
             target.integration_type
         )));
-    }
-    if req.enabled && !target.has_app_token {
-        return Err(WriteError::validation(
-            "credentials.app_token",
-            "an app-level token is required before inbound can be enabled",
-        ));
+    };
+    if req.enabled && !target.has_inbound_token {
+        return Err(match token_key {
+            "app_token" => WriteError::validation(
+                "credentials.app_token",
+                "an app-level token is required before inbound can be enabled",
+            ),
+            _ => WriteError::validation(
+                "credentials.bot_token",
+                "a bot token is required before inbound can be enabled",
+            ),
+        });
     }
 
     // Encoded **before** the mutation, per the invariant in `writes.rs`: a
@@ -1458,8 +1502,8 @@ fn update_inbound(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer
 
     // Nothing below this line may return Fallback.
     //
-    // The reload **is** the effect: starting and stopping the socket worker is
-    // the registry's job (#567), so this write ends the way `update` does, and
+    // The reload **is** the effect: starting and stopping the inbound worker is
+    // the registry's job (#567, #676), so this write ends the way `update` does, and
     // its failure is swallowed for the same reason — the column is already
     // written, and a 500 here would invite a retry of a write that landed.
     registry::reload_blocking(db_path, id);
@@ -1492,12 +1536,12 @@ struct InboundState {
 
 /// What [`update_inbound`] needs before it may write, and nothing else.
 ///
-/// `has_app_token` is computed by [`has_app_token_sql`], so this stays a read
-/// that cannot hold the token — the module header's rule, kept on the one write
-/// whose decision depends on a credential.
+/// `has_inbound_token` is computed by [`has_token_sql`] for the key the row's
+/// own type needs, so this stays a read that cannot hold the token — the module
+/// header's rule, kept on the one write whose decision depends on a credential.
 struct InboundTarget {
     integration_type: String,
-    has_app_token: bool,
+    has_inbound_token: bool,
 }
 
 fn inbound_target(
@@ -1506,15 +1550,20 @@ fn inbound_target(
 ) -> Result<Option<InboundTarget>, WriteError> {
     conn.query_row(
         &format!(
-            "SELECT type, {} AS has_app_token FROM integrations WHERE id = ?1",
-            has_app_token_sql()
+            "SELECT type,
+                    CASE type WHEN 'slack' THEN {}
+                              WHEN 'telegram' THEN {}
+                              ELSE 0 END AS has_inbound_token
+               FROM integrations WHERE id = ?1",
+            has_token_sql("app_token"),
+            has_token_sql("bot_token")
         ),
         [id],
         |row| {
-            let has_app_token: i64 = row.get(1)?;
+            let has_inbound_token: i64 = row.get(1)?;
             Ok(InboundTarget {
                 integration_type: row.get(0)?,
-                has_app_token: has_app_token != 0,
+                has_inbound_token: has_inbound_token != 0,
             })
         },
     )
@@ -3248,7 +3297,8 @@ mod tests {
                 "slack",
                 r#"{"auth_mode":"bot_token","bot_token":"xoxb-1"}"#,
             ),
-            ("telegram", "telegram", r#"{"bot_token":"123:abc"}"#),
+            ("github", "github", r#"{"personal_access_token":"ghp_x"}"#),
+            ("tg-no-token", "telegram", r#"{"bot_token":"  "}"#),
         ] {
             conn.execute(
                 "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
@@ -3264,8 +3314,26 @@ mod tests {
         assert_eq!(unknown.status(), axum::http::StatusCode::NOT_FOUND);
 
         let wrong_type =
-            update_inbound(file.path(), "telegram", br#"{"enabled":true}"#).expect_err("400");
+            update_inbound(file.path(), "github", br#"{"enabled":true}"#).expect_err("400");
         assert_eq!(wrong_type.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let no_bot_token =
+            update_inbound(file.path(), "tg-no-token", br#"{"enabled":true}"#).expect_err("422");
+        assert_eq!(
+            no_bot_token.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert!(
+            no_bot_token.message().contains("bot_token"),
+            "the 422 must name the field: {}",
+            no_bot_token.message()
+        );
+        assert!(
+            !get(file.path(), "tg-no-token")
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
 
         let no_token =
             update_inbound(file.path(), "no-token", br#"{"enabled":true}"#).expect_err("422");
@@ -3279,7 +3347,7 @@ mod tests {
             no_token.message()
         );
 
-        // Nothing was written by any of the three.
+        // Nothing was written by any of the four.
         assert!(
             !get(file.path(), "no-token")
                 .expect("get")
@@ -3435,14 +3503,33 @@ mod tests {
                 .inbound_enabled
         );
 
-        // A type change strands the switch just as surely: `update_inbound`
-        // answers 400 for a non-Slack row **whichever way** it is being moved,
-        // so a row that leaves `slack` with the switch on could never be turned
-        // off again. Both arms clear it — this `PUT` omits `credentials` on
-        // purpose, because that arm assigns fewer columns and was the one that
-        // missed it.
-        let retyped =
+        // A change between the two inbound types clears it too (#676): the
+        // switch was turned on for the other transport.
+        let to_telegram =
             update(file.path(), &id, br#"{"name":"R2","type":"telegram"}"#).expect("update");
+        assert!(
+            body_of(&to_telegram).contains(r#""inbound_enabled":false"#),
+            "{}",
+            body_of(&to_telegram)
+        );
+        update(
+            file.path(),
+            &id,
+            br#"{"name":"R2","type":"slack",
+                 "credentials":{"auth_mode":"bot_token","bot_token":"xoxb-3",
+                                "app_token":"xapp-1-abc"}}"#,
+        )
+        .expect("update");
+        update_inbound(file.path(), &id, br#"{"enabled":true}"#).expect("enable");
+
+        // A type change strands the switch just as surely: `update_inbound`
+        // answers 400 for a type with no inbound transport **whichever way** it
+        // is being moved, so a row that leaves `slack` with the switch on could
+        // never be turned off again. Both arms clear it — this `PUT` omits
+        // `credentials` on purpose, because that arm assigns fewer columns and
+        // was the one that missed it.
+        let retyped =
+            update(file.path(), &id, br#"{"name":"R2","type":"github"}"#).expect("update");
         assert!(
             body_of(&retyped).contains(r#""inbound_enabled":false"#),
             "{}",
@@ -3461,6 +3548,66 @@ mod tests {
             axum::http::StatusCode::BAD_REQUEST,
             "the 400 is unconditional, which is why the write above has to clear the column"
         );
+    }
+
+    /// The switch on a Telegram row (#676): it needs a stored bot token to turn
+    /// on, and a `PUT` that replaces the blob with one holding none turns it
+    /// off, exactly as the Slack row's app token does.
+    #[test]
+    fn the_inbound_switch_follows_a_telegram_rows_bot_token() {
+        let file = migrated();
+        let created = create(
+            file.path(),
+            br#"{"name":"T","type":"telegram","credentials":{"bot_token":"123:abc"}}"#,
+        )
+        .expect("create");
+        let id = serde_json::from_str::<serde_json::Value>(&body_of(&created)).expect("json")["id"]
+            .as_str()
+            .expect("an id")
+            .to_string();
+        let enabled = |file: &tempfile::NamedTempFile| {
+            get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        };
+
+        let answer = update_inbound(file.path(), &id, br#"{"enabled":true}"#).expect("enable");
+        assert_eq!(body_of(&answer), "{\"inbound_enabled\":true}\n");
+        assert!(enabled(&file));
+
+        // A rename omits `credentials`, so the token and the switch both stay.
+        let renamed =
+            update(file.path(), &id, br#"{"name":"T2","type":"telegram"}"#).expect("update");
+        assert!(
+            body_of(&renamed).contains(r#""inbound_enabled":true"#),
+            "{}",
+            body_of(&renamed)
+        );
+        // …and so does a blob that still holds a bot token.
+        update(
+            file.path(),
+            &id,
+            br#"{"name":"T2","type":"telegram","credentials":{"bot_token":"456:def"}}"#,
+        )
+        .expect("update");
+        assert!(enabled(&file));
+
+        // A blob with no bot token takes the switch with it.
+        let emptied = update(
+            file.path(),
+            &id,
+            br#"{"name":"T2","type":"telegram","credentials":{"bot_token":""}}"#,
+        )
+        .expect("update");
+        assert!(
+            body_of(&emptied).contains(r#""inbound_enabled":false"#),
+            "{}",
+            body_of(&emptied)
+        );
+        assert!(!enabled(&file));
+        // Off is always allowed, token or not.
+        update_inbound(file.path(), &id, br#"{"enabled":false}"#).expect("disable");
     }
 
     /// One rule, two spellings — [`has_credentials_sql`] and

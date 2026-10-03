@@ -90,7 +90,11 @@ default logs at `debug`.
   them keep one half, which for the socket half is a live connection holding the
   app token of a row the user has just changed. The worker is **not** a seventh
   entry in `start_for_type`'s starter table: it is a second handle on one of the
-  six, and `start_socket_worker` is where the three conditions are read.
+  six, and `start_socket_worker` is where the three conditions are read. Since
+  #676 the map's value is `registry::InboundWorker`, an enum over this worker
+  and Telegram's poll worker, so one set of epoch and generation rules serves
+  both; `socket::status_writer` and `backoff_for` are `pub(crate)` for the same
+  reason.
 - **The stored-token check is not redundant with the 422 on `PUT
   /api/integrations/{id}/inbound`.** That refusal guards the moment the switch
   goes on; a later `PUT /api/integrations/{id}` can replace the blob with one

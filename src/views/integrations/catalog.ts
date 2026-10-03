@@ -95,14 +95,16 @@ export interface Provider {
   services: ServiceInfo[];
   /**
    * Whether inbound messages can start an agent here, i.e. whether the trigger
-   * rules list is offered. Telegram and Slack both are — but by different
-   * transports, which is what the two flags below distinguish (#566, #569).
+   * rules list is offered. Telegram and Slack both are, each over an outbound
+   * connection Agento holds open — which is what `inbound` describes.
    */
   supportsTriggers?: boolean;
-  /** Telegram: the webhook Telegram pushes updates to. */
-  supportsWebhook?: boolean;
-  /** Slack: the Socket Mode connection Agento holds open (#569). */
-  supportsInbound?: boolean;
+  /**
+   * The inbound connection, when the provider has one: Slack's Socket Mode
+   * (#569) and Telegram's long polling (#676). Its presence is what offers the
+   * Inbound switch; the words are here so the panel has none of its own.
+   */
+  inbound?: InboundCopy;
   /** Only read when `supportsTriggers`. */
   triggerTargets?: TriggerTargets;
   /**
@@ -120,6 +122,22 @@ export interface Provider {
    */
   extraField?: CredField;
   docs?: string;
+}
+
+/** What the Inbound panel says for one provider's transport (#676). */
+export interface InboundCopy {
+  /** The row label beside the switch — the transport's name. */
+  label: string;
+  /** What the connection is and what turning it off does. */
+  help: string;
+  /** Why the switch cannot be turned on, shown beside it while it cannot. */
+  needsToken: string;
+  /**
+   * Which scrubbed-read flag says the token the worker needs is stored. Slack
+   * needs its app-level token; a Telegram row's only credential is its bot
+   * token. `PUT /api/integrations/{id}/inbound` answers 422 without it.
+   */
+  tokenFlag: "has_app_token" | "has_credentials";
 }
 
 export const PROVIDERS: Provider[] = [
@@ -227,7 +245,12 @@ export const PROVIDERS: Provider[] = [
       },
     ],
     supportsTriggers: true,
-    supportsInbound: true,
+    inbound: {
+      label: "Socket Mode",
+      help: "Socket Mode holds an outbound connection to Slack so mentions reach Agento without a public URL. Turn it off to close the connection; nothing is deleted.",
+      needsToken: "Store an app-level token above before this can be turned on.",
+      tokenFlag: "has_app_token",
+    },
     triggerTargets: {
       placeholder: "C0123ABCDEF, C0456GHIJKL (blank = any channel)",
       help: "Slack channel ids, comma-separated; empty = every channel the app is in.",
@@ -368,7 +391,12 @@ export const PROVIDERS: Provider[] = [
       },
     ],
     supportsTriggers: true,
-    supportsWebhook: true,
+    inbound: {
+      label: "Long polling",
+      help: "Agento asks Telegram for new messages over an outbound connection, so they reach it without a public URL. Turn it off to stop receiving; nothing is deleted.",
+      needsToken: "Store a bot token above before this can be turned on.",
+      tokenFlag: "has_credentials",
+    },
     triggerTargets: {
       /* The strings this provider already showed, moved here unchanged by
          #569 so the field's wording is per-provider rather than Telegram's
@@ -586,19 +614,19 @@ export type PinNotConnected = Expect<Eq<typeof NOT_CONNECTED, "Not connected">>;
 /* --- The inbound connection's own vocabulary (#569) ----------------------
    A second state on the same screen, and therefore a second set of words
    spelled *here* rather than at the badge — the reason `connectionState`
-   exists at all. `inbound_status` is the Socket Mode worker's column and has
+   exists at all. `inbound_status` is the inbound worker's column and has
    nothing to do with `authenticated`, so the two must not read alike: a Slack
    row shows the Authorisation badge and the Inbound badge inches apart, and
    `Not connected` under both would name two unrelated failures with one
    phrase. Only the *connected* word is shared, deliberately — a live socket is
    connected in the plain sense, and #569 names that word — and the row labels
-   (`Status` / `Socket Mode`) are what separate them.
+   (`Status` / the transport's name) are what separate them.
 
    An unrecognised status is reported as itself: the worker owns this column
    (#567) and may learn a word before this module does. Guessing at it would
    be the one thing worse than showing it. */
 
-/** What a socket that has never run is called — never `Not connected`. */
+/** What a connection that has never run is called — never `Not connected`. */
 export const NOT_RUNNING = "Not running";
 export type PinNotRunning = Expect<Eq<typeof NOT_RUNNING, "Not running">>;
 

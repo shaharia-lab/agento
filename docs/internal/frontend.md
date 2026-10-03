@@ -459,10 +459,8 @@ compile-time pin; `Delete` won because it was already the majority and because
   count and the bound in place of a name (`Delete 3 expired sessions that
   ended before 1 Sept 2026? Their … go with them.`).
 - **`Remove` survives for detaching, and only that**: taking a row out of a
-  list nothing has stored yet (a gateway alias's fallback target), or
-  unregistering something from a third party while the record it belongs to
-  stays (the Telegram webhook). If the record is gone afterwards, it is
-  `Delete`.
+  list nothing has stored yet (a gateway alias's fallback target). If the
+  record is gone afterwards, it is `Delete`.
 
 **One connection state gets one word, and it is `Connected`** (#518).
 `Integration.authenticated` renders in four places visible at once — the

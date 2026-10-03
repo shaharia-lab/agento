@@ -171,7 +171,8 @@ export interface Integration {
    * answers 422 without one.
    */
   has_app_token: boolean;
-  /** Whether the Slack inbound worker should be running for this row (#566). */
+  /** Whether the inbound worker — Slack's socket (#566) or Telegram's long
+      poll (#676) — should be running for this row. */
   inbound_enabled: boolean;
   /** What that worker is doing, or `""` when it has never run (#566). */
   inbound_status: string;
@@ -215,13 +216,6 @@ export interface TriggerRule {
   continue_on_reply: boolean;
   created_at: string;
   updated_at: string;
-}
-
-export interface WebhookStatus {
-  status: string;
-  url: string;
-  has_secret: boolean;
-  error: string;
 }
 
 /* --- Scheduled tasks (internal/storage/task_store.go) -------------------- */

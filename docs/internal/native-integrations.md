@@ -281,7 +281,11 @@ flow that actually errored.
   introduce a UI that echoes them back; the API scrubs them and the UI must not
   reintroduce them.
 
-## Slack inbound: the app token and the switch (#566)
+## The inbound switch: Slack's app token, Telegram's bot token (#566, #676)
+
+The switch serves two transports since #676: Slack's Socket Mode and Telegram's
+long poll (`docs/internal/native-integrations-telegram.md`). The bullets below
+were written for Slack; where a rule now covers both, it says so.
 
 - **`credentials.app_token` is a field, not an `auth_mode`.** Socket Mode needs
   a Slack app-level token (`xapp-…`) *beside* whichever of `bot_token`/`oauth`
@@ -304,30 +308,34 @@ flow that actually errored.
   not a field on `PUT /api/integrations/{id}`: that write is byte-exact against
   Go and its three-valued `credentials` contract (#515) would otherwise have to
   be resent to flip a boolean. It refuses before it writes — 404 unknown id, 400
-  for any type but `slack`, 422 naming `credentials.app_token` when *enabling* a
-  row that stores none. Disabling is never refused on the credential axis, so a
-  row whose credentials were scrubbed cannot get stuck on. It writes
-  `inbound_enabled` alone and ends in `registry::reload_blocking`, which is what
-  starts and stops the socket worker. **The route is desktop-only**, so it is
+  for a type with no inbound transport (anything but `slack` and `telegram`),
+  and 422 when *enabling* a row that does not store the token its worker needs:
+  `credentials.app_token` for Slack, `credentials.bot_token` for Telegram.
+  `inbound_token_key` is the one table of which type needs which key. Disabling
+  is never refused on the credential axis, so a row whose credentials were
+  scrubbed cannot get stuck on. It writes `inbound_enabled` alone and ends in
+  `registry::reload_blocking`, which is what starts and stops the worker. **The route is desktop-only**, so it is
   recorded in `parity/desktop_routes.json` through `integrations::ROUTES` — the
   **fourth** owner of that file, and the union in
   `the_desktop_only_routes_are_recorded_in_both_directions` has to name it or
   the set-equality assertion silently weakens.
 - **The 422 and the 400 are only worth something because `update` clears the
   column.** `PUT /api/integrations/{id}` can invalidate the switch on either
-  axis — a replacing blob that drops `app_token` (#515 makes a sent blob replace
-  wholly, and the Slack form emits only its mode's fields), or a `type` written
-  straight from the request body, which this write validates not at all. The
-  second is the sharper one: `update_inbound` answers 400 for a non-Slack row
-  *whichever way* the switch is being moved, so a row that left `slack` with the
-  switch on could never be turned off again. `clears_inbound` is therefore
-  `type != "slack" || a replacing blob with no app token`, and it is applied on
-  **both** arms of the `UPDATE` — the credentials-omitted arm assigns fewer
-  columns and is the one that misses it.
+  axis — a replacing blob that drops the type's token (#515 makes a sent blob
+  replace wholly, and the Slack form emits only its mode's fields), or a `type`
+  written straight from the request body, which this write validates not at
+  all. The second is the sharper one: `update_inbound` answers 400 for a type
+  with no inbound transport *whichever way* the switch is being moved, so a row
+  that left `slack` for `github` with the switch on could never be turned off
+  again. `clears_inbound` is therefore true when the new type has no inbound
+  transport, when the type changed at all (the switch was turned on for the
+  other transport), or when a replacing blob lacks the new type's token. It is
+  applied on **both** arms of the `UPDATE` — the credentials-omitted arm assigns
+  fewer columns and is the one that misses it.
 - `has_app_token_sql` is **not** scoped by `type`. No validator rejects an
   unknown key, so an API caller can put an `app_token` into a Telegram blob and
-  see the read report `true`; nothing follows from it, because the switch that
-  consults it refuses any type but `slack`.
+  see the read report `true`; nothing follows from it, because the switch asks
+  about the row's own key (`inbound_target` selects by `type`).
 - **`inbound_status` and `inbound_error` are the worker's to write** (#567), and
   so is `updated_at` left alone: a disable that cleared the status would erase
   the reason the user is looking at, and a worker rewriting its state on every

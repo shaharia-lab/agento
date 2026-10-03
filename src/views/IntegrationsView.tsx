@@ -32,7 +32,6 @@ import type {
   ScheduledTask,
   ServiceConfig,
   TriggerRule,
-  WebhookStatus,
 } from "../lib/types";
 import {
   connectionState,
@@ -44,6 +43,7 @@ import {
   unavailableCopy,
   type AuthMode,
   type CredField,
+  type InboundCopy,
   type Provider,
   type TriggerTargets,
 } from "./integrations/catalog";
@@ -68,16 +68,16 @@ import "../styles/integrations.css";
      spelling one heading twice is exactly how the drift started, so a rename
      here changes both.
    * **Edit-only sections render *after* the shared body** — Authorisation, the
-     inbound connection, the trigger rules, the webhook and the *Enabled*
+     inbound connection, the trigger rules and the *Enabled*
      switch. Both screens therefore open on the same thing, and the layout a
      user learns on the way in is the one they meet on the way back.
 
-   **Two providers take inbound messages and they take them differently**
-   (#569). `supportsTriggers` buys the trigger-rules list on both; the transport
-   beside it is a second flag — `supportsWebhook` for the URL Telegram pushes
-   to, `supportsInbound` for the Socket Mode connection Agento holds open to
-   Slack. Reading one flag for both is how Slack came to render a Register
-   button for a webhook route it has no handler for.
+   **Two providers take inbound messages, each over a connection Agento opens**
+   (#569, #676). `supportsTriggers` buys the trigger-rules list on both; the
+   transport beside it is the catalog's `inbound` entry — Socket Mode for
+   Slack, long polling for Telegram — and `InboundPanel` renders either from
+   it. Telegram's webhook panel went with #676: a desktop app has no public
+   URL for Telegram to push to.
    ========================================================================== */
 
 /** The heading over Name, the auth method and the credential fields. */
@@ -86,7 +86,7 @@ const CONNECTION_TITLE = "Connection";
 const SERVICES_TITLE = "Services and tools";
 /** The heading over the edit-only *Enabled* switch. */
 const AVAILABILITY_TITLE = "Availability";
-/** The heading over the Socket Mode switch and its status (#569). */
+/** The heading over the inbound switch and its status (#569, #676). */
 const INBOUND_TITLE = "Inbound";
 
 const NAME_HELP =
@@ -95,10 +95,6 @@ const SERVICES_HELP =
   "Only the tools you leave on are exposed to agents. You can change this later.";
 const STORED_SECRET_HELP =
   "Agento cannot show a stored secret back to you, and does not need to — leave this alone and saving keeps it.";
-const INBOUND_HELP =
-  "Socket Mode holds an outbound connection to Slack so mentions reach Agento without a public URL. Turn it off to close the connection; nothing is deleted.";
-const INBOUND_NEEDS_TOKEN =
-  "Store an app-level token above before this can be turned on.";
 /**
  * Why the app token cannot be set on its own.
  *
@@ -1289,20 +1285,14 @@ function IntegrationDetail({
               {/* Inbound first: a trigger rule only fires once something is
                   delivering messages, so the connection that delivers them is
                   the thing to read before the rules that consume them. */}
-              {provider.supportsInbound && (
+              {provider.inbound && (
                 <>
                   <div className="divider" />
-                  <InboundPanel item={item} />
+                  <InboundPanel item={item} copy={provider.inbound} />
                 </>
               )}
               <div className="divider" />
               <TriggerRules integrationId={item.id} provider={provider} />
-              {provider.supportsWebhook && (
-                <>
-                  <div className="divider" />
-                  <WebhookPanel integrationId={item.id} />
-                </>
-              )}
             </>
           )}
 
@@ -2319,7 +2309,7 @@ function RuleForm({
   );
 }
 
-/* --- Slack inbound (Socket Mode) ----------------------------------------- */
+/* --- Inbound: Slack Socket Mode, Telegram long polling -------------------- */
 
 /** How often the row is re-read while the connection is meant to be up. */
 const INBOUND_POLL_MS = 5_000;
@@ -2338,30 +2328,31 @@ const INBOUND_POLL_MS = 5_000;
 const INBOUND_SETTLE_MS = 20_000;
 
 /**
- * The Socket Mode switch and what the worker last reported (#566, #569).
+ * The inbound switch and what the worker last reported (#566, #569), for
+ * either transport: `copy` is the provider's catalog entry (#676).
  *
- * Self-contained, like `TriggerRules` and `WebhookPanel`: it re-reads the one
+ * Self-contained, like `TriggerRules`: it re-reads the one
  * row it renders rather than asking the detail pane to reload, so a poll for a
  * reconnect does not re-fetch the whole list — and, more to the point, does not
  * re-seed the form the user may be typing in.
  */
-function InboundPanel({ item }: { item: Integration }) {
+function InboundPanel({ item, copy }: { item: Integration; copy: InboundCopy }) {
   /**
-   * `updated_at` and `has_app_token` are deps, not decoration.
+   * `updated_at` and the token flag are deps, not decoration.
    *
    * `IntegrationDetail` is keyed on the integration id, so a save calls
    * `onChanged()` without remounting this subtree — and `current` prefers
    * `row.data` once the first fetch lands. Keyed on `item.id` alone, the row a
    * user has *just stored their first app token on* would keep answering from
-   * the fetch made before it, leaving the switch disabled under "Store an
-   * app-level token above" with no way back but selecting another row. The
+   * the fetch made before it, leaving the switch disabled under its
+   * "store a token above" line with no way back but selecting another row. The
    * poll cannot rescue it either: it is off precisely while inbound is.
    * `updated_at` moves on every `PUT /api/integrations/{id}`, so it covers a
    * token added, replaced or dropped.
    */
   const row = useResource(
     (signal) => api.get<Integration>(`/integrations/${item.id}`, signal),
-    [item.id, item.updated_at, item.has_app_token]
+    [item.id, item.updated_at, item[copy.tokenFlag]]
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -2371,7 +2362,7 @@ function InboundPanel({ item }: { item: Integration }) {
   // switch from flicking to "off" for one frame on every mount.
   const current = row.data ?? item;
   const on = current.inbound_enabled;
-  const hasToken = current.has_app_token;
+  const hasToken = current[copy.tokenFlag];
   // Gate the *turning-on*, not the control (#474): a row that is already on
   // and has since lost its token is exactly the row whose owner wants to turn
   // it off. The backend agrees — it refuses `enabled: true` without a token and
@@ -2406,7 +2397,7 @@ function InboundPanel({ item }: { item: Integration }) {
     <div className="formsec">
       <div className="formsec__title">{INBOUND_TITLE}</div>
       <div className="formrow">
-        <div className="formrow__label">Socket Mode</div>
+        <div className="formrow__label">{copy.label}</div>
         <div className="formrow__control">
           <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
             <Switch on={on} disabled={busy || (!canTurnOn && !on)} onChange={toggle} />
@@ -2421,7 +2412,7 @@ function InboundPanel({ item }: { item: Integration }) {
             </span>
           </div>
 
-          <div className="formrow__help">{INBOUND_HELP}</div>
+          <div className="formrow__help">{copy.help}</div>
 
           {!canTurnOn && (
             /* A disabled `Switch` receives no mouse events, so it deliberately
@@ -2430,7 +2421,7 @@ function InboundPanel({ item }: { item: Integration }) {
               <span className="msgline__icon">
                 <Icon name="alert" size={13} />
               </span>
-              <span>{INBOUND_NEEDS_TOKEN}</span>
+              <span>{copy.needsToken}</span>
             </div>
           )}
           {current.inbound_error && (
@@ -2438,118 +2429,6 @@ function InboundPanel({ item }: { item: Integration }) {
           )}
           {error && <div className="msgline msgline--error">{error}</div>}
           {row.error && <div className="msgline msgline--error">{row.error}</div>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* --- Telegram webhook ---------------------------------------------------- */
-
-function WebhookPanel({ integrationId }: { integrationId: string }) {
-  const status = useResource(
-    (signal) =>
-      api.get<WebhookStatus>(`/integrations/${integrationId}/webhook/status`, signal),
-    [integrationId]
-  );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [confirmRemove, setConfirmRemove] = useState(false);
-
-  async function run(action: () => Promise<unknown>) {
-    setBusy(true);
-    setError(undefined);
-    try {
-      await action();
-      status.reload();
-    } catch (err) {
-      setError(describeError(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const s = status.data;
-  const active = s?.status === "active";
-
-  return (
-    <div className="formsec">
-      <div className="formsec__title">Webhook</div>
-      <div className="formrow">
-        <div className="formrow__label">Delivery</div>
-        <div className="formrow__control">
-          <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
-            {active ? (
-              <span className="badge badge--green">Active</span>
-            ) : s?.status === "error" ? (
-              <span className="badge badge--red">Error</span>
-            ) : (
-              <span className="badge">Inactive</span>
-            )}
-            {s?.has_secret && <span className="badge">Secret set</span>}
-            {!active && (
-              <button
-                className="btn"
-                disabled={busy}
-                onClick={() =>
-                  run(() => api.post(`/integrations/${integrationId}/webhook/register`))
-                }
-              >
-                Register
-              </button>
-            )}
-            {active && (
-              <>
-                <button
-                  className="btn"
-                  disabled={busy}
-                  onClick={() =>
-                    run(() =>
-                      api.post(`/integrations/${integrationId}/webhook/regenerate-secret`)
-                    )
-                  }
-                >
-                  <Icon name="refresh" size={13} />
-                  Regenerate secret
-                </button>
-                {confirmRemove ? (
-                  <span className="confirm">
-                    Remove webhook?
-                    <button className="btn btn--ghost" onClick={() => setConfirmRemove(false)}>
-                      Cancel
-                    </button>
-                    <button
-                      className="btn btn--danger"
-                      disabled={busy}
-                      onClick={() =>
-                        run(async () => {
-                          await api.del(
-                            `/integrations/${integrationId}/webhook/register`
-                          );
-                          setConfirmRemove(false);
-                        })
-                      }
-                    >
-                      Remove
-                    </button>
-                  </span>
-                ) : (
-                  <button className="btn btn--danger" onClick={() => setConfirmRemove(true)}>
-                    Remove
-                  </button>
-                )}
-              </>
-            )}
-          </div>
-
-          <div className="formrow__help">
-            Telegram pushes updates to this instance. Registering needs a reachable public
-            URL, set under Settings → General.
-          </div>
-
-          {s?.url && <div className="codebox">{s.url}</div>}
-          {s?.error && <div className="msgline msgline--error">{s.error}</div>}
-          {error && <div className="msgline msgline--error">{error}</div>}
         </div>
       </div>
     </div>

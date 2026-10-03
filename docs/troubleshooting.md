@@ -322,6 +322,55 @@ still listed and its data is safe, but it cannot be edited or used.
 
 ---
 
+## Telegram
+
+These cover **long polling**, the inbound half, where a message to the bot runs
+an agent. Setting it up is in the
+[user guide](user-guide.md#telegram-long-polling). The badge under
+**Integrations → Telegram → Inbound** uses the same five states as Slack's,
+described [below](#what-the-socket-mode-badge-is-telling-you), and `ERROR`
+keeps retrying in the same way.
+
+### Telegram says something else is polling this bot token
+
+The badge reads `RECONNECTING` or `ERROR`, and the reason under it starts with
+*Something else is polling this bot token*.
+
+Telegram lets one program poll a bot at a time, and refuses the other with a
+`409 Conflict`. The usual cause is a second Agento using the same bot token: an
+installed Agento and a development build (`npm run app`) both running, or
+Agento on two machines. Another program built on the same bot does it too.
+
+- Close the other program, or turn **Long polling** off in one of the two.
+- Or give each its own bot. `@BotFather` creates one in a minute.
+
+The worker reconnects by itself once the other poller stops. Nothing needs
+restarting.
+
+### Telegram says a webhook is set for this bot
+
+The reason starts with *A webhook is set for this bot somewhere else*. Agento
+removes a bot's webhook when long polling starts, so this means something set
+one again afterwards, usually another program or a script calling
+`setWebhook`.
+
+Turn **Long polling** off and on again. Agento removes the webhook and starts
+polling. If it comes back, find what is setting it and stop that.
+
+### Long polling says Connected but a message does nothing
+
+- The integration has no enabled trigger rule, or none whose prefix, keywords
+  and chat ids match the message.
+- The message has no text. Photos, stickers and joins are received and ignored.
+- The bot is in a group with privacy mode on, so Telegram only gives it
+  commands and replies. `@BotFather` → `/setprivacy` changes that.
+
+The log lines worth knowing: `telegram poll worker started` / `stopped`,
+`telegram poll: … attempt=N status=…` for each failed attempt with its reason,
+and `trigger rule matched …` for a message that ran.
+
+---
+
 ## Slack
 
 These cover **Socket Mode** — the inbound half, where a mention in a channel runs

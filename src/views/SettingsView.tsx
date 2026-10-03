@@ -527,7 +527,7 @@ function GeneralPane({
           help={
             urlLock
               ? lockHelp(urlLock)
-              : "Externally reachable URL of this instance. Required for inbound webhooks."
+              : "Externally reachable URL of this instance. Telegram and Slack triggers do not need one."
           }
         >
           <label className={`field ${urlLock ? "field--locked" : ""}`}>

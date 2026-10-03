@@ -9,11 +9,11 @@
 > notes, not instructions: the goldens are frozen (`parity/README.md`).
 
 Eleven tools in one service group (`messaging`), over a bot token — the largest
-tool set after GitHub's twenty, and the **outbound half only**. The inbound
-webhook (`POST /webhooks/telegram/{id}`) and `internal/trigger/`'s dispatcher are
-#319 and are untouched; they matter here only because the webhook route is
-mounted at the root and deliberately outside `guards.rs`, which nothing in this
-module is on.
+tool set after GitHub's twenty. The inbound half is the long-poll worker in
+`telegram/polling.rs` (#676), described under *Inbound: long polling* below.
+The webhook (`POST /webhooks/telegram/{id}`, #319) is still mounted at the
+root, deliberately outside `guards.rs`, but nothing in the UI registers one any
+more.
 
 **It reaches two of the three reflector divergences `claude/schema_vectors.rs`
 left standing**, both of which it recorded as unreachable because "nothing in the
@@ -54,6 +54,57 @@ the model in a result sentence, so `Option<Box<RawValue>>` cannot be left to
 serde, which folds a JSON null into `None`.
 
 Cap 10 MiB and timeout 60 seconds, the largest of the six on both counts.
+
+## Inbound: long polling (#676)
+
+One `getUpdates` loop per Telegram row with `enabled`, `inbound_enabled` and a
+non-empty `bot_token`. It replaced the webhook as the receive path because a
+desktop app has no public URL. It is `slack/socket.rs`'s twin and shares its
+status writer, so read that module's header first; `telegram/polling.rs`'s own
+header states each rule below with its reason.
+
+- **`deleteWebhook` runs before the first poll**, with
+  `drop_pending_updates: false`, and the row's `webhook_secret`,
+  `webhook_status` and `webhook_error` are cleared to `''`, `'inactive'`, `''`.
+  Telegram answers `getUpdates` with a 409 while a webhook is set. A failure of
+  either half is a failed attempt and is retried.
+- **The payload is `{"allowed_updates":["message"],"offset":N,"timeout":T}`**,
+  keys sorted, through `gojson::to_vec_marshal`. `T` is 30, and 0 for the first
+  poll after a start or a failure, so the status is known in one round trip.
+- **The offset is in memory**, `last update_id + 1`. A restart gets a
+  redelivery, and `trigger::receiver::claim_update` (inside the dispatcher's
+  spawn) drops what already ran. An element that does not decode is skipped and
+  the offset still passes it; a batch that cannot move the offset is a failure.
+- **Status is `inbound_status` / `inbound_error`**, on Slack's four words.
+  `reconnecting` after a failed attempt, `error` from the fifth consecutive
+  one, `connected` again on the next answered poll. The wait is 1 s doubling to
+  60 s on the wall clock. A request has its own deadline, the poll timeout plus
+  20 s, below the client's 60 s.
+- **A `409 Conflict` is rewritten** by `describe_failure` into a sentence
+  naming the cause (a second poller, or a webhook set elsewhere), with
+  Telegram's text after it. Every other failure is `client::Client::call`'s own
+  sentence, which never holds the token.
+- **The worker does not need `authenticated`.** The webhook read `enabled`
+  alone, and migration 50 turns `inbound_enabled` on for every Telegram row
+  whose `webhook_status` was `active`. So `registry::start_worker_only` hosts a
+  poll worker on a row that has no tool server, through
+  `Registry::put_worker_if_current`. Slack never takes that path.
+- **The registry owns the worker** as `InboundWorker::Telegram`, in the same
+  map, epoch and generation bookkeeping as Slack's socket. Dropping the handle
+  cancels the poll in flight. The boot clear covers `type IN ('slack',
+  'telegram')`.
+- **`POST …/webhook/register` answers 409 while `inbound_enabled` is on**,
+  before it calls Telegram. The three webhook routes, the root route and the
+  `public_url` setting are otherwise unchanged and unreachable from the UI;
+  removing them is a follow-up.
+- **Two processes polling one token take turns getting 409.** An installed
+  Agento and `npm run app` with the same bot do this.
+
+Pinned by `telegram/polling_tests.rs` — library tests, because the Telegram API
+base is a `cfg(test)` seam a `tests/` binary cannot reach — and by
+`registry.rs`'s `a_telegram_poll_worker_follows_the_switch_and_the_token_but_not_the_auth`,
+`integrations.rs`'s `the_inbound_switch_follows_a_telegram_rows_bot_token` and
+`migrate.rs`'s `migration_50_turns_inbound_on_for_an_active_telegram_webhook`.
 
 ## Task delivery (#639)
 
