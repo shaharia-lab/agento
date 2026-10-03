@@ -263,8 +263,8 @@ pub struct JobHistory {
 /// What started a run — `job_history.triggered_by` (#681).
 ///
 /// The column stays text and [`JobHistory`] carries the string, so a value a
-/// later build writes is read back rather than refused. Only `Schedule` and
-/// `Manual` are written today; the event kinds arrive with #683.
+/// later build writes is read back rather than refused. The event kinds are
+/// written by `executor::run_event` (#683).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggeredBy {
     Schedule,
