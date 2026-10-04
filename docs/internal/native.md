@@ -55,7 +55,9 @@
       repos.rs / issues.rs / pulls.rs / actions.rs / releases.rs  one per service
     settings.rs  GET+PUT /api/settings and /settings/claude-config-dirs (a
                  filesystem probe; answered on both platforms since #374); the
-                 preferences + config dirs a read is scoped to
+                 preferences + config dirs a read is scoped to; and
+                 POST /settings/retention-prompt/answered, the retention
+                 prompt's one-column write (#751)
     claude_settings/ Claude Code's own settings.json and the profiles beside it (#304) —
       mod.rs     the run config dir, Go's `any`/`MarshalIndent`/`Indent`, GET+PUT
                  /api/claude-settings, and the request decoder that is NOT writes::decode_body

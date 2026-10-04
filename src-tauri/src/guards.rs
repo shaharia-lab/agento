@@ -916,6 +916,38 @@ pub(crate) mod tests {
         );
     }
 
+    /// The retention prompt's own write (#751) carries no body, and is guarded
+    /// like every other write all the same: no `Content-Type` is a 415 and a
+    /// `read` token is a 403.
+    #[test]
+    fn the_retention_prompt_write_needs_json_and_a_write_token() {
+        let path = "/api/settings/retention-prompt/answered";
+        assert_eq!(
+            reject(&request(Method::POST, path, "localhost", "")),
+            Some(CONTENT_TYPE_MISSING)
+        );
+        let read = mint(Scope::Read);
+        assert_eq!(
+            reject(&authed_request(
+                Method::POST,
+                path,
+                "localhost",
+                "application/json",
+                Some(&read)
+            )),
+            Some(INSUFFICIENT_SCOPE)
+        );
+        assert_eq!(
+            reject(&request(
+                Method::POST,
+                path,
+                "localhost",
+                "application/json"
+            )),
+            None
+        );
+    }
+
     /// ...and a `write` token serves all seven, which is what the app's own
     /// session carries.
     #[test]

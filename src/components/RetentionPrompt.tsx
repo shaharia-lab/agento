@@ -116,15 +116,13 @@ function UnansweredPrompt({ onExtended }: { onExtended(): void }) {
     return options[0] ?? LEAVE;
   };
 
-  /** Record the prompt as answered, on top of the settings as they are now. */
+  /**
+   * Record the prompt as answered. Its own route (#751), which stores that one
+   * flag: a `PUT /settings` replaces the whole row, and posting back what the
+   * `GET` answered would store the defaults it had filled in.
+   */
   async function markAnswered() {
-    // Read again rather than reuse the copy from mount: the PUT replaces the
-    // whole row, and a copy from mount would undo a save made since.
-    const fresh = await api.get<SettingsResponse>("/settings");
-    await api.put<SettingsResponse>("/settings", {
-      ...fresh.settings,
-      claude_retention_prompt_answered: true,
-    });
+    await api.post("/settings/retention-prompt/answered");
   }
 
   async function dismiss() {

@@ -730,6 +730,58 @@ fn update_with(
     Ok(super::Answer::json(body))
 }
 
+/// The retention prompt's one write (#751).
+const RETENTION_PROMPT_ANSWERED_PATH: &str = "/api/settings/retention-prompt/answered";
+
+/// The route this module adds, which Go never had.
+///
+/// An owner of `parity/desktop_routes.json`, whose assertion is set equality
+/// over the union of every owner's const.
+pub const ROUTES: &[(&str, &str)] = &[("POST", RETENTION_PROMPT_ANSWERED_PATH)];
+
+/// The answer of `POST /api/settings/retention-prompt/answered`.
+#[derive(Serialize)]
+struct RetentionPromptAnswered {
+    claude_retention_prompt_answered: bool,
+}
+
+/// `POST /api/settings/retention-prompt/answered` (#751): record the one-time
+/// retention prompt as answered, and store nothing else.
+///
+/// **One column, never the row.** The prompt used to answer through
+/// [`update`], posting back what `GET /api/settings` had answered, and that is
+/// [`resolve`]'s output: `default_model` and `default_working_dir` filled with
+/// their defaults. A `PUT` replaces the whole row, so answering or dismissing
+/// the prompt stored those defaults on every install, and a stored model
+/// switches the soft `ANTHROPIC_DEFAULT_SONNET_MODEL` default off for good.
+/// So this does not go through `resolve`, [`apply_update`] or [`save`]. On an
+/// install with no row yet the insert creates one, and every other column
+/// takes its schema default: the two above stay `''`, so both stay unstored.
+///
+/// No body is read, there is no way to set the flag back to false, and a
+/// second call is the same 200. Nothing here asks for a rescan or a
+/// Credentials Checker sync, because nothing either one reads has changed.
+///
+/// A failure is the machinery's (the database or the encoder), so it is a
+/// [`WriteError::Fallback`] and the default 500.
+pub fn mark_retention_prompt_answered(db_path: &Path) -> Result<super::Answer, WriteError> {
+    let conn = super::db::open_read_write(db_path).map_err(WriteError::Fallback)?;
+    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
+
+    let body = super::gojson::to_vec(&RetentionPromptAnswered {
+        claude_retention_prompt_answered: true,
+    })
+    .map_err(|e| WriteError::Fallback(format!("encoding retention prompt answer: {e}")))?;
+    // Nothing below this line may return Fallback, other than the write itself.
+    conn.execute(
+        "INSERT INTO user_settings (id, claude_retention_prompt_answered) VALUES (1, 1)
+         ON CONFLICT(id) DO UPDATE SET claude_retention_prompt_answered = 1",
+        [],
+    )
+    .map_err(|e| WriteError::Fallback(format!("marking the retention prompt answered: {e}")))?;
+    Ok(super::Answer::json(body))
+}
+
 /// `SettingsManager.Update` up to the point it persists: lock, validate,
 /// normalize. The order is Go's, and it is observable — a payload that both
 /// changes a locked field and carries an out-of-range threshold is answered
@@ -1157,7 +1209,8 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
     serve,
 };
 
-/// The two reads and, since #278, the write.
+/// The two reads, since #278 the write, and since #751 the retention prompt's
+/// own one-column write ([`mark_retention_prompt_answered`]).
 ///
 /// **`PUT /api/settings` was written, unit-tested against Go's literal answers,
 /// and deliberately left unclaimed until the cut-over** — the `migrate::apply`
@@ -1181,6 +1234,7 @@ fn claims(method: &Method, path: &str) -> bool {
     match path {
         "/api/settings" => method == Method::GET || method == Method::PUT,
         "/api/settings/claude-config-dirs" => method == Method::GET,
+        RETENTION_PROMPT_ANSWERED_PATH => method == Method::POST,
         _ => false,
     }
 }
@@ -1194,6 +1248,9 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
     // which no `configured` entry could ever match. Both are now the
     // target's rules (`parity/gopath_windows_vectors.json` pins them), so the
     // probe is answered everywhere and the gate is gone.
+    if req.path == RETENTION_PROMPT_ANSWERED_PATH {
+        return super::writes::finish(mark_retention_prompt_answered(&ctx.db_path));
+    }
     if req.method == Method::PUT {
         return super::writes::finish(update(&ctx.db_path, req.body));
     }
@@ -2472,6 +2529,173 @@ mod tests {
             assert_eq!(status, axum::http::StatusCode::OK, "{later}: {body}");
             assert!(stored(), "{later} must not bring the prompt back");
         }
+    }
+
+    /// The dedicated route (#751), answered through `serve` as `proxy.rs`
+    /// reaches it.
+    fn mark_answered(db: &std::path::Path) -> (axum::http::StatusCode, String) {
+        let ctx = super::super::Ctx {
+            db_path: db.to_path_buf(),
+        };
+        let answer = serve(
+            &ctx,
+            &super::super::Request {
+                method: &Method::POST,
+                path: RETENTION_PROMPT_ANSWERED_PATH,
+                query: "",
+                content_type: "application/json",
+                secret_token: "",
+                body: &[],
+            },
+        )
+        .expect("answered");
+        (
+            answer.status,
+            String::from_utf8(answer.body.unwrap_or_default()).expect("utf8"),
+        )
+    }
+
+    /// Every `user_settings` column of the one row, as `name=quoted value`,
+    /// leaving out the flag the route sets.
+    fn every_other_column(db: &std::path::Path) -> Vec<String> {
+        let conn = rusqlite::Connection::open(db).expect("open");
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('user_settings')")
+            .expect("columns")
+            .query_map([], |r| r.get(0))
+            .expect("columns")
+            .collect::<Result<_, _>>()
+            .expect("columns");
+        assert!(names
+            .iter()
+            .any(|n| n == "claude_retention_prompt_answered"));
+        names
+            .iter()
+            .filter(|name| *name != "claude_retention_prompt_answered")
+            .map(|name| {
+                let value: String = conn
+                    .query_row(
+                        &format!("SELECT quote({name}) FROM user_settings WHERE id = 1"),
+                        [],
+                        |r| r.get(0),
+                    )
+                    .expect("the row");
+                format!("{name}={value}")
+            })
+            .collect()
+    }
+
+    /// On a cold install the route creates the row with the flag set and
+    /// leaves the model and the working directory unstored (#751). Calling it
+    /// again is the same 200 and still one row.
+    #[test]
+    fn marking_the_prompt_answered_on_a_fresh_database_stores_only_the_flag() {
+        let file = migrated_db();
+        let rows = || {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            conn.query_row("SELECT COUNT(*) FROM user_settings", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .expect("count")
+        };
+        assert_eq!(rows(), 0, "a migrated database has no settings row");
+
+        for call in ["first", "second"] {
+            let (status, body) = mark_answered(file.path());
+            assert_eq!(status, axum::http::StatusCode::OK, "{call}: {body}");
+            assert_eq!(
+                body,
+                concat!(r#"{"claude_retention_prompt_answered":true}"#, "\n"),
+                "{call}"
+            );
+            assert_eq!(rows(), 1, "{call}");
+
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            let (model, dir, answered): (String, String, i64) = conn
+                .query_row(
+                    "SELECT default_model, default_working_dir,
+                            claude_retention_prompt_answered
+                     FROM user_settings WHERE id = 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .expect("the row");
+            assert_eq!(
+                (model.as_str(), dir.as_str(), answered),
+                ("", "", 1),
+                "{call}"
+            );
+        }
+    }
+
+    /// The defect itself (#751): after the prompt is answered, the soft
+    /// `ANTHROPIC_DEFAULT_SONNET_MODEL` default must still choose the model,
+    /// which it stops doing once any model is stored.
+    #[test]
+    fn marking_the_prompt_answered_keeps_the_soft_model_default_applying() {
+        use crate::paths::tests::EnvVar;
+        let _env = crate::paths::tests::env_lock();
+        let _hard = EnvVar::unset("AGENTO_DEFAULT_MODEL");
+        let _soft = EnvVar::set("ANTHROPIC_DEFAULT_SONNET_MODEL", "sonnet-from-env");
+        let file = migrated_db();
+
+        let (status, body) = mark_answered(file.path());
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let resolved = resolve(load_stored(&conn));
+        assert!(resolved.settings.claude_retention_prompt_answered);
+        assert_eq!(resolved.settings.default_model, "sonnet-from-env");
+        assert!(resolved.model_from_env);
+    }
+
+    /// On an install with a saved row, the route changes the flag's column and
+    /// no other byte of the row (#751).
+    #[test]
+    fn marking_the_prompt_answered_leaves_every_other_column_of_a_saved_row() {
+        let _env = crate::paths::tests::env_lock();
+        if !nothing_is_locked() {
+            return;
+        }
+        let file = migrated_db();
+        let (status, body) = put(
+            file.path(),
+            r#"{"default_working_dir":"/work/here","default_model":"opus",
+                "onboarding_complete":true,"appearance_dark_mode":true,
+                "appearance_font_size":15,"appearance_font_family":"mono",
+                "notification_settings":"{\"enabled\":false}",
+                "event_bus_worker_pool_size":7,"public_url":"https://a.test",
+                "hidden_projects":["/hidden/one"],"idle_gap_threshold_minutes":9,
+                "credentials_checker_enabled":true,
+                "session_history_retention_days":180}"#,
+        );
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let before = every_other_column(file.path());
+        assert!(
+            before.contains(&"default_model='opus'".to_string()),
+            "{before:?}"
+        );
+
+        let (status, body) = mark_answered(file.path());
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+        assert_eq!(every_other_column(file.path()), before);
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        assert!(load_stored(&conn).claude_retention_prompt_answered);
+    }
+
+    /// The route is a `POST` and nothing else, and it is recorded as this
+    /// module's desktop-only route.
+    #[test]
+    fn the_retention_prompt_route_is_claimed_for_post_only() {
+        assert!(claims(&Method::POST, RETENTION_PROMPT_ANSWERED_PATH));
+        for method in [Method::GET, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(!claims(&method, RETENTION_PROMPT_ANSWERED_PATH), "{method}");
+        }
+        assert_eq!(
+            ROUTES,
+            &[("POST", "/api/settings/retention-prompt/answered")]
+        );
     }
 
     /// A changed, non-zero retention prunes now, through one rescan; an

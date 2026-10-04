@@ -283,9 +283,19 @@ tests `patch` has no entry point without an `allow`. Do not add a caller whose
 
 The prompt that calls it, and the `claude_retention_prompt_answered` flag on
 `user_settings` (migration 49) that records it as answered, are in
-`docs/internal/frontend.md`. `PUT /api/settings` keeps that flag true once it
-is true (`settings::apply_update`), because the Settings form posts the whole
-row and an omitted key decodes to `false`.
+`docs/internal/frontend.md`. The prompt sets the flag through its own route,
+`POST /api/settings/retention-prompt/answered` (#751,
+`settings::mark_retention_prompt_answered`): no body, one upsert that sets that
+column and no other, a 200 with `{"claude_retention_prompt_answered":true}` on
+every call, and no rescan or Credentials Checker sync. It does not use
+`PUT /api/settings`, because that replaces the whole row and the prompt would
+be posting back a resolved one, which stores `default_model` and
+`default_working_dir` and so switches the soft
+`ANTHROPIC_DEFAULT_SONNET_MODEL` default off. On an install with no
+`user_settings` row the upsert creates it from the schema defaults.
+`PUT /api/settings` keeps the flag true once it is true
+(`settings::apply_update`), because the Settings form posts the whole row and
+an omitted key decodes to `false`.
 
 ## Writing one key of a config dir's `settings.json` (#719)
 

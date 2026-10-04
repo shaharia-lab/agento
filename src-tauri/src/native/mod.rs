@@ -500,6 +500,15 @@ mod tests {
         assert!(claims(&Method::GET, "/api/settings/claude-config-dirs"));
         assert!(claims(&Method::PUT, "/api/settings"));
         assert!(!claims(&Method::PUT, "/api/settings/claude-config-dirs"));
+        // The retention prompt's own write (#751): one column, a `POST` only.
+        assert!(claims(
+            &Method::POST,
+            "/api/settings/retention-prompt/answered"
+        ));
+        assert!(!claims(
+            &Method::GET,
+            "/api/settings/retention-prompt/answered"
+        ));
         // Claude Code's own retention, read per config dir (#718) and raised,
         // never lowered, by the retention prompt's `PUT` (#720).
         assert!(claims(&Method::GET, "/api/settings/claude-retention"));
@@ -857,8 +866,8 @@ mod tests {
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
         //
-        // The file has **seven owners** since #718, so the claimed set is the
-        // union of all seven modules' consts. An eighth owner appends here;
+        // The file has **eight owners** since #751, so the claimed set is the
+        // union of all eight modules' consts. A ninth owner appends here;
         // leaving it out would silently weaken the assertion from set equality
         // to "the owners I remembered", which is the one-directional property
         // this test exists to escape.
@@ -870,6 +879,7 @@ mod tests {
             .chain(security_scan::api::ROUTES.iter())
             .chain(sessions::ROUTES.iter())
             .chain(claude_settings::retention::ROUTES.iter())
+            .chain(settings::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(

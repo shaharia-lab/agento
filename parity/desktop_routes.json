@@ -283,6 +283,13 @@
       "status": "native",
       "owner": "#720",
       "reason": "raises one indexed config dir's cleanupPeriodDays and can never lower it: body {config_dir, cleanup_period_days}, written as a single-key splice that changes no other byte; 200 with the GET's document read after the write; 422 and nothing written for a dir that is not indexed, a value that is missing, null, not a whole number, below 1 or above 36500, a value lower than the one on disk (an absent file or key counts as the CLI default of 30), a value on disk of 0 (Claude Code skips cleanup there, so any number would start deletion) and a file reported as 'unknown'; an equal value already in the file is a 200 that writes nothing; 409 when the file changed during the write"
+    },
+    {
+      "method": "POST",
+      "route": "/api/settings/retention-prompt/answered",
+      "status": "native",
+      "owner": "#751",
+      "reason": "records the one-time retention prompt as answered by setting user_settings.claude_retention_prompt_answered and no other column: no body is read, 200 with {claude_retention_prompt_answered: true} on every call, a missing row is created from the schema defaults so default_model and default_working_dir stay unstored, and no rescan or Credentials Checker sync follows -- the prompt no longer answers through PUT /api/settings, which replaces the whole row"
     }
   ]
 }

@@ -100,11 +100,13 @@ src/
                  `extendOptions`, which offers only those strictly above the
                  dir's current value and none for a dir at `0` or `unknown`
                  (the reason is shown as text beside the dir, #713). Confirm
-                 and the × both record the prompt as answered through the
-                 settings `PUT`, after a fresh `GET`, because that `PUT`
-                 replaces the whole row and a copy read at mount would undo a
-                 save made since. The server keeps the flag true once set, so
-                 a Settings draft loaded earlier cannot bring the prompt back.
+                 and the × both record the prompt as answered through
+                 `POST /api/settings/retention-prompt/answered` (#751), which
+                 stores that one flag. It must not go through the settings
+                 `PUT`: that replaces the whole row, and posting back what the
+                 `GET` answered stores the defaults the `GET` filled in. The
+                 server keeps the flag true once set, so a Settings draft
+                 loaded earlier cannot bring the prompt back.
                  A failed write shows the server's message inline and leaves
                  the prompt open. Its stylesheet is styles/retentionprompt.css
     SaveBar.tsx  the one action strip at the foot of a form (#519) — the six
