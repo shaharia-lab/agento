@@ -685,8 +685,6 @@ async fn an_agent_whose_tools_this_build_cannot_host_is_a_recorded_failure() {
     assert_eq!(task.last_run_status, "failed");
 }
 
-/// An unresolvable `{{name}}` in the *task's* prompt fails the run before
-/// anything is created — `prepareTaskRun`'s first step.
 /// #675. The scheduler names `bypass` only for an agent with no mode of its
 /// own: a stored one is the agent's, and a scheduled run does not speak over
 /// it. An agent's mode cannot be written through the API, so the row is edited
@@ -743,6 +741,8 @@ async fn an_agent_with_an_unknown_permission_mode_is_a_recorded_failure() {
     assert_eq!(error, r#"agent setup: unknown permission mode "yolo""#);
 }
 
+/// An unresolvable `{{name}}` in the *task's* prompt fails the run before
+/// anything is created — `prepareTaskRun`'s first step.
 #[tokio::test]
 async fn an_unresolvable_prompt_variable_fails_the_run_before_it_starts() {
     let dir = tempfile::tempdir().expect("tempdir");
