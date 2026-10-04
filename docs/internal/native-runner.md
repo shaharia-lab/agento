@@ -150,8 +150,8 @@ login.
 
 ### OpenCode 1.18.34
 
-Read from <https://opencode.ai/docs/permissions/>, `/docs/cli/` and
-`/docs/acp/` on 2026-10-04. The version is npm's `opencode-ai` latest; **the
+Read from <https://opencode.ai/docs/permissions/>, `/docs/cli/`,
+`/docs/agents/` and `/docs/acp/` on 2026-10-04. The version is npm's `opencode-ai` latest; **the
 binary was not run** (its postinstall did not run under `npx` here).
 
 OpenCode has no sandbox. Each tool key (`read`, `edit`, `bash`, `webfetch`,
@@ -161,7 +161,7 @@ OpenCode has no sandbox. Each tool key (`read`, `edit`, `bash`, `webfetch`,
 |---|---|---|
 | (nothing sent) | the defaults: "Most permissions default to `allow`" (`external_directory` and `doom_loop` ask; `.env` reads are denied) | **yes** |
 | read-only | `OPENCODE_PERMISSION='{"edit":"deny","bash":"deny",…}'` | no |
-| plan | not read this run | not established |
+| plan | `opencode run --agent plan`: the built-in Plan agent, with file edits and `bash` at `ask` (`/docs/agents/`; `--agent` is on `run` in `/docs/cli/`) | **yes with `--auto`**; otherwise it rests on what `run` does with an `ask`, which is not known (below) |
 | workspace-write | `edit: allow`, `bash: deny` or `ask`, `external_directory: deny` | no |
 | full | `edit` and `bash` at `allow` | **yes** |
 | (any) | `opencode run --auto` ("Auto-approve permissions that are not explicitly denied") | **yes** |
@@ -220,5 +220,7 @@ servers, where Codex would need them as `-c` overrides.
   The declaration reports it because it cannot be ruled out from the help text.
 - Claude Code's `auto` and `manual` modes, `--permission-prompts none` and
   `--safe-mode` were read, not run.
+- What `opencode run` does with an `ask` when `--auto` is absent, which is
+  what decides whether its Plan agent is closed on a headless run.
 - No ACP session was opened.
 - Windows and macOS: every command above was run on Linux.
