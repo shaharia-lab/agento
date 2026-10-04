@@ -35,7 +35,7 @@ use chrono::Utc;
 
 use super::delivery::{self, DeliveryReport, ReplyTarget};
 use super::runtime::Scheduler;
-use crate::native::agent_run::RunResult;
+use crate::native::agent_run::{RunResult, Runner as _};
 use crate::native::agents::{self, Agent};
 use crate::native::chat::runner::TurnSettings;
 use crate::native::db;
@@ -1065,8 +1065,8 @@ async fn run_agent(
     agent: Agent,
     prompt: &str,
 ) -> Result<RunResult, String> {
-    // `resolveSystemPrompt`'s strictness lives in `run_headless`, so both
-    // headless callers get it — see that function.
+    // `resolveSystemPrompt`'s strictness lives behind `Runner::run`, so every
+    // headless caller gets it — see `agent_run`.
     let permission_mode = kind.permission_mode(&agent.permission_mode).to_string();
     let spec = crate::native::agent_run::headless_spec(
         db_path,
@@ -1084,13 +1084,14 @@ async fn run_agent(
     let timeout = std::time::Duration::from_secs(
         u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
     );
-    crate::native::agent_run::run_headless(
-        &spec,
-        prompt,
-        timeout,
-        Some(record_process(db_path, job_id)),
-    )
-    .await
+    crate::native::agent_run::runner()
+        .run(
+            &spec,
+            prompt,
+            timeout,
+            Some(record_process(db_path, job_id)),
+        )
+        .await
 }
 
 /// The spawn hook that writes a run's pid onto its job row.

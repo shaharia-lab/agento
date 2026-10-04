@@ -308,6 +308,40 @@ impl PermissionChoice {
             unknown => Err(format!("unknown permission mode {unknown:?}")),
         }
     }
+
+    /// The choice as the two option fields that carry it: the mode, and
+    /// whether `--allow-dangerously-skip-permissions` is sent.
+    fn apply(self, opts: Options) -> Options {
+        match self {
+            Self::Default => opts.with_default_permissions(),
+            Self::Plan => opts.with_permission_mode(permission_mode::PLAN),
+            Self::DontAsk => opts.with_permission_mode(permission_mode::DONT_ASK),
+            Self::Bypass => opts
+                .with_permission_mode(permission_mode::BYPASS_PERMISSIONS)
+                .with_bypass_permissions(),
+            // `with_default_permissions` first, for the flag it clears: a run
+            // nobody chose a mode for is not offered bypass at all.
+            Self::Unchosen => opts
+                .with_default_permissions()
+                .with_permission_mode(permission_mode::DONT_ASK),
+        }
+    }
+}
+
+/// The permission half of [`build_options`] for a run of `spec` with **no**
+/// permission handler, on otherwise-default options.
+///
+/// What [`crate::native::agent_run::Runner::fail_open`] reads (#677). It goes
+/// through [`PermissionChoice::resolve`] and [`PermissionChoice::apply`], the
+/// two calls `build_options` makes, and touches nothing else — no port is
+/// bound and no row is read — so it can be asked before a run is started.
+pub(crate) fn headless_permission_options(spec: &RunSpec) -> Result<Options, String> {
+    let permissions = PermissionChoice::resolve(
+        &spec.permission_mode,
+        spec.agent.as_ref().map(|a| a.permission_mode.as_str()),
+        false,
+    )?;
+    Ok(permissions.apply(Options::new()))
 }
 
 /// Build the SDK options for one chat turn.
@@ -394,19 +428,7 @@ pub async fn build_options(
     // Resolved at the top, by [`PermissionChoice::resolve`]. The flag is not a
     // function of the mode for `plan` and `dontAsk` — see
     // `a_chats_own_permission_mode_beats_the_interactive_default`.
-    opts = match permissions {
-        PermissionChoice::Default => opts.with_default_permissions(),
-        PermissionChoice::Plan => opts.with_permission_mode(permission_mode::PLAN),
-        PermissionChoice::DontAsk => opts.with_permission_mode(permission_mode::DONT_ASK),
-        PermissionChoice::Bypass => opts
-            .with_permission_mode(permission_mode::BYPASS_PERMISSIONS)
-            .with_bypass_permissions(),
-        // `with_default_permissions` first, for the flag it clears: a run
-        // nobody chose a mode for is not offered bypass at all.
-        PermissionChoice::Unchosen => opts
-            .with_default_permissions()
-            .with_permission_mode(permission_mode::DONT_ASK),
-    };
+    opts = permissions.apply(opts);
 
     opts = opts.with_claude_executable(claude_executable().await);
 

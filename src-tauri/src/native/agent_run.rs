@@ -2,10 +2,16 @@
 //! no SSE** — `agent.RunAgent` plus `collectRunResult`.
 //!
 //! Shared by every caller that has no user watching: the scheduler (#275), the
-//! Telegram trigger dispatcher (#319), and [`run_resumed`] (#564), which is the
-//! one that continues an *existing* chat rather than minting a fresh one. Go
+//! Telegram trigger dispatcher (#319), and [`Runner::resume`] (#564), which is
+//! the one that continues an *existing* chat rather than minting a fresh one. Go
 //! shares it too — both of its callers call `agent.RunAgent` — and the reason to
 //! share it here is sharper than tidiness.
+//!
+//! **Callers reach the CLI only through [`Runner`]** (#677), taken from
+//! [`runner`]. The functions that spawn are private to this module, so a rule
+//! about what may be spawned is written once, and a second harness is a second
+//! implementation rather than a fourth call site. `docs/internal/native-runner.md`
+//! has the seam and the per-harness table of fail-open flag combinations.
 //!
 //! **The trap this file exists to hold in one place:** the run must go through
 //! [`crate::claude::client::query`], the *one-shot*, and never through
@@ -23,6 +29,133 @@ use std::sync::Arc;
 use crate::native::chat::live;
 use crate::native::chat::runner::{self, RunSpec};
 use crate::native::db;
+
+/// One harness that can run an agent with nobody watching (#677).
+///
+/// [`RunSpec`], [`RunResult`] and [`ExecutionSettings`] are the neutral types:
+/// a caller builds a spec and reads a result without naming the CLI behind
+/// them. What is the harness's own is how a spec becomes flags, and which of
+/// those flags leave the run unchecked — [`Self::run`] and [`Self::fail_open`].
+///
+/// Generic rather than `dyn`: the methods return futures, so a trait object
+/// would need them boxed, and every caller is on the scheduler's or an inbound
+/// worker's `Send` path. A second harness makes [`runner`] answer an enum of
+/// runners; it does not change a call site.
+pub trait Runner: Send + Sync + Sized {
+    /// The harness's stable id, lower-case — `"claude"`.
+    fn harness(&self) -> &'static str;
+
+    /// Why a headless run of `spec` would be **fail-open** on this harness —
+    /// started with a flag combination under which a tool call nobody approved
+    /// can run — or `None` when it would not be.
+    ///
+    /// A declaration, not an enforcement: nothing here refuses a run. It is
+    /// decided from the spec alone, before anything is spawned or bound, so a
+    /// caller can refuse on it without knowing the harness. A spec the harness
+    /// would refuse to build at all answers `None`: that run fails closed.
+    fn fail_open(&self, spec: &RunSpec) -> Option<String>;
+
+    /// Run `prompt` to completion on a fresh session and answer what it
+    /// produced. `timeout` covers every stage that can await.
+    ///
+    /// `on_spawn` is told the subprocess's pid before a byte of its output is
+    /// read — the scheduler records it on the job row (#594). The other callers
+    /// pass `None`.
+    fn run(
+        &self,
+        spec: &RunSpec,
+        prompt: &str,
+        timeout: std::time::Duration,
+        on_spawn: Option<crate::claude::SpawnHook>,
+    ) -> impl std::future::Future<Output = Result<RunResult, String>> + Send;
+
+    /// Run **one turn on an existing chat**, resuming its session, and write
+    /// what it produced back onto the chat.
+    ///
+    /// Provided, because none of it is the harness's: the busy lock, the chat
+    /// lookup and the write-back are Agento's own, and the one harness-specific
+    /// step in the middle is [`Self::run`]. See [`run_resumed`] for the rules.
+    fn resume(
+        &self,
+        db_path: &std::path::Path,
+        chat_id: &str,
+        prompt: &str,
+        settings: &ExecutionSettings,
+        timeout: std::time::Duration,
+    ) -> impl std::future::Future<Output = Result<RunResult, String>> + Send {
+        run_resumed(self, db_path, chat_id, prompt, settings, timeout)
+    }
+}
+
+/// The runner every headless caller uses. One constructor, so the answer to
+/// "which harness runs this" has one place to change.
+pub fn runner() -> ClaudeRunner {
+    ClaudeRunner
+}
+
+/// The Claude Code CLI, through [`crate::claude::client::query`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClaudeRunner;
+
+impl ClaudeRunner {
+    /// [`Runner::harness`]'s answer.
+    pub const HARNESS: &'static str = "claude";
+
+    /// The fail-open rule over the options a run is spawned with, which is
+    /// where the two flags live (`claude/options.rs`'s argument builder).
+    ///
+    /// Two combinations, and the second is the wider one:
+    ///
+    /// - `--permission-mode bypassPermissions`: every permission check is
+    ///   skipped.
+    /// - `--allow-dangerously-skip-permissions`: the CLI's own help calls it
+    ///   "bypassing all permission checks as an option, without it being
+    ///   enabled by default". It skips nothing by itself, but a run that sends
+    ///   it can be switched into bypass while it runs, so it is not provably
+    ///   closed. `Options::new()` sets it, and only `with_default_permissions`
+    ///   clears it — so an explicit `plan` or `dontAsk` is reported here too.
+    fn fail_open_options(options: &crate::claude::options::Options) -> Option<String> {
+        use crate::claude::options::permission_mode::BYPASS_PERMISSIONS;
+        if options.permission_mode == BYPASS_PERMISSIONS {
+            Some(format!(
+                "--permission-mode {BYPASS_PERMISSIONS} skips every permission check"
+            ))
+        } else if options.allow_dangerously_skip_permissions {
+            Some(format!(
+                "--allow-dangerously-skip-permissions is sent with --permission-mode {}, \
+                 so the run can be switched to {BYPASS_PERMISSIONS}",
+                options.permission_mode
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+impl Runner for ClaudeRunner {
+    fn harness(&self) -> &'static str {
+        Self::HARNESS
+    }
+
+    fn fail_open(&self, spec: &RunSpec) -> Option<String> {
+        // The same resolution and the same builder calls `build_options` makes
+        // for a run with no permission handler, so the declaration cannot
+        // drift from what is spawned. An unknown mode is an `Err` there, and
+        // the run fails before a subprocess exists.
+        let options = runner::headless_permission_options(spec).ok()?;
+        Self::fail_open_options(&options)
+    }
+
+    async fn run(
+        &self,
+        spec: &RunSpec,
+        prompt: &str,
+        timeout: std::time::Duration,
+        on_spawn: Option<crate::claude::SpawnHook>,
+    ) -> Result<RunResult, String> {
+        run_headless(spec, prompt, timeout, on_spawn).await
+    }
+}
 
 /// What one run produced. `agent.AgentResult`, narrowed to the fields its two
 /// callers store — the thinking, cost and per-model breakdowns are collected
@@ -56,7 +189,9 @@ pub struct RunResult {
 ///
 /// `on_spawn` is told the CLI's pid before a byte of its output is read — the
 /// scheduler records it on the job row (#594). The other callers pass `None`.
-pub async fn run_headless(
+///
+/// Private: callers reach it through [`Runner::run`].
+async fn run_headless(
     spec: &RunSpec,
     prompt: &str,
     timeout: std::time::Duration,
@@ -165,7 +300,7 @@ pub fn headless_spec(
 ///
 /// The four `trigger_rules` columns #563 added that reach a [`RunSpec`] — the
 /// fifth, `timeout_minutes`, is a [`std::time::Duration`] argument to
-/// [`run_resumed`] rather than a spec field, because nothing about a `RunSpec`
+/// [`Runner::resume`] rather than a spec field, because nothing about a `RunSpec`
 /// is time-bounded.
 ///
 /// **Empty means "no choice was recorded"** for every field, exactly as it does
@@ -281,6 +416,9 @@ fn pick(overridden: &str, fallback: &str) -> String {
 /// Narrowing it means changing when the interactive turn releases, which is a
 /// divergence from that ordering and belongs to whoever decides to take it.
 ///
+/// Private: callers reach it through [`Runner::resume`], whose provided body
+/// this is. The spawn in the middle is `runner`'s; everything around it is not.
+///
 /// # Token totals are **incremented**, unlike every other headless write-back
 ///
 /// `schedule/executor.rs` and `trigger/dispatcher.rs` both *replace* the four
@@ -289,7 +427,8 @@ fn pick(overridden: &str, fallback: &str) -> String {
 /// inbound turns — so replacing would silently erase the UI turns' usage. This
 /// increments, the way `chat/persist.rs` does for the interactive turn. **Do not
 /// unify this statement with the executor's.**
-pub async fn run_resumed(
+async fn run_resumed<R: Runner>(
+    runner: &R,
     db_path: &std::path::Path,
     chat_id: &str,
     prompt: &str,
@@ -316,7 +455,7 @@ pub async fn run_resumed(
     };
 
     let spec = resume_spec(db_path, &row, agent, settings);
-    let result = run_headless(&spec, prompt, timeout, None).await;
+    let result = runner.run(&spec, prompt, timeout, None).await;
 
     let result = match result {
         Ok(result) => result,
@@ -783,6 +922,109 @@ mod tests {
         assert_eq!(
             spec.agent.as_ref().map(|a| a.model.as_str()),
             Some("rule-model")
+        );
+    }
+
+    fn agent_with_mode(mode: &str) -> crate::native::agents::Agent {
+        crate::native::agents::Agent {
+            name: "A".to_string(),
+            slug: "a".to_string(),
+            description: String::new(),
+            model: String::new(),
+            thinking: String::new(),
+            permission_mode: mode.to_string(),
+            system_prompt: String::new(),
+            capabilities: Default::default(),
+            claude_config_dir: String::new(),
+        }
+    }
+
+    /// Every stored spelling, on the run and on the agent, against what
+    /// `build_options` spawns for it. `bypass` is fail-open by its mode;
+    /// `plan` and `dontAsk` are fail-open by the flag `Options::new()` sets
+    /// and they never clear; `default` and the unchosen run send neither.
+    ///
+    /// The list is [`crate::native::chats::CHAT_PERMISSION_MODES`] itself, so
+    /// a mode added there has no answer here until someone gives it one.
+    #[test]
+    fn claude_declares_bypass_and_the_allow_flag_fail_open_for_every_mode() {
+        let runner = runner();
+        assert_eq!(runner.harness(), "claude");
+
+        let fail_open = |run: &str, agent: &str| {
+            let spec = headless_spec(
+                std::path::Path::new(NO_DB),
+                agent_with_mode(agent),
+                &ExecutionSettings {
+                    permission_mode: run.to_string(),
+                    ..Default::default()
+                },
+            );
+            runner.fail_open(&spec)
+        };
+
+        for mode in crate::native::chats::CHAT_PERMISSION_MODES {
+            let want = match mode {
+                "" | "default" => None,
+                "bypass" => Some("--permission-mode bypassPermissions skips"),
+                "plan" => {
+                    Some("--allow-dangerously-skip-permissions is sent with --permission-mode plan")
+                }
+                "dontAsk" => Some(
+                    "--allow-dangerously-skip-permissions is sent with --permission-mode dontAsk",
+                ),
+                other => panic!("permission mode {other:?} has no fail-open answer"),
+            };
+            // The run's own mode, and the same mode stored on the agent with
+            // no choice on the run: the two ways a headless run gets one.
+            for (run, agent) in [(mode, ""), ("", mode)] {
+                let got = fail_open(run, agent);
+                match want {
+                    None => assert_eq!(got, None, "run={run:?} agent={agent:?}"),
+                    Some(prefix) => assert!(
+                        got.as_deref().is_some_and(|r| r.starts_with(prefix)),
+                        "run={run:?} agent={agent:?} got={got:?}"
+                    ),
+                }
+            }
+        }
+
+        // A run's mode beats its agent's, in both directions.
+        assert_eq!(fail_open("default", "bypass"), None);
+        assert!(fail_open("bypass", "default").is_some());
+
+        // A mode `build_options` refuses is a run that never starts.
+        assert_eq!(fail_open("yolo", ""), None);
+        assert_eq!(fail_open("", "yolo"), None);
+    }
+
+    /// The declaration reads the two fields the argument builder turns into
+    /// flags, so it is pinned against them directly as well as through a spec.
+    #[test]
+    fn the_fail_open_rule_reads_the_mode_and_the_allow_flag() {
+        use crate::claude::options::{permission_mode, Options};
+
+        // `Options::new()` is bypass with the flag: the SDK's own default.
+        assert!(ClaudeRunner::fail_open_options(&Options::new()).is_some());
+        assert_eq!(
+            ClaudeRunner::fail_open_options(&Options::new().with_default_permissions()),
+            None
+        );
+        assert_eq!(
+            ClaudeRunner::fail_open_options(
+                &Options::new()
+                    .with_default_permissions()
+                    .with_permission_mode(permission_mode::DONT_ASK)
+            ),
+            None,
+            "the unchosen run: dontAsk with the flag cleared"
+        );
+        let flag_only = ClaudeRunner::fail_open_options(
+            &Options::new().with_permission_mode(permission_mode::PLAN),
+        );
+        assert!(
+            flag_only.is_some_and(|r| r.contains("--allow-dangerously-skip-permissions")),
+            "plan alone does not clear the flag"
         );
     }
 }

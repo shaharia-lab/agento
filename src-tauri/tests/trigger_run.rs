@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
+use agento_lib::native::agent_run::Runner as _;
 use agento_lib::native::trigger::dispatcher;
 
 /// `AGENTO_CLAUDE_EXECUTABLE` is process-wide, so the tests that set it are
@@ -183,7 +184,9 @@ async fn run_the_rule(db: &Path) -> Result<agento_lib::native::agent_run::RunRes
     // `execute_and_reply` calls, so a dispatcher that stopped passing the rule's
     // settings fails here rather than staying green.
     let (spec, timeout) = dispatcher::run_inputs(db, agent(), rule);
-    agento_lib::native::agent_run::run_headless(&spec, "hello", timeout, None).await
+    agento_lib::native::agent_run::runner()
+        .run(&spec, "hello", timeout, None)
+        .await
 }
 
 /// A rule's working directory, model and permission mode reach the process.
@@ -356,7 +359,9 @@ async fn an_unknown_mode_on_a_headless_run_is_an_error_and_spawns_nothing() {
     agent.permission_mode = "yolo".to_string();
     let rules = dispatcher::load_rules(&db, "tg").expect("load rules");
     let (spec, timeout) = dispatcher::run_inputs(&db, agent, rules.first().expect("one rule"));
-    let err = match agento_lib::native::agent_run::run_headless(&spec, "hello", timeout, None).await
+    let err = match agento_lib::native::agent_run::runner()
+        .run(&spec, "hello", timeout, None)
+        .await
     {
         Ok(_) => panic!("an unknown mode must not run"),
         Err(e) => e,

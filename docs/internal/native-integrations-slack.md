@@ -308,7 +308,7 @@ declines to start one.
   empty, released nothing and then removed its entry would lose a job queued in
   between, so the drain re-checks the channel while holding the lock that hands
   out senders and only removes the entry when it is still empty.
-- **An unlinked start and every resume go through `agent_run::run_resumed`.** A
+- **An unlinked start and every resume go through `agent_run::Runner::resume`.** A
   start creates the chat first and then resumes it — no `sdk_session_id` yet, so
   `resume_spec` passes no `--resume` — which makes the busy lock, the session-id
   write-back and the *additive* usage accounting one implementation from the

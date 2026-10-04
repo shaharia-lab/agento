@@ -61,7 +61,7 @@
 //! arrives first at the queue is answered first, and that the second never runs
 //! while the first is running. It is **in addition to** the chat's busy lock,
 //! not instead of it:
-//! `agent_run::run_resumed` takes `chat::live::try_lock`, which is what stops a
+//! `agent_run::Runner::resume` takes `chat::live::try_lock`, which is what stops a
 //! Slack turn and a UI turn colliding on the same chat row (decision 9). The
 //! queue is what makes the *ordering* deterministic; the lock is what makes the
 //! collision safe.
@@ -74,7 +74,7 @@
 //! ## Rules that are not obvious from the code
 //!
 //! - **An unlinked start and every resume run through
-//!   [`agent_run::run_resumed`].** A start creates the chat first and then
+//!   [`agent_run::Runner::resume`].** A start creates the chat first and then
 //!   resumes it — the chat has no `sdk_session_id` yet, so `resume_spec` passes
 //!   no `--resume` and the first turn is an ordinary headless run whose session
 //!   id is written back. One implementation means the busy lock, the write-back
@@ -116,7 +116,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::claude::CancellationToken;
-use crate::native::agent_run;
+use crate::native::agent_run::{self, Runner as _};
 use crate::native::db;
 use crate::native::schedule::delivery::ReplyTarget;
 use crate::native::schedule::executor::{self, EventInput, EventRefused};
@@ -432,14 +432,15 @@ impl Inbound {
             log::warn!("dispatcher stopped, dropping a slack turn chat_id={chat_id:?}");
             return;
         };
-        let result = agent_run::run_resumed(
-            &self.db_path,
-            &chat_id,
-            prompt,
-            &job.rule.settings,
-            dispatcher::run_timeout(&job.rule),
-        )
-        .await;
+        let result = agent_run::runner()
+            .resume(
+                &self.db_path,
+                &chat_id,
+                prompt,
+                &job.rule.settings,
+                dispatcher::run_timeout(&job.rule),
+            )
+            .await;
 
         let reply = reply_for(result, &chat_id);
         self.post(&job.mention.channel, &job.thread_ts, &reply)

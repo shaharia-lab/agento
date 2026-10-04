@@ -134,7 +134,7 @@ impl LiveSessions {
 /// It is a constant rather than a literal at each site because it is now the
 /// answer on **two** paths that are not each other's neighbours: the interactive
 /// turn's 409 (`turn.rs`) and the headless resume's `Err`
-/// ([`crate::native::agent_run::run_resumed`]). An inbound worker queues on
+/// ([`crate::native::agent_run::Runner::resume`]). An inbound worker queues on
 /// exactly this string, so the two must not drift apart.
 pub const CHAT_BUSY: &str = "session is busy, wait for the current message to complete";
 

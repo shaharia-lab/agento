@@ -48,6 +48,7 @@ required, not optional, and this table is the only thing that will prompt it.
 | `native/scanner/`, `native/insights/` | `docs/internal/native-scanner.md`, `docs/internal/native-insights.md` — the scan, the insight worker, the search index and its numbers |
 | `native/security_scan/` | `docs/internal/native-security-scan.md` — the Credentials Checker: rules, store, and the setting-gated worker |
 | `native/schedule/` | `docs/internal/native-schedule.md` — the scheduler, the executor, gocron and cron semantics, manual runs |
+| `native/agent_run.rs` | `docs/internal/native-runner.md` — the `Runner` seam every headless run goes through, and each harness's fail-open flag combinations |
 | `native/integrations/` | `docs/internal/native-integrations.md` — the registry, credentials, OAuth |
 | each provider under `native/integrations/` | `docs/internal/native-integrations-slack.md`, `-telegram.md`, `-github.md`, `-google.md`, `-jira.md`, `-confluence.md` — one file per ported integration |
 | `native/claude_settings/`, `native/notifications/` | `docs/internal/native-claude-settings.md`, `docs/internal/native-notifications.md` |

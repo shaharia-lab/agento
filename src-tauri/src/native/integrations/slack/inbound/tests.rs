@@ -1379,8 +1379,8 @@ fn the_global_bound_is_taken_around_the_run_and_not_around_the_wait() {
         .find("\"slack mention prompt")
         .expect("the turn logs its prompt before it runs");
     let run = flat
-        .find("agent_run::run_resumed(")
-        .expect("the turn calls run_resumed");
+        .find("agent_run::runner() .resume(")
+        .expect("the turn resumes the chat through the runner");
     // The linked arm (#685) takes the same permit, around its own run.
     let event_acquire = flat[run..]
         .find("dispatcher::semaphore().acquire()")

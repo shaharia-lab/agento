@@ -452,7 +452,7 @@ the run produces anything** (#594, migration 40). `claude/process.rs` spawns
 every CLI — chat and headless alike — with `process_group(0)` on Unix and
 `CREATE_NEW_PROCESS_GROUP` on Windows, so a signal to `-pid` reaches the MCP
 servers and tool children the CLI started, not just the CLI. The executor
-passes `run_headless` a `SpawnHook` that writes `job_history.pid` and
+passes `Runner::run` a `SpawnHook` that writes `job_history.pid` and
 `pid_started_at` through `tasks::record_job_process`; the spawn **awaits** it
 before the initialize handshake, which is what makes "written before any output
 is read" a property rather than a race. `pid_started_at` is the wall-clock time

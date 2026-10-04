@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agento_lib::native::agent_run::{self, ExecutionSettings};
+use agento_lib::native::agent_run::{self, ExecutionSettings, Runner as _};
 
 /// `AGENTO_CLAUDE_EXECUTABLE` is process-wide, so the tests that set it are
 /// serialized against each other.
@@ -262,7 +262,7 @@ async fn the_first_turn_mints_a_session_and_the_second_resumes_it() {
 
     let first = tokio::time::timeout(
         std::time::Duration::from_secs(90),
-        agent_run::run_resumed(
+        agent_run::runner().resume(
             &db,
             &chat,
             "first question",
@@ -314,15 +314,16 @@ async fn the_first_turn_mints_a_session_and_the_second_resumes_it() {
         ]
     );
 
-    agent_run::run_resumed(
-        &db,
-        &chat,
-        "second question",
-        &ExecutionSettings::default(),
-        std::time::Duration::from_secs(600),
-    )
-    .await
-    .expect("the second run");
+    agent_run::runner()
+        .resume(
+            &db,
+            &chat,
+            "second question",
+            &ExecutionSettings::default(),
+            std::time::Duration::from_secs(600),
+        )
+        .await
+        .expect("the second run");
 
     let spawned = spawns(dir.path());
     assert_eq!(spawned.len(), 2, "two spawns: {spawned:?}");
@@ -362,15 +363,16 @@ async fn a_resumed_run_is_refused_while_the_chat_is_busy_and_spawns_nothing() {
         "the lock starts free"
     );
 
-    let refused = agent_run::run_resumed(
-        &db,
-        &chat,
-        "while busy",
-        &ExecutionSettings::default(),
-        std::time::Duration::from_secs(60),
-    )
-    .await
-    .expect_err("a busy chat must refuse");
+    let refused = agent_run::runner()
+        .resume(
+            &db,
+            &chat,
+            "while busy",
+            &ExecutionSettings::default(),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect_err("a busy chat must refuse");
     assert_eq!(refused, agento_lib::native::chat::live::CHAT_BUSY);
     assert!(
         spawns(dir.path()).is_empty(),
@@ -409,14 +411,15 @@ async fn a_ui_turn_is_refused_while_a_resumed_run_holds_the_lock() {
     let running = tokio::spawn({
         let (db, chat) = (db.clone(), chat.clone());
         async move {
-            agent_run::run_resumed(
-                &db,
-                &chat,
-                "the headless turn",
-                &ExecutionSettings::default(),
-                std::time::Duration::from_secs(600),
-            )
-            .await
+            agent_run::runner()
+                .resume(
+                    &db,
+                    &chat,
+                    "the headless turn",
+                    &ExecutionSettings::default(),
+                    std::time::Duration::from_secs(600),
+                )
+                .await
         }
     });
 
@@ -480,15 +483,16 @@ async fn a_turn_with_no_final_text_stores_the_user_message_and_keeps_the_session
     let _env = env_lock().lock().await;
     std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
 
-    agent_run::run_resumed(
-        &db,
-        &chat,
-        "a question with no answer",
-        &ExecutionSettings::default(),
-        std::time::Duration::from_secs(600),
-    )
-    .await
-    .expect("the run");
+    agent_run::runner()
+        .resume(
+            &db,
+            &chat,
+            "a question with no answer",
+            &ExecutionSettings::default(),
+            std::time::Duration::from_secs(600),
+        )
+        .await
+        .expect("the run");
 
     assert_eq!(
         messages(&db, &chat),
@@ -531,15 +535,16 @@ async fn token_totals_are_summed_across_a_ui_turn_and_a_headless_turn() {
     let _env = env_lock().lock().await;
     std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
 
-    agent_run::run_resumed(
-        &db,
-        &chat,
-        "the headless turn",
-        &ExecutionSettings::default(),
-        std::time::Duration::from_secs(600),
-    )
-    .await
-    .expect("the run");
+    agent_run::runner()
+        .resume(
+            &db,
+            &chat,
+            "the headless turn",
+            &ExecutionSettings::default(),
+            std::time::Duration::from_secs(600),
+        )
+        .await
+        .expect("the run");
 
     assert_eq!(
         totals(&db, &chat),
@@ -580,15 +585,16 @@ async fn a_run_that_times_out_stores_the_question_alone_and_frees_the_lock() {
     // Generous enough that the deadline can only be reached in the drain — every
     // earlier stage (`build_options`, the spawn) is inside it too, and reaching
     // it there would leave `gate.started` absent and fail the assertion below.
-    let err = agent_run::run_resumed(
-        &db,
-        &chat,
-        "a question that times out",
-        &ExecutionSettings::default(),
-        std::time::Duration::from_secs(15),
-    )
-    .await
-    .expect_err("the run must time out");
+    let err = agent_run::runner()
+        .resume(
+            &db,
+            &chat,
+            "a question that times out",
+            &ExecutionSettings::default(),
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .expect_err("the run must time out");
     assert_eq!(err, agento_lib::native::agent_run::DEADLINE_EXCEEDED);
     assert!(
         gate_started(dir.path()).exists(),
@@ -630,15 +636,16 @@ async fn a_missing_chat_is_an_error_and_releases_the_lock_it_took() {
     migrated_with_chat(&db, &chat, "", [0; 4]);
 
     let absent = unique_id("nobody");
-    let err = agent_run::run_resumed(
-        &db,
-        &absent,
-        "hello",
-        &ExecutionSettings::default(),
-        std::time::Duration::from_secs(60),
-    )
-    .await
-    .expect_err("no such chat");
+    let err = agent_run::runner()
+        .resume(
+            &db,
+            &absent,
+            "hello",
+            &ExecutionSettings::default(),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect_err("no such chat");
     assert!(err.contains("not found"), "{err}");
 
     assert!(

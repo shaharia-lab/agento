@@ -30,7 +30,7 @@ use tokio::sync::Semaphore;
 
 use super::match_rule::{match_rule, sender_allowed, RuleFilters};
 use super::receiver::{TelegramMsg, TelegramUpdate};
-use crate::native::agent_run;
+use crate::native::agent_run::{self, Runner as _};
 use crate::native::agents::Agent;
 use crate::native::db;
 
@@ -115,7 +115,7 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
     // here where Go's is two statements.
     // **Every database call this module makes goes through [`db::blocking`],**
     // each under its own label so the log says which one panicked. (Not every
-    // call the *dispatch* makes: `run_headless` opens SQLite on the worker while
+    // call the *dispatch* makes: `Runner::run` opens SQLite on the worker while
     // building its options, which chat and the scheduler share verbatim.)
     // `process` runs on an axum worker, and each of these opens a connection and
     // may sit on
@@ -415,7 +415,7 @@ async fn execute_and_reply(
     };
 
     let (spec, timeout) = run_inputs(db_path, agent, rule);
-    let result = agent_run::run_headless(&spec, prompt, timeout, None).await;
+    let result = agent_run::runner().run(&spec, prompt, timeout, None).await;
 
     let result = match result {
         Ok(result) => result,
