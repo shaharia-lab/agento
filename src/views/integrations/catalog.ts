@@ -103,6 +103,7 @@ export interface TriggerTargets {
  * there the chat list is the sender list (`RequiredTargets`).
  */
 export interface TriggerSenders {
+  /** The comma-separated field's, shown when the member list cannot load. */
   placeholder: string;
   help: string;
   /** One entry as the write accepts it. */
@@ -310,7 +311,7 @@ export const PROVIDERS: Provider[] = [
     },
     triggerSenders: {
       placeholder: "Allowed users: U0123ABCDEF, U0456GHIJKL",
-      help: "Slack user ids, comma-separated. A rule answers only the users listed here, and cannot be turned on with none. A mention from anyone else starts nothing and gets no reply. To find an id, open the person's Slack profile, choose More, then Copy member ID.",
+      help: "A rule answers only the users listed here, and cannot be turned on with none. A mention from anyone else starts nothing and gets no reply. Someone the list does not show can be added by member ID: open the person's Slack profile, choose More, then Copy member ID.",
       /* The write's own rule (`integrations.rs::is_slack_user_id`). */
       pattern: /^[UW][A-Z0-9]+$/,
       missing: "Add at least one allowed user to save this rule turned on, or turn it off.",

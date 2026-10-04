@@ -202,6 +202,13 @@
     },
     {
       "method": "GET",
+      "route": "/api/integrations/{id}/slack/users",
+      "status": "native",
+      "owner": "#689",
+      "reason": "the Slack rule form's allowed-users picker: every page of users.list (at most 10 pages of 1000) projected to id, name and real_name, sorted by name then id, with bots, deleted accounts and Slackbot left out. The token is the one delivery posts with. 404 for an unknown id, 400 for a non-Slack, disabled or unconnected integration, 502 with a token-free sentence when Slack refuses or cannot be reached; a missing_scope names users:read. Answered by the streaming registry because it calls Slack"
+    },
+    {
+      "method": "GET",
       "route": "/api/security-scan/findings",
       "status": "native",
       "owner": "#604",

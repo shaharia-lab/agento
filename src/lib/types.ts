@@ -259,6 +259,15 @@ export interface SlackChannel {
   is_member: boolean;
 }
 
+/** One member from `GET /api/integrations/{id}/slack/users` (#689): a person,
+ *  never a bot, a deleted account or Slackbot. `name` is the handle;
+ *  `real_name` is "" when Slack has none. */
+export interface SlackUser {
+  id: string;
+  name: string;
+  real_name: string;
+}
+
 /** Numeric chat ids only, as strings (#639). */
 export interface TelegramDestinationConfig {
   integration_id: string;

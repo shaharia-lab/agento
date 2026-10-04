@@ -519,3 +519,37 @@ so the buffered registry never claims it. Rules:
 
 Pinned by `slack/channels.rs`'s tests and the `desktop_routes.json` set-equality
 test (the route is recorded in `integrations::ROUTES`).
+
+## Member list route (#689)
+
+`GET /api/integrations/{id}/slack/users` feeds the rule form's allowed-users
+picker (`components/SlackUserPicker.tsx`). It lives in `slack/users.rs`, which
+is `slack/channels.rs` section for section: the **streaming** registry answers
+it, and `integrations::route_of` refuses the extra segments. Rules:
+
+- **The token is `registry::slack_delivery_token`'s**, with the channel list's
+  refusals. Unknown id → 404; not Slack, disabled, not connected or no token →
+  400.
+- **Every page, capped at `MAX_PAGES` (10) × 1000.** `users.list` with
+  `limit=1000`, following `response_metadata.next_cursor`; a cursor that never
+  empties stops at the cap. The cap counts what Slack sent, so the answer holds
+  fewer than 10,000 people once the exclusions below are applied.
+- **People only.** A member with `is_bot` or `deleted` set is left out, and so
+  is Slackbot, which Slack reports with `is_bot: false`; it is matched on its
+  id, `USLACKBOT`.
+- **Three fields**: `id`, `name` (the handle), `real_name`, sorted by name then
+  id, through `gojson::to_vec`. A missing or `null` `real_name` is `""`. Never
+  Slack's body, so no email or profile field reaches the UI.
+- **Upstream failure is a 502** with a sentence: `missing_scope` names
+  `users:read`, the rejected-token family says to reconnect, and anything else
+  passes through. `ok` decides over the HTTP status, as everywhere. The OAuth
+  install requests `users:read` (`SLACK_SCOPES`); a Socket Mode app installed
+  from the user guide's manifest before #689 does not have it, so this is the
+  common first answer and the picker's fallback field is what keeps the rule
+  saveable.
+- **Nothing caches server-side.** `TriggerRules` fetches once per integration
+  per mount and shares the request between the rules edited in it
+  (`loadUsers`), because the method is Tier 2.
+
+Pinned by `slack/users.rs`'s tests and the `desktop_routes.json` set-equality
+test (the route is recorded in `integrations::ROUTES`).

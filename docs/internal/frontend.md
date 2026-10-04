@@ -348,8 +348,8 @@ text row-locally and writes the parsed array through `edit()`.
 
 **A Slack rule's allowed users** (#688). `Provider.triggerSenders` in
 `views/integrations/catalog.ts` is set for Slack only and carries the field's
-words and the write's id pattern. `RuleForm` shows the comma-separated
-**Allowed users** input when it is set, and Save is shut, with the reason in
+words and the write's id pattern. `RuleForm` shows the **Allowed users**
+picker when it is set, and Save is shut, with the reason in
 text, while the rule is on and the list is empty or an entry is not a user id.
 A stored rule's row reads `N allowed user(s)`, and one with no users shows
 `triggerSenders.off` instead. Its switch is
@@ -357,8 +357,17 @@ A stored rule's row reads `N allowed user(s)`, and one with no users shows
 rule on, so the switch has to stay usable to turn it off, and turning it on is
 refused by the write with a 422 that the section's error line shows.
 `filter_user_ids` is in `RuleDraft` and both `RuleWrite` builders for every
-provider, because the `PUT` is replace. #689 replaces the text input with a
-member picker.
+provider, because the `PUT` is replace.
+
+**The picker is `components/SlackUserPicker.tsx`** (#689), `SlackChannelPicker`
+over `GET /api/integrations/{id}/slack/users`, sharing `channelpicker.css`.
+`TriggerRules` caches the list per integration (`loadUsers`). The draft still
+holds the list as the comma-separated text, which is what the picker's
+`fallback` field edits when the list cannot be loaded; the picker reads and
+writes the same value as ids, so nothing typed is lost when the list arrives.
+A stored id the list lacks stays as `U… (not in list)`, and a search that is
+itself a user id (`triggerSenders.pattern`) offers an **Add** row, which is how
+a member past the route's page cap is allowed.
 
 **A trigger rule's task link, and what a run shows about its trigger** (#687).
 `RuleForm` (`IntegrationsView.tsx`) has a **Task** `Dropdown` over `GET

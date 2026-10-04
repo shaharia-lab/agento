@@ -783,9 +783,11 @@ fn start_oauth(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 ///
 /// `slack::channels::ROUTE` (#641) is recorded here too, though the streaming
 /// registry answers it: this module owns the `/api/integrations` prefix.
+/// `slack::users::ROUTE` (#689) is the same.
 pub const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/integrations/{id}/inbound"),
     slack::channels::ROUTE,
+    slack::users::ROUTE,
 ];
 
 /// This module's entry in `native::ENDPOINTS`.

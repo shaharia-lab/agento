@@ -254,11 +254,13 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 /// blocking one; see `gateway_api::CATALOG_ROUTE`.
 ///
 /// #641 added a second: `GET /api/integrations/{id}/slack/channels` pages
-/// through Slack's `conversations.list` on the same terms.
+/// through Slack's `conversations.list` on the same terms, and #689 a third:
+/// `GET /api/integrations/{id}/slack/users` over `users.list`.
 const STREAM_ENDPOINTS: &[StreamEndpoint] = &[
     chat::ENDPOINT,
     gateway_api::STREAM_ENDPOINT,
     integrations::slack::channels::STREAM_ENDPOINT,
+    integrations::slack::users::STREAM_ENDPOINT,
 ];
 
 /// Whether this request is answered by a *streaming* native handler.

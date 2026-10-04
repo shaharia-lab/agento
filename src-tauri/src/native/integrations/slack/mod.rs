@@ -63,6 +63,7 @@ pub mod inbound;
 pub mod messaging;
 pub mod mrkdwn;
 pub mod socket;
+pub mod users;
 pub mod validate;
 
 #[cfg(test)]

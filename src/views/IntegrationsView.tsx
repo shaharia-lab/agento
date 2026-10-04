@@ -18,6 +18,7 @@ import {
   Switch,
 } from "../components/ui";
 import { DirField, useDirPicker } from "../components/DirField";
+import { SlackUserPicker } from "../components/SlackUserPicker";
 import {
   MODELS,
   PERMISSION_MODES,
@@ -32,6 +33,7 @@ import type {
   ScheduledTask,
   ServiceConfig,
   TriggerRule,
+  SlackUser,
 } from "../lib/types";
 import {
   connectionState,
@@ -1788,6 +1790,20 @@ function TriggerRules({
     []
   );
   const picker = useDirPicker();
+  // One `users.list` walk per integration for as long as the section is open,
+  // shared by every rule edited in it (#689): Slack allows about 20 a minute.
+  // A failure is forgotten, so Retry asks again.
+  const userCache = useRef(new Map<string, Promise<SlackUser[] | null>>());
+  const loadUsers = useCallback((id: string) => {
+    const cache = userCache.current;
+    let pending = cache.get(id);
+    if (!pending) {
+      pending = api.get<SlackUser[] | null>(`/integrations/${encodeURIComponent(id)}/slack/users`);
+      pending.catch(() => cache.delete(id));
+      cache.set(id, pending);
+    }
+    return pending;
+  }, []);
 
   const [draft, setDraft] = useState<RuleDraft>();
   const [busy, setBusy] = useState(false);
@@ -1857,6 +1873,8 @@ function TriggerRules({
               tasksLoaded={tasksLoaded}
               targets={targets}
               senders={senders}
+              integrationId={integrationId}
+              loadUsers={loadUsers}
               browse={picker.browse}
               busy={busy}
               onChange={setDraft}
@@ -1980,6 +1998,8 @@ function TriggerRules({
             tasksLoaded={tasksLoaded}
             targets={targets}
             senders={senders}
+            integrationId={integrationId}
+            loadUsers={loadUsers}
             browse={picker.browse}
             busy={busy}
             onChange={setDraft}
@@ -2081,6 +2101,8 @@ function RuleForm({
   tasksLoaded,
   targets,
   senders,
+  integrationId,
+  loadUsers,
   browse,
   busy,
   onChange,
@@ -2096,6 +2118,9 @@ function RuleForm({
   targets: TriggerTargets;
   /** Set when the provider has an allowed-users list (#688). */
   senders: TriggerSenders | undefined;
+  /** The integration the rule belongs to, and its member list (#689). */
+  integrationId: string;
+  loadUsers(integrationId: string): Promise<SlackUser[] | null>;
   browse: ReturnType<typeof useDirPicker>["browse"];
   busy: boolean;
   onChange(d: RuleDraft): void;
@@ -2273,22 +2298,33 @@ function RuleForm({
         </div>
       )}
 
-      {/* Who may start a run (#688). A text field of ids, the same shape as
-          the list above; #689 replaces it with a member picker. */}
+      {/* Who may start a run (#688), picked from the workspace's members
+          (#689). The draft keeps the list as the text the fallback field
+          edits; the picker reads and writes it as ids, so the two are one
+          value and whatever was typed before the list loaded is still there. */}
       {senders && (
         <>
-          <div className="row" style={{ gap: "var(--sp-3)" }}>
-            <label className="field field--sm" style={{ flex: 1 }}>
-              <input
-                value={draft.filter_user_ids}
-                onChange={(e) => onChange({ ...draft, filter_user_ids: e.target.value })}
-                placeholder={senders.placeholder}
-                aria-label="Allowed users"
-                className="mono"
-                spellCheck={false}
-              />
-            </label>
-          </div>
+          <SlackUserPicker
+            integrationId={integrationId}
+            value={senderIds}
+            onChange={(ids) => onChange({ ...draft, filter_user_ids: ids.join(", ") })}
+            load={loadUsers}
+            idPattern={senders.pattern}
+            fallback={
+              <div className="row" style={{ gap: "var(--sp-3)" }}>
+                <label className="field field--sm" style={{ flex: 1 }}>
+                  <input
+                    value={draft.filter_user_ids}
+                    onChange={(e) => onChange({ ...draft, filter_user_ids: e.target.value })}
+                    placeholder={senders.placeholder}
+                    aria-label="Allowed users"
+                    className="mono"
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
+            }
+          />
           <div className="formrow__help">{senders.help}</div>
           {sendersInvalid.length > 0 && (
             <div className="msgline msgline--error">

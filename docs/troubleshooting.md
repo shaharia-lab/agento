@@ -475,6 +475,28 @@ list:
   thread gets the error sentence instead; one inside a thread is dropped
   silently, because Agento cannot tell whether the thread was its own.
 
+### The rule form says "Couldn't list members"
+
+The **Allowed users** list on a Slack rule is read from Slack each time the
+rule section opens. When that fails the form shows the reason and falls back to
+a field of comma-separated member ids, so the rule can still be saved.
+
+- **`the Slack app needs users:read … (missing_scope)`.** The app was installed
+  without the `users:read` scope, which the guide's Socket Mode manifest did
+  not list before this picker existed. In the Slack app's settings open
+  **OAuth & Permissions**, add `users:read` under **Bot Token Scopes**,
+  reinstall the app to the workspace, then choose **Retry**.
+- **`the Slack token was rejected`.** The bot token is wrong or revoked.
+  Replace it under **Bot token**.
+- **`slack rate limited`.** Slack allows about 20 member-list calls a minute.
+  Wait a minute and choose **Retry**.
+- **`the Slack integration is disabled`** or **`is not connected`**. The list
+  is read with the integration's own token, so the integration has to be on and
+  connected first.
+
+Until the list loads, add people by member id: open the person's Slack profile,
+choose **More**, then **Copy member ID**.
+
 ### The reply is "Sorry, something went wrong."
 
 That one sentence covers every failure of the run itself, so the log is the only

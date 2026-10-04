@@ -396,15 +396,18 @@ oauth_config:
       # Reads the channel's name, used to title the chat. Use groups:read
       # instead if the channel is private.
       - channels:read
+      # Lists the workspace's members, so a rule's Allowed users can be
+      # picked by name.
+      - users:read
 ```
 
-**That is the minimum for Socket Mode, and only for Socket Mode.** The same
+**That is what Socket Mode and its rule form use, and nothing more.** The same
 integration also gives your agents seven Slack *tools*, and most of them need
 scopes this manifest does not grant. Add what you want:
 
 - `read_messages` needs `channels:history`, and `groups:history` as well for a
   private channel.
-- `list_users` needs `users:read`.
+- `list_users` needs `users:read`, which the manifest above grants already.
 - `get_channel_info` reaches a **private** channel only with `groups:read`.
 - `list_channels` needs `groups:read` outright, not only for the private half:
   it asks Slack for public and private channels together, so without it the
@@ -433,7 +436,8 @@ Then:
 6. Add a **trigger rule** on the same integration: which agent runs, which
    channels it answers in, and which **Allowed users** it answers. Leave the
    channel list blank to answer in every channel the app is in. At least one
-   allowed user is required, by Slack member id, yours included (see
+   allowed user is required, yourself included: search the workspace's members
+   by name and tick each one (see
    [Who can run an agent this way](#who-can-run-an-agent-this-way)). To start a scheduled task instead of the agent, pick
    it under **Task** (see [A rule that starts a task](#a-rule-that-starts-a-task)).
 
@@ -488,8 +492,20 @@ thread to see an answer, ask in the thread.
 **Only the users a rule lists can run it.** A Slack rule has an **Allowed
 users** list of Slack user ids, and a rule cannot be turned on while the list is
 empty. A mention from anyone else starts nothing and gets no reply, in a thread
-Agento started as much as anywhere else. To find an id, open the person's Slack
-profile, choose **More**, then **Copy member ID**; it looks like `U0123ABCDEF`.
+Agento started as much as anywhere else.
+
+The rule form lists the workspace's members: search by name or handle and tick
+the people the rule should answer. Bots, deactivated accounts and Slackbot are
+not listed. Listing members needs the `users:read` scope, which the manifest
+above grants; an app installed without it shows *the Slack app needs
+users:read* and falls back to typing comma-separated member ids. Add the scope
+under **OAuth & Permissions** and reinstall the app to get the list.
+
+A member id still works everywhere: paste one into the search box and choose
+**Add**. To find an id, open the person's Slack profile, choose **More**, then
+**Copy member ID**; it looks like `U0123ABCDEF`. A saved id the list does not
+show, such as a deactivated account, stays on the rule as
+`U0123ABCDEF (not in list)` until you remove it.
 
 A listed user runs the rule's agent with the rule's **permission mode**, in the
 rule's **working directory**, on your machine, as you. So list only people you
