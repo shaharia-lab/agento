@@ -1767,9 +1767,10 @@ fn validate_rule_settings(req: &TriggerRuleRequest) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// A Telegram rule must name the chats it answers (#674).
+/// A rule must name the senders it answers: a Telegram rule its chats (#674),
+/// a Slack rule its users (#688, [`validate_rule_users`]).
 ///
-/// `filter_chat_ids` is that rule's sender allowlist, and the dispatcher reads
+/// On Telegram `filter_chat_ids` is the rule's sender allowlist, and the dispatcher reads
 /// an empty one as nobody (`match_rule::sender_allowed`), so a rule stored
 /// without one could never fire. It is refused here rather than stored, so
 /// the write and the filter agree and neither is the only guard. Every entry
@@ -1777,9 +1778,9 @@ fn validate_rule_settings(req: &TriggerRuleRequest) -> Result<(), WriteError> {
 /// compares against (`msg.chat.id.to_string()`): `+42`, `042` and `@name`
 /// would be stored and then never match.
 ///
-/// Telegram only. On a Slack rule the same column is a channel selection, and
-/// empty there is the workspace-wide default (`select_rule`); a Slack rule's
-/// senders are `filter_user_ids`, checked by [`validate_rule_users`].
+/// The chat-id check is Telegram's alone. On a Slack rule the same column is a
+/// channel selection, and empty there is the workspace-wide default
+/// (`select_rule`); a Slack rule's senders are `filter_user_ids`.
 fn validate_rule_senders(
     integration_type: &str,
     req: &TriggerRuleRequest,

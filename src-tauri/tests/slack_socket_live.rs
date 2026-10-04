@@ -188,6 +188,21 @@ fn fixture_db(dir: &Path, work_dir: &Path, channel: &str) -> PathBuf {
     db_path
 }
 
+/// Put `user` on the fixture rule's `filter_user_ids` (#688).
+fn allow_user(db_path: &Path, user: &str) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    let changed = conn
+        .execute(
+            "UPDATE trigger_rules SET filter_user_ids = ?1 WHERE id = 'live-rule'",
+            [serde_json::json!([user]).to_string()],
+        )
+        .map_err(|e| format!("listing the driver on the rule: {e}"))?;
+    if changed != 1 {
+        return Err("the fixture rule is missing".to_string());
+    }
+    Ok(())
+}
+
 /// The worker's own report, read back the way the UI reads it.
 fn inbound_state(db_path: &Path) -> (String, String) {
     let conn = db::open_read_only(db_path).expect("open");
@@ -431,6 +446,19 @@ async fn run(env: &Env, db_path: &Path) -> Result<Thread, (String, Option<Thread
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| fail("auth.test answered no user_id".to_string()))?
         .to_string();
+
+    // Who posts the mentions. A Slack rule answers only the users it lists
+    // (#688) and the fixture's rule is seeded listing none, so the driver's
+    // own id goes on it before the first mention is sent.
+    let driver = slack(&env.user_token, "auth.test", serde_json::json!({}))
+        .await
+        .map_err(fail)?;
+    let driver_user = driver
+        .get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| fail("auth.test on the user token answered no user_id".to_string()))?
+        .to_string();
+    allow_user(db_path, &driver_user).map_err(fail)?;
 
     let thread_ts = post(
         &env.user_token,

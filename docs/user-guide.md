@@ -430,9 +430,11 @@ Then:
    and then `CONNECTED`.
 5. In Slack, **invite the app to the channel** — `/invite @Agento`. Slack does
    not deliver `app_mention` from a channel the app is not in.
-6. Add a **trigger rule** on the same integration: which agent runs, and which
-   channels it answers in. Leave the channel list blank to answer in every
-   channel the app is in. To start a scheduled task instead of the agent, pick
+6. Add a **trigger rule** on the same integration: which agent runs, which
+   channels it answers in, and which **Allowed users** it answers. Leave the
+   channel list blank to answer in every channel the app is in. At least one
+   allowed user is required, by Slack member id, yours included (see
+   [Who can run an agent this way](#who-can-run-an-agent-this-way)). To start a scheduled task instead of the agent, pick
    it under **Task** (see [A rule that starts a task](#a-rule-that-starts-a-task)).
 
 Now `@Agento what changed in this repo today?` in that channel starts a run, and

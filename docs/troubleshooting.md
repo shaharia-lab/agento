@@ -424,9 +424,9 @@ Three things that look like this and are not:
 
 ### Socket Mode says Connected but a mention does nothing
 
-Every one of these is silent by design. Of the nine, two say nothing in the log
-at all, six are at **`debug`** level — so raise the level before you go looking
-— and one is at `error`. Two of the six have a second, database cause that logs
+Every one of these is silent by design. Of the ten, two say nothing in the log
+at all, seven are at **`debug`** level — so raise the level before you go looking
+— and one is at `error`. Two of the seven have a second, database cause that logs
 at `warn` or `error` just above them, and each says so below. Work down the
 list:
 
@@ -441,6 +441,12 @@ list:
   a channel explicitly wins over a blank-list rule *even when it is switched
   off*, so disabling it silences that one channel rather than falling back. Turn
   it on, or take the channel out of its list.
+- **The rule does not list the person who mentioned the app.** Log:
+  `slack mention ignored, the rule does not list the sender`. A Slack rule
+  answers only its **Allowed users**, and a rule saved before that list existed
+  has none, so after updating it answers nobody and its row reads *No allowed
+  users, not responding*. Edit the rule and add the person's Slack member id.
+  When the rule starts a task, each of these is counted on that task.
 - **The thread was not started by Agento.** Log:
   `slack mention ignored, a thread Agento did not start`. Only a mention that
   starts a new thread can start a chat; inside an existing thread Agento answers
