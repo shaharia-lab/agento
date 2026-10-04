@@ -15,8 +15,9 @@
 //!
 //! [`mask_text`] is the second export (#680): the same findings, applied. It
 //! answers the input with every finding replaced by its rule's display form
-//! ([`store::mask_for`]) and every other byte untouched. **Its output is safe to store and its
-//! input is not** — an event payload goes through it before it is written.
+//! ([`store::mask_for`]) and every other byte untouched. **Its output is safe
+//! to store and its input is not** — an event payload goes through it before it
+//! is written.
 
 use super::rules::{self, Confidence, PAIR_WINDOW};
 use super::store;

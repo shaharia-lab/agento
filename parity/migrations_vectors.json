@@ -236,6 +236,10 @@
     {
       "version": 54,
       "sql": "\n-- Per-task run limits for event runs (#691). Authored here like 31-53, and\n-- additive: three defaulted columns on scheduled_tasks, so an older build\n-- opening this database keeps working. Every existing task takes the defaults:\n-- one event run at a time, five waiting, ten an hour.\nALTER TABLE scheduled_tasks ADD COLUMN max_concurrent_runs INTEGER NOT NULL DEFAULT 1;\nALTER TABLE scheduled_tasks ADD COLUMN max_queued_events INTEGER NOT NULL DEFAULT 5;\nALTER TABLE scheduled_tasks ADD COLUMN max_runs_per_hour INTEGER NOT NULL DEFAULT 10;\n"
+    },
+    {
+      "version": 55,
+      "sql": "\n-- Rewrite the database URL snippets stored before #741. Authored here like\n-- 31-54, and it adds no column. Until ruleset 2 a masked snippet kept the last\n-- four characters of the match, and a database URL's match ends at the end of\n-- the host, so a host under four characters left the '@' and the end of the\n-- password in the stored tail. A rescan rewrites a live session's rows, but it\n-- never reaches a session whose transcript has expired or cannot be read, nor\n-- any session while the checker is off. The old form is always four characters,\n-- eight stars and a four-character tail, and only a leaking tail holds an '@',\n-- so the repair needs no transcript: keep the first twelve characters and what\n-- follows the '@', which is the host. The new form never holds an '@', so this\n-- touches no row written since and is safe to run on any database.\nUPDATE credential_findings\n   SET masked_snippet = substr(masked_snippet, 1, 12)\n                        || substr(masked_snippet, instr(masked_snippet, '@') + 1)\n WHERE rule_id = 'database-url-credentials'\n   AND instr(masked_snippet, '@') != 0;\n"
     }
   ]
 }

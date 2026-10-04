@@ -18,8 +18,8 @@
 //!
 //! A [`Finding`] is a byte range, not text. The matched bytes are sliced out of
 //! the caller's input only long enough to compute the two redacted forms that
-//! are stored — [`mask_for`] and [`hash_match`] — and are dropped before the row is
-//! written.
+//! are stored — [`mask_for`] and [`hash_match`] — and are dropped before the row
+//! is written.
 //!
 //! ## The hash scheme, decided here once
 //!

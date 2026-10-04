@@ -83,6 +83,10 @@
 //! Migration **54** is the twenty-fourth: `scheduled_tasks.max_concurrent_runs`,
 //! `max_queued_events` and `max_runs_per_hour`, the per-task limits on event
 //! runs, defaulting to 1, 5 and 10 (#691).
+//! Migration **55** is the twenty-fifth and adds no column: it rewrites the
+//! `database-url-credentials` snippets stored under ruleset 1 whose tail held
+//! the `@` and the end of the password, because a rescan never reaches an
+//! expired session's rows (#741).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -314,8 +318,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 54, "expected 54 migrations");
-        assert_eq!(expected_version(), 54);
+        assert_eq!(all.len(), 55, "expected 55 migrations");
+        assert_eq!(expected_version(), 55);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -409,7 +413,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 54);
+        assert_eq!(current_version(&conn).expect("version"), 55);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -627,7 +631,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 54);
+        assert_eq!(current_version(&conn).expect("version"), 55);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -687,7 +691,7 @@ mod tests {
         .expect("seed rows at 47");
 
         apply(&mut conn).expect("apply 48 and later");
-        assert_eq!(current_version(&conn).expect("version"), 54);
+        assert_eq!(current_version(&conn).expect("version"), 55);
 
         let flagged = |table: &str| -> Vec<String> {
             let mut stmt = conn
@@ -859,7 +863,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 54);
+        assert_eq!(current_version(&conn).expect("version"), 55);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -968,6 +972,61 @@ mod tests {
             )
             .expect("read");
         assert_eq!(updated_at, "then", "a backfill is not a user edit");
+    }
+
+    /// Migration 55 (#741): a database URL snippet stored under ruleset 1 on a
+    /// short host loses the `@` and the password characters before it, without
+    /// a rescan — the session here has expired, so no rescan will ever come.
+    /// Every other row is left as it was, and a second run changes nothing.
+    #[test]
+    fn migration_55_rewrites_a_database_url_snippet_that_kept_the_password_tail() {
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+        seed_at(&conn, 54);
+        conn.execute_batch(
+            "INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time, last_activity,
+                  transcript_expired_at)
+             VALUES ('gone', '/a', '/a/gone.jsonl', '2026-01-01 00:00:00+00:00',
+                     '2026-01-01 00:00:00+00:00', '2026-01-01 00:00:00+00:00',
+                     '2026-02-01 00:00:00+00:00');
+             INSERT INTO credential_findings
+                 (session_id, project_path, rule_id, location_start, confidence,
+                  masked_snippet, location_end, ruleset_version, match_hash, detected_at)
+             VALUES
+               ('gone', '/a', 'database-url-credentials', 10, 'high', 'post********K@db', 40, 1, 'h1', 't'),
+               ('gone', '/a', 'database-url-credentials', 50, 'high', 'mysq********ZK@h', 80, 1, 'h2', 't'),
+               ('gone', '/a', 'database-url-credentials', 90, 'high', 'post********@pg1', 120, 1, 'h3', 't'),
+               ('gone', '/a', 'database-url-credentials', 130, 'high', 'post********.com', 170, 1, 'h4', 't'),
+               ('gone', '/a', 'database-url-credentials', 180, 'high', '********', 190, 1, 'h5', 't'),
+               ('gone', '/a', 'github-pat', 200, 'high', 'ghp_********a@bc', 240, 1, 'h6', 't');",
+        )
+        .expect("seed rows at 54");
+
+        let snippets = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT masked_snippet FROM credential_findings ORDER BY location_start")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("rows")
+        };
+        let expected = [
+            "post********db",
+            "mysq********h",
+            "post********pg1",
+            "post********.com",
+            "********",
+            // Another rule's snippet is not this migration's to touch.
+            "ghp_********a@bc",
+        ];
+
+        apply(&mut conn).expect("apply 55");
+        assert_eq!(snippets(&conn), expected);
+
+        let sql = &migrations()[54].sql;
+        conn.execute_batch(sql).expect("a second run");
+        assert_eq!(snippets(&conn), expected);
     }
 
     /// Migration 54 (#691): a task that existed before it reads back with the
@@ -1240,7 +1299,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 54);
+        assert_eq!(current_version(&conn).expect("version"), 55);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -1249,7 +1308,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 54);
+        assert_eq!(recorded, 55);
     }
 
     #[test]
