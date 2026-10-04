@@ -74,10 +74,22 @@ statement; the rules below are the ones a change is most likely to break.
 ## Masking a text (#680)
 
 - **`scan::mask_text(&str) -> String` is `scan::scan`'s findings, applied.**
-  Every finding's byte range is replaced by `store::mask` of it — the display
+  Every finding's byte range is replaced by `store::mask_for` of it — the display
   form `credential_findings.masked_snippet` already carries — and every other
   byte is copied verbatim; a text with no findings comes back byte-identical.
   Overlapping spans are merged into one replacement first.
+- **A rule may carry its own mask, and `store::mask_for(rule_id, matched)` is
+  the one entry point for both stored forms** (#741). `rules::Rule::mask` is
+  `None` for the default `store::mask` (first four, a fixed run, last four);
+  `database-url-credentials` sets it, because its match ends at the end of the
+  host and a host under four characters would put the end of the password in
+  the default tail. Its tail is the last four characters of the host alone,
+  fewer when the host is shorter. A span merged from several findings shows
+  only the run when any of them has its own mask. Changing a stored form bumps
+  `CURRENT_RULESET_VERSION` (2 is this one) so the next scan rewrites the
+  snippets; a payload already stored was masked once and is not rewritten.
+  Enforced by `a_database_urls_mask_never_shows_a_password_character` and
+  `the_stored_snippet_is_the_form_mask_text_gives_the_same_match`.
 - **It follows `scan`, not the bare rule table.** A paired rule is masked only
   where `scan` credits it (`mask_text_follows_scan_on_a_paired_rule`), because
   masking the AWS secret shape alone would blank every 40-character base64 run.
