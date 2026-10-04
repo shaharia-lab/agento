@@ -195,9 +195,16 @@ Beyond that, who decides depends on whether anyone is watching:
   mode, chosen when you start it — see [Permissions, per
   conversation](#permissions-per-conversation). Left at *Agent default* it falls
   back to the agent's, and to asking you if the agent has no preference.
-- **In an unattended run**, meaning a scheduled task, the agent's **permission
-  mode** field decides. Left unset those runs proceed without prompting, because
-  the alternative is a task that hangs until it times out.
+- **In an unattended run**, the agent's **permission mode** field decides, and
+  what happens when it is unset depends on who started the run. A scheduled
+  task, or one you start with **Run now**, proceeds without prompting, because
+  the alternative is a task that hangs until it times out. A run started by a
+  Slack or Telegram message never prompts either, but it **denies** what it
+  would have asked about instead of going ahead. That limits an agent to the
+  tools it lists. **An agent that lists no tools is allowed every built-in
+  one, including shell commands and file writes**, so give the agent an
+  explicit tool list if a message-started run should be held to less. Set the
+  rule's permission mode to *Bypass* if it should not be held back at all.
 
 **Known limitation:** the permission mode you pick on an *agent* is not currently
 saved. The underlying API drops the field, and the desktop app reproduces the
@@ -311,6 +318,13 @@ moment.
 A rule saved by an earlier version with no chat ids is turned off when Agento
 updates, and its row says so. Edit the rule, add the chats it should answer, and
 turn it back on.
+
+A rule with no **permission mode** runs with prompts denied: anything the agent
+would have asked about is refused. Earlier versions ran such a rule with
+permission checks skipped, so a rule that relied on that needs *Bypass* chosen
+on it. An agent that lists no tools is still allowed every built-in one,
+including shell commands and file writes, so give the rule's agent an explicit
+tool list to limit what a message can make it do.
 
 The rule form has the same **Task** picker as a Slack rule's. A Telegram message
 does not start the linked task yet: it still runs the rule's own agent.
@@ -441,7 +455,11 @@ A rule can name a scheduled **task** instead of running its own agent. A
 mention that opens a thread then starts one run of that task: the task's own
 instructions are the prompt, what was said is handed to it as data, and the run
 is recorded in **Job history** like any other. The rule's agent, model and
-permission mode are not used for it.
+permission mode are not used for it. A run started this way does not skip
+permission checks the way a scheduled run of the same task does: anything the
+task's agent would have asked about is denied. An agent that lists no tools,
+and a task with no agent, is still allowed every built-in tool, including shell
+commands and file writes.
 
 **The task answers in the thread only if it has a *Reply to sender*
 destination** (see *Delivery* under Tasks). Without one the task still runs and
@@ -481,7 +499,13 @@ So treat the channel list as the access control it is:
   and make them channels whose membership you would grant a shell to.
 - Set the rule's **permission mode** and **working directory** deliberately. A
   rule left on a permissive mode in your home directory is a rule that lets a
-  channel member read and change anything you can.
+  channel member read and change anything you can. A rule with no permission
+  mode runs with prompts denied: anything the agent would have asked about is
+  refused. Earlier versions ran such a rule with permission checks skipped, so
+  a rule that relied on that needs *Bypass* chosen on it.
+- Give the rule's agent an explicit **tool list**. An agent that lists no tools
+  is allowed every built-in one, including shell commands and file writes, and
+  prompts denied does not take those away.
 - Remember that inviting the app to a new channel silently widens this when the
   rule's channel list is blank.
 
@@ -504,7 +528,8 @@ happened.
 Create one with a name and the **prompt** sent verbatim on every run. The agent
 is optional: **No agent** is the default, and runs Claude Code with the default
 model (or the task's own **Model**) and all built-in tools, no system prompt and
-no integrations, with permission prompts skipped. Pick an agent from the list
+no integrations, with permission prompts skipped when it runs on its schedule
+or from **Run now**. Pick an agent from the list
 instead to run with its model, tools, system prompt and integrations.
 
 **Schedules:**

@@ -47,8 +47,8 @@ src/
                  options, lifted out of views/AgentsView.tsx by #569 for its
                  second consumer (the Slack trigger-rule form). The four
                  permission values are pinned through typeAssert.ts, because an
-                 unrecognised mode is not a 422 on the chat runner — it routes
-                 everything it does not recognise into bypass.
+                 unrecognised mode is not a 422 on the chat runner — it fails
+                 every run that carries it (#675).
                  **views/chat/NewChatBar.tsx deliberately keeps its own list**:
                  a chat is chat-shaped (an explicit "agent default" entry,
                  "Permissions: …" labels) and a trigger run is unattended

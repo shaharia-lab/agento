@@ -124,10 +124,10 @@ pub async fn run_headless(
 /// and the caller stores it afterwards.
 ///
 /// **Empty is "no choice was recorded"** for every field of `settings`, so the
-/// zero value reproduces exactly what a headless run did before a caller could
-/// configure one: the agent's model, the agent's permission mode, and no
-/// working directory or settings profile. That is what the scheduler passes for
-/// the two fields a task does not carry.
+/// zero value is the agent's model, the agent's permission mode — prompts
+/// denied when it has none (#675) — and no working directory or settings
+/// profile. The scheduler passes an empty model, and names `bypass` for a
+/// scheduled or manual run of an agent with no mode of its own.
 pub fn headless_spec(
     db_path: &std::path::Path,
     agent: crate::native::agents::Agent,
@@ -152,9 +152,9 @@ pub fn headless_spec(
         settings: Arc::new(runner::TurnSettings::from_db(db_path)),
         working_dir: settings.working_directory.clone(),
         settings_profile_id: settings.settings_profile_id.clone(),
-        // A trigger rule may impose one (#565). Empty leaves the pre-#565
-        // answer: no conversation-level choice, so `build_options` applies the
-        // agent's own mode — `buildRunOptions` sets none either.
+        // A trigger rule may impose one (#565), and the scheduler names its own
+        // (#675). Empty is no conversation-level choice: `build_options`
+        // applies the agent's own mode, and denies prompts when it has none.
         permission_mode: settings.permission_mode.clone(),
         resume_session_id: None,
         custom_session_id: String::new(),
@@ -178,9 +178,9 @@ pub struct ExecutionSettings {
     pub model: String,
     pub working_directory: String,
     pub settings_profile_id: String,
-    /// One of [`crate::native::chats::CHAT_PERMISSION_MODES`]. The catch-all in
-    /// `build_options` turns an unknown mode into a fully bypassing run, so a
-    /// caller validates before it gets here.
+    /// One of [`crate::native::chats::CHAT_PERMISSION_MODES`]. `build_options`
+    /// refuses any other value, which fails the run, so a caller that would
+    /// rather run restricted than not at all maps it before it gets here.
     pub permission_mode: String,
 }
 
@@ -713,7 +713,7 @@ mod tests {
         assert_eq!(spec.settings_profile_id, "");
         assert_eq!(
             spec.permission_mode, "",
-            "no choice recorded, so `build_options` applies the agent's own"
+            "no choice recorded, so `build_options` applies the agent's own, or denies prompts"
         );
         assert_eq!(
             spec.agent.as_ref().map(|a| a.model.as_str()),

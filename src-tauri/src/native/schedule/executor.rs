@@ -94,6 +94,33 @@ impl RunKind {
             Self::Event(source) => source,
         }
     }
+
+    /// The permission mode the run asks `build_options` for, given the mode
+    /// its agent stores (#675).
+    ///
+    /// **The agent's own mode is never overridden.** A run's mode beats its
+    /// agent's in the runner, so naming one for an agent that has its own
+    /// would turn a `plan` agent into a bypassing one. Whatever the agent
+    /// stores, this answers empty and the runner reads the agent — an
+    /// unknown value included, which fails the run there.
+    ///
+    /// **A scheduled or manual run of an agent with no mode bypasses, and
+    /// says so.** Every such run always has — nobody is there to answer a
+    /// prompt, and a task has no mode column to say otherwise — but it used to
+    /// get there by passing nothing and falling through the runner's
+    /// catch-all. The runner has no such arm now, so the mode is named here.
+    /// #693 replaces this constant with the task's own required mode.
+    ///
+    /// **An event run names none.** Somebody outside the app started it, so
+    /// with no mode on the agent it resolves as any other run with no recorded
+    /// choice does: prompts denied. The rule that linked the task is not read
+    /// for it, as none of the rule's other execution settings are.
+    fn permission_mode(self, agent_mode: &str) -> &'static str {
+        match self {
+            Self::Scheduled | Self::Manual if agent_mode.is_empty() => "bypass",
+            Self::Scheduled | Self::Manual | Self::Event(_) => "",
+        }
+    }
 }
 
 /// What describes *this* run rather than the task it is of: who started it,
@@ -566,7 +593,7 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
         agent,
     } = ready;
 
-    let result = run_agent(&db_path, &task, &job.id, agent, &prompt).await;
+    let result = run_agent(&db_path, &task, &job.id, run.kind, agent, &prompt).await;
 
     // Taken before `run` moves into the section below.
     let reply_to = run.event.as_ref().and_then(|e| e.reply_to.clone());
@@ -829,8 +856,10 @@ fn create_task_session(db_path: &std::path::Path, task: &ScheduledTask) -> Resul
             working_directory: &task.working_directory,
             model: &task.model,
             settings_profile_id: &task.settings_profile_id,
-            // A task carries no per-conversation choice; its agent's own mode
-            // applies, which is what `buildRunOptions` has always done.
+            // A task carries no per-conversation choice. What its *run* asks
+            // for is [`RunKind::permission_mode`], and it is not written here:
+            // this row is also what a later reply or an interactive turn
+            // resumes, and neither of those is the scheduler.
             permission_mode: "",
         },
     )
@@ -1010,9 +1039,8 @@ fn resolve_agent(db_path: &std::path::Path, task: &ScheduledTask) -> Result<Agen
         description: String::new(),
         model,
         thinking: "adaptive".to_string(),
-        // Empty, so `appendPermissionOpts` falls to the bypass arm — which is
-        // what an unattended run needs, since nothing is there to answer a
-        // permission prompt.
+        // Empty: no agent, so no agent's mode. What the run asks for is
+        // [`RunKind::permission_mode`].
         permission_mode: String::new(),
         system_prompt: String::new(),
         capabilities: Default::default(),
@@ -1033,20 +1061,23 @@ async fn run_agent(
     db_path: &std::path::Path,
     task: &ScheduledTask,
     job_id: &str,
+    kind: RunKind,
     agent: Agent,
     prompt: &str,
 ) -> Result<RunResult, String> {
     // `resolveSystemPrompt`'s strictness lives in `run_headless`, so both
     // headless callers get it — see that function.
+    let permission_mode = kind.permission_mode(&agent.permission_mode).to_string();
     let spec = crate::native::agent_run::headless_spec(
         db_path,
         agent,
-        // A task carries only these two of the four. Its model and permission
-        // mode have always been the agent's, and #565 gave the *rule* the other
-        // two rather than changing what a scheduled task does.
+        // A task carries only the first two of the four. Its model has always
+        // been the agent's, and its permission mode is the run kind's — see
+        // [`RunKind::permission_mode`].
         &crate::native::agent_run::ExecutionSettings {
             working_directory: task.working_directory.clone(),
             settings_profile_id: task.settings_profile_id.clone(),
+            permission_mode,
             ..Default::default()
         },
     );
@@ -2071,8 +2102,42 @@ mod tests {
         assert!(agent.capabilities.built_in.is_none());
         assert!(
             agent.permission_mode.is_empty(),
-            "bypass by falling through"
+            "no agent, no agent's mode: the run kind names the mode"
         );
+    }
+
+    /// #675. What a task run asks the runner for is stated, not fallen into:
+    /// the two kinds a user starts from inside the app bypass **explicitly**
+    /// when the agent has no mode, as every such run always has, and a run an
+    /// outside sender started names no mode — which the runner resolves to
+    /// prompts denied. An agent's own mode is left to the runner by all of
+    /// them, a value it will refuse included.
+    #[test]
+    fn a_scheduled_or_manual_run_names_bypass_and_an_event_run_names_nothing() {
+        assert_eq!(RunKind::Scheduled.permission_mode(""), "bypass");
+        assert_eq!(RunKind::Manual.permission_mode(""), "bypass");
+        let events = [
+            tasks::TriggeredBy::Telegram,
+            tasks::TriggeredBy::Slack,
+            tasks::TriggeredBy::Webhook,
+            tasks::TriggeredBy::Reply,
+        ]
+        .map(RunKind::Event);
+        for kind in events {
+            assert_eq!(kind.permission_mode(""), "", "{kind:?}");
+        }
+        for kind in [RunKind::Scheduled, RunKind::Manual]
+            .into_iter()
+            .chain(events)
+        {
+            for own in ["plan", "dontAsk", "default", "bypass", "yolo"] {
+                assert_eq!(
+                    kind.permission_mode(own),
+                    "",
+                    "{kind:?} must not speak over an agent that stores {own:?}"
+                );
+            }
+        }
     }
 
     #[test]

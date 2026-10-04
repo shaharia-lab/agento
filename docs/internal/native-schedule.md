@@ -73,8 +73,41 @@ Go models this as `if opts.PermissionHandler != nil` in *two* places, so the
 parameter is now `Option<PermissionHandler>` and both branches are reproduced:
 with a handler, `WithDefaultPermissions` overrides whatever the agent configured
 (which is why a `plan` agent still prompts in the UI); without one, the agent's
-own `permission_mode` applies — and an empty one means **bypass**, which is what
-an unattended run needs since nothing is there to answer a prompt. `chat_id`
+own `permission_mode` applies.
+
+**Nothing resolves to bypass but the literal `"bypass"` (#675).** The match in
+`chat/runner.rs` is `PermissionChoice::resolve`, it has no catch-all, and it
+runs before anything binds a port:
+
+- **Empty with nobody to ask is `Unchosen`**: `--permission-mode dontAsk` with
+  `--allow-dangerously-skip-permissions` *not* sent. Nothing prompts, and a call
+  the allowlist does not already cover is denied. This is what a Telegram or
+  Slack rule with no mode runs with, and an event run of a task.
+- **A value outside `chats::CHAT_PERMISSION_MODES` is an `Err`** naming it, on
+  the run's mode and on the agent's alike. `run_headless` returns it as
+  `agent setup: unknown permission mode "…"`, which is a failed `job_history`
+  row for a task and the error reply for a rule. Only a hand-edited row can
+  hold one.
+- **A scheduled or manual run of an agent with no mode bypasses because the
+  executor says so.** `RunKind::permission_mode` answers `"bypass"` for those
+  two when the agent's mode is empty, and `""` otherwise — for an event run,
+  and for any agent that stores a mode, because a run's mode beats its agent's
+  and naming one would speak over a `plan` agent. Such a run bypassed before
+  this by passing nothing; a task has no mode column until #693, which replaces
+  that constant with the task's required mode.
+- **"Prompts denied" is only as narrow as the allowlist.** `dontAsk` denies
+  what `--allowedTools` does not already cover, and `allowed_tools` gives an
+  agent that names no tool at all — the shape the agent form creates, and the
+  scheduler's no-agent stand-in — all twelve built-ins, the shell and file
+  writes among them. So `Unchosen` removes the bypass, not those tools.
+
+Pinned by `only_the_literal_bypass_bypasses_and_an_unknown_mode_is_refused`
+(every stored spelling × the agent's × with and without a handler),
+`a_scheduled_or_manual_run_names_bypass_and_an_event_run_names_nothing`, and
+on the spawned CLI's argv in `tests/trigger_run.rs`, `tests/scheduled_run.rs`
+(`a_scheduled_run_leaves_an_agents_own_permission_mode_alone`,
+`an_agent_with_an_unknown_permission_mode_is_a_recorded_failure`) and
+`tests/headless_resume.rs`. `chat_id`
 likewise became `custom_session_id`: a chat pins a new CLI session to its own id,
 while `buildRunOptions` sets neither session field, so the CLI generates one and
 `saveSessionResults` stores it back.
@@ -84,8 +117,9 @@ while `buildRunOptions` sets neither session field, so the CLI generates one and
 `config.AgentConfig` there, and `resolveToolsAndMCP` gives a non-nil config with
 empty capabilities **all twelve built-in tools** while a nil config gets none.
 `None` would run a no-agent task with no `--allowedTools` argument at all. What
-that stand-in spawns — the Settings default model, all twelve tools in order, no
-system prompt, no MCP servers, permissions bypassed — is pinned by
+that stand-in spawns on a schedule — the Settings default model, all twelve
+tools in order, no system prompt, no MCP servers, permissions bypassed
+explicitly — is pinned by
 `a_task_with_no_agent_runs_on_the_default_model_with_every_built_in_tool` in
 `tests/scheduled_run.rs` (#629).
 
@@ -271,9 +305,14 @@ the three permits, re-read the task — with these rules:
   `template::interpolate` runs on `task.prompt` only — `{{…}}` in an event is
   data. `prompt_preview` is cut from the instructions alone. Pinned by
   `the_event_prompt_is_the_instructions_then_one_delimited_data_block`.
-- **The event chooses nothing.** The task, its agent, permission mode, model
-  and destinations are the row's; each run gets a fresh chat session; the
-  event's origin reaches delivery only as `DeliveryReport::reply_to`.
+- **The event chooses nothing.** The task, its agent, model and destinations
+  are the row's; each run gets a fresh chat session; the event's origin reaches
+  delivery only as `DeliveryReport::reply_to`.
+- **An event run is not bypassed (#675).** It names no permission mode, so it
+  runs on the task's agent's own, and with prompts denied when that is empty —
+  where a scheduled or manual run of the same task bypasses. Prompts denied
+  still allows every tool the agent's allowlist covers; see above. The linking rule's
+  mode is not read, as none of its execution settings are.
 
 **A task write can fail after storing a row, so the timers are swept.**
 `Scheduler::reconcile` runs every 60 seconds and brings the installed timers

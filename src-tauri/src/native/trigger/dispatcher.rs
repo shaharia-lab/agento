@@ -180,7 +180,7 @@ pub struct Rule {
     pub filters: RuleFilters,
     /// Migration 39's four spec-reachable execution settings (#563), as
     /// [`load_rules`] read them — with an unusable `permission_mode` already
-    /// dropped, see [`usable_permission_mode`].
+    /// replaced by `dontAsk`, see [`usable_permission_mode`].
     pub settings: agent_run::ExecutionSettings,
     /// Migration 39's fifth. `0` is "the dispatcher's own default", **not** a
     /// run that times out instantly — see [`run_timeout`].
@@ -292,22 +292,23 @@ fn decode_list(raw: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A stored `permission_mode`, or empty when it is not one Agento knows.
+/// A stored `permission_mode`, or `dontAsk` when it is not one Agento knows.
 ///
 /// `integrations::validate_rule_settings` rejects anything outside
 /// [`crate::native::chats::CHAT_PERMISSION_MODES`] at the write (#563), but the
 /// dispatcher reads *stored rows* — hand-edited, restored from a backup, or
-/// written before that validation existed. An unknown mode is not inert:
-/// `chat/runner.rs`' `match` routes everything it does not recognise into
-/// `with_bypass_permissions()`, so one typo would run the agent with permissions
-/// fully bypassed. Falling back to empty runs it on the agent's own configured
-/// mode, which is what a rule that sets nothing already does.
+/// written before that validation existed. `chat/runner.rs` refuses a mode it
+/// does not know, and a refused run here is a sender who gets the error reply
+/// for every message until somebody edits the row. So the rule runs with
+/// prompts denied instead (#675): the most restrictive mode that still
+/// answers. Not empty — empty would hand the choice to the agent's own mode,
+/// and a rule that named *something* did not ask for that.
 fn usable_permission_mode(stored: String) -> String {
     if crate::native::chats::is_valid_permission_mode(&stored) {
         return stored;
     }
-    log::warn!("ignoring unknown trigger rule permission mode {stored:?}");
-    String::new()
+    log::warn!("unknown trigger rule permission mode {stored:?}, running with prompts denied");
+    "dontAsk".to_string()
 }
 
 /// How long one run of `rule` may take.
@@ -323,9 +324,8 @@ fn usable_permission_mode(stored: String) -> String {
 /// that validation existed. This clamps rather than refusing, because refusing
 /// here means an inbound message silently going unanswered, and an absurd value
 /// would otherwise hold one of the ten concurrency slots for as long as it says.
-/// It is [`usable_permission_mode`]'s premise with the opposite answer, and for
-/// the same reason both are stated: a clamped timeout is a run that still
-/// happens, where a bad mode is a run that must not.
+/// It is [`usable_permission_mode`]'s premise and its answer: a row that never
+/// went through validation still runs, on the nearest value that is safe.
 pub(crate) fn run_timeout(rule: &Rule) -> std::time::Duration {
     if rule.timeout_minutes <= 0 {
         return RUN_TIMEOUT;
@@ -1005,11 +1005,11 @@ mod tests {
         );
     }
 
-    /// An unknown mode is not inert: `build_options`' catch-all would run the
-    /// agent with permissions fully bypassed, so a stored value outside
-    /// `CHAT_PERMISSION_MODES` is dropped rather than forwarded.
+    /// A stored value outside `CHAT_PERMISSION_MODES` is neither forwarded,
+    /// which `build_options` would refuse, nor emptied, which would run the
+    /// agent's own mode: it runs with prompts denied.
     #[test]
-    fn an_unusable_permission_mode_is_dropped_rather_than_escalating_to_bypass() {
+    fn an_unusable_permission_mode_runs_with_prompts_denied() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(dir.path());
         add_configured_rule(
@@ -1027,8 +1027,8 @@ mod tests {
 
         let rules = load_rules(&db, "tg").expect("load");
         assert_eq!(
-            rules[0].settings.permission_mode, "",
-            "\"yolo\" would reach `with_bypass_permissions()`; empty runs the agent's own mode"
+            rules[0].settings.permission_mode, "dontAsk",
+            "\"yolo\" is not a mode, and empty would run the agent's own"
         );
         for mode in crate::native::chats::CHAT_PERMISSION_MODES {
             assert_eq!(usable_permission_mode(mode.to_string()), mode);

@@ -282,6 +282,25 @@ async fn the_first_turn_mints_a_session_and_the_second_resumes_it() {
         None,
         "a chat that has never run has no session to resume"
     );
+    // #675. This is the Slack inbound path: no mode from the rule
+    // (`ExecutionSettings::default()`), none on the chat, no agent.
+    let mode_at = spawned[0]
+        .iter()
+        .position(|a| a == "--permission-mode")
+        .expect("a permission mode is always sent");
+    assert_eq!(
+        spawned[0].get(mode_at + 1).map(String::as_str),
+        Some("dontAsk"),
+        "a resumed run nobody chose a mode for denies prompts: {:?}",
+        spawned[0]
+    );
+    assert!(
+        !spawned[0]
+            .iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"),
+        "{:?}",
+        spawned[0]
+    );
     assert_eq!(
         sdk_session_id(&db, &chat),
         "sdk-minted-1",

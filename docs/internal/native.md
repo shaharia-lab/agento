@@ -98,7 +98,7 @@
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte.
                  PATCH also takes model and permission_mode (#722): the
                  mode is 422-checked against CHAT_PERMISSION_MODES, since
-                 the runner reads an unknown mode as bypass
+                 the runner fails a turn on an unknown mode (#675)
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between
                  them, the five task writes, and POST /api/tasks/{id}/run
                  (#541) — the desktop-only route that fires a task on demand,

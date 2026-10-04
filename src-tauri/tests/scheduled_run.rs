@@ -497,7 +497,9 @@ async fn a_task_with_no_agent_runs_on_the_default_model_with_every_built_in_tool
             .any(|a| a == "--system-prompt" || a == "--append-system-prompt"),
         "no system prompt flag: {argv:?}"
     );
-    // An empty `permission_mode` falls to the bypass arm of `build_options`.
+    // Bypassed, as every scheduled run always has been — and since #675
+    // because the executor says so (`RunKind::permission_mode`), not because
+    // the runner fell through to it.
     assert_eq!(
         flag_value(&argv, "--permission-mode"),
         Some("bypassPermissions"),
@@ -685,6 +687,62 @@ async fn an_agent_whose_tools_this_build_cannot_host_is_a_recorded_failure() {
 
 /// An unresolvable `{{name}}` in the *task's* prompt fails the run before
 /// anything is created — `prepareTaskRun`'s first step.
+/// #675. The scheduler names `bypass` only for an agent with no mode of its
+/// own: a stored one is the agent's, and a scheduled run does not speak over
+/// it. An agent's mode cannot be written through the API, so the row is edited
+/// directly — which is the only way a real one comes to hold a value.
+#[tokio::test]
+async fn a_scheduled_run_leaves_an_agents_own_permission_mode_alone() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with(&db, "go", "planner", 30, Some("{}"));
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE agents SET permission_mode = 'plan'", [])
+        .expect("store a mode");
+    let cli = fake_cli(dir.path(), ANSWERING_CLI);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let (status, error, ..) = job_rows(&db).remove(0);
+    assert_eq!(status, "success", "error was {error:?}");
+    let argv = argv(dir.path());
+    assert_eq!(
+        flag_value(&argv, "--permission-mode"),
+        Some("plan"),
+        "{argv:?}"
+    );
+}
+
+/// #675. A stored mode that is not one fails the run with a row that names the
+/// value — never silence, and never a guess at what was meant.
+#[tokio::test]
+async fn an_agent_with_an_unknown_permission_mode_is_a_recorded_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with(&db, "go", "typo", 30, Some("{}"));
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE agents SET permission_mode = 'yolo'", [])
+        .expect("store a mode");
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "the refusal is recorded, not silent");
+    let (status, error, ..) = &jobs[0];
+    assert_eq!(status, "failed");
+    assert_eq!(error, r#"agent setup: unknown permission mode "yolo""#);
+}
+
 #[tokio::test]
 async fn an_unresolvable_prompt_variable_fails_the_run_before_it_starts() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1605,6 +1663,22 @@ async fn an_event_run_hands_the_cli_a_delimited_payload_and_delivers_to_its_orig
         format!("what happened today?\n</event-payload id=\"{block_id}\">")
     );
     assert!(!block_id.is_empty());
+
+    // #675: an outside sender started this run and the task's agent names no
+    // mode, so it denies prompts — and is not offered bypass — where a
+    // scheduled or manual run of the same task bypasses.
+    let argv = argv(dir.path());
+    assert_eq!(
+        flag_value(&argv, "--permission-mode"),
+        Some("dontAsk"),
+        "{argv:?}"
+    );
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"),
+        "{argv:?}"
+    );
 
     // One row, a success, started by Slack, with the payload stored.
     let (status, error, response, _, _) = job_rows(&db).remove(0);

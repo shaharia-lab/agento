@@ -237,7 +237,7 @@ async fn a_rules_execution_settings_reach_the_spawned_cli() {
     assert_eq!(
         flag_value(&argv, "--permission-mode"),
         Some("plan"),
-        "and its permission mode reaches build_options rather than the bypassing catch-all"
+        "and its permission mode is the one the CLI is started with"
     );
     // `--allow-dangerously-skip-permissions` is on this line too, and that is
     // not this change: `Options`' own default sets the flag, and only
@@ -246,12 +246,12 @@ async fn a_rules_execution_settings_reach_the_spawned_cli() {
     // buys is the mode the CLI reads, which is the flag asserted above.
 }
 
-/// A rule that records nothing runs as a trigger run did before #565 — the
-/// agent's model and the bypassing catch-all a headless run with no configured
-/// mode has always taken — with one deliberate exception: since #559 an unset
-/// working directory is the settings default, not the app process's own cwd.
+/// A rule that records nothing runs on the agent's model, in the settings
+/// default directory (#559, not the app process's own cwd), and — since #675 —
+/// **with prompts denied rather than permissions bypassed**: an outside sender
+/// started this run, and nobody chose a mode for it.
 #[tokio::test]
-async fn a_rule_that_configures_nothing_runs_as_it_always_did() {
+async fn a_rule_that_configures_nothing_runs_with_prompts_denied() {
     let Some(_) = python3() else {
         eprintln!("no python3; skipping");
         return;
@@ -286,7 +286,84 @@ async fn a_rule_that_configures_nothing_runs_as_it_always_did() {
     assert_eq!(flag_value(&argv, "--model"), Some("agent-model"));
     assert_eq!(
         flag_value(&argv, "--permission-mode"),
-        Some("bypassPermissions"),
-        "no mode on the rule and none on the agent is `build_options`' catch-all"
+        Some("dontAsk"),
+        "no mode on the rule and none on the agent: {argv:?}"
+    );
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"),
+        "and the flag that would permit bypass is not sent: {argv:?}"
+    );
+}
+
+/// A stored mode that is not one — a hand-edited row — neither bypasses nor
+/// silences the rule: the dispatcher runs it with prompts denied.
+#[tokio::test]
+async fn a_rule_with_an_unknown_stored_mode_runs_with_prompts_denied() {
+    let Some(_) = python3() else {
+        eprintln!("no python3; skipping");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    migrated_with_rule(&db, "", "", "yolo", 0);
+    let cli = fake_cli(dir.path());
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    std::env::remove_var("AGENTO_WORKING_DIR");
+    tokio::time::timeout(std::time::Duration::from_secs(30), run_the_rule(&db))
+        .await
+        .expect("the run must finish, not hang")
+        .expect("the run answered");
+
+    let (argv, _) = only_spawn(dir.path());
+    assert_eq!(
+        flag_value(&argv, "--permission-mode"),
+        Some("dontAsk"),
+        "{argv:?}"
+    );
+    // This is the *stored* `dontAsk`, the one a rule that chose it gets, so it
+    // carries the flag every explicit `plan` and `dontAsk` always has (see
+    // `a_rules_execution_settings_reach_the_spawned_cli`). Only a run with no
+    // mode at all drops it. Asserted so the difference is a decision.
+    assert!(
+        argv.iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"),
+        "{argv:?}"
+    );
+}
+
+/// A mode the runner does not know fails the run before anything is spawned,
+/// and the error names the value. The dispatcher never sends one (the test
+/// above), so this is the runner's own refusal, reached the way a headless
+/// caller reaches it.
+#[tokio::test]
+async fn an_unknown_mode_on_a_headless_run_is_an_error_and_spawns_nothing() {
+    let Some(_) = python3() else {
+        eprintln!("no python3; skipping");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    migrated_with_rule(&db, "", "", "", 0);
+    let cli = fake_cli(dir.path());
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let mut agent = agent();
+    agent.permission_mode = "yolo".to_string();
+    let rules = dispatcher::load_rules(&db, "tg").expect("load rules");
+    let (spec, timeout) = dispatcher::run_inputs(&db, agent, rules.first().expect("one rule"));
+    let err = match agento_lib::native::agent_run::run_headless(&spec, "hello", timeout, None).await
+    {
+        Ok(_) => panic!("an unknown mode must not run"),
+        Err(e) => e,
+    };
+    assert_eq!(err, r#"agent setup: unknown permission mode "yolo""#);
+    assert!(
+        !spawn_log(dir.path()).exists(),
+        "refused before a subprocess exists"
     );
 }

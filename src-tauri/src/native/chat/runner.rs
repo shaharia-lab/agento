@@ -259,6 +259,57 @@ pub struct RunSpec {
     pub custom_session_id: String,
 }
 
+/// What a run's permissions resolve to (#675).
+///
+/// The first four are the stored spellings in
+/// [`crate::native::chats::CHAT_PERMISSION_MODES`]. `Unchosen` is the fifth
+/// stored spelling, empty, on a run with nobody to ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionChoice {
+    Default,
+    Plan,
+    DontAsk,
+    Bypass,
+    /// No mode on the run and none on its agent, and no permission handler:
+    /// nothing prompts, and what is not already allowed is denied.
+    Unchosen,
+}
+
+impl PermissionChoice {
+    /// `run` is the run's own mode, `agent` its agent's, and `interactive`
+    /// whether a permission handler is there to answer a prompt.
+    ///
+    /// The run's own mode wins outright. It is the conversation-level choice a
+    /// user made in the New Chat bar or on a trigger rule, and it is the only
+    /// way past the interactive branch — a chat *always* has a permission
+    /// handler, so before migration 30 there was no way to say "stop asking
+    /// me" for one conversation.
+    ///
+    /// Absent that choice an interactive handler forces `default`, overriding
+    /// whatever the agent configured; without one the agent's own mode applies.
+    ///
+    /// **Nothing resolves to `Bypass` but the literal `"bypass"`.** Empty is
+    /// [`Self::Unchosen`], and a value outside the list is an `Err` naming it:
+    /// the write paths refuse one, so it can only be a hand-edited row, and
+    /// running it on any guess at what was meant is the wrong answer. A caller
+    /// that means bypass says so, as the scheduler does.
+    fn resolve(run: &str, agent: Option<&str>, interactive: bool) -> Result<Self, String> {
+        let stored = match (run, interactive) {
+            ("", true) => "default",
+            ("", false) => agent.unwrap_or(""),
+            (run, _) => run,
+        };
+        match stored {
+            "default" => Ok(Self::Default),
+            "plan" => Ok(Self::Plan),
+            "dontAsk" => Ok(Self::DontAsk),
+            "bypass" => Ok(Self::Bypass),
+            "" => Ok(Self::Unchosen),
+            unknown => Err(format!("unknown permission mode {unknown:?}")),
+        }
+    }
+}
+
 /// Build the SDK options for one chat turn.
 ///
 /// `Err` means "this build cannot run this chat", and it is answered rather
@@ -291,6 +342,13 @@ pub async fn build_options(
         caps,
         crate::paths::database_path().as_deref(),
         super::mcps_yaml::path().as_deref(),
+    )?;
+    // Up here for the same reason: a mode this build does not know is a
+    // refusal, and a refusal leaves no listener behind.
+    let permissions = PermissionChoice::resolve(
+        &spec.permission_mode,
+        spec.agent.as_ref().map(|a| a.permission_mode.as_str()),
+        permission_handler.is_some(),
     )?;
 
     // `--include-partial-messages` is unconditional in Go, and it is what makes
@@ -333,38 +391,21 @@ pub async fn build_options(
         opts = opts.with_settings(path);
     }
 
-    // `appendPermissionOpts`, in Go's own precedence order.
-    //
-    // The run's own mode wins outright. It is the conversation-level choice a
-    // user made in the New Chat bar, and it is the only way past the
-    // interactive branch below — which is why it exists: a chat *always* has a
-    // permission handler, so before migration 30 there was no way to say "stop
-    // asking me" for one conversation, and a `plan` or `dontAsk` agent silently
-    // behaved as `default` in the chat UI.
-    //
-    // Absent that choice the pre-existing rules are untouched: an interactive
-    // permission handler forces default permissions, overriding whatever the
-    // agent configured; **without one the agent's own mode applies**, which is
-    // the branch a scheduled run takes (#275) — nothing is there to answer a
-    // prompt, so a `bypass` agent must actually bypass rather than block
-    // forever.
-    let mode = if spec.permission_mode.is_empty() {
-        match permission_handler {
-            Some(_) => Some("default"),
-            None => spec.agent.as_ref().map(|a| a.permission_mode.as_str()),
-        }
-    } else {
-        Some(spec.permission_mode.as_str())
-    };
-    opts = match mode {
-        Some("default") => opts.with_default_permissions(),
-        Some("plan") => opts.with_permission_mode(permission_mode::PLAN),
-        Some("dontAsk") => opts.with_permission_mode(permission_mode::DONT_ASK),
-        // "bypass", empty, unknown, or no agent at all. Go sets the mode
-        // *and* the bypass flag, so both are set here.
-        _ => opts
+    // Resolved at the top, by [`PermissionChoice::resolve`]. The flag is not a
+    // function of the mode for `plan` and `dontAsk` — see
+    // `a_chats_own_permission_mode_beats_the_interactive_default`.
+    opts = match permissions {
+        PermissionChoice::Default => opts.with_default_permissions(),
+        PermissionChoice::Plan => opts.with_permission_mode(permission_mode::PLAN),
+        PermissionChoice::DontAsk => opts.with_permission_mode(permission_mode::DONT_ASK),
+        PermissionChoice::Bypass => opts
             .with_permission_mode(permission_mode::BYPASS_PERMISSIONS)
             .with_bypass_permissions(),
+        // `with_default_permissions` first, for the flag it clears: a run
+        // nobody chose a mode for is not offered bypass at all.
+        PermissionChoice::Unchosen => opts
+            .with_default_permissions()
+            .with_permission_mode(permission_mode::DONT_ASK),
     };
 
     opts = opts.with_claude_executable(claude_executable().await);
@@ -1411,6 +1452,147 @@ mod tests {
             permission_mode::PLAN,
             "without a handler the agent's own mode still applies"
         );
+    }
+
+    /// #675, as a table: every stored spelling, on the run and on the agent,
+    /// with and without somebody to ask.
+    ///
+    /// Two claims no row may break. **Only the literal `"bypass"` bypasses** —
+    /// not empty, not an absent agent, not a typo. And **a run nobody chose a
+    /// mode for never asks**: headless with nothing recorded is `Unchosen`,
+    /// not `Default`, because a prompt with no handler has nobody to answer it.
+    #[test]
+    fn only_the_literal_bypass_bypasses_and_an_unknown_mode_is_refused() {
+        use PermissionChoice::{Bypass, Default, DontAsk, Plan, Unchosen};
+        let stored = [
+            ("", None),
+            ("default", Some(Default)),
+            ("plan", Some(Plan)),
+            ("dontAsk", Some(DontAsk)),
+            ("bypass", Some(Bypass)),
+        ];
+        assert_eq!(
+            stored.len(),
+            crate::native::chats::CHAT_PERMISSION_MODES.len(),
+            "a sixth stored mode needs a row here"
+        );
+        for mode in crate::native::chats::CHAT_PERMISSION_MODES {
+            assert!(
+                stored.iter().any(|(known, _)| *known == mode),
+                "{mode:?} has no row"
+            );
+        }
+
+        let agents = [
+            None,
+            Some(""),
+            Some("default"),
+            Some("plan"),
+            Some("dontAsk"),
+            Some("bypass"),
+        ];
+        for (run, own) in stored {
+            for agent in agents {
+                for interactive in [true, false] {
+                    let got = PermissionChoice::resolve(run, agent, interactive)
+                        .unwrap_or_else(|e| panic!("({run:?}, {agent:?}, {interactive}): {e}"));
+                    let want = match (own, interactive) {
+                        // The run's own mode wins outright.
+                        (Some(own), _) => own,
+                        // A handler forces `default`, whatever the agent says.
+                        (None, true) => Default,
+                        // Without one, the agent's — and failing that, nothing.
+                        (None, false) => stored
+                            .iter()
+                            .find(|(mode, _)| Some(*mode) == agent)
+                            .and_then(|(_, own)| *own)
+                            .unwrap_or(Unchosen),
+                    };
+                    assert_eq!(got, want, "({run:?}, {agent:?}, {interactive})");
+                    assert_eq!(
+                        got == Bypass,
+                        run == "bypass"
+                            || (run.is_empty() && !interactive && agent == Some("bypass")),
+                        "({run:?}, {agent:?}, {interactive}) bypasses without saying so"
+                    );
+                }
+            }
+        }
+
+        // Unknown, wherever it is read from. The message names the value.
+        for interactive in [true, false] {
+            assert_eq!(
+                PermissionChoice::resolve("yolo", Some("plan"), interactive),
+                Err(r#"unknown permission mode "yolo""#.to_string())
+            );
+        }
+        assert_eq!(
+            PermissionChoice::resolve("", Some("Bypass"), false),
+            Err(r#"unknown permission mode "Bypass""#.to_string()),
+            "the agent's own mode is held to the same list, case included"
+        );
+        assert_eq!(
+            PermissionChoice::resolve("", Some("yolo"), true),
+            Ok(Default),
+            "an interactive turn never reads the agent's mode, so cannot fail on it"
+        );
+    }
+
+    /// The same, from the side that decides what the CLI is sent: a headless
+    /// run with no mode on the run and none on its agent — or no agent at all —
+    /// denies what is not already allowed, and is not offered bypass.
+    #[tokio::test]
+    async fn a_headless_run_with_no_mode_denies_prompts_and_is_not_offered_bypass() {
+        for agent in [None, Some(agent_with(Capabilities::default()))] {
+            let (spec, _) = spec_with(agent);
+            let (opts, _servers, _hosted) = build_options(&spec, None).await.expect("options");
+            assert_eq!(opts.permission_mode, permission_mode::DONT_ASK);
+            assert!(
+                !opts.allow_dangerously_skip_permissions,
+                "nothing chose bypass, so the flag that permits it is not sent"
+            );
+            let argv = opts.build_args();
+            assert!(
+                !argv
+                    .iter()
+                    .any(|a| a == "--allow-dangerously-skip-permissions"),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// What the scheduler relies on: a headless caller that *says* bypass gets
+    /// it, flag and all.
+    #[tokio::test]
+    async fn a_headless_run_that_names_bypass_bypasses() {
+        let (mut spec, _) = spec_with(Some(agent_with(Capabilities::default())));
+        spec.permission_mode = "bypass".into();
+        let (opts, _servers, _hosted) = build_options(&spec, None).await.expect("options");
+        assert_eq!(opts.permission_mode, permission_mode::BYPASS_PERMISSIONS);
+        assert!(opts.allow_dangerously_skip_permissions);
+    }
+
+    /// An unknown mode is a refusal, not a run — with a handler or without.
+    #[tokio::test]
+    async fn an_unknown_permission_mode_fails_the_build_and_names_the_value() {
+        for handler in [no_op_handler(), None] {
+            let (mut spec, _) = spec_with(Some(agent_with(Capabilities::default())));
+            spec.permission_mode = "yolo".into();
+            let err = match build_options(&spec, handler).await {
+                Ok(_) => panic!("\"yolo\" must not build"),
+                Err(e) => e,
+            };
+            assert_eq!(err, r#"unknown permission mode "yolo""#);
+        }
+
+        let mut agent = agent_with(Capabilities::default());
+        agent.permission_mode = "yolo".into();
+        let (spec, _) = spec_with(Some(agent));
+        let err = match build_options(&spec, None).await {
+            Ok(_) => panic!("an agent's \"yolo\" must not build"),
+            Err(e) => e,
+        };
+        assert_eq!(err, r#"unknown permission mode "yolo""#);
     }
 
     /// A settings row on disk, migrated and empty.

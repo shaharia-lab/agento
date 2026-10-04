@@ -494,4 +494,6 @@ these are now simply Agento's bugs, and fixing them is unblocked.
   carries the reasoning.
 - **An agent's `permission_mode` cannot be persisted.** `AgentRequest` has no
   such field, so the API silently drops it even though the config type and the
-  validator both know about it.
+  validator both know about it. An agent's empty mode is no longer bypass
+  (#675): a headless run with no mode of its own denies prompts, and only a
+  scheduled or manual task run bypasses, by naming it.

@@ -1730,12 +1730,11 @@ fn check_rule_task(conn: &rusqlite::Connection, task_id: &str) -> Result<(), Wri
 
 /// The checks `create` and `update` share, after `agent_slug`.
 ///
-/// **An unknown `permission_mode` is not a run that fails, it is a run with no
-/// permissions at all.** `chat/runner.rs` matches `default`, `plan` and
-/// `dontAsk` and routes *everything else* — `bypass`, empty, and any typo alike
-/// — into `with_permission_mode(BYPASS_PERMISSIONS).with_bypass_permissions()`,
-/// so `"yolo"` would silently escalate rather than error. That catch-all is why
-/// the set is checked here, at the write, and why it is
+/// **An unknown `permission_mode` is refused here, at the write**, so the one
+/// who typed it is told. `chat/runner.rs` no longer runs a mode it does not
+/// know (#675) and the dispatcher runs such a stored row with prompts denied,
+/// but both of those are answers to a row that got past this check, and
+/// neither tells anyone which field was wrong. The set is
 /// [`chats::CHAT_PERMISSION_MODES`] rather than a list of this module's own.
 ///
 /// `timeout_minutes` is refused rather than clamped for the same reason a bad

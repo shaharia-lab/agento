@@ -679,8 +679,8 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
         return Err(WriteError::BadRequest("no fields to update".to_string()));
     }
     // The same 422 `create` answers, and before the transaction opens, so an
-    // invalid mode mutates nothing. The runner's unknown-mode arm is bypass,
-    // which makes this check the guard rather than the UI's option list.
+    // invalid mode mutates nothing. The runner fails a turn whose mode it does
+    // not know, which makes this check the one that says which field it was.
     if let Some(mode) = &req.permission_mode {
         if !is_valid_permission_mode(mode) {
             return Err(WriteError::validation(
@@ -1599,7 +1599,7 @@ mod tests {
     }
 
     /// An unknown mode is the create route's 422, and the row is untouched —
-    /// the runner reads an unknown mode as bypass, so this is the guard.
+    /// the runner fails a turn on an unknown mode, so this is the guard.
     #[test]
     fn patching_an_invalid_permission_mode_is_422_and_changes_nothing() {
         let file = migrated();
