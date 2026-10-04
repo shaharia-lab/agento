@@ -197,7 +197,13 @@ pub fn decode_string_list(raw: &str) -> Option<Vec<String>> {
     match serde_json::from_str::<Option<Vec<String>>>(raw) {
         Ok(values) => values,
         Err(e) => {
-            log::warn!("native: malformed stored string array {raw:?}: {e}");
+            // The length, never the value: this decodes columns that name
+            // people (a rule's chats and users), and a log is not where a
+            // stored value belongs. `e` carries a position and a kind only.
+            log::warn!(
+                "native: malformed stored string array ({} bytes): {e}",
+                raw.len()
+            );
             None
         }
     }
