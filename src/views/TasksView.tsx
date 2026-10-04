@@ -242,6 +242,11 @@ function blankTask(): ScheduledTask {
     stop_after_time: null,
     save_output: true,
     continue_on_reply: false,
+    // The server's defaults (#691). The form has no fields for them until
+    // #692; they ride in the draft so a save sends back what was read.
+    max_concurrent_runs: 1,
+    max_queued_events: 5,
+    max_runs_per_hour: 10,
     dropped_event_count: 0,
     rate_limited_event_count: 0,
     status: "active",

@@ -473,6 +473,16 @@ is recorded, and nothing is posted in Slack. A paused task is not run and says
 nothing. Later mentions in the same thread continue that run's chat, as in any
 other thread.
 
+**A task limits how often messages can start it.** Each task runs one
+message-started run at a time, keeps up to five more messages waiting in the
+order they arrived, and starts at most ten such runs in any hour. A message
+that arrives when the queue is full, or after the hour's ten, starts nothing
+and gets no reply; the task counts it. These limits apply only to runs a
+message starts, not to the task's schedule or to **Run now**. They are stored
+per task (`max_concurrent_runs` 1 to 3, `max_queued_events` 1 to 100,
+`max_runs_per_hour` 1 to 1000) and can be changed through `PUT /api/tasks/{id}`;
+the task form does not show them yet.
+
 Link a rule in its form: the **Task** picker lists every task, and **No task**
 unlinks it. The rule's row then reads `→ task: <name>` instead of `→ <agent>`.
 A row marked `paused` names a task that is paused, and the form says a matching

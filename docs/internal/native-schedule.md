@@ -23,6 +23,9 @@ database".
 - `native/schedule/runtime.rs` is `scheduler.go`: the `task id → timer` registry,
   `ScheduleTask`/`UnscheduleTask`, the three-slot semaphore, and `Start`.
 - `native/schedule/executor.rs` is `executor.go`: one run, end to end.
+- `native/schedule/limiter.rs` has no Go counterpart: the per-task limits on
+  event runs (#691), described under *An event passes its task's limiter
+  first* below.
 - The five task writes (`POST /api/tasks`, `PUT`/`DELETE /api/tasks/{id}`,
   `pause`, `resume`) moved with them, because each also registers or unregisters
   a cron entry — a task stored by one process and scheduled by the other is a
@@ -275,14 +278,16 @@ one and the first to finish would clear an entry the second still owns.
 authenticates its sender, builds an `EventInput` (whose constructor refuses
 `schedule` and `manual` as a source) and calls it. Slack does
 (`slack/inbound.rs::run_linked`, #685); Telegram and the webhook do not yet
-(#684, #696). It is `run_manual`'s shape — mark in flight, take one of
-the three permits, re-read the task — with these rules:
+(#684, #696). It is two steps, `admit_event` and then `run_admitted`: the
+task's own limiter (#691, below), then `run_manual`'s shape — mark in flight,
+take one of the three permits, re-read the task — with these rules:
 
-- **Three refusals, and none writes a row**, since no run started:
+- **Five refusals, and none writes a row**, since no run started:
   `NoSuchTask` (absent, or deleted while it queued — `job_history.task_id`
   cascades), `Paused` (any status but `active`: pause is the user's off switch
-  for an automation, unlike **Run now**) and `Unavailable` (the read failed or
-  the semaphore is closed). Counting refusals belongs to #690/#691.
+  for an automation, unlike **Run now**), `Unavailable` (the read failed or
+  the semaphore is closed), and the limiter's two, `Dropped` and
+  `RateLimited`, which are counted on the task instead.
 - **`RunKind::Event(source)` spends nothing**: `advances_schedule()` is false, so
   `run_count`, `last_run_*` and the auto-pause rules stay where they were, as for
   a manual run. Every run that starts ends in exactly one `job_history` row with
@@ -313,6 +318,64 @@ the three permits, re-read the task — with these rules:
   where a scheduled or manual run of the same task bypasses. Prompts denied
   still allows every tool the agent's allowlist covers; see above. The linking rule's
   mode is not read, as none of its execution settings are.
+
+**An event passes its task's limiter first** (#691). `schedule/limiter.rs` is a
+small in-memory state per task, owned by the `Scheduler` and asked only by
+`executor::admit_event`. A timer's fire and **Run now** never reach it and are
+not counted by it. Each task stores three limits (migration 54), and the
+decision is `limiter::decide`, a pure function made once, when the event
+arrives, in this order:
+
+1. The hour's `reserved` count is at `max_runs_per_hour` (default 10, 1 to
+   1000) → `RateLimited`, and `rate_limited_event_count` goes up by one.
+2. Fewer than `max_concurrent_runs` (default 1, 1 to 3) event runs hold a slot
+   → the event takes one.
+3. Fewer than `max_queued_events` (default 5, 1 to 100) events are waiting →
+   it waits, first in, first out.
+4. Otherwise → `Dropped`, and `dropped_event_count` goes up by one.
+
+Six things about it are specification:
+
+- **`reserved` is every start in the last sixty minutes plus every admitted or
+  queued event that has not started yet.** Counting the ones still to start is
+  what lets the rate be checked at arrival and never again, so a queued event is
+  never refused after it waited. The issue's wording was "started in the last
+  hour + running + queued"; a running event is counted once here, as a
+  reservation until its run starts and as a start after, rather than twice.
+  `no_sixty_minutes_holds_more_starts_than_the_cap` pins the cap.
+- **A start is stamped with the instant its `job_history` row carries**
+  (`RunSlot::started(run.started_at)`), and it counts for sixty minutes from
+  then whether or not the run has finished. An event that is admitted and then
+  refused further on — its task paused or deleted while it waited for a permit
+  — started nothing and is not charged.
+- **A restart does not reset the hour.** The first time a scheduler sees a
+  task, `admit_event` reads `tasks::event_starts_since` — the task's
+  `job_history` rows whose `triggered_by` is `telegram`, `slack`, `webhook` or
+  `reply` — and seeds the window with it. The first seed wins.
+  `the_hourly_cap_survives_a_restart_and_counts_only_event_runs` pins it.
+- **A waiting event holds nothing global.** The scheduler's three permits are
+  taken in `run_admitted`, and a transport takes its own bound between the two
+  steps (Slack's ten-slot dispatcher permit), so one task's burst queues behind
+  that task and nowhere else. Both global bounds stay as the outer limit.
+- **The slot is a guard.** `RunSlot` frees what it holds on drop — a queue place
+  while it waits, a running slot after — and wakes the task's next waiter, so a
+  cancelled waiter cannot leak a place. The limiter's one `std::sync::Mutex` is
+  held for arithmetic only and never across an `await`.
+- **No SQLite in the limiter.** It is handed the time and the seed. The read,
+  the seed query and the refusal's count all run in `admit_event` through
+  `db::blocking`; `a_refusals_contended_write_lock_does_not_stall_the_runtime`
+  is this path's copy of the contended-lock test.
+
+A paused or missing task is refused before the limiter as well as after the
+permit, so it takes no queue place and moves neither counter. A queued event is
+not marked in `Scheduler::in_flight` until it has a slot. The limits are read
+from the row at each arrival; a raised `max_concurrent_runs` reaches the events
+already waiting before the arrival that carried it.
+
+On the wire the limits are replace like the rest of the task: an omitted key,
+`null` and `0` all store the default, as `timeout_minutes` does, and a value
+outside its range is a 422 naming the field. A queue of zero is therefore not
+expressible.
 
 **A task write can fail after storing a row, so the timers are swept.**
 `Scheduler::reconcile` runs every 60 seconds and brings the installed timers
@@ -573,12 +636,15 @@ epic #679). Migration 48 adds eight columns across three tables.
   `TaskRequest` has neither, `update_task_in` leaves both out of its `SET` list
   — so no task write can reset them, the run's write-back included
   (`the_runs_write_back_leaves_the_automations_columns_alone`) — and
-  `update_task` copies the stored values into its response only. Whatever
-  increments them (#690, #691) must write the column directly, not through
-  `update_task_in`.
+  `update_task` copies the stored values into its response only. Their two
+  writers, `tasks::count_dropped_event` (#688, #691) and
+  `tasks::count_rate_limited_event` (#691), each write the column directly,
+  not through `update_task_in`.
 
-On the wire the three task fields sit between `destinations` and `status` and
-are always present. The rule's half — `trigger_rules.task_id` and its own
+On the wire the task's fields sit between `destinations` and `status`, in the
+order `continue_on_reply`, the three limits of migration 54
+(`max_concurrent_runs`, `max_queued_events`, `max_runs_per_hour`), then the two
+counters, and are always present. The rule's half — `trigger_rules.task_id` and its own
 `continue_on_reply` — is in `docs/internal/native-integrations.md`.
 
 **Delivery results live in `job_deliveries`, never on the run's row** (#635,

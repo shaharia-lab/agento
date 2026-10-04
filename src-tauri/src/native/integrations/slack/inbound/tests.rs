@@ -1392,11 +1392,20 @@ fn the_global_bound_is_taken_around_the_run_and_not_around_the_wait() {
         .map(|at| run + at)
         .expect("the event run must take the dispatcher's permit too");
     let event_run = flat
-        .find("executor::run_event(")
-        .expect("the linked arm calls run_event");
+        .find("executor::run_admitted(")
+        .expect("the linked arm runs the admitted event");
     assert!(
         event_acquire < event_run,
         "the event run's permit is taken immediately before the run"
+    );
+    // #691: and after the task's own limiter, so an event waiting in its
+    // task's queue holds none of the ten.
+    let admit = flat
+        .find("executor::admit_event(")
+        .expect("the linked arm passes the task's limiter");
+    assert!(
+        admit < event_acquire,
+        "admission comes before the dispatcher's permit"
     );
     // Presence alone would stay green if the acquire moved back to `accept`,
     // which is the regression this test is named for. Its *position* is the
@@ -1781,6 +1790,95 @@ async fn a_linked_task_with_no_reply_destination_runs_and_stays_silent() {
         "and no delivery row"
     );
     assert_eq!(threads(&db).len(), 1, "the thread is still mapped");
+}
+
+/// #691: a mention the task's run limits refuse — past its queue, or past
+/// its hourly cap — posts nothing, writes no row and reaches no CLI. Each is
+/// counted on the task, which is the only record it leaves.
+#[tokio::test]
+async fn a_mention_refused_by_the_tasks_run_limits_is_silent_and_counted() {
+    use crate::native::schedule::limiter::Limits;
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-limited", "active", REPLY_ALWAYS);
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    conn.execute(
+        "UPDATE scheduled_tasks SET max_queued_events = 1, max_runs_per_hour = 3",
+        [],
+    )
+    .expect("tighten the limits");
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = crate::native::schedule::runtime::detached(&db);
+    let handler = super::handler_with_scheduler(&db, "s-limited", "xoxb-t", Arc::clone(&scheduler));
+
+    // The task's one slot and its one queue place are both taken.
+    let limits = Limits {
+        concurrent: 1,
+        queued: 1,
+        per_hour: 3,
+    };
+    let now = chrono::Utc::now();
+    let running = scheduler
+        .limiter()
+        .admit("t1", limits, now)
+        .await
+        .expect("the slot");
+    let queued = {
+        let scheduler = Arc::clone(&scheduler);
+        tokio::spawn(async move { scheduler.limiter().admit("t1", limits, now).await })
+    };
+    for _ in 0..1000 {
+        if scheduler.limiter().load("t1") == (1, 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(scheduler.limiter().load("t1"), (1, 1));
+    finish(handler(mention(
+        "<@U0BOT> past the queue",
+        "1700000000.000100",
+        "",
+        "s-limited",
+    )))
+    .await;
+
+    // The running event and the queued one are two of the hour already, so
+    // at a cap of two the next mention is rate-limited rather than dropped.
+    conn.execute("UPDATE scheduled_tasks SET max_runs_per_hour = 2", [])
+        .expect("lower the cap");
+    finish(handler(mention(
+        "<@U0BOT> past the cap",
+        "1700000000.000200",
+        "",
+        "s-limited",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(slack.posted(), vec![], "neither refusal says anything");
+    assert!(jobs(&db).is_empty(), "nor writes a job_history row");
+    assert!(spawns(dir.path()).is_empty(), "nor reaches a CLI");
+    assert!(threads(&db).is_empty(), "nor maps a thread");
+    let counts: (i64, i64) = conn
+        .query_row(
+            "SELECT dropped_event_count, rate_limited_event_count FROM scheduled_tasks
+             WHERE id = 't1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("counters");
+    assert_eq!(counts, (1, 1), "one dropped, one rate-limited");
+    drop(running);
+    queued.abort();
 }
 
 /// Every refusal writes no row. Pause is the off switch and is silent; a task

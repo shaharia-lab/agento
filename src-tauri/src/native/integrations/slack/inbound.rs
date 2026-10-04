@@ -81,7 +81,8 @@
 //!   and the *additive* usage accounting are the same on the first turn and the
 //!   fiftieth.
 //! - **A top-level mention under a rule that names a task is not a chat turn
-//!   at all** (#685). It is handed to `executor::run_event` as an event: the
+//!   at all** (#685). It is handed to the executor as an event
+//!   (`executor::admit_event`, then `executor::run_admitted`): the
 //!   task's own instructions are the prompt and the mention's words are a
 //!   delimited data block inside it, the run is a `job_history` row with
 //!   `triggered_by = slack`, and the answer reaches the thread as the task's
@@ -89,7 +90,11 @@
 //!   destination runs, is recorded, and says nothing in Slack. The rule's
 //!   `agent_slug` and execution settings are not read on that path. A reply
 //!   *inside* a thread is unchanged whatever the rule says: it resumes the
-//!   mapped chat, linked rule or not.
+//!   mapped chat, linked rule or not. The task's run limits (#691) apply
+//!   before the dispatcher's permit, so a mention the task has no slot for
+//!   waits in the task's queue, up to its bound, holding this thread's worker
+//!   and nothing global; one past the queue or past the hourly cap is counted
+//!   on the task and gets no reply.
 //! - **The two failure sentences are the dispatcher's constants**, not
 //!   re-spellings. Telegram and Slack answering differently for the same failure
 //!   is the drift those `pub(crate)` consts exist to prevent.
@@ -506,6 +511,8 @@ impl Inbound {
     ///
     /// - **Paused** is silence, as a disabled channel rule is. Pause is the
     ///   user's off switch for the automation.
+    /// - **Dropped or rate-limited by the task's run limits** (#691) is
+    ///   silence too, counted on the task by the executor.
     /// - **A task that is gone, could not be read, or has no scheduler to run
     ///   on** answers [`ERROR_REPLY`]. It does **not** fall back to
     ///   [`Inbound::start_chat`]: that would run the sender's words as the
@@ -547,14 +554,19 @@ impl Inbound {
             return;
         };
 
-        // The ten-slot bound, around the run as it is in `turn`: the event run
+        // The task's own limits first (#691): an event waiting in its task's
+        // queue holds no global permit. Only an admitted one takes the
+        // ten-slot bound, around the run as it is in `turn`, and the event run
         // then takes one of the scheduler's three inside it.
-        let ran = {
-            let Ok(_permit) = dispatcher::semaphore().acquire().await else {
-                log::warn!("dispatcher stopped, dropping a slack event task_id={task_id:?}");
-                return;
-            };
-            executor::run_event(scheduler, task_id, event).await
+        let ran = match executor::admit_event(&scheduler, task_id).await {
+            Ok(admitted) => {
+                let Ok(_permit) = dispatcher::semaphore().acquire().await else {
+                    log::warn!("dispatcher stopped, dropping a slack event task_id={task_id:?}");
+                    return;
+                };
+                executor::run_admitted(scheduler, admitted, event).await
+            }
+            Err(refused) => Err(refused),
         };
         match ran {
             Ok(job_id) => {
@@ -565,6 +577,16 @@ impl Inbound {
                 log::info!(
                     "slack mention ignored, the rule's task is paused rule_id={:?} \
                      task_id={task_id:?}",
+                    job.rule.id
+                );
+            }
+            // Silence, as for a paused task: the limits are the owner's, and
+            // a sentence per refused mention is what a burst would turn into
+            // a flood. The executor has counted it on the task.
+            Err(refused @ (EventRefused::Dropped | EventRefused::RateLimited)) => {
+                log::info!(
+                    "slack mention ignored, the rule's task is at its run limits rule_id={:?} \
+                     task_id={task_id:?} reason={refused:?}",
                     job.rule.id
                 );
             }

@@ -34,7 +34,8 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use super::delivery::{self, DeliveryReport, ReplyTarget};
-use super::runtime::Scheduler;
+use super::limiter;
+use super::runtime::{RunGuard, Scheduler};
 use crate::native::agent_run::{RunResult, Runner as _};
 use crate::native::agents::{self, Agent};
 use crate::native::chat::runner::TurnSettings;
@@ -206,7 +207,8 @@ impl EventInput {
 }
 
 /// Why [`run_event`] started no run. None of these writes a `job_history` row:
-/// no run began, and counting the refusal belongs to #690/#691.
+/// no run began. The two the limiter answers are counted on the task instead
+/// (#691), which is their only record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventRefused {
     /// The task does not exist, or was deleted while the event waited for a
@@ -217,6 +219,22 @@ pub enum EventRefused {
     Paused,
     /// The task could not be read, or the scheduler's semaphore is closed.
     Unavailable,
+    /// Every one of the task's event-run slots was busy and its queue was
+    /// full (#691). Counted in `dropped_event_count`.
+    Dropped,
+    /// The task has already started its hour's worth of event runs (#691).
+    /// Counted in `rate_limited_event_count`.
+    RateLimited,
+}
+
+/// An event the task's limiter has let in (#691): proof that
+/// [`admit_event`] ran, and the slot it took. [`run_admitted`] holds it to the
+/// end of the run; dropping it anywhere before gives the slot back and wakes
+/// the task's next waiting event.
+pub struct Admitted {
+    task_id: String,
+    slot: limiter::RunSlot,
+    _in_flight: RunGuard,
 }
 
 /// The most of an event's text a run keeps, in bytes. A longer payload is cut
@@ -333,7 +351,7 @@ pub async fn run_manual(
     scheduler: Arc<Scheduler>,
     task: ScheduledTask,
     job_id: String,
-    guard: crate::native::schedule::runtime::RunGuard,
+    guard: RunGuard,
 ) {
     let _guard = guard;
     let Ok(_permit) = scheduler.semaphore().acquire_owned().await else {
@@ -397,9 +415,16 @@ pub async fn run_manual(
 /// One run started by an event (#683): a message, a webhook call, a reply.
 /// **The only way an event becomes a run.**
 ///
-/// Shaped like [`run_manual`] — a permit from the scheduler's three-slot
-/// semaphore, then a re-read of the task — and differing in three ways:
+/// Two steps, [`admit_event`] and then [`run_admitted`]. A caller with a
+/// bound of its own to take calls them itself, so its permit is taken after
+/// admission and a queued event holds none; everything else calls this.
 ///
+/// Shaped like [`run_manual`] — a permit from the scheduler's three-slot
+/// semaphore, then a re-read of the task — and differing in four ways:
+///
+/// - **The task's own limits come first** (#691). An event the task has no
+///   slot, queue place or hourly budget for is refused before it can wait on
+///   anything global ([`EventRefused::Dropped`], [`EventRefused::RateLimited`]).
 /// - **A paused task is refused** ([`EventRefused::Paused`]). **Run now** on a
 ///   paused task is a person testing it; an event is the automation itself,
 ///   and pause is how a user turns it off.
@@ -419,14 +444,143 @@ pub async fn run_event(
     task_id: &str,
     event: EventInput,
 ) -> Result<String, EventRefused> {
-    let _in_flight = scheduler.mark_running(task_id);
+    let admitted = admit_event(&scheduler, task_id).await?;
+    run_admitted(scheduler, admitted, event).await
+}
+
+/// What [`admit_event`] reads before it asks the limiter: the task, and — the
+/// first time this process sees the task — the event runs it started in the
+/// last hour.
+type AdmissionRead = (Option<ScheduledTask>, Option<Vec<chrono::DateTime<Utc>>>);
+
+/// Pass one event through its task's limiter (#691), waiting in the task's
+/// queue when its slots are busy.
+///
+/// **Nothing global is held while it waits.** The scheduler's three permits
+/// and a transport's own bound are both taken after this returns, so one
+/// task's burst queues behind that task and nowhere else.
+///
+/// The order is the limiter's ([`limiter::decide`]): the hourly cap, then a
+/// free slot, then the queue, then a drop. A refusal is counted on the task
+/// and starts nothing. The hour is seeded from `job_history` the first time a
+/// task is seen, so a restart does not reset the cap.
+///
+/// A missing task and a paused one are refused here as well as after the
+/// permit: neither should take a queue place, or be counted as dropped, on
+/// its way to being refused anyway.
+pub async fn admit_event(
+    scheduler: &Arc<Scheduler>,
+    task_id: &str,
+) -> Result<Admitted, EventRefused> {
+    let now = Utc::now();
+    let read: Option<Result<AdmissionRead, String>> = {
+        let (db_path, id) = (scheduler.db_path().to_path_buf(), task_id.to_string());
+        let unseeded = !scheduler.limiter().is_seeded(task_id);
+        db::blocking("event admission read", move || {
+            let Some(task) = tasks::get_task(&db_path, &id)? else {
+                return Ok((None, None));
+            };
+            let starts = if unseeded {
+                Some(tasks::event_starts_since(
+                    &db_path,
+                    &id,
+                    now - chrono::Duration::minutes(60),
+                    limiter::MAX_RUNS_PER_HOUR,
+                )?)
+            } else {
+                None
+            };
+            Ok((Some(task), starts))
+        })
+        .await
+    };
+    let (task, starts) = match read {
+        Some(Ok((Some(task), starts))) => (task, starts),
+        Some(Ok((None, _))) => {
+            log::info!("event run refused: no such task task_id={task_id:?}");
+            return Err(EventRefused::NoSuchTask);
+        }
+        Some(Err(e)) => {
+            log::error!("event run refused: could not read the task task_id={task_id:?} error={e}");
+            return Err(EventRefused::Unavailable);
+        }
+        None => return Err(EventRefused::Unavailable),
+    };
+    if task.status != "active" {
+        log::info!(
+            "event run refused: the task is not active task_id={task_id:?} status={:?}",
+            task.status
+        );
+        return Err(EventRefused::Paused);
+    }
+    if let Some(starts) = starts {
+        scheduler.limiter().seed(task_id, starts);
+    }
+
+    let limits = limiter::Limits::from_stored(
+        task.max_concurrent_runs,
+        task.max_queued_events,
+        task.max_runs_per_hour,
+    );
+    match scheduler.limiter().admit(task_id, limits, now).await {
+        Ok(slot) => Ok(Admitted {
+            task_id: task_id.to_string(),
+            slot,
+            // Marked once it has a slot, not while it waits: the in-flight map
+            // answers "is a run of this task under way", and a queued event is
+            // not one yet.
+            _in_flight: scheduler.mark_running(task_id),
+        }),
+        Err(refusal) => {
+            let refused = match refusal {
+                limiter::Refusal::Dropped => EventRefused::Dropped,
+                limiter::Refusal::RateLimited => EventRefused::RateLimited,
+            };
+            log::info!(
+                "event run refused by the task's limits task_id={task_id:?} reason={refused:?} \
+                 limits={limits:?}"
+            );
+            count_refusal(scheduler, task_id, refusal).await;
+            Err(refused)
+        }
+    }
+}
+
+/// Count one refusal on the task — the only record a refused event leaves.
+/// Loud rather than fatal when the write fails: the event is refused either
+/// way, and the count is what would have said so.
+async fn count_refusal(scheduler: &Arc<Scheduler>, task_id: &str, refusal: limiter::Refusal) {
+    let (db_path, id) = (scheduler.db_path().to_path_buf(), task_id.to_string());
+    let counted = db::blocking("event refusal count", move || match refusal {
+        limiter::Refusal::Dropped => tasks::count_dropped_event(&db_path, &id),
+        limiter::Refusal::RateLimited => tasks::count_rate_limited_event(&db_path, &id),
+    })
+    .await;
+    if let Some(Err(e)) = counted {
+        log::warn!("failed to count a refused event task_id={task_id:?}: {e}");
+    }
+}
+
+/// Run one admitted event to the end: the scheduler's permit, the re-read,
+/// the run. The second half of [`run_event`].
+pub async fn run_admitted(
+    scheduler: Arc<Scheduler>,
+    admitted: Admitted,
+    event: EventInput,
+) -> Result<String, EventRefused> {
+    let Admitted {
+        task_id,
+        mut slot,
+        _in_flight,
+    } = admitted;
+    let task_id = task_id.as_str();
     let Ok(_permit) = scheduler.semaphore().acquire_owned().await else {
         log::warn!("event run refused: the scheduler semaphore is closed task_id={task_id:?}");
         return Err(EventRefused::Unavailable);
     };
 
-    // Read after the permit, for `run_manual`'s reason: the wait can be hours,
-    // and a run whose task is gone cannot insert its row.
+    // Read again after the permit, for `run_manual`'s reason: the wait can be
+    // hours, and a run whose task is gone cannot insert its row.
     let task = {
         let (db_path, id) = (scheduler.db_path().to_path_buf(), task_id.to_string());
         match db::blocking("event run read", move || tasks::get_task(&db_path, &id)).await {
@@ -474,6 +628,9 @@ pub async fn run_event(
             block_id: uuid::Uuid::new_v4().simple().to_string(),
         }),
     };
+    // The instant the job row will carry, so the hour this process counts and
+    // the hour a restart reads back from `job_history` are the same one.
+    slot.started(run.started_at);
     run_task(&scheduler, task, run).await;
     Ok(job_id)
 }
@@ -2847,6 +3004,315 @@ mod tests {
         assert!(job_rows_of(file.path()).is_empty());
     }
 
+    fn event_counters(path: &std::path::Path) -> (i64, i64) {
+        let task = tasks::get_task(path, "t1").expect("read").expect("row");
+        (task.dropped_event_count, task.rate_limited_event_count)
+    }
+
+    /// Let spawned admissions reach the limiter's queue: each one reads the
+    /// task on the blocking pool first, so this polls rather than yields.
+    async fn until_load(scheduler: &Arc<Scheduler>, want: (usize, usize)) {
+        for _ in 0..2000 {
+            if scheduler.limiter().load("t1") == want {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!(
+            "the limiter never reached {want:?}: {:?}",
+            scheduler.limiter().load("t1")
+        );
+    }
+
+    /// Gate (h), through the real entry point: 20 events inside a minute to
+    /// one task at the default limits are 1 running, 5 queued and 14 refused,
+    /// and the task's two counters add up to the 14. No refusal writes a row,
+    /// and none of the scheduler's three permits is held by a waiter.
+    #[tokio::test]
+    async fn twenty_events_to_one_task_are_one_running_five_queued_and_fourteen_counted() {
+        let file = with_active_task("p");
+        let scheduler = test_scheduler(file.path());
+
+        let running = admit_event(&scheduler, "t1").await;
+        assert!(running.is_ok(), "the first event has the slot");
+        let mut queued = Vec::new();
+        for _ in 0..5 {
+            let scheduler = Arc::clone(&scheduler);
+            queued.push(tokio::spawn(async move {
+                admit_event(&scheduler, "t1").await.map(|_| ())
+            }));
+        }
+        until_load(&scheduler, (1, 5)).await;
+
+        let mut refused = Vec::new();
+        for _ in 0..14 {
+            refused.push(admit_event(&scheduler, "t1").await.err());
+        }
+        assert_eq!(refused, vec![Some(EventRefused::Dropped); 14]);
+        let (dropped, rate_limited) = event_counters(file.path());
+        assert_eq!(dropped + rate_limited, 14, "every refusal is counted");
+        assert_eq!((dropped, rate_limited), (14, 0), "all of them as drops");
+
+        assert_eq!(scheduler.limiter().load("t1"), (1, 5));
+        assert!(queued.iter().all(|waiter| !waiter.is_finished()));
+        assert_eq!(
+            scheduler.semaphore().available_permits(),
+            3,
+            "a queued event holds none of the scheduler's permits"
+        );
+        assert!(job_rows_of(file.path()).is_empty(), "no refusal is a run");
+
+        // The queue outlives the slow run: every waiter gets its turn.
+        drop(running);
+        for waiter in queued {
+            assert_eq!(waiter.await.expect("joined"), Ok(()));
+        }
+        assert_eq!(scheduler.limiter().load("t1"), (0, 0));
+        assert_eq!(event_counters(file.path()), (14, 0));
+    }
+
+    /// While one task's events queue, another task's event still runs. `t2`'s
+    /// prompt cannot be interpolated, so its run ends in a row with no
+    /// subprocess.
+    #[tokio::test]
+    async fn a_burst_on_one_task_does_not_hold_up_another() {
+        let file = with_active_task("p");
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO scheduled_tasks
+                    (id, name, prompt, schedule_type, schedule_config, status,
+                     created_at, updated_at)
+                 VALUES ('t2','T2','report for {{quarter}}','interval','{}','active',
+                         '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("a second task");
+        let scheduler = test_scheduler(file.path());
+
+        let _running = admit_event(&scheduler, "t1").await.expect("t1 runs");
+        let mut waiting = Vec::new();
+        for _ in 0..5 {
+            let scheduler = Arc::clone(&scheduler);
+            waiting.push(tokio::spawn(async move {
+                admit_event(&scheduler, "t1").await.map(|_| ())
+            }));
+        }
+        until_load(&scheduler, (1, 5)).await;
+
+        let ran = run_event(Arc::clone(&scheduler), "t2", event_input("j-other-task")).await;
+        assert_eq!(ran, Ok("j-other-task".to_string()));
+        let rows = tasks::list_task_job_history(file.path(), "t2", 10).expect("list");
+        assert_eq!(rows.len(), 1, "t2's event ran to its row");
+        for waiter in waiting {
+            waiter.abort();
+        }
+    }
+
+    /// The cap across a restart: a fresh scheduler reads the hour back from
+    /// `job_history`, so ten event runs before the restart leave no room for
+    /// an eleventh after it. Scheduled and manual runs are not counted, and
+    /// neither is an event run older than the hour.
+    #[tokio::test]
+    async fn the_hourly_cap_survives_a_restart_and_counts_only_event_runs() {
+        // A prompt that cannot be interpolated: the run that is let in ends in
+        // a failed row without a subprocess, which is still a start.
+        let file = with_active_task("report for {{quarter}}");
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let insert = |id: String, source: &str, minutes_ago: i64| {
+            let started =
+                crate::native::gotime::to_go_string_utc(crate::native::gotime::GoTime::from_utc(
+                    Utc::now() - chrono::Duration::minutes(minutes_ago),
+                ));
+            conn.execute(
+                "INSERT INTO job_history (id, task_id, task_name, status, started_at, triggered_by)
+                 VALUES (?1, 't1', 'T', 'success', ?2, ?3)",
+                rusqlite::params![id, started, source],
+            )
+            .expect("a past run");
+        };
+        // Nine event runs inside the hour, across every event source.
+        for (n, source) in ["slack", "telegram", "webhook", "reply"]
+            .into_iter()
+            .cycle()
+            .take(9)
+            .enumerate()
+        {
+            insert(format!("recent-{n}"), source, 5 + n as i64);
+        }
+        // None of these is an event run of the last hour.
+        for n in 0..20 {
+            insert(format!("scheduled-{n}"), "schedule", 10);
+            insert(format!("manual-{n}"), "manual", 10);
+            insert(format!("old-{n}"), "slack", 61 + n);
+        }
+
+        // "Restart": the limiter is the scheduler's, so a new one knows nothing.
+        let scheduler = test_scheduler(file.path());
+        let ran = run_event(Arc::clone(&scheduler), "t1", event_input("j-tenth")).await;
+        assert_eq!(ran, Ok("j-tenth".to_string()), "the hour's tenth runs");
+        settled_deliveries(file.path(), "j-tenth", 1).await;
+        assert_eq!(
+            run_event(Arc::clone(&scheduler), "t1", event_input("j-eleventh")).await,
+            Err(EventRefused::RateLimited),
+            "and the eleventh does not"
+        );
+        assert_eq!(event_counters(file.path()), (0, 1));
+
+        // A second restart reads the tenth back from its own job row.
+        let restarted = test_scheduler(file.path());
+        assert_eq!(
+            run_event(restarted, "t1", event_input("j-after-restart")).await,
+            Err(EventRefused::RateLimited)
+        );
+        assert_eq!(event_counters(file.path()), (0, 2));
+        let event_rows = job_rows_of(file.path())
+            .into_iter()
+            .filter(|row| row.id.starts_with("j-"))
+            .count();
+        assert_eq!(event_rows, 1, "a refused event writes no row");
+    }
+
+    /// A paused or missing task is refused before the limiter, so it takes no
+    /// queue place and moves neither counter; and an admitted event whose task
+    /// is paused before it runs gives its slot and its hour back.
+    #[tokio::test]
+    async fn a_refusal_that_is_not_the_limiters_holds_no_slot_and_counts_nothing() {
+        let file = with_active_task("p");
+        let scheduler = test_scheduler(file.path());
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute("UPDATE scheduled_tasks SET max_runs_per_hour = 1", [])
+            .expect("one an hour");
+
+        let admitted = admit_event(&scheduler, "t1").await.expect("admitted");
+        assert!(scheduler.is_running("t1"), "an admitted event is in flight");
+        conn.execute("UPDATE scheduled_tasks SET status = 'paused'", [])
+            .expect("pause");
+        assert_eq!(
+            run_admitted(
+                Arc::clone(&scheduler),
+                admitted,
+                event_input("j-late-pause")
+            )
+            .await,
+            Err(EventRefused::Paused)
+        );
+        assert!(!scheduler.is_running("t1"));
+        assert_eq!(
+            admit_event(&scheduler, "t1").await.err(),
+            Some(EventRefused::Paused)
+        );
+        assert_eq!(scheduler.limiter().load("t1"), (0, 0));
+
+        conn.execute("UPDATE scheduled_tasks SET status = 'active'", [])
+            .expect("resume");
+        assert!(
+            admit_event(&scheduler, "t1").await.is_ok(),
+            "the event that never ran was not charged to the hour"
+        );
+        assert_eq!(event_counters(file.path()), (0, 0));
+        assert!(job_rows_of(file.path()).is_empty());
+    }
+
+    /// The copy of `a_contended_write_lock_does_not_stall_the_runtime` for the
+    /// limiter's caller. A refusal's count is a write behind `db.rs`'s
+    /// five-second `busy_timeout`, and an event arrives on whatever task its
+    /// transport runs — so the count written inline would park a runtime
+    /// worker for as long as the scanner held the lock.
+    ///
+    /// The shape is the established one: **one worker thread**, so a single
+    /// parked worker is the whole runtime; a **plain OS thread** holds the
+    /// lock; and `last` is seeded before the spawn, because a starved ticker
+    /// is never polled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_refusals_contended_write_lock_does_not_stall_the_runtime() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+
+        let file = with_active_task("p");
+        let db_path = file.path().to_path_buf();
+        // Already WAL, or `open_read_write`'s own mode change fails at once
+        // instead of waiting.
+        drop(db::open_read_write(&db_path).expect("convert to WAL"));
+        let scheduler = test_scheduler(&db_path);
+        // The slot and the queue are full, so the next event is a refusal and
+        // its count is the write under test.
+        let _running = admit_event(&scheduler, "t1").await.expect("runs");
+        let mut waiting = Vec::new();
+        for _ in 0..5 {
+            let scheduler = Arc::clone(&scheduler);
+            waiting.push(tokio::spawn(async move {
+                admit_event(&scheduler, "t1").await.map(|_| ())
+            }));
+        }
+        until_load(&scheduler, (1, 5)).await;
+
+        /// Long enough that a parked worker is unmistakable, short enough to
+        /// stay well inside the 5 s `busy_timeout` so the write still lands.
+        const HOLD: Duration = Duration::from_millis(1_500);
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+        let lock_db = db_path.clone();
+        let holder = std::thread::spawn(move || {
+            let mut conn = rusqlite::Connection::open(&lock_db).expect("open");
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .expect("begin immediate");
+            holding_tx.send(()).expect("signal");
+            std::thread::sleep(HOLD);
+            tx.rollback().expect("rollback");
+        });
+        holding_rx.recv().expect("the writer took the lock");
+
+        let worst_gap_ms = Arc::new(AtomicU64::new(0));
+        let ticks = Arc::new(AtomicU64::new(0));
+        let ticker = {
+            let (worst_gap_ms, ticks, mut last) = (
+                Arc::clone(&worst_gap_ms),
+                Arc::clone(&ticks),
+                Instant::now(),
+            );
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let now = Instant::now();
+                    let gap =
+                        u64::try_from(now.duration_since(last).as_millis()).unwrap_or(u64::MAX);
+                    worst_gap_ms.fetch_max(gap, Ordering::Relaxed);
+                    ticks.fetch_add(1, Ordering::Relaxed);
+                    last = now;
+                }
+            })
+        };
+
+        let started = Instant::now();
+        let refused = admit_event(&scheduler, "t1").await.err();
+        assert_eq!(refused, Some(EventRefused::Dropped));
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "the count waited on the held lock, so the test exercised the wait"
+        );
+        holder.join().expect("the writer finished");
+        ticker.abort();
+
+        let worst = worst_gap_ms.load(Ordering::Relaxed);
+        assert!(
+            worst < 500,
+            "the runtime stalled for {worst} ms while the write lock was held \
+             (the hold is {} ms; anything near it means the count was written inline)",
+            HOLD.as_millis()
+        );
+        let ticks = ticks.load(Ordering::Relaxed);
+        assert!(
+            ticks > 50,
+            "the ticker only advanced {ticks} times across a {} ms hold",
+            HOLD.as_millis()
+        );
+        assert_eq!(event_counters(&db_path), (1, 0), "and the count landed");
+        for waiter in waiting {
+            waiter.abort();
+        }
+    }
+
     /// The agent-run and timeout failures reach `finish`'s error arm: still
     /// one row, still the event's source and payload.
     #[test]
@@ -2917,6 +3383,9 @@ mod tests {
             save_output: false,
             destinations: Vec::new(),
             continue_on_reply: false,
+            max_concurrent_runs: 1,
+            max_queued_events: 5,
+            max_runs_per_hour: 10,
             dropped_event_count: 0,
             rate_limited_event_count: 0,
             status: "active".to_string(),

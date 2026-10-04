@@ -232,6 +232,10 @@
     {
       "version": 53,
       "sql": "\n-- Slack rule allowed users (#688). Authored here like 31-52, and additive: one\n-- defaulted column on trigger_rules, so an older build opening this database\n-- keeps working. No row is rewritten and enabled is not touched: an existing\n-- Slack rule keeps its switch and answers nobody until a user is listed.\nALTER TABLE trigger_rules ADD COLUMN filter_user_ids TEXT NOT NULL DEFAULT '[]';\n"
+    },
+    {
+      "version": 54,
+      "sql": "\n-- Per-task run limits for event runs (#691). Authored here like 31-53, and\n-- additive: three defaulted columns on scheduled_tasks, so an older build\n-- opening this database keeps working. Every existing task takes the defaults:\n-- one event run at a time, five waiting, ten an hour.\nALTER TABLE scheduled_tasks ADD COLUMN max_concurrent_runs INTEGER NOT NULL DEFAULT 1;\nALTER TABLE scheduled_tasks ADD COLUMN max_queued_events INTEGER NOT NULL DEFAULT 5;\nALTER TABLE scheduled_tasks ADD COLUMN max_runs_per_hour INTEGER NOT NULL DEFAULT 10;\n"
     }
   ]
 }

@@ -348,7 +348,8 @@ declines to start one.
   before; otherwise `Inbound::run_linked` builds an `EventInput`
   (`TriggeredBy::Slack`, the text `filtered_prompt` left, and
   `ReplyTarget::Slack { integration, channel, thread_ts: the mention's ts }`) and
-  calls `executor::run_event`. On that arm:
+  hands it to the executor in two steps, `executor::admit_event` and then
+  `executor::run_admitted`. On that arm:
   - **The handler posts nothing on success.** The answer is the task's `reply`
     delivery (`schedule/delivery.rs`, #682), which the run does not await. A
     linked task with no `reply` destination therefore runs, is recorded, and is
@@ -357,9 +358,12 @@ declines to start one.
     instructions are the prompt and the mention's words are the delimited data
     block inside it (`docs/internal/native-schedule.md`).
   - **The refusals write no `job_history` row.** `Paused` is silence, like a
-    disabled channel rule. `NoSuchTask`, `Unavailable` and a process with no
-    scheduler answer `ERROR_REPLY` in the thread, and never fall back to
-    `start_chat` — that would run the sender's words as the prompt.
+    disabled channel rule. `Dropped` and `RateLimited` — the task's own run
+    limits (#691) — are silence too, with one `info` line of ids; the executor
+    has already counted the event on the task. `NoSuchTask`, `Unavailable` and
+    a process with no scheduler answer `ERROR_REPLY` in the thread, and never
+    fall back to `start_chat` — that would run the sender's words as the
+    prompt.
   - **The scheduler is looked up per turn** (`Inbound::scheduler`:
     `schedule::runtime::running()`), because `lib.rs` starts the integration
     registry before the scheduler. Tests pass a `runtime::detached` one through
@@ -373,9 +377,14 @@ declines to start one.
     which is spawned and not awaited — so the second fails, and which of the
     two threads ends up mapped is not determined (#686). When the delivery
     wins, a follow-up in the mention's thread is dropped as unmapped.
-  - **Both global bounds apply.** The dispatcher's ten-slot permit is taken
-    around `run_event`, which then takes one of the scheduler's three, so an
-    event run waiting for the scheduler holds a dispatcher permit (#691).
+  - **The task's limits come first, then both global bounds** (#691).
+    `admit_event` passes the task's limiter, and only an admitted event takes
+    the dispatcher's ten-slot permit, around `run_admitted`, which then takes
+    one of the scheduler's three. A mention waiting in its task's queue holds
+    neither; it does hold its Slack thread's worker, so later mentions in that
+    one thread wait behind it. The queue is at most 100 per task.
+    `the_global_bound_is_taken_around_the_run_and_not_around_the_wait` pins the
+    order.
   - **A quick follow-up can be answered before the first reply lands**, since
     delivery is not awaited; the FIFO still orders the runs themselves.
 - **The two failure sentences are `trigger::dispatcher`'s constants**, now

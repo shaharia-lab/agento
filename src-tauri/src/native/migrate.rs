@@ -80,6 +80,9 @@
 //! users a Slack rule answers, default `[]`. No row is rewritten and `enabled`
 //! is not touched, so an existing Slack rule keeps its switch and answers
 //! nobody until a user is listed (#688).
+//! Migration **54** is the twenty-fourth: `scheduled_tasks.max_concurrent_runs`,
+//! `max_queued_events` and `max_runs_per_hour`, the per-task limits on event
+//! runs, defaulting to 1, 5 and 10 (#691).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -311,8 +314,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 53, "expected 53 migrations");
-        assert_eq!(expected_version(), 53);
+        assert_eq!(all.len(), 54, "expected 54 migrations");
+        assert_eq!(expected_version(), 54);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -406,7 +409,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 53);
+        assert_eq!(current_version(&conn).expect("version"), 54);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -624,7 +627,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 53);
+        assert_eq!(current_version(&conn).expect("version"), 54);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -684,7 +687,7 @@ mod tests {
         .expect("seed rows at 47");
 
         apply(&mut conn).expect("apply 48 and later");
-        assert_eq!(current_version(&conn).expect("version"), 53);
+        assert_eq!(current_version(&conn).expect("version"), 54);
 
         let flagged = |table: &str| -> Vec<String> {
             let mut stmt = conn
@@ -856,7 +859,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 53);
+        assert_eq!(current_version(&conn).expect("version"), 54);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -965,6 +968,47 @@ mod tests {
             )
             .expect("read");
         assert_eq!(updated_at, "then", "a backfill is not a user edit");
+    }
+
+    /// Migration 54 (#691): a task that existed before it reads back with the
+    /// default limits, and an older build's insert, which names none of the
+    /// three columns, still lands with them.
+    #[test]
+    fn migration_54_gives_every_task_the_default_event_run_limits() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 53);
+        let insert = |conn: &Connection, id: &str| {
+            conn.execute(
+                "INSERT INTO scheduled_tasks (id, name, prompt) VALUES (?1, 'T', 'p')",
+                [id],
+            )
+            .expect("insert task");
+        };
+        insert(&conn, "existing");
+
+        apply(&mut conn).expect("apply 54");
+        insert(&conn, "older-build");
+
+        let rows: Vec<(String, i64, i64, i64)> = conn
+            .prepare(
+                "SELECT id, max_concurrent_runs, max_queued_events, max_runs_per_hour
+                 FROM scheduled_tasks ORDER BY id",
+            )
+            .expect("prepare")
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("existing".to_string(), 1, 5, 10),
+                ("older-build".to_string(), 1, 5, 10),
+            ]
+        );
     }
 
     /// Migration 53 (#688): a rule that existed before it reads back with an
@@ -1196,7 +1240,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 53);
+        assert_eq!(current_version(&conn).expect("version"), 54);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -1205,7 +1249,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 53);
+        assert_eq!(recorded, 54);
     }
 
     #[test]

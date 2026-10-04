@@ -424,11 +424,11 @@ Three things that look like this and are not:
 
 ### Socket Mode says Connected but a mention does nothing
 
-Every one of these is silent by design. Of the ten, two say nothing in the log
-at all, seven are at **`debug`** level — so raise the level before you go looking
-— and one is at `error`. Two of the seven have a second, database cause that logs
-at `warn` or `error` just above them, and each says so below. Work down the
-list:
+Every one of these is silent by design. Of the eleven, two say nothing in the
+log at all, seven are at **`debug`** level — so raise the level before you go
+looking — one is at `info` and one is at `error`. Two of the seven have a
+second, database cause that logs at `warn` or `error` just above them, and each
+says so below. Work down the list:
 
 - **The app is not in the channel.** Slack never sent the event at all — nothing
   appears in the log. `/invite @Agento` in that channel.
@@ -447,6 +447,13 @@ list:
   has none, so after updating it answers nobody and its row reads *No allowed
   users, not responding*. Edit the rule and add the person's Slack member id.
   When the rule starts a task, each of these is counted on that task.
+- **The rule's task is at its run limits.** Log, at `info`:
+  `slack mention ignored, the rule's task is at its run limits`, with
+  `reason=Dropped` or `reason=RateLimited`. A task runs one message-started run
+  at a time, keeps five more waiting and starts ten in any hour, unless its
+  limits were changed. A mention past the queue is dropped and one past the
+  hour's count is rate-limited; each is counted on the task and gets no reply.
+  Wait for the running one to finish or for the hour to move on.
 - **The thread was not started by Agento.** Log:
   `slack mention ignored, a thread Agento did not start`. Only a mention that
   starts a new thread can start a chat; inside an existing thread Agento answers

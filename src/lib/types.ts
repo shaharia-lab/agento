@@ -307,6 +307,14 @@ export interface ScheduledTask {
   destinations?: TaskDestination[] | null;
   /** Whether a reply to this task's output continues the conversation (#681). */
   continue_on_reply: boolean;
+  /**
+   * Limits on the task's event runs (#691): at once (1-3), waiting (1-100),
+   * and starts in any hour (1-1000). A write that omits one, or sends 0,
+   * stores the default: 1, 5 and 10.
+   */
+  max_concurrent_runs: number;
+  max_queued_events: number;
+  max_runs_per_hour: number;
   /** Events the task did not run for (#681). Server-owned: a write ignores both. */
   dropped_event_count: number;
   rate_limited_event_count: number;
