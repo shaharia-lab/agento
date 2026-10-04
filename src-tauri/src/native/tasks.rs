@@ -1866,6 +1866,31 @@ mod tests {
         }
     }
 
+    /// #688: a refused event moves the one task's counter by one, an edit made
+    /// afterwards keeps the count, and a task that is gone is not an error.
+    #[test]
+    fn a_dropped_event_is_counted_on_its_task_and_nowhere_else() {
+        let file = migrated();
+        let counted = created(&file, r#"{"name":"A","prompt":"p"}"#);
+        let other = created(&file, r#"{"name":"B","prompt":"p"}"#);
+        let dropped = |id: &str| {
+            get_task(file.path(), id)
+                .expect("read")
+                .expect("task")
+                .dropped_event_count
+        };
+
+        count_dropped_event(file.path(), &counted.id).expect("count");
+        count_dropped_event(file.path(), &counted.id).expect("count");
+        assert_eq!((dropped(&counted.id), dropped(&other.id)), (2, 0));
+
+        update_task(file.path(), &counted.id, br#"{"name":"A2","prompt":"p"}"#).expect("edit");
+        assert_eq!(dropped(&counted.id), 2, "an edit keeps the count");
+
+        count_dropped_event(file.path(), "no-such-task").expect("a missing task is not an error");
+        assert_eq!((dropped(&counted.id), dropped(&other.id)), (2, 0));
+    }
+
     #[test]
     fn validation_failures_are_422_with_gos_wording() {
         let file = migrated();
@@ -3707,6 +3732,23 @@ pub fn finish_delivery(
         )
         .map_err(|e| format!("finishing delivery {id:?}: {e}"))?;
     Ok(changed > 0)
+}
+
+/// Counts one event a rule refused on `task_id` (#688): an inbound message
+/// that produced no run and no reply.
+///
+/// The column is the server's, so this writes it directly: `update_task_in`
+/// leaves it out of its `SET` list, which is what keeps a concurrent task edit
+/// or a run's write-back from undoing an increment. A task deleted since the
+/// rule was linked changes no row, and that is not an error.
+pub fn count_dropped_event(db_path: &Path, task_id: &str) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "UPDATE scheduled_tasks SET dropped_event_count = dropped_event_count + 1 WHERE id = ?1",
+        [task_id],
+    )
+    .map_err(|e| format!("counting a dropped event: {e}"))?;
+    Ok(())
 }
 
 /// Fails every delivery a previous session left `pending`, with `reason` as its

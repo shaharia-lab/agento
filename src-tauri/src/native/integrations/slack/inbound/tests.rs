@@ -36,6 +36,8 @@ use super::{filtered_prompt, reply_for, strip_mention, Dropped, ERROR_REPLY, NO_
 
 const BOT_USER: &str = "U0BOT";
 const CHANNEL: &str = "C1";
+/// Who every fixture mention is from, and who every seeded rule lists (#688).
+const SENDER: &str = "U1";
 
 // ─── The fake Slack ──────────────────────────────────────────────────────────
 
@@ -339,8 +341,8 @@ fn seed_filtered_rule(
         "INSERT INTO trigger_rules
             (id, integration_id, name, agent_slug, enabled, filter_prefix, filter_keywords,
              filter_chat_ids, model, working_directory, settings_profile_id, permission_mode,
-             timeout_minutes, created_at, updated_at)
-         VALUES (?1, ?2, ?1, '', ?3, ?8, ?9, ?4, ?5, ?6, '', 'plan', 0, ?7, ?7)",
+             timeout_minutes, created_at, updated_at, filter_user_ids)
+         VALUES (?1, ?2, ?1, '', ?3, ?8, ?9, ?4, ?5, ?6, '', 'plan', 0, ?7, ?7, ?10)",
         rusqlite::params![
             id,
             integration_id,
@@ -350,7 +352,9 @@ fn seed_filtered_rule(
             working_directory,
             created_at,
             prefix,
-            keywords
+            keywords,
+            // Every seeded rule lists the fixture's sender (#688).
+            format!(r#"["{SENDER}"]"#)
         ],
     )
     .expect("seed a rule");
@@ -395,7 +399,7 @@ fn mention(text: &str, ts: &str, thread_ts: &str, integration_id: &str) -> AppMe
     AppMention {
         integration_id: integration_id.to_string(),
         channel: CHANNEL.to_string(),
-        user: "U1".to_string(),
+        user: SENDER.to_string(),
         text: text.to_string(),
         ts: ts.to_string(),
         thread_ts: thread_ts.to_string(),
@@ -450,6 +454,7 @@ fn filters(prefix: &str, keywords: &[&str], channels: &[&str]) -> RuleFilters {
         prefix: prefix.to_string(),
         keywords: keywords.iter().map(|k| k.to_string()).collect(),
         chat_ids: channels.iter().map(|c| c.to_string()).collect(),
+        user_ids: Vec::new(),
     }
 }
 
@@ -1921,4 +1926,244 @@ async fn an_existing_thread_resumes_even_when_its_rule_is_now_linked() {
         ],
         "the words are the prompt on this path, as they always were"
     );
+}
+
+// ─── Allowed users (#688) ────────────────────────────────────────────────────
+
+/// `t1`'s dropped-event counter.
+fn dropped_events(db_path: &Path) -> i64 {
+    rusqlite::Connection::open(db_path)
+        .expect("open")
+        .query_row(
+            "SELECT dropped_event_count FROM scheduled_tasks WHERE id = 't1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the task exists")
+}
+
+fn chat_count(db_path: &Path) -> i64 {
+    rusqlite::Connection::open(db_path)
+        .expect("open")
+        .query_row("SELECT COUNT(*) FROM chat_sessions", [], |row| row.get(0))
+        .expect("count chats")
+}
+
+/// `mention`, from `user` rather than from [`SENDER`].
+fn mention_from(user: &str, text: &str, ts: &str, integration_id: &str) -> AppMention {
+    let mut mention = mention(text, ts, "", integration_id);
+    mention.user = user.to_string();
+    mention
+}
+
+/// The issue's gate: a mention from a user the rule does not list is no run, no
+/// chat, no mapped thread and no reply, and the linked task counts it once. A
+/// mention that names no user at all is refused the same way, and so is every
+/// mention under a rule that lists nobody.
+#[tokio::test]
+async fn a_mention_from_an_unlisted_user_runs_nothing_and_is_counted_on_the_task() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-users", "active", REPLY_ALWAYS);
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-users",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention_from(
+        "U9STRANGER",
+        "<@U0BOT> run it",
+        "1700000000.000100",
+        "s-users",
+    )))
+    .await;
+    assert_eq!(dropped_events(&db), 1, "counted exactly once");
+
+    finish(handler(mention_from(
+        "",
+        "<@U0BOT> run it",
+        "1700000000.000200",
+        "s-users",
+    )))
+    .await;
+    // Case is part of a Slack id: `u1` is not `U1`.
+    finish(handler(mention_from(
+        &SENDER.to_lowercase(),
+        "<@U0BOT> run it",
+        "1700000000.000300",
+        "s-users",
+    )))
+    .await;
+    assert_eq!(dropped_events(&db), 3);
+
+    // A rule that lists nobody answers nobody, the listed sender included.
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE trigger_rules SET filter_user_ids = '[]'", [])
+        .expect("clear the list");
+    finish(handler(mention(
+        "<@U0BOT> run it",
+        "1700000000.000400",
+        "",
+        "s-users",
+    )))
+    .await;
+    // Nothing to wait for by name, so give a stray run time to show.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(dropped_events(&db), 4);
+    assert!(
+        slack.calls().is_empty(),
+        "nothing was asked of Slack, `auth.test` included: {:?}",
+        slack.calls()
+    );
+    assert!(jobs(&db).is_empty(), "no run was recorded");
+    assert!(threads(&db).is_empty(), "no thread was mapped");
+    assert_eq!(chat_count(&db), 0, "no chat was created");
+}
+
+/// The sender is decided before the prefix and keywords: an unlisted user whose
+/// text would also fail the prefix is a dropped sender (counted, no
+/// `auth.test`), while the listed user failing the same prefix is an ordinary
+/// filtered mention, which is not counted.
+#[tokio::test]
+async fn the_sender_is_checked_before_the_prefix_and_before_auth_test() {
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-order");
+    seed_filtered_rule(
+        &db,
+        "s-order",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+        "/ask",
+        "[]",
+    );
+    seed_task(&db, "active", "[]");
+    link_rule(&db, "r", "t1");
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-order",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+
+    finish(handler(mention_from(
+        "U9STRANGER",
+        "<@U0BOT> no prefix here",
+        "1700000000.000100",
+        "s-order",
+    )))
+    .await;
+    assert_eq!(dropped_events(&db), 1, "dropped as a sender");
+    assert!(
+        slack.calls().is_empty(),
+        "the bot's id was never fetched: {:?}",
+        slack.calls()
+    );
+
+    finish(handler(mention(
+        "<@U0BOT> no prefix here",
+        "1700000000.000200",
+        "",
+        "s-order",
+    )))
+    .await;
+    set_api_base(None);
+
+    assert_eq!(
+        dropped_events(&db),
+        1,
+        "a listed sender failing the prefix is filtered, not counted"
+    );
+    assert_eq!(
+        slack
+            .calls()
+            .iter()
+            .map(|call| call.method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["auth.test"],
+        "the listed sender got as far as the filters, and no reply"
+    );
+    assert!(jobs(&db).is_empty());
+}
+
+/// A rule with no linked task has nowhere to count, and still drops: the listed
+/// sender is answered as before, and an unlisted user's reply inside that same
+/// thread, one Agento started, adds no turn and no message.
+#[tokio::test]
+async fn an_unlinked_rule_drops_an_unlisted_user_even_inside_its_own_thread() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-plain");
+    seed_rule(
+        &db,
+        "s-plain",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+    );
+    // A task exists and the rule is not linked to it.
+    seed_task(&db, "active", "[]");
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler(&db, "s-plain", "xoxb-t");
+    finish(handler(mention(
+        "<@U0BOT> first",
+        "1700000000.000100",
+        "",
+        "s-plain",
+    )))
+    .await;
+    let mut reply = mention(
+        "<@U0BOT> second",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-plain",
+    );
+    reply.user = "U9STRANGER".to_string();
+    finish(handler(reply)).await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(
+        slack.posted(),
+        vec![("1700000000.000100".to_string(), "answer 1".to_string())],
+        "the listed sender is answered, the stranger's reply is not"
+    );
+    let mapped = threads(&db);
+    assert_eq!(mapped.len(), 1);
+    assert_eq!(
+        messages(&db, &mapped[0].1).len(),
+        2,
+        "the chat holds the one turn"
+    );
+    assert_eq!(dropped_events(&db), 0, "an unlinked rule counts nowhere");
 }

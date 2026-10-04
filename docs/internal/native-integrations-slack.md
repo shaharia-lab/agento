@@ -267,6 +267,33 @@ declines to start one.
   *could not read*: `busy_timeout` is five seconds, and a database busy behind the
   session scanner would otherwise make a resume look like a stranger's thread and
   answer nothing.
+- **The sender is checked first, and an empty list is nobody (#688).** A rule's
+  `filter_user_ids` (migration 53) is the Slack users it answers. `accept` asks
+  `match_rule::sender_allowed(&rule.filters.user_ids, &mention.user)` straight
+  after `rule_for` and before `auth.test`, the strip and the filters, so a
+  mention from an unlisted user costs one rule read and nothing else: no queue
+  entry, no thread-map read, no chat, no run and no reply. An empty list, an
+  empty `user` and an id in another case are all refusals, the opposite of
+  `filter_chat_ids`, where empty is the workspace default. The check runs on
+  every mention, a reply inside one of Agento's own threads included, for the
+  reason the filters do. It is a separate function rather than a clause of
+  `match_rule` because that one is shared with Telegram and pinned to
+  `parity/trigger_match_vectors.json`. A refusal is `Dropped::UnknownSender`,
+  logged at `debug` with Slack's ids, and it is the one drop that is counted:
+  `tasks::count_dropped_event` adds one to the linked task's
+  `dropped_event_count` through `db::blocking`, and a rule with no `task_id`
+  only logs. The write is the other guard: on a Slack integration
+  `integrations.rs::validate_rule_users` answers 422 on `filter_user_ids` for
+  `enabled: true` with no users, and for an entry that is not `U` or `W`
+  followed by uppercase letters or digits; the list is stored trimmed, without
+  blanks or repeats. **Migration 53 grandfathers nothing**: a rule that existed
+  keeps `enabled` and reads back `[]`, so it answers nobody until a user is
+  added, and the row's switch cannot turn it back on because that posts the
+  stored rule. Guards:
+  `a_mention_from_an_unlisted_user_runs_nothing_and_is_counted_on_the_task`,
+  `the_sender_is_checked_before_the_prefix_and_before_auth_test`,
+  `an_unlinked_rule_drops_an_unlisted_user_even_inside_its_own_thread`,
+  `a_slack_rule_cannot_be_enabled_without_an_allowed_user`.
 - **Strip, then filter, then enqueue — and the filters read the stripped text
   (#582).** The trigger-rule form has always shown Prefix and Keywords for every
   provider, and until #582 the Slack path read neither: `filter_prefix` and

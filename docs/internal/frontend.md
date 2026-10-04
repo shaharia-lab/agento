@@ -346,6 +346,20 @@ summary gains ` · ⚠`, so an untouched save round-trips it. Warnings wait unti
 *within* the owned name, not only equal to it. The channel field keeps its raw
 text row-locally and writes the parsed array through `edit()`.
 
+**A Slack rule's allowed users** (#688). `Provider.triggerSenders` in
+`views/integrations/catalog.ts` is set for Slack only and carries the field's
+words and the write's id pattern. `RuleForm` shows the comma-separated
+**Allowed users** input when it is set, and Save is shut, with the reason in
+text, while the rule is on and the list is empty or an entry is not a user id.
+A stored rule's row reads `N allowed user(s)`, and one with no users shows
+`triggerSenders.off` instead. Its switch is
+**not** disabled, unlike a Telegram rule with no chats: migration 53 left such a
+rule on, so the switch has to stay usable to turn it off, and turning it on is
+refused by the write with a 422 that the section's error line shows.
+`filter_user_ids` is in `RuleDraft` and both `RuleWrite` builders for every
+provider, because the `PUT` is replace. #689 replaces the text input with a
+member picker.
+
 **A trigger rule's task link, and what a run shows about its trigger** (#687).
 `RuleForm` (`IntegrationsView.tsx`) has a **Task** `Dropdown` over `GET
 /api/tasks`: `No task` is `task_id: ""`, and a stored id the loaded list does

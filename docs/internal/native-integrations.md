@@ -199,6 +199,13 @@ the other process's view immediately afterwards. Always go through
 busy timeout.
 
 
+**A trigger rule carries `filter_user_ids`** (#688, migration 53). On the wire
+it follows `filter_chat_ids`, and it is always a list: a write stores the given
+entries trimmed, without blanks or repeats, and an omitted key stores `[]`. It
+is replaced on `PUT` like the rest of the rule. Only Slack reads or validates
+it (`docs/internal/native-integrations-slack.md`); a Telegram rule stores
+whatever it is given and is never asked for one.
+
 **A trigger rule can name a task, and says whether a reply continues** (#681,
 epic #679). Migration 48 adds `trigger_rules.task_id` and
 `trigger_rules.continue_on_reply`; on the wire both follow `timeout_minutes`,

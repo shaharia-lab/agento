@@ -93,6 +93,28 @@ export interface TriggerTargets {
   required?: RequiredTargets;
 }
 
+/**
+ * Set on a provider whose rules name the people they answer in a list of
+ * their own, apart from `filter_chat_ids` (#688).
+ *
+ * Slack sets it: its target list selects channels, and who may start a run is
+ * `filter_user_ids`. The write refuses turning a rule on while that list is
+ * empty, and the handler answers nobody for an empty one. Telegram does not:
+ * there the chat list is the sender list (`RequiredTargets`).
+ */
+export interface TriggerSenders {
+  placeholder: string;
+  help: string;
+  /** One entry as the write accepts it. */
+  pattern: RegExp;
+  /** Beside the form's disabled Save, while the rule is on and the list empty. */
+  missing: string;
+  /** Under the field, ahead of the entries that do not match `pattern`. */
+  invalid: string;
+  /** On a stored rule's row while its list is empty. */
+  off: string;
+}
+
 export interface RequiredTargets {
   /** One entry as the write accepts it. */
   pattern: RegExp;
@@ -128,6 +150,8 @@ export interface Provider {
   inbound?: InboundCopy;
   /** Only read when `supportsTriggers`. */
   triggerTargets?: TriggerTargets;
+  /** The rule form's allowed-users field, where a provider has one (#688). */
+  triggerSenders?: TriggerSenders;
   /**
    * A credential field that lives *beside* whichever mode the row uses rather
    * than inside one (#569).
@@ -282,7 +306,16 @@ export const PROVIDERS: Provider[] = [
       help: "Slack channel ids, comma-separated; empty = every channel the app is in.",
       noun: "channel",
       filterHelp:
-        "Checked after the @mention is removed: the prefix must start what is left, a keyword may appear anywhere in it. Replies inside a thread Agento started are checked too. Leave both empty to answer every mention in a matched channel.",
+        "Checked after the @mention is removed: the prefix must start what is left, a keyword may appear anywhere in it. Replies inside a thread Agento started are checked too. Leave both empty to answer every mention from an allowed user in a matched channel.",
+    },
+    triggerSenders: {
+      placeholder: "Allowed users: U0123ABCDEF, U0456GHIJKL",
+      help: "Slack user ids, comma-separated. A rule answers only the users listed here, and cannot be turned on with none. A mention from anyone else starts nothing and gets no reply. To find an id, open the person's Slack profile, choose More, then Copy member ID.",
+      /* The write's own rule (`integrations.rs::is_slack_user_id`). */
+      pattern: /^[UW][A-Z0-9]+$/,
+      missing: "Add at least one allowed user to save this rule turned on, or turn it off.",
+      invalid: "Not a Slack user ID:",
+      off: "No allowed users, not responding. Edit the rule and add at least one.",
     },
     extraField: {
       key: "app_token",

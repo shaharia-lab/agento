@@ -200,6 +200,9 @@ export interface TriggerRule {
   filter_prefix: string;
   filter_keywords: string[] | null;
   filter_chat_ids: string[] | null;
+  /** The Slack users a rule answers (#688). On a Slack rule empty is nobody;
+      every other provider stores it and never reads it. */
+  filter_user_ids: string[] | null;
   /** The execution settings a rule may override, migration 39 (#563). Every
       one is empty/0 for "whatever the dispatcher already does", which is what
       every rule written before that migration reads back as. */

@@ -240,7 +240,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
         .prepare(
             "SELECT id, name, agent_slug, enabled, filter_prefix, filter_keywords,
                     filter_chat_ids, model, working_directory, settings_profile_id,
-                    permission_mode, timeout_minutes, task_id
+                    permission_mode, timeout_minutes, task_id, filter_user_ids
              FROM trigger_rules
              WHERE integration_id = ?1
              ORDER BY created_at ASC",
@@ -252,6 +252,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
             let keywords: String = row.get(5)?;
             let chat_ids: String = row.get(6)?;
             let permission_mode: String = row.get(10)?;
+            let user_ids: String = row.get(13)?;
             Ok(Rule {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -261,6 +262,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
                     prefix: row.get(4)?,
                     keywords: decode_list(&keywords),
                     chat_ids: decode_list(&chat_ids),
+                    user_ids: decode_list(&user_ids),
                 },
                 settings: agent_run::ExecutionSettings {
                     model: row.get(7)?,
@@ -282,8 +284,8 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
 }
 
 /// A stored `[]string` column. An unparseable or null value is an empty list:
-/// "no filter" for keywords, and for Telegram's `filter_chat_ids` an allowlist
-/// that names nobody (#674).
+/// "no filter" for keywords, and for Telegram's `filter_chat_ids` and Slack's
+/// `filter_user_ids` an allowlist that names nobody (#674, #688).
 fn decode_list(raw: &str) -> Vec<String> {
     serde_json::from_str::<Option<Vec<Option<String>>>>(raw)
         .ok()

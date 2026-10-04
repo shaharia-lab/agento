@@ -483,17 +483,28 @@ thread to see an answer, ask in the thread.
 
 #### Who can run an agent this way
 
-**Anyone who can post in a configured channel can run that rule's agent** — with
-the rule's **permission mode**, in the rule's **working directory**, on your
-machine, as you. Agento checks that the message came from a human rather than
-another bot, and nothing else: there is no allowlist of Slack users.
+**Only the users a rule lists can run it.** A Slack rule has an **Allowed
+users** list of Slack user ids, and a rule cannot be turned on while the list is
+empty. A mention from anyone else starts nothing and gets no reply, in a thread
+Agento started as much as anywhere else. To find an id, open the person's Slack
+profile, choose **More**, then **Copy member ID**; it looks like `U0123ABCDEF`.
 
-**The channel list is the only filter a Slack rule applies.** The rule form also
-offers a **Prefix** and **Keywords**, because the same form serves Telegram —
-but a mention over Socket Mode is matched on its channel alone, so neither
-narrows what triggers a run. Do not reach for them as a safety measure.
+A listed user runs the rule's agent with the rule's **permission mode**, in the
+rule's **working directory**, on your machine, as you. So list only people you
+would grant a shell to.
 
-So treat the channel list as the access control it is:
+**A rule saved by an earlier version has no allowed users, so it stops
+answering when Agento updates**, and its row says *No allowed users, not
+responding*. Edit the rule and add the users it should answer.
+
+When the rule starts a task, each mention it refused from an unlisted user is
+counted on that task. A rule with no task does not count them.
+
+The **Prefix** and **Keywords** on a rule narrow which messages from an allowed
+user start a run. They are not a safety measure: who may run the rule is the
+user list, and where is the channel list.
+
+Beyond the user list:
 
 - Name the channels explicitly in the rule rather than leaving the list blank,
   and make them channels whose membership you would grant a shell to.

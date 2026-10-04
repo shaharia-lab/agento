@@ -123,7 +123,7 @@ use crate::native::schedule::executor::{self, EventInput, EventRefused};
 use crate::native::schedule::runtime::{self, Scheduler};
 use crate::native::tasks;
 use crate::native::trigger::dispatcher::{self, Rule, ERROR_REPLY, NO_RESPONSE_REPLY};
-use crate::native::trigger::match_rule::{match_rule, RuleFilters};
+use crate::native::trigger::match_rule::{match_rule, sender_allowed, RuleFilters};
 use crate::native::trigger::select_rule::select_rule_for_channel;
 
 use crate::native::gourl::Values;
@@ -238,6 +238,15 @@ impl Inbound {
             return;
         };
 
+        // Who is asking comes first (#688): before the bot's id is fetched and
+        // before the rule's prefix and keywords are read, so a mention from a
+        // user the rule does not list costs no `auth.test`, no queue entry, no
+        // thread lookup and no run, and says nothing in Slack.
+        if !sender_allowed(&rule.filters.user_ids, &mention.user) {
+            self.drop_unknown_sender(&mention, &rule).await;
+            return;
+        }
+
         // The strip and the filters both need the bot's own id, and the filter
         // decision belongs before the queue: a mention this rule does not want
         // must not take a thread's turn, read the thread map or start a chat.
@@ -279,6 +288,34 @@ impl Inbound {
         // An `Err` is the worker being torn down without answering, which is
         // still the end of this handler's work.
         let _ = finished.await;
+    }
+
+    /// Record a mention from a user `rule` does not list (#688): one `debug`
+    /// line with Slack's opaque ids, and one count on the rule's linked task.
+    /// A rule with no task has nowhere to count and only logs.
+    async fn drop_unknown_sender(&self, mention: &AppMention, rule: &Rule) {
+        log::debug!(
+            "slack mention ignored, {} integration_id={:?} channel={:?} rule_id={:?} user={:?}",
+            Dropped::UnknownSender.reason(),
+            self.integration_id,
+            mention.channel,
+            rule.id,
+            mention.user
+        );
+        if rule.task_id.is_empty() {
+            return;
+        }
+        let (db_path, task_id) = (self.db_path.clone(), rule.task_id.clone());
+        let counted = db::blocking("slack dropped event count", move || {
+            tasks::count_dropped_event(&db_path, &task_id)
+        })
+        .await;
+        if let Some(Err(e)) = counted {
+            log::warn!(
+                "failed to count a dropped slack event rule_id={:?}: {e}",
+                rule.id
+            );
+        }
     }
 
     /// The rule this channel runs under, or `None` for silence.
@@ -804,11 +841,14 @@ fn enqueue(state: &Arc<Inbound>, job: Job) {
 
 /// Why a mention produced no run and no reply.
 ///
-/// Two reasons rather than one because they read differently in a log: nothing
-/// was said to the bot at all, or the rule was asked for something narrower
-/// than what was said.
+/// Three reasons rather than one because they read differently in a log: the
+/// rule does not list who asked, nothing was said to the bot at all, or the
+/// rule was asked for something narrower than what was said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dropped {
+    /// The mention's user is not in the rule's `filter_user_ids` (#688).
+    /// Decided first, and the only reason that is counted on the linked task.
+    UnknownSender,
     /// Removing the bot's own `<@Uxxx>` left nothing.
     NothingSaid,
     /// The rule's `filter_prefix` or `filter_keywords` said no.
@@ -817,9 +857,10 @@ enum Dropped {
 
 impl Dropped {
     /// The clause a `debug` line reads with. No Slack-derived text, by
-    /// construction — these are two constants.
+    /// construction — these are three constants.
     fn reason(self) -> &'static str {
         match self {
+            Dropped::UnknownSender => "the rule does not list the sender",
             Dropped::NothingSaid => "nothing said to the bot",
             Dropped::Filtered => "the rule's filters did not match",
         }

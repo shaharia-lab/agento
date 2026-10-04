@@ -228,6 +228,10 @@
     {
       "version": 52,
       "sql": "\n-- Run summaries (#678). Authored here like 31-51, and additive: two defaulted\n-- columns on job_history, so an older build opening this database keeps\n-- working. Every run recorded before this migration was run by this install,\n-- on the only harness there was, so the backfill is exact and not a guess.\nALTER TABLE job_history ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';\nALTER TABLE job_history ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';\nUPDATE job_history\n   SET machine_id = COALESCE((SELECT machine_id FROM install_identity), '');\n"
+    },
+    {
+      "version": 53,
+      "sql": "\n-- Slack rule allowed users (#688). Authored here like 31-52, and additive: one\n-- defaulted column on trigger_rules, so an older build opening this database\n-- keeps working. No row is rewritten and enabled is not touched: an existing\n-- Slack rule keeps its switch and answers nobody until a user is listed.\nALTER TABLE trigger_rules ADD COLUMN filter_user_ids TEXT NOT NULL DEFAULT '[]';\n"
     }
   ]
 }

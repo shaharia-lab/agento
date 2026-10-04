@@ -76,6 +76,10 @@
 //! Migration **52** is the twenty-second: `job_history.machine_id` and
 //! `harness`, which install ran a run and on what. Existing rows are backfilled
 //! with this install's `install_identity.machine_id` and `claude` (#678).
+//! Migration **53** is the twenty-third: `trigger_rules.filter_user_ids`, the
+//! users a Slack rule answers, default `[]`. No row is rewritten and `enabled`
+//! is not touched, so an existing Slack rule keeps its switch and answers
+//! nobody until a user is listed (#688).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -307,8 +311,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 52, "expected 52 migrations");
-        assert_eq!(expected_version(), 52);
+        assert_eq!(all.len(), 53, "expected 53 migrations");
+        assert_eq!(expected_version(), 53);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -402,7 +406,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 52);
+        assert_eq!(current_version(&conn).expect("version"), 53);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -620,7 +624,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 52);
+        assert_eq!(current_version(&conn).expect("version"), 53);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -680,7 +684,7 @@ mod tests {
         .expect("seed rows at 47");
 
         apply(&mut conn).expect("apply 48 and later");
-        assert_eq!(current_version(&conn).expect("version"), 52);
+        assert_eq!(current_version(&conn).expect("version"), 53);
 
         let flagged = |table: &str| -> Vec<String> {
             let mut stmt = conn
@@ -852,7 +856,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 52);
+        assert_eq!(current_version(&conn).expect("version"), 53);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -961,6 +965,54 @@ mod tests {
             )
             .expect("read");
         assert_eq!(updated_at, "then", "a backfill is not a user edit");
+    }
+
+    /// Migration 53 (#688): a rule that existed before it reads back with an
+    /// empty `filter_user_ids` and the `enabled` it had, and an older build's
+    /// insert, which does not name the column, still lands.
+    #[test]
+    fn migration_53_gives_existing_rules_an_empty_user_list_and_keeps_them_on() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 52);
+        conn.execute(
+            "INSERT INTO integrations
+                (id, name, type, enabled, credentials, services, created_at, updated_at)
+             VALUES ('sl', 'sl', 'slack', 1, '{}', '{}', 'then', 'then')",
+            [],
+        )
+        .expect("seed integration");
+        let insert = |conn: &Connection, id: &str, enabled: i64| {
+            conn.execute(
+                "INSERT INTO trigger_rules
+                    (id, integration_id, name, agent_slug, enabled, created_at, updated_at)
+                 VALUES (?1, 'sl', ?1, 'a', ?2, 'then', 'then')",
+                rusqlite::params![id, enabled],
+            )
+            .expect("insert rule");
+        };
+        insert(&conn, "on", 1);
+        insert(&conn, "off", 0);
+
+        apply(&mut conn).expect("apply 53");
+        insert(&conn, "older-build", 1);
+
+        let rows: Vec<(String, i64, String)> = conn
+            .prepare("SELECT id, enabled, filter_user_ids FROM trigger_rules ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        let empty = || "[]".to_string();
+        assert_eq!(
+            rows,
+            vec![
+                ("off".to_string(), 0, empty()),
+                ("older-build".to_string(), 1, empty()),
+                ("on".to_string(), 1, empty()),
+            ]
+        );
     }
 
     /// Migration 52 (#678): every run recorded before it comes out naming this
@@ -1144,7 +1196,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 52);
+        assert_eq!(current_version(&conn).expect("version"), 53);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -1153,7 +1205,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 52);
+        assert_eq!(recorded, 53);
     }
 
     #[test]

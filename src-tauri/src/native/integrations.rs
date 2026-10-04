@@ -318,6 +318,10 @@ pub struct TriggerRule {
     pub filter_prefix: String,
     pub filter_keywords: Option<Vec<String>>,
     pub filter_chat_ids: Option<Vec<String>>,
+    /// The Slack users this rule answers (#688), and on Slack empty is nobody.
+    /// Stored trimmed and deduplicated, never `null`: a write always stores a
+    /// list and migration 53 defaulted the column to `[]`.
+    pub filter_user_ids: Option<Vec<String>>,
     pub model: String,
     pub working_directory: String,
     pub settings_profile_id: String,
@@ -697,7 +701,7 @@ const TRIGGER_RULE_COLUMNS: &str = "SELECT id, integration_id, name, agent_slug,
                     model, working_directory, settings_profile_id,
                     permission_mode, timeout_minutes,
                     created_at, updated_at,
-                    task_id, continue_on_reply
+                    task_id, continue_on_reply, filter_user_ids
              FROM trigger_rules";
 
 fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
@@ -707,6 +711,7 @@ fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
     let created_at: String = row.get(13)?;
     let updated_at: String = row.get(14)?;
     let continue_on_reply: i64 = row.get(16)?;
+    let user_ids: String = row.get(17)?;
     Ok(TriggerRule {
         id: row.get(0)?,
         integration_id: row.get(1)?,
@@ -716,6 +721,7 @@ fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
         filter_prefix: row.get(5)?,
         filter_keywords: super::gojson::decode_string_list(&keywords),
         filter_chat_ids: super::gojson::decode_string_list(&chat_ids),
+        filter_user_ids: super::gojson::decode_string_list(&user_ids),
         model: row.get(8)?,
         working_directory: row.get(9)?,
         settings_profile_id: row.get(10)?,
@@ -1687,6 +1693,9 @@ struct TriggerRuleRequest {
     /// A `null` element is `""` to Go, not an error (#295).
     filter_keywords: Option<super::gojson::GoList<String>>,
     filter_chat_ids: Option<super::gojson::GoList<String>>,
+    /// The Slack sender allowlist (#688). Replaced like the rest: an omitted
+    /// key stores `[]`.
+    filter_user_ids: Option<super::gojson::GoList<String>>,
     /// Migration 39's five execution settings (#563).
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     model: String,
@@ -1769,11 +1778,15 @@ fn validate_rule_settings(req: &TriggerRuleRequest) -> Result<(), WriteError> {
 /// would be stored and then never match.
 ///
 /// Telegram only. On a Slack rule the same column is a channel selection, and
-/// empty there is the workspace-wide default (`select_rule`).
+/// empty there is the workspace-wide default (`select_rule`); a Slack rule's
+/// senders are `filter_user_ids`, checked by [`validate_rule_users`].
 fn validate_rule_senders(
     integration_type: &str,
     req: &TriggerRuleRequest,
 ) -> Result<(), WriteError> {
+    if integration_type == "slack" {
+        return validate_rule_users(req);
+    }
     if integration_type != "telegram" {
         return Ok(());
     }
@@ -1792,6 +1805,57 @@ fn validate_rule_senders(
                 format!("chat id {chat:?} is not a numeric Telegram chat id"),
             ));
         }
+    }
+    Ok(())
+}
+
+/// A rule's `filter_user_ids` as it is stored (#688): each entry trimmed,
+/// blanks dropped, duplicates removed keeping the first. An omitted or `null`
+/// key is an empty list.
+fn rule_user_ids(req: &TriggerRuleRequest) -> Vec<String> {
+    let given = req.filter_user_ids.as_ref().map(|list| list.0.as_slice());
+    let mut out: Vec<String> = Vec::new();
+    for id in given.unwrap_or_default() {
+        let id = id.trim();
+        if !id.is_empty() && !out.iter().any(|kept| kept == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
+}
+
+/// Whether `id` is spelled like a Slack user id: `U` or `W`, then one or more
+/// uppercase letters or digits.
+fn is_slack_user_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    matches!(bytes.next(), Some(b'U' | b'W'))
+        && id.len() > 1
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// A Slack rule that is on must name the users it answers (#688).
+///
+/// `slack::inbound` reads an empty `filter_user_ids` as nobody
+/// (`match_rule::sender_allowed`), so an enabled rule stored without one could
+/// never fire. It is refused here rather than stored, so the write and the
+/// filter agree and neither is the only guard. A rule that is off may be saved
+/// with no users: that is how a rule from before migration 53 is edited, and
+/// the enabled switch posts the stored rule back, so this same 422 is what
+/// keeps it off until a user is listed. An entry that is not spelled like a
+/// user id is refused either way, because it would be stored and never match.
+fn validate_rule_users(req: &TriggerRuleRequest) -> Result<(), WriteError> {
+    let user_ids = rule_user_ids(req);
+    if let Some(bad) = user_ids.iter().find(|id| !is_slack_user_id(id)) {
+        return Err(WriteError::validation(
+            "filter_user_ids",
+            format!("user id {bad:?} is not a Slack user id"),
+        ));
+    }
+    if req.enabled && user_ids.is_empty() {
+        return Err(WriteError::validation(
+            "filter_user_ids",
+            "at least one user id is required to enable: a Slack rule answers only the users it lists",
+        ));
     }
     Ok(())
 }
@@ -1831,6 +1895,7 @@ fn create_trigger_rule(
     // whose `created_at` and `updated_at` differ by a nanosecond.
     let now = super::gotime::now_go_text();
     let stamp = parse_written(&now)?;
+    let user_ids = rule_user_ids(&req);
     let rule = TriggerRule {
         id: uuid::Uuid::new_v4().to_string(),
         integration_id: integration_id.to_string(),
@@ -1840,6 +1905,7 @@ fn create_trigger_rule(
         filter_prefix: req.filter_prefix,
         filter_keywords: req.filter_keywords.map(|list| list.0),
         filter_chat_ids: req.filter_chat_ids.map(|list| list.0),
+        filter_user_ids: Some(user_ids),
         model: req.model,
         working_directory: req.working_directory,
         settings_profile_id: req.settings_profile_id,
@@ -1886,7 +1952,8 @@ fn update_trigger_rule(
     }
     validate_rule_settings(&req)?;
     // The on/off switch posts the stored rule back, so this also refuses
-    // turning on a rule that migration 51 turned off, until it lists a chat.
+    // turning on a rule that migration 51 turned off, until it lists a chat,
+    // and a Slack rule from before migration 53, until it lists a user.
     let integration_type = integration_type_of(&conn, &existing.integration_id)?;
     validate_rule_senders(integration_type.as_deref().unwrap_or_default(), &req)?;
     // Only a *changed* link is looked up (#687). A task deleted after the rule
@@ -1900,6 +1967,7 @@ fn update_trigger_rule(
     // `UpdateRule` keeps the stored id, integration and creation time and
     // replaces everything else — a field the caller omitted is cleared, not kept.
     let now = super::gotime::now_go_text();
+    let user_ids = rule_user_ids(&req);
     let rule = TriggerRule {
         id: existing.id,
         integration_id: existing.integration_id,
@@ -1909,6 +1977,7 @@ fn update_trigger_rule(
         filter_prefix: req.filter_prefix,
         filter_keywords: req.filter_keywords.map(|list| list.0),
         filter_chat_ids: req.filter_chat_ids.map(|list| list.0),
+        filter_user_ids: Some(user_ids),
         model: req.model,
         working_directory: req.working_directory,
         settings_profile_id: req.settings_profile_id,
@@ -1926,8 +1995,9 @@ fn update_trigger_rule(
             filter_prefix = ?4, filter_keywords = ?5, filter_chat_ids = ?6,
             model = ?7, working_directory = ?8, settings_profile_id = ?9,
             permission_mode = ?10, timeout_minutes = ?11,
-            updated_at = ?12, task_id = ?13, continue_on_reply = ?14
-         WHERE id = ?15",
+            updated_at = ?12, task_id = ?13, continue_on_reply = ?14,
+            filter_user_ids = ?15
+         WHERE id = ?16",
         rusqlite::params![
             &rule.name,
             &rule.agent_slug,
@@ -1943,6 +2013,7 @@ fn update_trigger_rule(
             &now,
             &rule.task_id,
             i64::from(rule.continue_on_reply),
+            &marshal_list(&rule.filter_user_ids)?,
             &rule.id,
         ],
     )
@@ -1983,8 +2054,9 @@ fn insert_rule(
             (id, integration_id, name, agent_slug, enabled,
              filter_prefix, filter_keywords, filter_chat_ids,
              model, working_directory, settings_profile_id, permission_mode,
-             timeout_minutes, created_at, updated_at, task_id, continue_on_reply)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             timeout_minutes, created_at, updated_at, task_id, continue_on_reply,
+             filter_user_ids)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             &rule.id,
             &rule.integration_id,
@@ -2003,6 +2075,7 @@ fn insert_rule(
             now,
             &rule.task_id,
             i64::from(rule.continue_on_reply),
+            &marshal_list(&rule.filter_user_ids)?,
         ],
     )
     .map_err(|e| WriteError::Fallback(format!("creating trigger rule: {e}")))?;
@@ -2109,7 +2182,8 @@ mod tests {
             created_at          DATETIME NOT NULL,
             updated_at          DATETIME NOT NULL,
             task_id             TEXT NOT NULL DEFAULT '',
-            continue_on_reply   INTEGER NOT NULL DEFAULT 0
+            continue_on_reply   INTEGER NOT NULL DEFAULT 0,
+            filter_user_ids     TEXT NOT NULL DEFAULT '[]'
         );";
 
     /// The secret is a distinctive string so a leak is unmistakable in any
@@ -4130,20 +4204,218 @@ mod tests {
         );
     }
 
-    /// The requirement is Telegram's. A Slack rule's list is a channel
+    /// The chat requirement is Telegram's. A Slack rule's list is a channel
     /// selection, and one with none is the workspace-wide default.
     #[test]
     fn a_slack_rule_may_still_list_no_channel() {
         let file = migrated();
         seed_integration_of(&file, "sl", "slack");
         for body in [
-            &br#"{"agent_slug":"a","enabled":true}"#[..],
-            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":[]}"#,
-            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["C0123ABCD"]}"#,
+            &br#"{"agent_slug":"a","enabled":true,"filter_user_ids":["U0123ABCD"]}"#[..],
+            br#"{"agent_slug":"a","enabled":true,"filter_user_ids":["U0123ABCD"],"filter_chat_ids":[]}"#,
+            br#"{"agent_slug":"a","enabled":true,"filter_user_ids":["U0123ABCD"],"filter_chat_ids":["C0123ABCD"]}"#,
         ] {
             let created = create_trigger_rule(file.path(), "sl", body).expect("create");
             assert_eq!(created.status, axum::http::StatusCode::CREATED);
         }
+    }
+
+    /// #688: a Slack rule that is on must list a user. Both writes refuse it on
+    /// the field, whatever shape "lists nobody" takes, and store nothing.
+    #[test]
+    fn a_slack_rule_cannot_be_enabled_without_an_allowed_user() {
+        let file = migrated();
+        seed_integration_of(&file, "sl", "slack");
+        create_trigger_rule(
+            file.path(),
+            "sl",
+            br#"{"agent_slug":"a","enabled":true,"filter_user_ids":["U0123ABCD"]}"#,
+        )
+        .expect("create");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        let required = "at least one user id is required to enable: \
+                        a Slack rule answers only the users it lists";
+        for (body, want) in [
+            (r#"{"agent_slug":"a","enabled":true}"#, required.to_string()),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_user_ids":null}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_user_ids":[]}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_user_ids":[null,""," "]}"#,
+                required.to_string(),
+            ),
+            // Not spelled like a user id: refused on or off, since it would be
+            // stored and never match.
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_user_ids":["u0123abcd"]}"#,
+                r#"user id "u0123abcd" is not a Slack user id"#.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":false,"filter_user_ids":["U0123ABCD","@ada"]}"#,
+                r#"user id "@ada" is not a Slack user id"#.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_user_ids":["C0123ABCD"]}"#,
+                r#"user id "C0123ABCD" is not a Slack user id"#.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_user_ids":["U"]}"#,
+                r#"user id "U" is not a Slack user id"#.to_string(),
+            ),
+        ] {
+            for err in [
+                create_trigger_rule(file.path(), "sl", body.as_bytes()).expect_err("create"),
+                update_trigger_rule(file.path(), "sl", &id, body.as_bytes()).expect_err("update"),
+            ] {
+                assert_eq!(
+                    err.status(),
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "{body}"
+                );
+                assert_eq!(
+                    err.message(),
+                    format!(r#"validation error for "filter_user_ids": {want}"#),
+                    "{body}"
+                );
+            }
+        }
+        assert_eq!(
+            stored(
+                &file,
+                "SELECT CAST(COUNT(*) AS TEXT) || '/' || MAX(filter_user_ids) FROM trigger_rules"
+            ),
+            r#"1/["U0123ABCD"]"#,
+            "nothing was created and the stored list was not replaced"
+        );
+    }
+
+    /// #688: a Slack rule that is off may be stored with no users, which is how
+    /// a rule from before migration 53 is edited. The stored list is the given
+    /// one trimmed, without blanks or repeats, and it ships after
+    /// `filter_chat_ids`; an omitted key stores `[]`, not `null`.
+    #[test]
+    fn a_slack_rules_users_are_stored_normalised_and_an_off_rule_needs_none() {
+        let file = migrated();
+        seed_integration_of(&file, "sl", "slack");
+
+        let off = create_trigger_rule(file.path(), "sl", br#"{"agent_slug":"a","enabled":false}"#)
+            .expect("an off rule needs no users");
+        assert!(
+            body_of(&off)
+                .contains(r#""enabled":false,"filter_prefix":"","filter_keywords":null,"filter_chat_ids":null,"filter_user_ids":[],"model":"#),
+            "{}",
+            body_of(&off)
+        );
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        assert_eq!(
+            stored(&file, "SELECT filter_user_ids FROM trigger_rules"),
+            "[]"
+        );
+
+        let on = update_trigger_rule(
+            file.path(),
+            "sl",
+            &id,
+            br#"{"agent_slug":"a","enabled":true,
+                 "filter_user_ids":[" U0123ABCD ","",null,"W9ENTERPRISE","U0123ABCD"]}"#,
+        )
+        .expect("enable with users");
+        let wire =
+            r#""filter_chat_ids":null,"filter_user_ids":["U0123ABCD","W9ENTERPRISE"],"model":"#;
+        assert!(body_of(&on).contains(wire), "{}", body_of(&on));
+        assert_eq!(
+            stored(&file, "SELECT filter_user_ids FROM trigger_rules"),
+            r#"["U0123ABCD","W9ENTERPRISE"]"#
+        );
+        let listed = list_trigger_rules(file.path(), "sl").expect("list");
+        assert_eq!(
+            listed[0].filter_user_ids,
+            Some(vec!["U0123ABCD".to_string(), "W9ENTERPRISE".to_string()])
+        );
+
+        // Replace, like every other field: turning it off without the key
+        // clears the list.
+        update_trigger_rule(file.path(), "sl", &id, br#"{"agent_slug":"a"}"#).expect("off");
+        assert_eq!(
+            stored(&file, "SELECT filter_user_ids FROM trigger_rules"),
+            "[]"
+        );
+    }
+
+    /// #688: the user list is Slack's requirement. A Telegram rule stores
+    /// whatever it is given there, unchecked, and is never asked for one.
+    #[test]
+    fn a_telegram_rule_stores_a_user_list_and_never_needs_one() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        let created = create_trigger_rule(
+            file.path(),
+            "tg",
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["42"]}"#,
+        )
+        .expect("no user list");
+        assert!(
+            body_of(&created).contains(r#""filter_chat_ids":["42"],"filter_user_ids":[],"#),
+            "{}",
+            body_of(&created)
+        );
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        update_trigger_rule(
+            file.path(),
+            "tg",
+            &id,
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["42"],
+                 "filter_user_ids":["not a slack id"]}"#,
+        )
+        .expect("stored, not validated");
+        assert_eq!(
+            stored(&file, "SELECT filter_user_ids FROM trigger_rules"),
+            r#"["not a slack id"]"#
+        );
+    }
+
+    /// #688: a Slack rule from before migration 53 is on with no users. The
+    /// row's enabled switch posts the stored rule back, and that is refused
+    /// until a user is listed; turning it off, or editing it while off, works.
+    #[test]
+    fn a_slack_rule_predating_the_user_list_reads_back_empty_and_cannot_be_re_enabled() {
+        let file = migrated();
+        seed_integration_of(&file, "sl", "slack");
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO trigger_rules
+                    (id, integration_id, name, agent_slug, enabled, created_at, updated_at)
+                 VALUES ('old', 'sl', 'Old', 'a', 1,
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("a rule written by an older build");
+        let listed = list_trigger_rules(file.path(), "sl").expect("list");
+        assert!(listed[0].enabled, "the migration left it on");
+        assert_eq!(listed[0].filter_user_ids, Some(vec![]));
+
+        let err = update_trigger_rule(
+            file.path(),
+            "sl",
+            "old",
+            br#"{"name":"Old","agent_slug":"a","enabled":true,"filter_user_ids":[]}"#,
+        )
+        .expect_err("posting it back as it is");
+        assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        update_trigger_rule(
+            file.path(),
+            "sl",
+            "old",
+            br#"{"name":"Old","agent_slug":"a","enabled":false,"filter_user_ids":[]}"#,
+        )
+        .expect("turning it off");
     }
 
     #[test]
@@ -4154,7 +4426,8 @@ mod tests {
         let created = create_trigger_rule(
             file.path(),
             "int-1",
-            br#"{"name":"R","agent_slug":"a","enabled":true,"filter_keywords":["x"]}"#,
+            br#"{"name":"R","agent_slug":"a","enabled":true,"filter_keywords":["x"],
+                 "filter_user_ids":["U0123ABCD"]}"#,
         )
         .expect("create rule");
         assert_eq!(created.status, axum::http::StatusCode::CREATED);
@@ -4254,7 +4527,7 @@ mod tests {
         // the filters and the timestamps, not merely their presence.
         assert!(
             body.contains(
-                r#""filter_chat_ids":null,"model":"claude-opus-4-6","working_directory":"/srv/work","settings_profile_id":"p-7","permission_mode":"plan","timeout_minutes":45,"task_id":"","continue_on_reply":false,"created_at":"#
+                r#""filter_chat_ids":null,"filter_user_ids":[],"model":"claude-opus-4-6","working_directory":"/srv/work","settings_profile_id":"p-7","permission_mode":"plan","timeout_minutes":45,"task_id":"","continue_on_reply":false,"created_at":"#
             ),
             "{body}"
         );
@@ -4406,7 +4679,7 @@ mod tests {
         create_trigger_rule(
             file.path(),
             "int-1",
-            br#"{"agent_slug":"a","enabled":true,"task_id":"task-1"}"#,
+            br#"{"agent_slug":"a","enabled":true,"task_id":"task-1","filter_user_ids":["U0123ABCD"]}"#,
         )
         .expect("linked rule");
         let id = stored(&file, "SELECT id FROM trigger_rules");

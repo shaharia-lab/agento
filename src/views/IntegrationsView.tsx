@@ -45,6 +45,7 @@ import {
   type CredField,
   type InboundCopy,
   type Provider,
+  type TriggerSenders,
   type TriggerTargets,
 } from "./integrations/catalog";
 import "../styles/integrations.css";
@@ -1599,6 +1600,9 @@ interface RuleDraft {
   filter_prefix: string;
   filter_keywords: string;
   filter_chat_ids: string;
+  /** Slack's allowed users (#688); carried for every provider, because the
+      write is replace. */
+  filter_user_ids: string;
   /** Migration 39's five (#563); "" / "0" everywhere means "the dispatcher's". */
   model: string;
   working_directory: string;
@@ -1622,6 +1626,7 @@ const BLANK_RULE: RuleDraft = {
   filter_prefix: "",
   filter_keywords: "",
   filter_chat_ids: "",
+  filter_user_ids: "",
   model: "",
   working_directory: "",
   settings_profile_id: "",
@@ -1641,6 +1646,7 @@ function draftOf(r: TriggerRule): RuleDraft {
     filter_prefix: r.filter_prefix,
     filter_keywords: (r.filter_keywords ?? []).join(", "),
     filter_chat_ids: (r.filter_chat_ids ?? []).join(", "),
+    filter_user_ids: (r.filter_user_ids ?? []).join(", "),
     model: r.model,
     working_directory: r.working_directory,
     settings_profile_id: r.settings_profile_id,
@@ -1678,6 +1684,7 @@ interface RuleWrite {
   filter_prefix: string;
   filter_keywords: string[] | null;
   filter_chat_ids: string[] | null;
+  filter_user_ids: string[] | null;
   model: string;
   working_directory: string;
   settings_profile_id: string;
@@ -1696,6 +1703,7 @@ function ruleBody(d: RuleDraft): RuleWrite {
     filter_prefix: d.filter_prefix.trim(),
     filter_keywords: splitList(d.filter_keywords),
     filter_chat_ids: splitList(d.filter_chat_ids),
+    filter_user_ids: splitList(d.filter_user_ids),
     model: d.model.trim(),
     working_directory: d.working_directory.trim(),
     settings_profile_id: d.settings_profile_id.trim(),
@@ -1715,6 +1723,7 @@ function ruleBodyToggled(r: TriggerRule, enabled: boolean): RuleWrite {
     filter_prefix: r.filter_prefix,
     filter_keywords: r.filter_keywords,
     filter_chat_ids: r.filter_chat_ids,
+    filter_user_ids: r.filter_user_ids,
     model: r.model,
     working_directory: r.working_directory,
     settings_profile_id: r.settings_profile_id,
@@ -1728,6 +1737,11 @@ function ruleBodyToggled(r: TriggerRule, enabled: boolean): RuleWrite {
 /** Whether a stored rule lacks the target list its provider requires (#674). */
 function missingTargets(r: TriggerRule, targets: TriggerTargets): boolean {
   return !!targets.required && !(r.filter_chat_ids ?? []).some((id) => id !== "");
+}
+
+/** Whether a stored rule lists none of the users its provider asks for (#688). */
+function missingSenders(r: TriggerRule, senders: TriggerSenders | undefined): boolean {
+  return !!senders && !(r.filter_user_ids ?? []).some((id) => id.trim() !== "");
 }
 
 function splitList(v: string): string[] | null {
@@ -1788,6 +1802,7 @@ function TriggerRules({
   const tasksLoaded = tasks.data !== undefined;
   const taskList = tasks.data ?? [];
   const targets = provider.triggerTargets ?? TRIGGER_TARGETS_FALLBACK;
+  const senders = provider.triggerSenders;
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -1841,6 +1856,7 @@ function TriggerRules({
               tasks={taskList}
               tasksLoaded={tasksLoaded}
               targets={targets}
+              senders={senders}
               browse={picker.browse}
               busy={busy}
               onChange={setDraft}
@@ -1862,6 +1878,9 @@ function TriggerRules({
                       {r.filter_chat_ids.length} {targets.noun} filter(s)
                     </span>
                   )}
+                  {senders && r.filter_user_ids && r.filter_user_ids.length > 0 && (
+                    <span>{r.filter_user_ids.length} allowed user(s)</span>
+                  )}
                   {/* The execution settings, and only the ones this rule
                       actually overrides: a chip per default would be five chips
                       on every row saying nothing. */}
@@ -1880,6 +1899,19 @@ function TriggerRules({
                       <Icon name="alert" size={13} />
                     </span>
                     <span>{targets.required?.off}</span>
+                  </div>
+                )}
+                {/* A Slack rule with no allowed users answers nobody (#688),
+                    whatever its switch says: one stored before the list existed
+                    is still on. The switch stays usable, so it can be turned
+                    off, and turning it on is refused by the write, whose 422
+                    shows in this section's error line. */}
+                {missingSenders(r, senders) && (
+                  <div className="msgline msgline--warn">
+                    <span className="msgline__icon">
+                      <Icon name="alert" size={13} />
+                    </span>
+                    <span>{senders?.off}</span>
                   </div>
                 )}
               </div>
@@ -1947,6 +1979,7 @@ function TriggerRules({
             tasks={taskList}
             tasksLoaded={tasksLoaded}
             targets={targets}
+            senders={senders}
             browse={picker.browse}
             busy={busy}
             onChange={setDraft}
@@ -2047,6 +2080,7 @@ function RuleForm({
   tasks,
   tasksLoaded,
   targets,
+  senders,
   browse,
   busy,
   onChange,
@@ -2060,6 +2094,8 @@ function RuleForm({
   /** False while the task list is loading, and when its read failed. */
   tasksLoaded: boolean;
   targets: TriggerTargets;
+  /** Set when the provider has an allowed-users list (#688). */
+  senders: TriggerSenders | undefined;
   browse: ReturnType<typeof useDirPicker>["browse"];
   busy: boolean;
   onChange(d: RuleDraft): void;
@@ -2095,12 +2131,20 @@ function RuleForm({
   const targetIds = splitList(draft.filter_chat_ids) ?? [];
   const targetsMissing = !!required && targetIds.length === 0;
   const targetsInvalid = required ? targetIds.filter((id) => !required.pattern.test(id)) : [];
+  // The provider's allowed users (#688), checked as the write checks them: an
+  // entry must be a user id either way, and the list may be empty only while
+  // the rule is off.
+  const senderIds = splitList(draft.filter_user_ids) ?? [];
+  const sendersInvalid = senders ? senderIds.filter((id) => !senders.pattern.test(id)) : [];
+  const sendersMissing = !!senders && draft.enabled && senderIds.length === 0;
   const ready =
     draft.name.trim() !== "" &&
     draft.agent_slug.trim() !== "" &&
     timeoutValid &&
     !targetsMissing &&
-    targetsInvalid.length === 0;
+    targetsInvalid.length === 0 &&
+    !sendersMissing &&
+    sendersInvalid.length === 0;
 
   return (
     <div className="rulerow" style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--sp-4)" }}>
@@ -2229,6 +2273,31 @@ function RuleForm({
         </div>
       )}
 
+      {/* Who may start a run (#688). A text field of ids, the same shape as
+          the list above; #689 replaces it with a member picker. */}
+      {senders && (
+        <>
+          <div className="row" style={{ gap: "var(--sp-3)" }}>
+            <label className="field field--sm" style={{ flex: 1 }}>
+              <input
+                value={draft.filter_user_ids}
+                onChange={(e) => onChange({ ...draft, filter_user_ids: e.target.value })}
+                placeholder={senders.placeholder}
+                aria-label="Allowed users"
+                className="mono"
+                spellCheck={false}
+              />
+            </label>
+          </div>
+          <div className="formrow__help">{senders.help}</div>
+          {sendersInvalid.length > 0 && (
+            <div className="msgline msgline--error">
+              {senders.invalid} {sendersInvalid.map((id) => `“${id}”`).join(", ")}.
+            </div>
+          )}
+        </>
+      )}
+
       {/* The execution settings a rule may override (#563). Every one is
           optional: left alone, the run gets whatever the dispatcher already
           does, which is what a rule written before migration 39 reads back as.
@@ -2331,6 +2400,14 @@ function RuleForm({
             <Icon name="alert" size={13} />
           </span>
           <span>{required.missing}</span>
+        </div>
+      )}
+      {senders && sendersMissing && (
+        <div className="msgline msgline--warn">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>{senders.missing}</span>
         </div>
       )}
 
