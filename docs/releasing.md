@@ -50,6 +50,10 @@ it with nothing to promote.
                                                             v
                                      promote: copy latest.json to the fixed
                                      `desktop-latest` tag every app polls
+                                                            │
+                                                            v
+                                     announce: post the release to the
+                                     Discord release channel, once
 ```
 
 **Publishing the draft is the release act.** Draft assets are not publicly
@@ -129,7 +133,10 @@ cannot download.
 
 7. **Publish the draft.** That fires `promote`, which copies the staged manifest
    to `desktop-latest`. Installed apps start seeing the update within their next
-   check.
+   check. Once that has succeeded, `announce` posts the release to the Discord
+   release channel: the version, a link to the release, and the notes you wrote
+   in step 6 (cut with a "Read the full notes" link when they run long). It
+   posts once per version and cannot fail the release.
 
 ---
 
@@ -322,3 +329,28 @@ pointing backwards does not undo an installed update.
 
 **The draft looks wrong.** Delete the draft release and the tag, fix, and start
 again. Nothing has shipped until a draft is published.
+
+**The announcement did not post.** The release is unaffected: `announce` runs
+after the manifest is live and is non-blocking, so the run stays green with that
+one job marked failed and a warning naming what Discord answered. Re-run that
+job alone, from the run's page or as below. It reuses `promote`'s earlier
+result, so nothing is promoted twice.
+
+```bash
+gh run view <run-id> --json jobs --jq '.jobs[] | select(.name == "Announce in Discord") | .databaseId'
+gh run rerun --job <that-id>
+```
+
+If the job was skipped rather than failed, read `promote`'s "Is this the first
+promotion of this version?" step: a version already on `desktop-latest` is not
+announced again, which is what keeps "Re-run all jobs" from posting a duplicate.
+A notice saying `DISCORD_WEBHOOK` is not set means the repository secret is
+missing; it is provisioned by Terraform in the infrastructure repository. In
+either case, or if Discord stays down, post by hand.
+
+Prereleases are never announced, and neither is a dry run. Preview the message
+for any published release without sending it:
+
+```bash
+GITHUB_REPOSITORY=shaharia-lab/agento .github/scripts/announce-release.sh --dry-run v1.1.0
+```

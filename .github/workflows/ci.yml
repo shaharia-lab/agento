@@ -79,6 +79,13 @@ jobs:
       - name: CLAUDE.md fits the context budget and stands alone
         run: scripts/check-claude-md-size.sh
 
+      # `announce-release.sh` otherwise runs only when a real release is
+      # published, where a mistake means a missing or a malformed announcement
+      # and no second try. The test is offline: a fixture release and a stub
+      # `curl`.
+      - name: Release announcement script
+        run: .github/scripts/announce-release.test.sh
+
       - name: Install Linux build dependencies
         # Azure's mirror regularly fails over to archive.ubuntu.com, and a
         # stalled fetch there is the hang the timeouts above exist for — so
