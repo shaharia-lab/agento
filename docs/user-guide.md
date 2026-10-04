@@ -478,10 +478,9 @@ message-started run at a time, keeps up to five more messages waiting in the
 order they arrived, and starts at most ten such runs in any hour. A message
 that arrives when the queue is full, or after the hour's ten, starts nothing
 and gets no reply; the task counts it. These limits apply only to runs a
-message starts, not to the task's schedule or to **Run now**. They are stored
-per task (`max_concurrent_runs` 1 to 3, `max_queued_events` 1 to 100,
-`max_runs_per_hour` 1 to 1000) and can be changed through `PUT /api/tasks/{id}`;
-the task form does not show them yet.
+message starts, not to the task's schedule or to **Run now**. Change them in
+the task form's **Limits** section (see *Scheduled tasks*), which is also where
+the task's counts of dropped and rate-limited messages are shown.
 
 Link a rule in its form: the **Task** picker lists every task, and **No task**
 unlinks it. The rule's row then reads `→ task: <name>` instead of `→ <agent>`.
@@ -591,7 +590,17 @@ Other options:
 - **Stop after**: **No limit**, or a **Run limit** of N runs.
 - **Stop at**: **No end date**, or an **End date**. Switching back to *No end
   date* clears a date you already chose.
+- **Runs at once** (1 to 3, normally 1), **Events that can wait** (1 to 100,
+  normally 5) and **Runs per hour** (1 to 1000, normally 10): the limits on
+  runs an event starts, such as a Slack or Telegram message. They do not limit
+  the schedule or **Run now**. A value outside its range is refused, and the
+  field says so.
 - **Enabled**: pause without deleting.
+
+The inspector's **Reliability** group counts the events the task refused:
+**Dropped events** arrived when the waiting list was full, and **Rate-limited
+events** arrived after the hour's runs were used up. Neither started a run, so
+neither has a row in the history.
 
 ### Delivery
 
@@ -686,6 +695,10 @@ run the schedule did not start.
 A run started by a message shows what was sent under **Event payload**, as plain
 text with a copy button. It is stored with secrets masked. A run that continues
 an earlier one has a **Continues** row that selects that run.
+
+A run's **Overview** also shows **Dropped events** and **Rate-limited events**.
+These are totals for the run's task, not for that run, and they are left out
+when the task has been deleted.
 
 Failed runs carry the reason. A run that hit its timeout says so. A run that
 delivered its output somewhere lists each channel under **Delivery**, with

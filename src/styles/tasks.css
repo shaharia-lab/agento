@@ -67,6 +67,13 @@
   color: var(--red);
 }
 
+/* A sentence introducing a run of rows inside a form section (#692). */
+.tasks-form__note {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  line-height: var(--leading-normal);
+}
+
 /* --- Monospace output / error block -------------------------------------- */
 .logblock {
   padding: var(--sp-4);

@@ -14,6 +14,7 @@ import type {
   JobDelivery,
   JobHistory,
   JobStatus,
+  ScheduledTask,
 } from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import {
@@ -183,6 +184,20 @@ export function JobsView({
 
   // A running job's output and timing land after the row was first read.
   usePoll(detail.reload, POLL_MS, job?.status === "running");
+
+  // The run's task, for the two refused-event counts (#692). They are the
+  // task's totals: a refused event writes no `job_history` row, so no run owns
+  // one. A deleted task fails this read, and the rows are then left out.
+  const taskId = job?.task_id ?? "";
+  const task = useResource<ScheduledTask | null>(
+    (signal) => (taskId ? api.get(`/tasks/${taskId}`, signal) : Promise.resolve(null)),
+    [taskId]
+  );
+  // `useResource` keeps the previous answer across a failed read and through
+  // the render in which `taskId` changes, so it is taken only when it is about
+  // this run's task and the last read of it succeeded.
+  const jobTask =
+    task.data && task.data.id === taskId && !task.error ? task.data : null;
 
   /**
    * A hand-off from a task's *Recent runs* (#542): select that run.
@@ -511,6 +526,26 @@ export function JobsView({
                       {job.finished_at ? dateTime(job.finished_at) : "—"}
                     </InspRow>
                     <InspRow label="Duration">{runDuration(job)}</InspRow>
+                    {jobTask && (
+                      <>
+                        <InspRow label="Dropped events">
+                          <span
+                            className="tnum"
+                            title="Events this run's task has dropped in total"
+                          >
+                            {jobTask.dropped_event_count}
+                          </span>
+                        </InspRow>
+                        <InspRow label="Rate-limited events">
+                          <span
+                            className="tnum"
+                            title="Events this run's task has rate-limited in total"
+                          >
+                            {jobTask.rate_limited_event_count}
+                          </span>
+                        </InspRow>
+                      </>
+                    )}
                   </InspGroup>
 
                   <InspGroup title="Tokens">
