@@ -187,11 +187,13 @@ export function JobsView({
 
   // The run's task, for the two refused-event counts (#692). They are the
   // task's totals: a refused event writes no `job_history` row, so no run owns
-  // one. A deleted task fails this read, and the rows are then left out.
+  // one. A deleted task fails this read, and the rows are then left out. It
+  // is re-read for each focused run, so stepping through one task's runs does
+  // not keep the first answer.
   const taskId = job?.task_id ?? "";
   const task = useResource<ScheduledTask | null>(
     (signal) => (taskId ? api.get(`/tasks/${taskId}`, signal) : Promise.resolve(null)),
-    [taskId]
+    [taskId, focusedId]
   );
   // `useResource` keeps the previous answer across a failed read and through
   // the render in which `taskId` changes, so it is taken only when it is about
@@ -528,19 +530,11 @@ export function JobsView({
                     <InspRow label="Duration">{runDuration(job)}</InspRow>
                     {jobTask && (
                       <>
-                        <InspRow label="Dropped events">
-                          <span
-                            className="tnum"
-                            title="Events this run's task has dropped in total"
-                          >
-                            {jobTask.dropped_event_count}
-                          </span>
+                        <InspRow label="Task's dropped events">
+                          <span className="tnum">{jobTask.dropped_event_count}</span>
                         </InspRow>
-                        <InspRow label="Rate-limited events">
-                          <span
-                            className="tnum"
-                            title="Events this run's task has rate-limited in total"
-                          >
+                        <InspRow label="Task's rate-limited events">
+                          <span className="tnum">
                             {jobTask.rate_limited_event_count}
                           </span>
                         </InspRow>

@@ -142,9 +142,9 @@ function executionSummary(t: ScheduledTask): string {
 type RunLimitField = "max_concurrent_runs" | "max_queued_events" | "max_runs_per_hour";
 
 /** The three per-task limits on runs an event starts. `max` and `fallback`
- *  mirror `validate_run_limits` and the column defaults in `native/tasks.rs`;
- *  the server refuses the same ranges, so this table only saves the round
- *  trip. */
+ *  mirror `MAX_*` and `DEFAULT_MAX_*` in `native/schedule/limiter.rs`, which
+ *  `validate_task` in `native/tasks.rs` checks; the server refuses the same
+ *  ranges, so this table only saves the round trip. */
 const RUN_LIMITS: readonly {
   field: RunLimitField;
   label: string;
@@ -848,11 +848,7 @@ export function TasksView({
 
             <div className="scroll tasks-form" style={{ flex: 1, padding: "var(--sp-8)" }}>
               <div className="form">
-                {/* A run-limit error is shown on its own row instead, while
-                    that row is on screen. */}
-                {actionError && !(limitErrorField && isOpen("limits")) && (
-                  <div className="formerror">{actionError}</div>
-                )}
+                {actionError && <div className="formerror">{actionError}</div>}
 
                 <div className="formsec">
                   <div className="formsec__title">Task</div>
@@ -1114,7 +1110,7 @@ export function TasksView({
                     </div>
                   </FormRow>
                   <div className="tasks-form__note">
-                    The three limits below apply only to runs an event starts,
+                    The limits below apply only to runs an event starts,
                     such as a Slack or Telegram message. The schedule and Run
                     now are not limited by them.
                   </div>
@@ -1241,11 +1237,18 @@ export function TasksView({
                         {draft.status === "active" ? "Active" : "Paused"}
                       </span>
                     </InspRow>
+                    {/* The two counters are read from the polled record, not
+                        the draft: a refused event bumps them without touching
+                        `updated_at`, so the draft is never re-seeded for one. */}
                     <InspRow label="Dropped events">
-                      <span className="tnum">{draft.dropped_event_count}</span>
+                      <span className="tnum">
+                        {(selected ?? draft).dropped_event_count}
+                      </span>
                     </InspRow>
                     <InspRow label="Rate-limited events">
-                      <span className="tnum">{draft.rate_limited_event_count}</span>
+                      <span className="tnum">
+                        {(selected ?? draft).rate_limited_event_count}
+                      </span>
                     </InspRow>
                   </InspGroup>
 

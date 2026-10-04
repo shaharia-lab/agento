@@ -479,8 +479,8 @@ order they arrived, and starts at most ten such runs in any hour. A message
 that arrives when the queue is full, or after the hour's ten, starts nothing
 and gets no reply; the task counts it. These limits apply only to runs a
 message starts, not to the task's schedule or to **Run now**. Change them in
-the task form's **Limits** section (see *Scheduled tasks*), which is also where
-the task's counts of dropped and rate-limited messages are shown.
+the task form's **Limits** section; the task's inspector shows its counts of
+dropped and rate-limited messages (see *Scheduled tasks*).
 
 Link a rule in its form: the **Task** picker lists every task, and **No task**
 unlinks it. The rule's row then reads `→ task: <name>` instead of `→ <agent>`.
@@ -696,9 +696,9 @@ A run started by a message shows what was sent under **Event payload**, as plain
 text with a copy button. It is stored with secrets masked. A run that continues
 an earlier one has a **Continues** row that selects that run.
 
-A run's **Overview** also shows **Dropped events** and **Rate-limited events**.
-These are totals for the run's task, not for that run, and they are left out
-when the task has been deleted.
+A run's **Overview** also shows **Task's dropped events** and **Task's
+rate-limited events**. These are totals for the run's task, not for that run,
+and they are left out when the task has been deleted.
 
 Failed runs carry the reason. A run that hit its timeout says so. A run that
 delivered its output somewhere lists each channel under **Delivery**, with
