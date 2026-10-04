@@ -193,6 +193,21 @@ fn job_rows(path: &Path) -> Vec<(String, String, String, i64, i64)> {
     rows.map(|r| r.expect("row")).collect()
 }
 
+/// #678: a real run's row names the install that ran it — read from
+/// `install_identity` by the insert, never passed in — and the harness.
+fn assert_run_summary(path: &Path, job_id: &str) {
+    let machine_id: String = rusqlite::Connection::open(path)
+        .expect("open")
+        .query_row("SELECT machine_id FROM install_identity", [], |r| r.get(0))
+        .expect("the install's identity");
+    assert!(!machine_id.is_empty());
+    let job = agento_lib::native::tasks::get_job_history(path, job_id)
+        .expect("read")
+        .expect("the row");
+    assert_eq!(job.machine_id, machine_id, "{job_id}");
+    assert_eq!(job.harness, "claude", "{job_id}");
+}
+
 #[tokio::test]
 async fn a_scheduled_run_records_a_successful_job_and_persists_its_chat() {
     if python3().is_none() {
@@ -259,6 +274,8 @@ async fn a_scheduled_run_records_a_successful_job_and_persists_its_chat() {
     assert_eq!(task.last_run_status, "success");
     assert!(task.last_run_at.is_some());
     assert_eq!(task.status, "active", "a cron task keeps running");
+
+    assert_run_summary(&db, &only_job_id(&db));
 }
 
 /// #559, the executor's half: a task with no `working_directory` runs the CLI
@@ -392,6 +409,7 @@ async fn a_manual_run_fires_a_paused_task_at_its_limit_and_moves_no_counter() {
             .expect("the job row");
         assert_eq!(id, "job-manual-1", "the route's id is the row's id");
     }
+    assert_run_summary(&db, "job-manual-1");
     assert_eq!(session_count(&db), 1, "and the chat is persisted");
 
     // …and the schedule is exactly where it was.
@@ -1690,6 +1708,7 @@ async fn an_event_run_hands_the_cli_a_delimited_payload_and_delivers_to_its_orig
     assert_eq!(job.triggered_by, "slack");
     assert_eq!(job.event_payload, "what happened today?");
     assert_eq!(job.prompt_preview, "summarise the day");
+    assert_run_summary(&db, "job-event-1");
 
     // Delivered, with the event's origin.
     assert_eq!(
@@ -1747,4 +1766,5 @@ async fn an_event_run_that_outlives_its_timeout_is_one_failed_row() {
         .expect("the row");
     assert_eq!(job.triggered_by, "telegram");
     assert_eq!(job.event_payload, "ping");
+    assert_run_summary(&db, "job-event-timeout");
 }

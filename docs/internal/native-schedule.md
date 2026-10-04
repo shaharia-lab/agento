@@ -545,6 +545,23 @@ epic #679). Migration 48 adds eight columns across three tables.
   On the wire `triggered_by` follows `response_text` and is always present; the
   other two follow it and are **omitted when empty**, so a scheduled run's row
   gains one key. `deliveries` stays last.
+- **`job_history.machine_id` and `harness`** are the run summary (#678,
+  migration 52): which install ran a run, and on what. `machine_id` is
+  `install_identity.machine_id` and **no caller supplies it** —
+  `tasks::insert_job_history` reads it in the statement and ignores the struct's
+  field, so every path that reaches the one insert (schedule, manual, event,
+  reply, and a run that failed before it started) records it
+  (`an_inserted_run_carries_the_installs_machine_id_whatever_the_caller_passed`).
+  A database with no identity row stores `''` rather than failing the insert.
+  `harness` is `Runner::harness()`, asked of `agent_run::runner()` by
+  `executor::harness()` at both inserts; it is `claude` on every row today.
+  `update_job_history` names neither column, so a finish cannot rewrite them.
+  **Every row older than the migration was backfilled** with this install's id
+  and `claude`. The id copies with the database (#704's known limit), so a
+  database moved to another machine keeps calling its runs this install's.
+  On the wire both follow `event_payload`, before `deliveries`, and are
+  **always present** — pinned by `parity/job_history_run_summary_golden.json`.
+  No view shows either yet.
 - **`scheduled_tasks.continue_on_reply`** is a request field, replaced on `PUT`
   like every other (absent and `null` store `false`). Slack delivery still maps
   every thread whatever it says, until #686 reads it. **Migration 48 turned it

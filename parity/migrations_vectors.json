@@ -224,6 +224,10 @@
     {
       "version": 51,
       "sql": "UPDATE trigger_rules SET enabled = 0\n WHERE enabled = 1\n   AND integration_id IN (SELECT id FROM integrations WHERE type = 'telegram')\n   AND NOT EXISTS (\n       SELECT 1 FROM json_each(\n           CASE WHEN json_valid(trigger_rules.filter_chat_ids)\n                THEN CASE WHEN json_type(trigger_rules.filter_chat_ids) = 'array'\n                          THEN trigger_rules.filter_chat_ids ELSE '[]' END\n                ELSE '[]' END) AS entry\n        WHERE entry.type = 'text' AND entry.value != '');\n"
+    },
+    {
+      "version": 52,
+      "sql": "\n-- Run summaries (#678). Authored here like 31-51, and additive: two defaulted\n-- columns on job_history, so an older build opening this database keeps\n-- working. Every run recorded before this migration was run by this install,\n-- on the only harness there was, so the backfill is exact and not a guess.\nALTER TABLE job_history ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';\nALTER TABLE job_history ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';\nUPDATE job_history\n   SET machine_id = COALESCE((SELECT machine_id FROM install_identity), '');\n"
     }
   ]
 }

@@ -251,6 +251,14 @@ pub struct JobHistory {
     pub continues_job_id: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub event_payload: String,
+    /// Which install ran this (#678): `install_identity.machine_id`. Always
+    /// present. **Read back, never supplied** — [`insert_job_history`] takes
+    /// it from the database and ignores this field, so no run path can write a
+    /// row without it or with another install's.
+    pub machine_id: String,
+    /// The harness that ran it (#678) — `Runner::harness()`, `"claude"` today.
+    /// Always present; a row older than the column reads `"claude"`.
+    pub harness: String,
     /// Where the run's output was delivered and how each went (#635), read
     /// from `job_deliveries`. **Last, and absent when empty** rather than `[]`,
     /// so a job with no deliveries keeps the bytes it had before the field
@@ -348,7 +356,7 @@ const JOB_COLUMNS: &str =
        duration_ms, chat_session_id, model, prompt_preview, error_message,
        total_input_tokens, total_output_tokens,
        total_cache_creation_tokens, total_cache_read_tokens, response_text,
-       triggered_by, continues_job_id, event_payload
+       triggered_by, continues_job_id, event_payload, machine_id, harness
 FROM job_history";
 
 /// Every task, most recently created first, as the store orders them.
@@ -611,6 +619,8 @@ fn scan_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobHistory> {
         triggered_by: row.get(17)?,
         continues_job_id: row.get(18)?,
         event_payload: row.get(19)?,
+        machine_id: row.get(20)?,
+        harness: row.get(21)?,
         deliveries: Vec::new(),
     })
 }
@@ -997,7 +1007,9 @@ mod tests {
             response_text               TEXT NOT NULL DEFAULT '',
             triggered_by                TEXT NOT NULL DEFAULT 'schedule',
             continues_job_id            TEXT NOT NULL DEFAULT '',
-            event_payload               TEXT NOT NULL DEFAULT ''
+            event_payload               TEXT NOT NULL DEFAULT '',
+            machine_id                  TEXT NOT NULL DEFAULT '',
+            harness                     TEXT NOT NULL DEFAULT 'claude'
         );
         CREATE TABLE job_deliveries (
             id          TEXT PRIMARY KEY,
@@ -1119,11 +1131,11 @@ mod tests {
         );
         assert_eq!(
             encoded(&history[0]),
-            r#"{"id":"job-new","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"running","started_at":"2026-08-15T01:00:00Z","duration_ms":0,"chat_session_id":"","model":"","prompt_preview":"","error_message":"","total_input_tokens":0,"total_output_tokens":0,"total_cache_creation_tokens":0,"total_cache_read_tokens":0,"response_text":"","triggered_by":"schedule"}"#
+            r#"{"id":"job-new","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"running","started_at":"2026-08-15T01:00:00Z","duration_ms":0,"chat_session_id":"","model":"","prompt_preview":"","error_message":"","total_input_tokens":0,"total_output_tokens":0,"total_cache_creation_tokens":0,"total_cache_read_tokens":0,"response_text":"","triggered_by":"schedule","machine_id":"","harness":"claude"}"#
         );
         assert_eq!(
             encoded(&history[1]),
-            r#"{"id":"job-old","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"success","started_at":"2026-08-14T02:00:00.123456789Z","finished_at":"2026-08-14T02:04:31.5Z","duration_ms":271500,"chat_session_id":"chat-1","model":"claude-opus-4-1","prompt_preview":"summarise \u003cb\u003efast\u003c/b\u003e","error_message":"","total_input_tokens":1200,"total_output_tokens":340,"total_cache_creation_tokens":90,"total_cache_read_tokens":7700,"response_text":"done \u0026 dusted","triggered_by":"schedule"}"#
+            r#"{"id":"job-old","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"success","started_at":"2026-08-14T02:00:00.123456789Z","finished_at":"2026-08-14T02:04:31.5Z","duration_ms":271500,"chat_session_id":"chat-1","model":"claude-opus-4-1","prompt_preview":"summarise \u003cb\u003efast\u003c/b\u003e","error_message":"","total_input_tokens":1200,"total_output_tokens":340,"total_cache_creation_tokens":90,"total_cache_read_tokens":7700,"response_text":"done \u0026 dusted","triggered_by":"schedule","machine_id":"","harness":"claude"}"#
         );
     }
 
@@ -1165,11 +1177,41 @@ mod tests {
             .expect("job");
         assert!(
             encoded(&job).ends_with(
-                r#""response_text":"","triggered_by":"reply","continues_job_id":"job-old","event_payload":"{\"text\":\"a \u003cb\u003e \u0026 c\"}"}"#
+                r#""response_text":"","triggered_by":"reply","continues_job_id":"job-old","event_payload":"{\"text\":\"a \u003cb\u003e \u0026 c\"}","machine_id":"","harness":"claude"}"#
             ),
             "{}",
             encoded(&job)
         );
+    }
+
+    /// **The run summary's two fields, in wire order** (#678).
+    ///
+    /// `machine_id` and `harness` follow `event_payload` and are always
+    /// present; `deliveries` stays last. The golden is the whole row, on each
+    /// of the three reads that answer one.
+    #[test]
+    fn a_run_names_its_install_and_harness_with_the_golden_bytes() {
+        let file = fixture();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "UPDATE job_history
+                SET machine_id = '0123456789abcdef0123456789abcdef',
+                    triggered_by = 'slack', event_payload = 'a <b> & c'
+              WHERE id = 'job-old'",
+            [],
+        )
+        .expect("set the summary columns");
+        drop(conn);
+
+        let want = include_str!("../../../parity/job_history_run_summary_golden.json").trim_end();
+        let all = list_all_job_history(file.path(), 50, 0).expect("all");
+        let task = list_task_job_history(file.path(), "full", 50).expect("task");
+        let one = get_job_history(file.path(), "job-old")
+            .expect("get")
+            .expect("job");
+        for job in [&all[1], &task[1], &one] {
+            assert_eq!(encoded(job), want);
+        }
     }
 
     /// The six spellings `job_history.triggered_by` may hold (#681), which
@@ -1262,7 +1304,7 @@ mod tests {
             Some(GoTime::parse_go_string("2026-08-14 02:04:35 +0000 UTC").unwrap());
         insert_pending_delivery(file.path(), &failed).expect("insert");
 
-        let want = r#""response_text":"done \u0026 dusted","triggered_by":"schedule","deliveries":[{"id":"d-failed","type":"slack","target":"Acme Slack · C0123ABCD","status":"failed","error":"channel_not_found \u003cC0\u003e","created_at":"2026-08-14T02:04:31.9Z","finished_at":"2026-08-14T02:04:35Z"},{"id":"d-pending","type":"slack","target":"Acme Slack · C0123ABCD","status":"pending","error":"","created_at":"2026-08-14T02:04:32Z"},{"id":"d-sent","type":"slack","target":"Acme Slack · C0123ABCD","status":"sent","error":"","created_at":"2026-08-14T02:04:33Z","finished_at":"2026-08-14T02:04:34.25Z"}]}"#;
+        let want = r#""response_text":"done \u0026 dusted","triggered_by":"schedule","machine_id":"","harness":"claude","deliveries":[{"id":"d-failed","type":"slack","target":"Acme Slack · C0123ABCD","status":"failed","error":"channel_not_found \u003cC0\u003e","created_at":"2026-08-14T02:04:31.9Z","finished_at":"2026-08-14T02:04:35Z"},{"id":"d-pending","type":"slack","target":"Acme Slack · C0123ABCD","status":"pending","error":"","created_at":"2026-08-14T02:04:32Z"},{"id":"d-sent","type":"slack","target":"Acme Slack · C0123ABCD","status":"sent","error":"","created_at":"2026-08-14T02:04:33Z","finished_at":"2026-08-14T02:04:34.25Z"}]}"#;
         let all = list_all_job_history(file.path(), 50, 0).expect("all");
         let task = list_task_job_history(file.path(), "full", 50).expect("task");
         let one = get_job_history(file.path(), "job-old")
@@ -2735,6 +2777,78 @@ mod tests {
         file
     }
 
+    fn a_run(id: &str, machine_id: &str) -> JobHistory {
+        JobHistory {
+            id: id.to_string(),
+            task_id: "t1".to_string(),
+            task_name: "T".to_string(),
+            agent_slug: String::new(),
+            status: "running".to_string(),
+            started_at: GoTime::parse_go_string("2026-02-01 00:00:00 +0000 UTC").unwrap(),
+            finished_at: None,
+            duration_ms: 0,
+            chat_session_id: String::new(),
+            model: String::new(),
+            prompt_preview: String::new(),
+            error_message: String::new(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
+            response_text: String::new(),
+            triggered_by: "schedule".to_string(),
+            continues_job_id: String::new(),
+            event_payload: String::new(),
+            machine_id: machine_id.to_string(),
+            harness: "claude".to_string(),
+            deliveries: Vec::new(),
+        }
+    }
+
+    /// **No caller supplies `machine_id`** (#678): the insert reads it from
+    /// `install_identity`, so a row carries this install's id whether the
+    /// caller left the field empty or named another machine. `harness` is the
+    /// caller's, and a finish does not touch either.
+    #[test]
+    fn an_inserted_run_carries_the_installs_machine_id_whatever_the_caller_passed() {
+        let file = migrated_with_history();
+        let machine_id: String = rusqlite::Connection::open(file.path())
+            .expect("open")
+            .query_row("SELECT machine_id FROM install_identity", [], |r| r.get(0))
+            .expect("identity");
+        assert!(!machine_id.is_empty());
+
+        for (id, passed) in [("j-empty", ""), ("j-other", "another-machine")] {
+            let mut job = a_run(id, passed);
+            insert_job_history(file.path(), &job).expect("insert");
+            job.status = "success".to_string();
+            update_job_history(file.path(), &job).expect("finish");
+
+            let stored = get_job_history(file.path(), id).expect("get").expect("row");
+            assert_eq!(stored.status, "success");
+            assert_eq!(stored.machine_id, machine_id, "{id}");
+            assert_eq!(stored.harness, "claude", "{id}");
+        }
+    }
+
+    /// A database whose identity row is gone still records the run — with an
+    /// empty `machine_id` — rather than failing the insert and leaving a run
+    /// with no row at all.
+    #[test]
+    fn a_run_is_still_recorded_when_the_identity_row_is_missing() {
+        let file = migrated_with_history();
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute("DELETE FROM install_identity", [])
+            .expect("drop the identity");
+
+        insert_job_history(file.path(), &a_run("j-anon", "x")).expect("insert");
+        let stored = get_job_history(file.path(), "j-anon")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.machine_id, "");
+    }
+
     fn history_ids(file: &tempfile::NamedTempFile) -> Vec<String> {
         let conn = rusqlite::Connection::open(file.path()).expect("open");
         let mut stmt = conn
@@ -3354,6 +3468,14 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
 }
 
 /// `SQLiteTaskStore.CreateJobHistory`.
+///
+/// **`machine_id` is not a parameter** (#678). The statement reads it from
+/// `install_identity`, the single row migration 46 generated, so every run path
+/// that reaches this insert — schedule, manual, event, reply — records the
+/// install it ran on without being able to forget it or pass another's.
+/// `job.machine_id` is ignored. The `COALESCE` is for a database whose identity
+/// row is gone: the run is still recorded, with `''`, rather than the insert
+/// failing a `NOT NULL` and leaving a run with no row at all.
 pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String> {
     let conn = db::open_read_write(db_path)?;
     conn.execute(
@@ -3362,9 +3484,10 @@ pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String
              duration_ms, chat_session_id, model, prompt_preview, error_message,
              total_input_tokens, total_output_tokens,
              total_cache_creation_tokens, total_cache_read_tokens, response_text,
-             triggered_by, continues_job_id, event_payload)
+             triggered_by, continues_job_id, event_payload, machine_id, harness)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20)",
+                 ?18, ?19, ?20,
+                 COALESCE((SELECT machine_id FROM install_identity), ''), ?21)",
         rusqlite::params![
             job.id,
             job.task_id,
@@ -3386,6 +3509,7 @@ pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String
             job.triggered_by,
             job.continues_job_id,
             job.event_payload,
+            job.harness,
         ],
     )
     .map_err(|e| format!("creating job history: {e}"))?;

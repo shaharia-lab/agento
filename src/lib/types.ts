@@ -351,6 +351,10 @@ export interface JobHistory {
   continues_job_id?: string;
   /** The event that started the run (#681). Omitted when there was none. */
   event_payload?: string;
+  /** The install that ran it (#678): `install_identity.machine_id`. */
+  machine_id: string;
+  /** The harness that ran it (#678); "claude" today. */
+  harness: string;
   /** Omitted when the run delivered nowhere (#635). */
   deliveries?: JobDelivery[] | null;
 }
