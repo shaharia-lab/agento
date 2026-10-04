@@ -10,6 +10,7 @@ import type {
   SettingsResponse,
   TaskPreview,
   TaskRunStarted,
+  TriggeredBy,
 } from "../lib/types";
 import {
   describeError,
@@ -136,11 +137,84 @@ function executionSummary(t: ScheduledTask): string {
     .join(" · ");
 }
 
-/** Limits, collapsed: `no limit`, or whichever of the two limits is set. */
+/* --- Event-run limits (#691, #692) ---------------------------------------- */
+
+type RunLimitField = "max_concurrent_runs" | "max_queued_events" | "max_runs_per_hour";
+
+/** The three per-task limits on runs an event starts. `max` and `fallback`
+ *  mirror `MAX_*` and `DEFAULT_MAX_*` in `native/schedule/limiter.rs`, which
+ *  `validate_task` in `native/tasks.rs` checks; the server refuses the same
+ *  ranges, so this table only saves the round trip. */
+const RUN_LIMITS: readonly {
+  field: RunLimitField;
+  label: string;
+  unit: string;
+  help: string;
+  max: number;
+  fallback: number;
+  /** How the collapsed summary names a non-default value. */
+  summary(n: number): string;
+}[] = [
+  {
+    field: "max_concurrent_runs",
+    label: "Runs at once",
+    unit: "at a time",
+    help: "How many event-started runs of this task may run together.",
+    max: 3,
+    fallback: 1,
+    summary: (n) => `${n} at once`,
+  },
+  {
+    field: "max_queued_events",
+    label: "Events that can wait",
+    unit: "waiting",
+    help: "Events that arrive while the task is busy wait in order. One that arrives when this many are waiting is dropped.",
+    max: 100,
+    fallback: 5,
+    summary: (n) => `${n} waiting`,
+  },
+  {
+    field: "max_runs_per_hour",
+    label: "Runs per hour",
+    unit: "per hour",
+    help: "An event that arrives after this many event-started runs in an hour starts nothing.",
+    max: 1000,
+    fallback: 10,
+    summary: (n) => `${n} per hour`,
+  },
+];
+
+/** The first run limit outside its range, as the 422 the server would answer —
+ *  the same wording, so `fieldOf` opens the section and the row shows it
+ *  whichever side refused. An emptied input is `0`, which is refused here even
+ *  though the server would store the default for it: the form shows a number,
+ *  and saving a different one than is on screen is the surprise to avoid. */
+function runLimitError(t: ScheduledTask): string | undefined {
+  for (const { field, max } of RUN_LIMITS) {
+    const n = t[field];
+    if (!Number.isInteger(n) || n < 1 || n > max) {
+      return `validation error for "${field}": must be between 1 and ${max}`;
+    }
+  }
+  return undefined;
+}
+
+/** A validation error's text without its `validation error for "<field>": `
+ *  prefix, as a sentence to show on the field it names. */
+function fieldMessage(message: string): string {
+  const text = message.replace(/^validation error for "[^"]+":\s*/, "");
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
+}
+
+/** Limits, collapsed: `no limit`, or whichever limits are set — a run limit is
+ *  named only when it differs from its default. */
 function limitsSummary(t: ScheduledTask): string {
   const parts = [
     t.stop_after_count > 0 ? `stops after ${t.stop_after_count} run${t.stop_after_count === 1 ? "" : "s"}` : "",
     t.stop_after_time ? `ends ${dateTime(t.stop_after_time)}` : "",
+    ...RUN_LIMITS.map((l) =>
+      t[l.field] > 0 && t[l.field] !== l.fallback ? l.summary(t[l.field]) : ""
+    ),
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "no limit";
 }
@@ -148,7 +222,7 @@ function limitsSummary(t: ScheduledTask): string {
 /** The fields each collapsible section owns — a 422 naming one opens it. */
 const SECTION_FIELDS: Record<TaskFormSectionId, readonly string[]> = {
   execution: ["working_directory", "model", "timeout_minutes", "save_output"],
-  limits: ["stop_after_count", "stop_after_time"],
+  limits: ["stop_after_count", "stop_after_time", ...RUN_LIMITS.map((l) => l.field)],
   delivery: ["destinations"],
 };
 
@@ -241,6 +315,10 @@ function blankTask(): ScheduledTask {
     stop_after_time: null,
     save_output: true,
     continue_on_reply: false,
+    // The server's defaults (#691), as `RUN_LIMITS` spells them.
+    max_concurrent_runs: 1,
+    max_queued_events: 5,
+    max_runs_per_hour: 10,
     dropped_event_count: 0,
     rate_limited_event_count: 0,
     status: "active",
@@ -486,6 +564,12 @@ export function TasksView({
 
   async function save() {
     if (!draft) return;
+    // Refused before the request; the server's own check is the authority.
+    const refused = runLimitError(draft);
+    if (refused) {
+      setActionError(refused);
+      return;
+    }
     setBusy(true);
     setActionError(undefined);
     try {
@@ -588,6 +672,9 @@ export function TasksView({
       setBusy(false);
     }
   }
+
+  /** The run-limit field the current error names, if it names one. */
+  const limitErrorField = RUN_LIMITS.find((l) => l.field === fieldOf(actionError))?.field;
 
   const listLoading = tasksRes.loading && !tasksRes.data;
   const listError = tasksRes.error && !tasksRes.data;
@@ -1022,6 +1109,34 @@ export function TasksView({
                       )}
                     </div>
                   </FormRow>
+                  <div className="tasks-form__note">
+                    The limits below apply only to runs an event starts,
+                    such as a Slack or Telegram message. The schedule and Run
+                    now are not limited by them.
+                  </div>
+                  {RUN_LIMITS.map((l) => (
+                    <FormRow key={l.field} label={l.label} help={l.help}>
+                      <div className="inline">
+                        <label className="field field--num">
+                          <input
+                            type="number"
+                            min={1}
+                            max={l.max}
+                            step={1}
+                            aria-invalid={limitErrorField === l.field}
+                            value={draft[l.field] || ""}
+                            onChange={(e) =>
+                              edit({ [l.field]: Number(e.target.value) || 0 })
+                            }
+                          />
+                        </label>
+                        <span className="inline__label">{l.unit}</span>
+                      </div>
+                      {limitErrorField === l.field && actionError && (
+                        <div className="formerror">{fieldMessage(actionError)}</div>
+                      )}
+                    </FormRow>
+                  ))}
                 </FormSection>
 
                 <div className="divider" />
@@ -1120,6 +1235,19 @@ export function TasksView({
                         }`}
                       >
                         {draft.status === "active" ? "Active" : "Paused"}
+                      </span>
+                    </InspRow>
+                    {/* The two counters are read from the polled record, not
+                        the draft: a refused event bumps them without touching
+                        `updated_at`, so the draft is never re-seeded for one. */}
+                    <InspRow label="Dropped events">
+                      <span className="tnum">
+                        {(selected ?? draft).dropped_event_count}
+                      </span>
+                    </InspRow>
+                    <InspRow label="Rate-limited events">
+                      <span className="tnum">
+                        {(selected ?? draft).rate_limited_event_count}
                       </span>
                     </InspRow>
                   </InspGroup>
@@ -1320,11 +1448,17 @@ function RecentRuns({
           type="button"
           className="runrow runrow--link"
           key={j.id}
-          title={`${dateTime(j.started_at)} — open this run`}
+          title={`${dateTime(j.started_at)} · ${triggerLabel(j.triggered_by)} — open this run`}
           onClick={() => onOpen(j.id)}
         >
           <span className={`dot ${statusDot(j.status)}`} />
           <span className="runrow__when">{relativeTime(j.started_at)}</span>
+          {/* Named only when it is not the schedule (#687): this is a task's
+              own list, so the schedule is the unremarkable case and a label on
+              every row would say nothing. */}
+          {j.triggered_by !== "schedule" && (
+            <span className="runrow__val">{triggerLabel(j.triggered_by)}</span>
+          )}
           {j.deliveries?.some((d) => d.status === "failed") && (
             <span className="runrow__warn" title="Delivery failed: open this run">
               <Icon name="alert" size={12} />
@@ -1505,6 +1639,28 @@ function ScheduleEditor({
       )}
     </>
   );
+}
+
+/* --- What started a run (also used by JobsView) --------------------------- */
+
+/**
+ * `job_history.triggered_by`, as the one word every view shows for it (#687).
+ *
+ * A `Record` over the union so a seventh value on the wire type fails `tsc`
+ * here instead of rendering a blank cell.
+ */
+const TRIGGER_LABEL: Record<TriggeredBy, string> = {
+  schedule: "Schedule",
+  manual: "Manual",
+  telegram: "Telegram",
+  slack: "Slack",
+  webhook: "Webhook",
+  reply: "Reply",
+};
+
+/** The label for a run's trigger; a value this build does not know shows raw. */
+export function triggerLabel(t: string): string {
+  return (TRIGGER_LABEL as Record<string, string | undefined>)[t] ?? t;
 }
 
 /* --- Shared outcome badge (also used by JobsView) ------------------------- */

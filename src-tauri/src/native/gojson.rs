@@ -197,10 +197,27 @@ pub fn decode_string_list(raw: &str) -> Option<Vec<String>> {
     match serde_json::from_str::<Option<Vec<String>>>(raw) {
         Ok(values) => values,
         Err(e) => {
-            log::warn!("native: malformed stored string array {raw:?}: {e}");
+            log::warn!("{}", malformed_list_warning(raw, &e));
             None
         }
     }
+}
+
+/// What [`decode_string_list`] logs for a value it could not decode: its
+/// length and the error's category and position, never the value.
+///
+/// This decodes columns that name people (a rule's chats and users), and a log
+/// is not where a stored value belongs. The error is reduced rather than
+/// printed because `serde_json`'s `Display` quotes a mistyped scalar: a stored
+/// `"U0123ABCD"` reads `invalid type: string "U0123ABCD", expected a sequence`.
+fn malformed_list_warning(raw: &str, e: &serde_json::Error) -> String {
+    format!(
+        "native: malformed stored string array ({} bytes): {:?} at line {} column {}",
+        raw.len(),
+        e.classify(),
+        e.line(),
+        e.column()
+    )
 }
 
 /// Decode a field the way Go does: a JSON `null` is the **zero value**, not a
@@ -736,6 +753,33 @@ fn indent_compact_inner(src: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The warning for an undecodable stored list names its size and where the
+    /// decode stopped, and never the value: `serde_json` quotes a mistyped
+    /// scalar in its own message, which is why that message is not logged.
+    #[test]
+    fn a_malformed_stored_list_is_logged_without_its_value() {
+        for (raw, secret) in [
+            (r#""U0123ABCD""#, "U0123ABCD"),
+            ("[-1001234567890]", "1001234567890"),
+        ] {
+            let e = serde_json::from_str::<Option<Vec<String>>>(raw).expect_err("malformed");
+            assert!(
+                e.to_string().contains(secret),
+                "the fixture is one whose own error quotes the value"
+            );
+            let line = malformed_list_warning(raw, &e);
+            assert!(!line.contains(secret), "{line}");
+            assert!(
+                line.starts_with(&format!(
+                    "native: malformed stored string array ({} bytes): ",
+                    raw.len()
+                )),
+                "{line}"
+            );
+            assert!(decode_string_list(raw).is_none());
+        }
+    }
     use serde::Serialize;
 
     /// Cross-language vectors, shared with `desktop/parity/gojson_parity_test.go`.

@@ -308,6 +308,7 @@ fn a_file_changed_between_the_read_and_the_write_is_not_overwritten() {
         &dir_string(&dir),
         KEY,
         "90",
+        |_| true,
         |path| std::fs::write(path, "{\"model\":\"opus\"}").expect("claude code writes"),
         write_file,
     );
@@ -325,6 +326,7 @@ fn a_file_changed_between_the_read_and_the_write_is_not_overwritten() {
         &dir_string(&empty),
         KEY,
         "90",
+        |_| true,
         |path| std::fs::write(path, "{}").expect("claude code writes"),
         write_file,
     );
@@ -347,6 +349,7 @@ fn a_failed_write_leaves_the_previous_file_intact() {
         &dir_string(&dir),
         KEY,
         "90",
+        |_| true,
         |_| {},
         |path, data| {
             super::super::replace_file(path, |file| {
@@ -384,5 +387,42 @@ fn a_symlinked_settings_file_is_edited_through_the_link() {
     assert_eq!(
         std::fs::read(&real).expect("read"),
         b"{\"cleanupPeriodDays\":90}"
+    );
+}
+
+/// `allow` sees the bytes the splice is built from — the file's, or `None`
+/// when there is no file — and a `false` writes nothing at all.
+#[test]
+fn a_declined_write_leaves_everything_as_it_was() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(settings_of(&dir), "{\"cleanupPeriodDays\":30}").expect("write");
+    let indexed = [dir_string(&dir)];
+    let mut seen = None;
+    let wrote = set_top_level_key_if(&indexed, &dir_string(&dir), KEY, "90", |bytes| {
+        seen = bytes.map(<[u8]>::to_vec);
+        false
+    });
+    assert_eq!(wrote, Ok(false));
+    assert_eq!(seen.as_deref(), Some(&b"{\"cleanupPeriodDays\":30}"[..]));
+    assert_eq!(
+        std::fs::read(settings_of(&dir)).expect("read"),
+        b"{\"cleanupPeriodDays\":30}"
+    );
+
+    let empty = tempfile::tempdir().expect("temp dir");
+    let missing = empty.path().join("never-created");
+    let indexed = [missing.to_string_lossy().into_owned()];
+    let mut absent = false;
+    let wrote = set_top_level_key_if(&indexed, &indexed[0], KEY, "90", |bytes| {
+        absent = bytes.is_none();
+        false
+    });
+    assert_eq!(wrote, Ok(false));
+    assert!(absent, "no file is `None`, not empty bytes");
+    assert!(!missing.exists(), "a declined write creates no dir");
+
+    assert_eq!(
+        set_top_level_key_if(&indexed, &indexed[0], KEY, "90", |_| true),
+        Ok(true)
     );
 }

@@ -79,6 +79,13 @@ jobs:
       - name: CLAUDE.md fits the context budget and stands alone
         run: scripts/check-claude-md-size.sh
 
+      # `announce-release.sh` otherwise runs only when a real release is
+      # published, where a mistake means a missing or a malformed announcement
+      # and no second try. The test is offline: a fixture release and a stub
+      # `curl`.
+      - name: Release announcement script
+        run: .github/scripts/announce-release.test.sh
+
       - name: Install Linux build dependencies
         # Azure's mirror regularly fails over to archive.ubuntu.com, and a
         # stalled fetch there is the hang the timeouts above exist for — so
@@ -182,16 +189,19 @@ jobs:
   # counts — it is red at **1394/1422**, so six of those were pure CRLF against
   # the byte-exact goldens and are now fixed rather than excluded.
   #
-  # Of the 28 that remain, **27 are Unix-shaped test fixtures rather than
+  # Of the 28 that failed then, **27 are Unix-shaped test fixtures rather than
   # defects**: `native::settings::tests` (10), `native::claude_settings` (9),
   # `native::fs::tests` (5), `native::scanner::walk` (2) and
   # `native::uploads::tests` (1) assert Unix path spellings —
   # `absolute_dir("/var/lib/claude")` is correctly `None` on Windows,
   # `validate_path_within_dir("/h/.claude/x", "/h/.claude")` is correctly
-  # refused, `HOME=/home//u` correctly cleans to `\home\u`. The 28th is
+  # refused, `HOME=/home//u` correctly cleans to `\home\u`. The 28th was
   # `integrations::telegram::client::tests::a_body_that_dies_mid_stream_still_names_nothing_secret`,
-  # which is a **stream-timing** difference and not a path fixture at all —
-  # pre-existing, newly visible, and its own piece of work.
+  # and it was a fixture artefact too, of a different kind: its scripted server
+  # closed the socket without reading the request, which Windows turns into a
+  # reset that fails the *send*. #671 made the server read first, so the test
+  # passes here and is named in the filter below — the one guard on a bot token
+  # reaching the model that runs on this platform.
   #
   # Porting those is general Windows support, which #374 lists under *Risks* as
   # the scope creep to avoid, so the filter names the modules that issue owns:
@@ -266,10 +276,11 @@ jobs:
             native::claude_settings::profiles::tests::a_windows_path_outside_the_dir_is_refused \
             claude::process::tests::a_filetime_converts_to_system_time \
             claude::process::tests::a_windows_orphan_is_stopped_only_when_its_start_time_matches \
+            native::integrations::telegram::client::tests::a_body_that_dies_mid_stream_still_names_nothing_secret \
             | tee filtered.log
           passed=$(grep -oE '^test result: ok\. [0-9]+ passed' filtered.log | grep -oE '[0-9]+' | head -1)
           echo "ran ${passed:-0} tests"
-          if [ -z "$passed" ] || [ "$passed" -lt 25 ]; then
-            echo "::error::expected at least 25 tests to run, got ${passed:-0} — the filter has gone stale"
+          if [ -z "$passed" ] || [ "$passed" -lt 28 ]; then
+            echo "::error::expected at least 28 tests to run, got ${passed:-0} — the filter has gone stale"
             exit 1
           fi

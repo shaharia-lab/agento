@@ -18,6 +18,7 @@ import {
   Switch,
 } from "../components/ui";
 import { DirField, useDirPicker } from "../components/DirField";
+import { SlackUserPicker } from "../components/SlackUserPicker";
 import {
   MODELS,
   PERMISSION_MODES,
@@ -29,9 +30,10 @@ import type {
   AvailableTool,
   ClaudeSettingsProfile,
   Integration,
+  ScheduledTask,
   ServiceConfig,
   TriggerRule,
-  WebhookStatus,
+  SlackUser,
 } from "../lib/types";
 import {
   connectionState,
@@ -43,7 +45,9 @@ import {
   unavailableCopy,
   type AuthMode,
   type CredField,
+  type InboundCopy,
   type Provider,
+  type TriggerSenders,
   type TriggerTargets,
 } from "./integrations/catalog";
 import "../styles/integrations.css";
@@ -67,16 +71,16 @@ import "../styles/integrations.css";
      spelling one heading twice is exactly how the drift started, so a rename
      here changes both.
    * **Edit-only sections render *after* the shared body** — Authorisation, the
-     inbound connection, the trigger rules, the webhook and the *Enabled*
+     inbound connection, the trigger rules and the *Enabled*
      switch. Both screens therefore open on the same thing, and the layout a
      user learns on the way in is the one they meet on the way back.
 
-   **Two providers take inbound messages and they take them differently**
-   (#569). `supportsTriggers` buys the trigger-rules list on both; the transport
-   beside it is a second flag — `supportsWebhook` for the URL Telegram pushes
-   to, `supportsInbound` for the Socket Mode connection Agento holds open to
-   Slack. Reading one flag for both is how Slack came to render a Register
-   button for a webhook route it has no handler for.
+   **Two providers take inbound messages, each over a connection Agento opens**
+   (#569, #676). `supportsTriggers` buys the trigger-rules list on both; the
+   transport beside it is the catalog's `inbound` entry — Socket Mode for
+   Slack, long polling for Telegram — and `InboundPanel` renders either from
+   it. Telegram's webhook panel went with #676: a desktop app has no public
+   URL for Telegram to push to.
    ========================================================================== */
 
 /** The heading over Name, the auth method and the credential fields. */
@@ -85,7 +89,7 @@ const CONNECTION_TITLE = "Connection";
 const SERVICES_TITLE = "Services and tools";
 /** The heading over the edit-only *Enabled* switch. */
 const AVAILABILITY_TITLE = "Availability";
-/** The heading over the Socket Mode switch and its status (#569). */
+/** The heading over the inbound switch and its status (#569, #676). */
 const INBOUND_TITLE = "Inbound";
 
 const NAME_HELP =
@@ -94,10 +98,6 @@ const SERVICES_HELP =
   "Only the tools you leave on are exposed to agents. You can change this later.";
 const STORED_SECRET_HELP =
   "Agento cannot show a stored secret back to you, and does not need to — leave this alone and saving keeps it.";
-const INBOUND_HELP =
-  "Socket Mode holds an outbound connection to Slack so mentions reach Agento without a public URL. Turn it off to close the connection; nothing is deleted.";
-const INBOUND_NEEDS_TOKEN =
-  "Store an app-level token above before this can be turned on.";
 /**
  * Why the app token cannot be set on its own.
  *
@@ -1288,20 +1288,14 @@ function IntegrationDetail({
               {/* Inbound first: a trigger rule only fires once something is
                   delivering messages, so the connection that delivers them is
                   the thing to read before the rules that consume them. */}
-              {provider.supportsInbound && (
+              {provider.inbound && (
                 <>
                   <div className="divider" />
-                  <InboundPanel item={item} />
+                  <InboundPanel item={item} copy={provider.inbound} />
                 </>
               )}
               <div className="divider" />
               <TriggerRules integrationId={item.id} provider={provider} />
-              {provider.supportsWebhook && (
-                <>
-                  <div className="divider" />
-                  <WebhookPanel integrationId={item.id} />
-                </>
-              )}
             </>
           )}
 
@@ -1608,6 +1602,9 @@ interface RuleDraft {
   filter_prefix: string;
   filter_keywords: string;
   filter_chat_ids: string;
+  /** Slack's allowed users (#688); carried for every provider, because the
+      write is replace. */
+  filter_user_ids: string;
   /** Migration 39's five (#563); "" / "0" everywhere means "the dispatcher's". */
   model: string;
   working_directory: string;
@@ -1615,9 +1612,10 @@ interface RuleDraft {
   permission_mode: string;
   timeout_minutes: string;
   /**
-   * #681's pair. No control edits either yet, so the draft only carries what
-   * the stored rule holds — the write is replace, and a save that left them
-   * out would unlink the rule and turn its continuation off.
+   * #681's pair. `task_id` is the **Linked task** picker's (#687);
+   * `continue_on_reply` has no control yet (#686), so the draft only carries
+   * what the stored rule holds — the write is replace, and a save that left it
+   * out would turn the rule's continuation off.
    */
   task_id: string;
   continue_on_reply: boolean;
@@ -1630,6 +1628,7 @@ const BLANK_RULE: RuleDraft = {
   filter_prefix: "",
   filter_keywords: "",
   filter_chat_ids: "",
+  filter_user_ids: "",
   model: "",
   working_directory: "",
   settings_profile_id: "",
@@ -1649,6 +1648,7 @@ function draftOf(r: TriggerRule): RuleDraft {
     filter_prefix: r.filter_prefix,
     filter_keywords: (r.filter_keywords ?? []).join(", "),
     filter_chat_ids: (r.filter_chat_ids ?? []).join(", "),
+    filter_user_ids: (r.filter_user_ids ?? []).join(", "),
     model: r.model,
     working_directory: r.working_directory,
     settings_profile_id: r.settings_profile_id,
@@ -1686,6 +1686,7 @@ interface RuleWrite {
   filter_prefix: string;
   filter_keywords: string[] | null;
   filter_chat_ids: string[] | null;
+  filter_user_ids: string[] | null;
   model: string;
   working_directory: string;
   settings_profile_id: string;
@@ -1704,6 +1705,7 @@ function ruleBody(d: RuleDraft): RuleWrite {
     filter_prefix: d.filter_prefix.trim(),
     filter_keywords: splitList(d.filter_keywords),
     filter_chat_ids: splitList(d.filter_chat_ids),
+    filter_user_ids: splitList(d.filter_user_ids),
     model: d.model.trim(),
     working_directory: d.working_directory.trim(),
     settings_profile_id: d.settings_profile_id.trim(),
@@ -1723,6 +1725,7 @@ function ruleBodyToggled(r: TriggerRule, enabled: boolean): RuleWrite {
     filter_prefix: r.filter_prefix,
     filter_keywords: r.filter_keywords,
     filter_chat_ids: r.filter_chat_ids,
+    filter_user_ids: r.filter_user_ids,
     model: r.model,
     working_directory: r.working_directory,
     settings_profile_id: r.settings_profile_id,
@@ -1731,6 +1734,16 @@ function ruleBodyToggled(r: TriggerRule, enabled: boolean): RuleWrite {
     task_id: r.task_id,
     continue_on_reply: r.continue_on_reply,
   };
+}
+
+/** Whether a stored rule lacks the target list its provider requires (#674). */
+function missingTargets(r: TriggerRule, targets: TriggerTargets): boolean {
+  return !!targets.required && !(r.filter_chat_ids ?? []).some((id) => id !== "");
+}
+
+/** Whether a stored rule lists none of the users its provider asks for (#688). */
+function missingSenders(r: TriggerRule, senders: TriggerSenders | undefined): boolean {
+  return !!senders && !(r.filter_user_ids ?? []).some((id) => id.trim() !== "");
 }
 
 function splitList(v: string): string[] | null {
@@ -1767,7 +1780,30 @@ function TriggerRules({
         .catch(() => null),
     []
   );
+  // Optional for the same reason profiles are: a rule with no linked task is
+  // the normal case, so a failed read must not fail the section. A failure
+  // resolves to `undefined`, the same value as "not loaded yet", which is what
+  // keeps it from being read as "every linked task is missing" — see
+  // `linkedTask`.
+  const tasks = useResource(
+    (signal) => api.get<ScheduledTask[] | null>("/tasks", signal).catch(() => undefined),
+    []
+  );
   const picker = useDirPicker();
+  // One `users.list` walk per integration for as long as the section is open,
+  // shared by every rule edited in it (#689): Slack allows about 20 a minute.
+  // A failure is forgotten, so Retry asks again.
+  const userCache = useRef(new Map<string, Promise<SlackUser[] | null>>());
+  const loadUsers = useCallback((id: string) => {
+    const cache = userCache.current;
+    let pending = cache.get(id);
+    if (!pending) {
+      pending = api.get<SlackUser[] | null>(`/integrations/${encodeURIComponent(id)}/slack/users`);
+      pending.catch(() => cache.delete(id));
+      cache.set(id, pending);
+    }
+    return pending;
+  }, []);
 
   const [draft, setDraft] = useState<RuleDraft>();
   const [busy, setBusy] = useState(false);
@@ -1777,7 +1813,12 @@ function TriggerRules({
   const list = rules.data ?? [];
   const agentList = agents.data ?? [];
   const profileList = profiles.data ?? [];
+  // `undefined` is both "still loading" and "the read failed"; a Go `null` is
+  // a loaded, empty list.
+  const tasksLoaded = tasks.data !== undefined;
+  const taskList = tasks.data ?? [];
   const targets = provider.triggerTargets ?? TRIGGER_TARGETS_FALLBACK;
+  const senders = provider.triggerSenders;
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -1808,8 +1849,8 @@ function TriggerRules({
     <div className="formsec">
       <div className="formsec__title">Trigger rules</div>
       <div className="formrow__help">
-        An inbound message matching a rule starts the chosen agent. Rules are evaluated in
-        order and a message only fires the first that matches.
+        An inbound message matching a rule starts the chosen agent, or the rule's linked
+        task. Rules are evaluated in order and a message only fires the first that matches.
       </div>
 
       <div className="grouplist">
@@ -1828,7 +1869,12 @@ function TriggerRules({
               draft={draft}
               agents={agentList}
               profiles={profileList}
+              tasks={taskList}
+              tasksLoaded={tasksLoaded}
               targets={targets}
+              senders={senders}
+              integrationId={integrationId}
+              loadUsers={loadUsers}
               browse={picker.browse}
               busy={busy}
               onChange={setDraft}
@@ -1840,7 +1886,7 @@ function TriggerRules({
               <div className="rulerow__body">
                 <span style={{ fontWeight: 500 }}>{r.name || "Untitled rule"}</span>
                 <span className="rulerow__meta">
-                  <span>→ {r.agent_slug || "no agent"}</span>
+                  <RuleTarget rule={r} tasks={taskList} tasksLoaded={tasksLoaded} />
                   {r.filter_prefix && <span>prefix “{r.filter_prefix}”</span>}
                   {r.filter_keywords && r.filter_keywords.length > 0 && (
                     <span>keywords: {r.filter_keywords.join(", ")}</span>
@@ -1849,6 +1895,9 @@ function TriggerRules({
                     <span>
                       {r.filter_chat_ids.length} {targets.noun} filter(s)
                     </span>
+                  )}
+                  {senders && r.filter_user_ids && r.filter_user_ids.length > 0 && (
+                    <span>{r.filter_user_ids.length} allowed user(s)</span>
                   )}
                   {/* The execution settings, and only the ones this rule
                       actually overrides: a chip per default would be five chips
@@ -1859,6 +1908,30 @@ function TriggerRules({
                     </span>
                   ))}
                 </span>
+                {/* A rule stored before the list was required (#674) reads
+                    back off and empty. The write refuses to turn it on, so
+                    the switch is shut and this line is its reason. */}
+                {missingTargets(r, targets) && (
+                  <div className="msgline msgline--warn">
+                    <span className="msgline__icon">
+                      <Icon name="alert" size={13} />
+                    </span>
+                    <span>{targets.required?.off}</span>
+                  </div>
+                )}
+                {/* A Slack rule with no allowed users answers nobody (#688),
+                    whatever its switch says: one stored before the list existed
+                    is still on. The switch stays usable, so it can be turned
+                    off, and turning it on is refused by the write, whose 422
+                    shows in this section's error line. */}
+                {missingSenders(r, senders) && (
+                  <div className="msgline msgline--warn">
+                    <span className="msgline__icon">
+                      <Icon name="alert" size={13} />
+                    </span>
+                    <span>{senders?.off}</span>
+                  </div>
+                )}
               </div>
               {confirmDelete === r.id ? (
                 <span className="confirm">
@@ -1883,7 +1956,7 @@ function TriggerRules({
                 <>
                   <Switch
                     on={r.enabled}
-                    disabled={busy}
+                    disabled={busy || missingTargets(r, targets)}
                     /* The write is replace, so the body carries every column —
                        and carries it verbatim, because this control edits one
                        boolean. See `RuleWrite`. */
@@ -1921,7 +1994,12 @@ function TriggerRules({
             draft={draft}
             agents={agentList}
             profiles={profileList}
+            tasks={taskList}
+            tasksLoaded={tasksLoaded}
             targets={targets}
+            senders={senders}
+            integrationId={integrationId}
+            loadUsers={loadUsers}
             browse={picker.browse}
             busy={busy}
             onChange={setDraft}
@@ -1951,6 +2029,50 @@ function TriggerRules({
 }
 
 /**
+ * What a rule's task link resolves to (#687).
+ *
+ * `trigger_rules.task_id` has no foreign key and deleting a task does not
+ * clear it, so a stored id can name nothing. That is reported, never hidden —
+ * and only once the task list has actually loaded, because "not in a list that
+ * has not arrived" is not "missing".
+ */
+type LinkedTask =
+  | { kind: "none" }
+  | { kind: "unknown" }
+  | { kind: "missing" }
+  | { kind: "found"; task: ScheduledTask };
+
+function linkedTask(taskId: string, tasks: ScheduledTask[], loaded: boolean): LinkedTask {
+  if (!taskId) return { kind: "none" };
+  const task = tasks.find((t) => t.id === taskId);
+  if (task) return { kind: "found", task };
+  return loaded ? { kind: "missing" } : { kind: "unknown" };
+}
+
+/** A rule row's `→` target: the linked task when there is one, else the agent. */
+function RuleTarget({
+  rule,
+  tasks,
+  tasksLoaded,
+}: {
+  rule: TriggerRule;
+  tasks: ScheduledTask[];
+  tasksLoaded: boolean;
+}) {
+  const link = linkedTask(rule.task_id, tasks, tasksLoaded);
+  if (link.kind === "none") return <span>→ {rule.agent_slug || "no agent"}</span>;
+  return (
+    <>
+      <span>→ task: {link.kind === "found" ? link.task.name || link.task.id : rule.task_id}</span>
+      {link.kind === "found" && link.task.status === "paused" && (
+        <span className="badge badge--amber">paused</span>
+      )}
+      {link.kind === "missing" && <span className="badge badge--amber">missing</span>}
+    </>
+  );
+}
+
+/**
  * The non-default execution settings of a rule, as short chips.
  *
  * A profile is named rather than shown as its id: the id is a uuid, and a row
@@ -1975,7 +2097,12 @@ function RuleForm({
   draft,
   agents,
   profiles,
+  tasks,
+  tasksLoaded,
   targets,
+  senders,
+  integrationId,
+  loadUsers,
   browse,
   busy,
   onChange,
@@ -1985,7 +2112,15 @@ function RuleForm({
   draft: RuleDraft;
   agents: Agent[];
   profiles: ClaudeSettingsProfile[];
+  tasks: ScheduledTask[];
+  /** False while the task list is loading, and when its read failed. */
+  tasksLoaded: boolean;
   targets: TriggerTargets;
+  /** Set when the provider has an allowed-users list (#688). */
+  senders: TriggerSenders | undefined;
+  /** The integration the rule belongs to, and its member list (#689). */
+  integrationId: string;
+  loadUsers(integrationId: string): Promise<SlackUser[] | null>;
   browse: ReturnType<typeof useDirPicker>["browse"];
   busy: boolean;
   onChange(d: RuleDraft): void;
@@ -2011,12 +2146,30 @@ function RuleForm({
    * the honest half of what the lock was for.
    */
   const agentModel = agent?.model ?? "";
+  const link = linkedTask(draft.task_id, tasks, tasksLoaded);
   const timeout = Number(draft.timeout_minutes);
   const timeoutValid =
     draft.timeout_minutes === "" ||
     (Number.isInteger(timeout) && timeout >= 0 && timeout <= RULE_MAX_TIMEOUT_MINUTES);
+  // The provider's required list (#674), checked as the write checks it.
+  const required = targets.required;
+  const targetIds = splitList(draft.filter_chat_ids) ?? [];
+  const targetsMissing = !!required && targetIds.length === 0;
+  const targetsInvalid = required ? targetIds.filter((id) => !required.pattern.test(id)) : [];
+  // The provider's allowed users (#688), checked as the write checks them: an
+  // entry must be a user id either way, and the list may be empty only while
+  // the rule is off.
+  const senderIds = splitList(draft.filter_user_ids) ?? [];
+  const sendersInvalid = senders ? senderIds.filter((id) => !senders.pattern.test(id)) : [];
+  const sendersMissing = !!senders && draft.enabled && senderIds.length === 0;
   const ready =
-    draft.name.trim() !== "" && draft.agent_slug.trim() !== "" && timeoutValid;
+    draft.name.trim() !== "" &&
+    draft.agent_slug.trim() !== "" &&
+    timeoutValid &&
+    !targetsMissing &&
+    targetsInvalid.length === 0 &&
+    !sendersMissing &&
+    sendersInvalid.length === 0;
 
   return (
     <div className="rulerow" style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--sp-4)" }}>
@@ -2054,6 +2207,59 @@ function RuleForm({
         )}
       </div>
 
+      {/* The rule→task link (#687). The stored id stays an option whatever the
+          task list says — missing, or not loaded — so a save that leaves this
+          control alone sends it back unchanged, which the update accepts. */}
+      <div className="row" style={{ gap: "var(--sp-3)" }}>
+        <Dropdown
+          small
+          value={draft.task_id}
+          onChange={(task_id) => onChange({ ...draft, task_id })}
+          ariaLabel="Linked task"
+          label={`Task: ${
+            link.kind === "none"
+              ? "none"
+              : link.kind === "found"
+              ? link.task.name || link.task.id
+              : link.kind === "missing"
+              ? `${draft.task_id} (missing)`
+              : draft.task_id
+          }`}
+          options={[
+            { value: "", label: "No task" },
+            ...(link.kind === "missing"
+              ? [{ value: draft.task_id, label: `${draft.task_id} (missing)` }]
+              : link.kind === "unknown"
+              ? [{ value: draft.task_id, label: draft.task_id }]
+              : []),
+            ...tasks.map((t) => ({
+              value: t.id,
+              label: `${t.name || t.id}${t.status === "paused" ? " (paused)" : ""}`,
+            })),
+          ]}
+        />
+      </div>
+      <div className="formrow__help">
+        A linked task runs in place of this rule's agent and settings, with the message
+        passed to it as data. The settings below apply only while no task is linked.
+      </div>
+      {link.kind === "found" && link.task.status === "paused" && (
+        <div className="msgline msgline--warn">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>This task is paused, so a matching message starts nothing.</span>
+        </div>
+      )}
+      {link.kind === "missing" && (
+        <div className="msgline msgline--warn">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>The linked task no longer exists. Choose another, or No task.</span>
+        </div>
+      )}
+
       <div className="row" style={{ gap: "var(--sp-3)" }}>
         <label className="field field--sm" style={{ flex: 1 }}>
           <input
@@ -2086,6 +2292,47 @@ function RuleForm({
         </label>
       </div>
       <div className="formrow__help">{targets.help}</div>
+      {required && targetsInvalid.length > 0 && (
+        <div className="msgline msgline--error">
+          {required.invalid} {targetsInvalid.map((id) => `“${id}”`).join(", ")}.
+        </div>
+      )}
+
+      {/* Who may start a run (#688), picked from the workspace's members
+          (#689). The draft keeps the list as the text the fallback field
+          edits; the picker reads and writes it as ids, so the two are one
+          value and whatever was typed before the list loaded is still there. */}
+      {senders && (
+        <>
+          <SlackUserPicker
+            integrationId={integrationId}
+            value={senderIds}
+            onChange={(ids) => onChange({ ...draft, filter_user_ids: ids.join(", ") })}
+            load={loadUsers}
+            idPattern={senders.pattern}
+            fallback={
+              <div className="row" style={{ gap: "var(--sp-3)" }}>
+                <label className="field field--sm" style={{ flex: 1 }}>
+                  <input
+                    value={draft.filter_user_ids}
+                    onChange={(e) => onChange({ ...draft, filter_user_ids: e.target.value })}
+                    placeholder={senders.placeholder}
+                    aria-label="Allowed users"
+                    className="mono"
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
+            }
+          />
+          <div className="formrow__help">{senders.help}</div>
+          {sendersInvalid.length > 0 && (
+            <div className="msgline msgline--error">
+              {senders.invalid} {sendersInvalid.map((id) => `“${id}”`).join(", ")}.
+            </div>
+          )}
+        </>
+      )}
 
       {/* The execution settings a rule may override (#563). Every one is
           optional: left alone, the run gets whatever the dispatcher already
@@ -2181,6 +2428,25 @@ function RuleForm({
         </div>
       )}
 
+      {/* Why Save is shut, in text beside it: a disabled button shows no
+          tooltip. */}
+      {required && targetsMissing && (
+        <div className="msgline msgline--warn">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>{required.missing}</span>
+        </div>
+      )}
+      {senders && sendersMissing && (
+        <div className="msgline msgline--warn">
+          <span className="msgline__icon">
+            <Icon name="alert" size={13} />
+          </span>
+          <span>{senders.missing}</span>
+        </div>
+      )}
+
       <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
         <Switch on={draft.enabled} onChange={(v) => onChange({ ...draft, enabled: v })} />
         <span style={{ fontSize: "var(--text-sm)", color: "var(--fg-secondary)", flex: 1 }}>
@@ -2197,7 +2463,7 @@ function RuleForm({
   );
 }
 
-/* --- Slack inbound (Socket Mode) ----------------------------------------- */
+/* --- Inbound: Slack Socket Mode, Telegram long polling -------------------- */
 
 /** How often the row is re-read while the connection is meant to be up. */
 const INBOUND_POLL_MS = 5_000;
@@ -2216,30 +2482,31 @@ const INBOUND_POLL_MS = 5_000;
 const INBOUND_SETTLE_MS = 20_000;
 
 /**
- * The Socket Mode switch and what the worker last reported (#566, #569).
+ * The inbound switch and what the worker last reported (#566, #569), for
+ * either transport: `copy` is the provider's catalog entry (#676).
  *
- * Self-contained, like `TriggerRules` and `WebhookPanel`: it re-reads the one
+ * Self-contained, like `TriggerRules`: it re-reads the one
  * row it renders rather than asking the detail pane to reload, so a poll for a
  * reconnect does not re-fetch the whole list — and, more to the point, does not
  * re-seed the form the user may be typing in.
  */
-function InboundPanel({ item }: { item: Integration }) {
+function InboundPanel({ item, copy }: { item: Integration; copy: InboundCopy }) {
   /**
-   * `updated_at` and `has_app_token` are deps, not decoration.
+   * `updated_at` and the token flag are deps, not decoration.
    *
    * `IntegrationDetail` is keyed on the integration id, so a save calls
    * `onChanged()` without remounting this subtree — and `current` prefers
    * `row.data` once the first fetch lands. Keyed on `item.id` alone, the row a
    * user has *just stored their first app token on* would keep answering from
-   * the fetch made before it, leaving the switch disabled under "Store an
-   * app-level token above" with no way back but selecting another row. The
+   * the fetch made before it, leaving the switch disabled under its
+   * "store a token above" line with no way back but selecting another row. The
    * poll cannot rescue it either: it is off precisely while inbound is.
    * `updated_at` moves on every `PUT /api/integrations/{id}`, so it covers a
    * token added, replaced or dropped.
    */
   const row = useResource(
     (signal) => api.get<Integration>(`/integrations/${item.id}`, signal),
-    [item.id, item.updated_at, item.has_app_token]
+    [item.id, item.updated_at, item[copy.tokenFlag]]
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -2249,7 +2516,7 @@ function InboundPanel({ item }: { item: Integration }) {
   // switch from flicking to "off" for one frame on every mount.
   const current = row.data ?? item;
   const on = current.inbound_enabled;
-  const hasToken = current.has_app_token;
+  const hasToken = current[copy.tokenFlag];
   // Gate the *turning-on*, not the control (#474): a row that is already on
   // and has since lost its token is exactly the row whose owner wants to turn
   // it off. The backend agrees — it refuses `enabled: true` without a token and
@@ -2284,7 +2551,7 @@ function InboundPanel({ item }: { item: Integration }) {
     <div className="formsec">
       <div className="formsec__title">{INBOUND_TITLE}</div>
       <div className="formrow">
-        <div className="formrow__label">Socket Mode</div>
+        <div className="formrow__label">{copy.label}</div>
         <div className="formrow__control">
           <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
             <Switch on={on} disabled={busy || (!canTurnOn && !on)} onChange={toggle} />
@@ -2299,7 +2566,7 @@ function InboundPanel({ item }: { item: Integration }) {
             </span>
           </div>
 
-          <div className="formrow__help">{INBOUND_HELP}</div>
+          <div className="formrow__help">{copy.help}</div>
 
           {!canTurnOn && (
             /* A disabled `Switch` receives no mouse events, so it deliberately
@@ -2308,7 +2575,7 @@ function InboundPanel({ item }: { item: Integration }) {
               <span className="msgline__icon">
                 <Icon name="alert" size={13} />
               </span>
-              <span>{INBOUND_NEEDS_TOKEN}</span>
+              <span>{copy.needsToken}</span>
             </div>
           )}
           {current.inbound_error && (
@@ -2316,118 +2583,6 @@ function InboundPanel({ item }: { item: Integration }) {
           )}
           {error && <div className="msgline msgline--error">{error}</div>}
           {row.error && <div className="msgline msgline--error">{row.error}</div>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* --- Telegram webhook ---------------------------------------------------- */
-
-function WebhookPanel({ integrationId }: { integrationId: string }) {
-  const status = useResource(
-    (signal) =>
-      api.get<WebhookStatus>(`/integrations/${integrationId}/webhook/status`, signal),
-    [integrationId]
-  );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [confirmRemove, setConfirmRemove] = useState(false);
-
-  async function run(action: () => Promise<unknown>) {
-    setBusy(true);
-    setError(undefined);
-    try {
-      await action();
-      status.reload();
-    } catch (err) {
-      setError(describeError(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const s = status.data;
-  const active = s?.status === "active";
-
-  return (
-    <div className="formsec">
-      <div className="formsec__title">Webhook</div>
-      <div className="formrow">
-        <div className="formrow__label">Delivery</div>
-        <div className="formrow__control">
-          <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
-            {active ? (
-              <span className="badge badge--green">Active</span>
-            ) : s?.status === "error" ? (
-              <span className="badge badge--red">Error</span>
-            ) : (
-              <span className="badge">Inactive</span>
-            )}
-            {s?.has_secret && <span className="badge">Secret set</span>}
-            {!active && (
-              <button
-                className="btn"
-                disabled={busy}
-                onClick={() =>
-                  run(() => api.post(`/integrations/${integrationId}/webhook/register`))
-                }
-              >
-                Register
-              </button>
-            )}
-            {active && (
-              <>
-                <button
-                  className="btn"
-                  disabled={busy}
-                  onClick={() =>
-                    run(() =>
-                      api.post(`/integrations/${integrationId}/webhook/regenerate-secret`)
-                    )
-                  }
-                >
-                  <Icon name="refresh" size={13} />
-                  Regenerate secret
-                </button>
-                {confirmRemove ? (
-                  <span className="confirm">
-                    Remove webhook?
-                    <button className="btn btn--ghost" onClick={() => setConfirmRemove(false)}>
-                      Cancel
-                    </button>
-                    <button
-                      className="btn btn--danger"
-                      disabled={busy}
-                      onClick={() =>
-                        run(async () => {
-                          await api.del(
-                            `/integrations/${integrationId}/webhook/register`
-                          );
-                          setConfirmRemove(false);
-                        })
-                      }
-                    >
-                      Remove
-                    </button>
-                  </span>
-                ) : (
-                  <button className="btn btn--danger" onClick={() => setConfirmRemove(true)}>
-                    Remove
-                  </button>
-                )}
-              </>
-            )}
-          </div>
-
-          <div className="formrow__help">
-            Telegram pushes updates to this instance. Registering needs a reachable public
-            URL, set under Settings → General.
-          </div>
-
-          {s?.url && <div className="codebox">{s.url}</div>}
-          {s?.error && <div className="msgline msgline--error">{s.error}</div>}
-          {error && <div className="msgline msgline--error">{error}</div>}
         </div>
       </div>
     </div>

@@ -36,7 +36,7 @@
 //! # Which errors reach the wire
 //!
 //! `httpErr` maps the service's three typed errors and turns everything else
-//! into a 500. Only four failures reach the wire from this file:
+//! into a 500. These failures reach the wire from this file:
 //!
 //! | | |
 //! |---|---|
@@ -44,7 +44,8 @@
 //! | 400 `invalid JSON body` | the update handler, which *does* use `errInvalidJSONBody`. |
 //! | 404 `profile "<id>" not found` | `NotFoundError`. |
 //! | 409 `profile with id "<id>" already exists` | `ConflictError` — used both for a rename collision **and** for deleting the default profile, where the wording is Go's and reads oddly. Reproduced, not improved. |
-//! | 422 `validation error for "settings": failed to parse settings JSON` | the one reachable `ValidationError`: `json.Valid` passes a number `strconv.ParseFloat` then rejects. |
+//! | 422 `validation error for "settings": failed to parse settings JSON` | the one `ValidationError` the original reached: `json.Valid` passes a number `strconv.ParseFloat` then rejects. |
+//! | 422 `validation error for "settings": <reason>` | #670: a `settings` value nested past serde's 128 levels, or one the syntax check admits and the parse refuses. Decided before the rename, so it moves nothing. |
 //!
 //! Everything else is a 500.
 //!
@@ -55,14 +56,15 @@
 //!   create, rename and the seeded default *derive* one from the dir. Moving
 //!   the config dir must not silently repoint a profile at a file that is not
 //!   its own.
-//! - **`slugify` walks Unicode categories.** `unicode.IsLetter`/`IsDigit` keep
-//!   accented letters, which `safeProfileID` then rejects — so a non-ASCII name
-//!   is a 500 in Go unless every character happens to be dropped. Rust's
-//!   `char::is_alphabetic` is a *different* set (it includes `Nl` and
-//!   `Other_Alphabetic`), so rather than approximate the tables, any non-ASCII
-//!   name is **declined with a 500** before anything is written. That is a
-//!   known limitation rather than a reproduction — see the known-bugs list in
-//!   `CLAUDE.md`.
+//! - **A profile's id is ASCII, and its name is whatever the user typed**
+//!   (#670). [`slugify`] keeps ASCII letters and digits and drops every other
+//!   character, so `Café` is stored under the name `Café` with the id `caf`,
+//!   and a name with no ASCII letter or digit at all gets the id `profile`.
+//!   The id stays ASCII on purpose: it is a file name (`settings_<id>.json`,
+//!   guarded by [`resolve_profile_file_path`]) and the UI interpolates it into
+//!   a URL path unescaped. Until #670 any non-ASCII name was a 500, inherited
+//!   from an original whose slug kept Unicode letters and whose id check then
+//!   refused them.
 
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -193,11 +195,11 @@ fn ensure_default(dir: &str) -> Result<(), WriteError> {
         match go_any(&content) {
             Decoded::Value(value) => value,
             Decoded::NotJson | Decoded::NumberOutOfRange => Value::Object(serde_json::Map::new()),
-            // Go's parser would have succeeded; ours cannot say — a document
-            // past serde's 128-level limit, or bytes that are not UTF-8, which
-            // Go decodes with a U+FFFD substitution this port will not guess.
-            // Nothing but the directory has been touched, so the 500 is
-            // exact.
+            // A `settings.json` past serde's 128-level limit, or one whose
+            // bytes are not UTF-8. This is the file on disk, not the request,
+            // so it stays a 500 (#670 reclassified only the request-borne
+            // arms): no request can fix it. Nothing but the directory has
+            // been touched.
             Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
         }
     };
@@ -249,14 +251,11 @@ fn deduplicate_id(base: &str, profiles: &[Profile]) -> String {
     id
 }
 
-/// `slugify`, for the ASCII names it can be reproduced for — see the module
-/// header for why a non-ASCII one is declined instead.
-fn slugify(name: &str) -> Result<String, WriteError> {
-    if !name.is_ascii() {
-        return Err(WriteError::Fallback(format!(
-            "profile name {name:?} is not ASCII: Go slugifies by Unicode category"
-        )));
-    }
+/// The id a profile name gets: lowercase ASCII letters and digits, with runs
+/// of spaces and dashes collapsed to one `-`. **Total** — a non-ASCII
+/// character is dropped like punctuation rather than refused (#670; see the
+/// module header for why the id stays ASCII).
+fn slugify(name: &str) -> String {
     let mut slug = String::with_capacity(name.len());
     let mut prev_dash = false;
     for c in name.to_ascii_lowercase().chars() {
@@ -271,18 +270,23 @@ fn slugify(name: &str) -> Result<String, WriteError> {
             slug.push(c);
             prev_dash = false;
         }
-        // Everything else — including `_` — is dropped by `strings.Map`.
+        // Everything else — `_`, punctuation, every non-ASCII character — is
+        // dropped.
     }
     let trimmed = slug.trim_matches('-');
-    Ok(if trimmed.is_empty() {
+    if trimmed.is_empty() {
         "profile".to_string()
     } else {
         trimmed.to_string()
-    })
+    }
 }
 
-/// `resolveProfileFilePath`: `safeProfileID` first, so a tampered index cannot
-/// name a path outside the dir. An id that fails it is a 500 in Go.
+/// `resolveProfileFilePath`: `safeProfileID` first, so no id can name a path
+/// outside the dir.
+///
+/// Every id that reaches this came out of [`slugify`] or [`deduplicate_id`],
+/// which cannot produce one it refuses — so the refusal is an invariant, not
+/// an answer to client input, and stays a 500 (#670).
 fn resolve_profile_file_path(dir: &str, id: &str) -> Result<String, WriteError> {
     let safe = !id.is_empty()
         && id
@@ -442,7 +446,7 @@ pub fn create(dir: &str, body: &[u8]) -> Result<Answer, WriteError> {
     ensure_default(dir)?;
     let mut profiles = load(dir)?;
 
-    let id = deduplicate_id(&slugify(&req.name)?, &profiles);
+    let id = deduplicate_id(&slugify(&req.name), &profiles);
     let content = read_default_profile_content(&profiles);
     let file_path = resolve_profile_file_path(dir, &id)?;
     super::write_file(&file_path, &content)
@@ -520,15 +524,20 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
                 Decoded::Value(value) => Some(Ok(value)),
                 Decoded::NumberOutOfRange => Some(Err(())),
                 // `go_json_valid` just passed over the same bytes, so this is
-                // the two parsers disagreeing rather than a malformed request.
-                // Declined — answering 400 here would be inventing a status
-                // has no reason to send.
+                // a value the skip-parse admits and the materializing parse
+                // refuses — a lone surrogate escape is the reachable one. The
+                // body was well-formed and one field of it is not usable, so
+                // it is a 422 on that field (#670), like the arm above.
                 Decoded::NotJson => {
-                    return Err(WriteError::Fallback(
-                        "settings re-parse disagrees with json.Valid; only Go can say".to_string(),
+                    return Err(WriteError::validation(
+                        "settings",
+                        "settings could not be parsed",
                     ))
                 }
-                Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
+                // Past serde's 128-level limit: the same 422, with the reason.
+                Decoded::Undecidable(reason) => {
+                    return Err(WriteError::validation("settings", reason))
+                }
             }
         }
     };
@@ -577,6 +586,11 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
 ///
 /// A rename collision is an explicit 409 rather than the auto-deduplication
 /// create and duplicate perform — the two really do differ.
+///
+/// **A new name with no ASCII letter or digit keeps the id** (#670). Its slug
+/// would be the `profile` fallback, which says nothing about the name: moving
+/// the profile onto it would be a rename the user did not ask for, and a 409
+/// naming an id they never typed as soon as a second such profile existed.
 fn rename(
     profiles: &mut [Profile],
     idx: usize,
@@ -584,7 +598,11 @@ fn rename(
     new_name: &str,
     dir: &str,
 ) -> Result<(), WriteError> {
-    let new_id = slugify(new_name)?;
+    let new_id = if new_name.chars().any(|c| c.is_ascii_alphanumeric()) {
+        slugify(new_name)
+    } else {
+        current_id.to_string()
+    };
     if new_id != current_id {
         if profiles
             .iter()
@@ -645,7 +663,7 @@ pub fn duplicate(dir: &str, id: &str) -> Result<Answer, WriteError> {
     validate_path_within_dir(&profiles[idx].file_path, dir)?;
 
     let new_name = format!("Copy of {}", profiles[idx].name);
-    let new_id = deduplicate_id(&slugify(&new_name)?, &profiles);
+    let new_id = deduplicate_id(&slugify(&new_name), &profiles);
     let content = std::fs::read(&profiles[idx].file_path).unwrap_or_else(|_| b"{}".to_vec());
     let file_path = resolve_profile_file_path(dir, &new_id)?;
     super::write_file(&file_path, &content)
@@ -723,20 +741,99 @@ mod tests {
             ("Copy of Default", "copy-of-default"),
             ("v1.2", "v12"),
         ] {
-            assert_eq!(slugify(name).expect("ascii"), want, "name {name:?}");
+            assert_eq!(slugify(name), want, "name {name:?}");
         }
     }
 
-    /// Go keeps Unicode letters and then rejects the id it built, unless every
-    /// character happened to be dropped. Two different answers from one rule
-    /// this port does not reproduce, so it hands the name over.
+    /// A non-ASCII name is accepted (#670): its non-ASCII characters are
+    /// dropped from the id like punctuation, and a name with nothing left is
+    /// `profile`. Every result passes the file-name guard.
     #[test]
-    fn a_non_ascii_name_is_declined_rather_than_guessing_a_slug() {
-        assert!(matches!(
-            slugify("Café").unwrap_err(),
-            WriteError::Fallback(_)
-        ));
-        assert!(matches!(slugify("™").unwrap_err(), WriteError::Fallback(_)));
+    fn a_non_ascii_name_slugs_to_an_ascii_id() {
+        let root = dir();
+        let d = path_of(&root);
+        for (name, want) in [
+            ("Café", "caf"),
+            ("Über Work 2", "ber-work-2"),
+            ("日本語", "profile"),
+            ("™", "profile"),
+            ("– dash –", "dash"),
+        ] {
+            let id = slugify(name);
+            assert_eq!(id, want, "name {name:?}");
+            resolve_profile_file_path(&d, &id).expect("a slug is always a safe id");
+        }
+    }
+
+    /// Renaming to a name with no ASCII letter or digit changes the name and
+    /// nothing else (#670): the id and the file stay, so two such profiles
+    /// never collide on the `profile` fallback.
+    #[test]
+    fn a_rename_to_a_name_with_no_ascii_keeps_the_id_and_the_file() {
+        let root = dir();
+        let d = path_of(&root);
+        create(&d, r#"{"name":"日本語"}"#.as_bytes()).expect("create");
+        create(&d, r#"{"name":"한국어"}"#.as_bytes()).expect("create");
+
+        let renamed =
+            body_of(update(&d, "profile-2", r#"{"name":"中文"}"#.as_bytes()).expect("rename"));
+        assert!(
+            renamed.contains(r#""id":"profile-2","name":"中文""#),
+            "{renamed}"
+        );
+        assert!(std::path::Path::new(&format!("{d}/settings_profile-2.json")).exists());
+
+        // An ASCII-named profile renamed the same way keeps its id too.
+        create(&d, br#"{"name":"Work"}"#).expect("create");
+        let renamed = body_of(update(&d, "work", r#"{"name":"仕事"}"#.as_bytes()).expect("rename"));
+        assert!(
+            renamed.contains(r#""id":"work","name":"仕事""#),
+            "{renamed}"
+        );
+        assert!(std::path::Path::new(&format!("{d}/settings_work.json")).exists());
+    }
+
+    /// The whole life of a profile with a non-ASCII name (#670): created with
+    /// the name verbatim and an ASCII id, read back, renamed to another
+    /// non-ASCII name, duplicated, and deleted. Two names that slug alike are
+    /// told apart by the usual numeric suffix.
+    #[test]
+    fn a_non_ascii_profile_name_round_trips_through_every_route() {
+        let root = dir();
+        let d = path_of(&root);
+
+        let created = create(&d, r#"{"name":"日本語"}"#.as_bytes()).expect("create");
+        assert_eq!(created.status, StatusCode::CREATED);
+        let body = body_of(created);
+        assert!(body.contains(r#""id":"profile","name":"日本語""#), "{body}");
+        let second = body_of(create(&d, r#"{"name":"한국어"}"#.as_bytes()).expect("create"));
+        assert!(
+            second.contains(r#""id":"profile-2","name":"한국어""#),
+            "{second}"
+        );
+
+        let read = body_of(get(&d, "profile").expect("get"));
+        assert!(read.contains(r#""name":"日本語""#), "{read}");
+        assert!(std::path::Path::new(&format!("{d}/settings_profile.json")).exists());
+
+        let renamed =
+            body_of(update(&d, "profile", r#"{"name":"Café"}"#.as_bytes()).expect("rename"));
+        assert!(renamed.contains(r#""id":"caf","name":"Café""#), "{renamed}");
+        assert!(std::path::Path::new(&format!("{d}/settings_caf.json")).exists());
+        assert!(!std::path::Path::new(&format!("{d}/settings_profile.json")).exists());
+
+        let copy = body_of(duplicate(&d, "caf").expect("duplicate"));
+        assert!(
+            copy.contains(r#""id":"copy-of-caf","name":"Copy of Café""#),
+            "{copy}"
+        );
+
+        assert_eq!(
+            delete(&d, "caf").expect("delete").status,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(get(&d, "caf").unwrap_err().status(), StatusCode::NOT_FOUND);
+        assert!(!std::path::Path::new(&format!("{d}/settings_caf.json")).exists());
     }
 
     #[test]
@@ -1291,9 +1388,10 @@ mod tests {
     /// The same cap on `update`, which is a **400** and not the 422 a
     /// hand-written depth check inside `validateSettingsJSON` produced: Go's
     /// `Decode` fails first, so the service never runs. The 128–10000 band
-    /// is still declined, which is the neighbouring case easy to lose.
+    /// is a 422 on `settings` (#670), which is the neighbouring case easy to
+    /// lose.
     #[test]
-    fn an_update_deeper_than_gos_scanner_is_400_and_the_band_below_is_declined() {
+    fn an_update_deeper_than_gos_scanner_is_400_and_the_band_below_is_422() {
         let root = dir();
         let d = path_of(&root);
         list(&d).expect("seed");
@@ -1307,13 +1405,40 @@ mod tests {
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "invalid JSON body");
 
-        // Past serde's 128-level limit but inside Go's 10000: neither parser is
-        // the authority, so it declines.
+        // Past serde's 128-level limit but inside the scanner's 10000: the
+        // body decoded and its `settings` value is the problem.
         let band = format!(r#"{{"settings":{}{}}}"#, "[".repeat(200), "]".repeat(200));
-        assert!(matches!(
-            update(&d, "default", band.as_bytes()).unwrap_err(),
-            WriteError::Fallback(_)
-        ));
+        let err = update(&d, "default", band.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            err.message(),
+            r#"validation error for "settings": the value is nested more than 128 levels deep"#
+        );
+    }
+
+    /// A `settings` value the syntax check admits and the parse refuses — a
+    /// lone surrogate escape — is a 422 on `settings` (#670), and it is decided
+    /// before the rename in the same request moves anything.
+    #[test]
+    fn an_update_whose_settings_do_not_parse_is_422_and_renames_nothing() {
+        let root = dir();
+        let d = path_of(&root);
+        list(&d).expect("seed");
+        create(&d, br#"{"name":"Work"}"#).expect("create");
+
+        let body = [
+            br#"{"name":"Moved","settings":{"a":""#.as_slice(),
+            &[92],
+            b"ud800\"}}",
+        ]
+        .concat();
+        let err = update(&d, "work", &body).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            err.message(),
+            r#"validation error for "settings": settings could not be parsed"#
+        );
+        assert!(get(&d, "work").is_ok(), "the rename did not happen");
     }
 
     /// **`update` validates the recorded path before it mutates anything.** It

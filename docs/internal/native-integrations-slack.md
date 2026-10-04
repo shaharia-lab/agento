@@ -90,7 +90,11 @@ default logs at `debug`.
   them keep one half, which for the socket half is a live connection holding the
   app token of a row the user has just changed. The worker is **not** a seventh
   entry in `start_for_type`'s starter table: it is a second handle on one of the
-  six, and `start_socket_worker` is where the three conditions are read.
+  six, and `start_socket_worker` is where the three conditions are read. Since
+  #676 the map's value is `registry::InboundWorker`, an enum over this worker
+  and Telegram's poll worker, so one set of epoch and generation rules serves
+  both; `socket::status_writer` and `backoff_for` are `pub(crate)` for the same
+  reason.
 - **The stored-token check is not redundant with the 422 on `PUT
   /api/integrations/{id}/inbound`.** That refusal guards the moment the switch
   goes on; a later `PUT /api/integrations/{id}` can replace the blob with one
@@ -263,6 +267,33 @@ declines to start one.
   *could not read*: `busy_timeout` is five seconds, and a database busy behind the
   session scanner would otherwise make a resume look like a stranger's thread and
   answer nothing.
+- **The sender is checked first, and an empty list is nobody (#688).** A rule's
+  `filter_user_ids` (migration 53) is the Slack users it answers. `accept` asks
+  `match_rule::sender_allowed(&rule.filters.user_ids, &mention.user)` straight
+  after `rule_for` and before `auth.test`, the strip and the filters, so a
+  mention from an unlisted user costs one rule read and nothing else: no queue
+  entry, no thread-map read, no chat, no run and no reply. An empty list, an
+  empty `user` and an id in another case are all refusals, the opposite of
+  `filter_chat_ids`, where empty is the workspace default. The check runs on
+  every mention, a reply inside one of Agento's own threads included, for the
+  reason the filters do. It is a separate function rather than a clause of
+  `match_rule` because that one is shared with Telegram and pinned to
+  `parity/trigger_match_vectors.json`. A refusal is `Dropped::UnknownSender`,
+  logged at `debug` with Slack's ids, and it is the one drop that is counted:
+  `tasks::count_dropped_event` adds one to the linked task's
+  `dropped_event_count` through `db::blocking`, and a rule with no `task_id`
+  only logs. The write is the other guard: on a Slack integration
+  `integrations.rs::validate_rule_users` answers 422 on `filter_user_ids` for
+  `enabled: true` with no users, and for an entry that is not `U` or `W`
+  followed by uppercase letters or digits; the list is stored trimmed, without
+  blanks or repeats. **Migration 53 grandfathers nothing**: a rule that existed
+  keeps `enabled` and reads back `[]`, so it answers nobody until a user is
+  added, and the row's switch cannot turn it back on because that posts the
+  stored rule. Guards:
+  `a_mention_from_an_unlisted_user_runs_nothing_and_is_counted_on_the_task`,
+  `the_sender_is_checked_before_the_prefix_and_before_auth_test`,
+  `an_unlinked_rule_drops_an_unlisted_user_even_inside_its_own_thread`,
+  `a_slack_rule_cannot_be_enabled_without_an_allowed_user`.
 - **Strip, then filter, then enqueue — and the filters read the stripped text
   (#582).** The trigger-rule form has always shown Prefix and Keywords for every
   provider, and until #582 the Slack path read neither: `filter_prefix` and
@@ -304,10 +335,58 @@ declines to start one.
   empty, released nothing and then removed its entry would lose a job queued in
   between, so the drain re-checks the channel while holding the lock that hands
   out senders and only removes the entry when it is still empty.
-- **Both start and resume go through `agent_run::run_resumed`.** A start creates
-  the chat first and then resumes it — no `sdk_session_id` yet, so `resume_spec`
-  passes no `--resume` — which makes the busy lock, the session-id write-back and
-  the *additive* usage accounting one implementation from the first turn on.
+- **An unlinked start and every resume go through `agent_run::Runner::resume`.** A
+  start creates the chat first and then resumes it — no `sdk_session_id` yet, so
+  `resume_spec` passes no `--resume` — which makes the busy lock, the session-id
+  write-back and the *additive* usage accounting one implementation from the
+  first turn on.
+- **A top-level mention under a rule that names a task is an event run, not a
+  chat turn** (#685). `Inbound::turn` keeps its order — thread map, the
+  unmapped-and-threaded drop, the `auth.test` failure — and then branches three
+  ways: a mapped thread resumes, as before and **whatever the rule now says**; an
+  unmapped top-level mention whose `rule.task_id` is empty starts a chat, as
+  before; otherwise `Inbound::run_linked` builds an `EventInput`
+  (`TriggeredBy::Slack`, the text `filtered_prompt` left, and
+  `ReplyTarget::Slack { integration, channel, thread_ts: the mention's ts }`) and
+  hands it to the executor in two steps, `executor::admit_event` and then
+  `executor::run_admitted`. On that arm:
+  - **The handler posts nothing on success.** The answer is the task's `reply`
+    delivery (`schedule/delivery.rs`, #682), which the run does not await. A
+    linked task with no `reply` destination therefore runs, is recorded, and is
+    silent in Slack; one `warn` names the rule and the task.
+  - **The rule's `agent_slug` and execution settings are not read.** The task's
+    instructions are the prompt and the mention's words are the delimited data
+    block inside it (`docs/internal/native-schedule.md`).
+  - **The refusals write no `job_history` row.** `Paused` is silence, like a
+    disabled channel rule. `Dropped` and `RateLimited` — the task's own run
+    limits (#691) — are silence too, with one `info` line of ids; the executor
+    has already counted the event on the task. `NoSuchTask`, `Unavailable` and
+    a process with no scheduler answer `ERROR_REPLY` in the thread, and never
+    fall back to `start_chat` — that would run the sender's words as the
+    prompt.
+  - **The scheduler is looked up per turn** (`Inbound::scheduler`:
+    `schedule::runtime::running()`), because `lib.rs` starts the integration
+    registry before the scheduler. Tests pass a `runtime::detached` one through
+    `handler_with_scheduler`.
+  - **The thread is mapped after the run**, to the run's `chat_session_id`, by
+    the same `insert_thread` a start uses — the third writer of
+    `inbound_threads`. A later mention in that thread is then an ordinary
+    resume, answered inline. A failed insert is a `warn`. A linked task that
+    also has a `slack` destination has two inserts racing for one
+    `UNIQUE (chat_id)` row — this one and the delivery's summary thread (#642),
+    which is spawned and not awaited — so the second fails, and which of the
+    two threads ends up mapped is not determined (#686). When the delivery
+    wins, a follow-up in the mention's thread is dropped as unmapped.
+  - **The task's limits come first, then both global bounds** (#691).
+    `admit_event` passes the task's limiter, and only an admitted event takes
+    the dispatcher's ten-slot permit, around `run_admitted`, which then takes
+    one of the scheduler's three. A mention waiting in its task's queue holds
+    neither; it does hold its Slack thread's worker, so later mentions in that
+    one thread wait behind it. The queue is at most 100 per task.
+    `the_global_bound_is_taken_around_the_run_and_not_around_the_wait` pins the
+    order.
+  - **A quick follow-up can be answered before the first reply lands**, since
+    delivery is not awaited; the FIFO still orders the runs themselves.
 - **The two failure sentences are `trigger::dispatcher`'s constants**, now
   `pub(crate)`: `ERROR_REPLY` for a failed run and for a timeout (which arrives
   as an `Err`, indistinguishable to a reader in Slack), `NO_RESPONSE_REPLY` for
@@ -448,4 +527,38 @@ so the buffered registry never claims it. Rules:
   (`loadChannels`), because the method is Tier 2.
 
 Pinned by `slack/channels.rs`'s tests and the `desktop_routes.json` set-equality
+test (the route is recorded in `integrations::ROUTES`).
+
+## Member list route (#689)
+
+`GET /api/integrations/{id}/slack/users` feeds the rule form's allowed-users
+picker (`components/SlackUserPicker.tsx`). It lives in `slack/users.rs`, which
+is `slack/channels.rs` section for section: the **streaming** registry answers
+it, and `integrations::route_of` refuses the extra segments. Rules:
+
+- **The token is `registry::slack_delivery_token`'s**, with the channel list's
+  refusals. Unknown id → 404; not Slack, disabled, not connected or no token →
+  400.
+- **Every page, capped at `MAX_PAGES` (10) × 1000.** `users.list` with
+  `limit=1000`, following `response_metadata.next_cursor`; a cursor that never
+  empties stops at the cap. The cap counts what Slack sent, so the answer holds
+  fewer than 10,000 people once the exclusions below are applied.
+- **People only.** A member with `is_bot` or `deleted` set is left out, and so
+  is Slackbot, which Slack reports with `is_bot: false`; it is matched on its
+  id, `USLACKBOT`.
+- **Three fields**: `id`, `name` (the handle), `real_name`, sorted by name then
+  id, through `gojson::to_vec`. A missing or `null` `real_name` is `""`. Never
+  Slack's body, so no email or profile field reaches the UI.
+- **Upstream failure is a 502** with a sentence: `missing_scope` names
+  `users:read`, the rejected-token family says to reconnect, and anything else
+  passes through. `ok` decides over the HTTP status, as everywhere. The OAuth
+  install requests `users:read` (`SLACK_SCOPES`); a Socket Mode app installed
+  from the user guide's manifest before #689 does not have it, so this is the
+  common first answer and the picker's fallback field is what keeps the rule
+  saveable.
+- **Nothing caches server-side.** `TriggerRules` fetches once per integration
+  per mount and shares the request between the rules edited in it
+  (`loadUsers`), because the method is Tier 2.
+
+Pinned by `slack/users.rs`'s tests and the `desktop_routes.json` set-equality
 test (the route is recorded in `integrations::ROUTES`).

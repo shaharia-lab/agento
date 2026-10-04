@@ -37,6 +37,9 @@ name: Release
 #                      copies the staged `latest.json` to the fixed
 #                      `desktop-latest` tag. That URL is what every installed
 #                      app polls, so THIS is the moment a release goes live.
+#                   -> `announce` then posts the release to the Discord release
+#                      channel: once per version, only after `promote`
+#                      succeeded, and without being able to fail the run.
 #
 # Publishing the manifest immediately at build time would point updaters at
 # draft asset URLs that 404 until someone remembers to publish the draft —
@@ -493,6 +496,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name }}
+    outputs:
+      first_promotion: ${{ steps.live.outputs.first_promotion }}
     steps:
       - name: Download the staged manifest
         run: |
@@ -526,6 +531,35 @@ jobs:
           print(f"promoting {version}: {', '.join(sorted(manifest['platforms']))}")
           EOF
 
+      # What `announce` keys off. The manifest live on `desktop-latest` is the
+      # one durable record of which version was last promoted, so reading it
+      # BEFORE the upload below answers "has this version gone out already?"
+      # with no state of its own. "Re-run all jobs" on a promoted release finds
+      # its own version there and announces nothing.
+      #
+      # Not `github.run_attempt == 1`: that would also silence a release whose
+      # first attempt failed here and whose re-run is the one that shipped it.
+      #
+      # No `desktop-latest` release, no manifest on it, or one that does not
+      # parse all mean nothing was promoted before, which is a first promotion.
+      - name: Is this the first promotion of this version?
+        id: live
+        run: |
+          version="${TAG#v}"
+          live_version=""
+          if gh release download desktop-latest --repo "$GITHUB_REPOSITORY" \
+               --pattern latest.json --output live.json 2>/dev/null; then
+            live_version="$(jq -r '.version // empty' live.json 2>/dev/null || true)"
+          fi
+
+          if [ "$live_version" = "$version" ]; then
+            echo "first_promotion=false" >>"$GITHUB_OUTPUT"
+            echo "desktop-latest already carries ${version}; this run will not announce it again."
+          else
+            echo "first_promotion=true" >>"$GITHUB_OUTPUT"
+            echo "desktop-latest carries '${live_version:-nothing}'; ${version} is a first promotion."
+          fi
+
       # A fixed tag so the updater has a stable manifest URL. Marked as a
       # prerelease so it never displaces the real "Latest release" on the repo
       # page — asset download URLs work for prereleases just the same.
@@ -543,3 +577,43 @@ jobs:
           Not a download — see the \`v*\` releases for installers."
           fi
           gh release upload desktop-latest latest.json --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Tells the Discord release channel, once per version. It hangs off `promote`
+  # rather than off the event, so it inherits that job's whole filter by only
+  # running when it succeeded: a real `v*` release, published, not a
+  # prerelease, carrying a manifest. A tag push, a `workflow_dispatch`, a
+  # release candidate and `desktop-latest`'s own publication never get here,
+  # and editing a release starts no run at all (`types: [published]`).
+  #
+  # A separate job, not a last step of `promote`, for three reasons:
+  # `continue-on-error` here cannot hide a promotion failure there; this job
+  # needs only `contents: read`; and re-running it alone retries the
+  # announcement with `promote`'s earlier output, without promoting twice.
+  #
+  # `continue-on-error` is what keeps Discord out of the release's way. The
+  # manifest is already live when this starts, so an outage or a revoked
+  # webhook leaves the run green with this one job marked failed.
+  announce:
+    name: Announce in Discord
+    needs: promote
+    if: needs.promote.outputs.first_promotion == 'true'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      # The webhook reaches the script through `env` and nowhere else, and the
+      # release text is fetched by the script with `gh`, never expanded from
+      # `github.event.release.body` into this file: release notes are typed by
+      # hand and an expression inside `run:` is pasted into the shell as code.
+      #
+      # A missing secret (a fork has none) is the script's own case — it logs a
+      # notice and exits 0 — because `secrets` cannot be read in a job's `if`.
+      - name: Post the release to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: .github/scripts/announce-release.sh "$TAG"

@@ -212,6 +212,34 @@
     {
       "version": 48,
       "sql": "\n-- The automations data model (#681, epic #679). Authored here like 31-47, and\n-- additive: eight defaulted columns on three existing tables, so an older build\n-- opening this database applies nothing and simply never reads them.\n--\n-- Every column is NOT NULL DEFAULT, following 39 and 44: the one additive shape\n-- SQLite applies without rebuilding the table.\n--\n-- `job_history.triggered_by` says what started a run: schedule, telegram,\n-- slack, webhook, manual or reply. A manual run wrote a row identical to a\n-- scheduled one before this migration, so the two cannot be told apart in\n-- history: every existing row reads 'schedule', and 'manual' is recorded from\n-- here on. `continues_job_id` names the run a reply continues and\n-- `event_payload` holds the event that started the run; both are '' when\n-- there is none.\n--\n-- `trigger_rules.task_id` links a rule to the task it starts, '' while it is\n-- not linked. Like `continues_job_id` it carries no foreign key, following\n-- `settings_profile_id`: ADD COLUMN cannot add a NOT NULL reference, and a\n-- dangling id is the reader's to handle.\n--\n-- `continue_on_reply` is on both tables, because a rule has no task until\n-- `task_id` is set. It defaults to off for whatever is created from here on,\n-- and the two UPDATEs turn it on for everything that continues a conversation\n-- on a reply today: every existing rule, and every task with a Slack\n-- destination, whose thread is mapped for replies unconditionally (#642). No\n-- behaviour changes silently and no rule is moved or rewritten.\n--\n-- The CASE keeps a hand-edited `destinations` from failing the upgrade: CASE\n-- evaluates lazily, so `json_each` never sees text that is not JSON and\n-- `json_extract` never sees an element that is not an object. Such a task\n-- simply stays off.\n--\n-- `dropped_event_count` and `rate_limited_event_count` count the events a task\n-- did not run for. Nothing increments them yet.\nALTER TABLE job_history ADD COLUMN triggered_by TEXT NOT NULL DEFAULT 'schedule';\nALTER TABLE job_history ADD COLUMN continues_job_id TEXT NOT NULL DEFAULT '';\nALTER TABLE job_history ADD COLUMN event_payload TEXT NOT NULL DEFAULT '';\nALTER TABLE trigger_rules ADD COLUMN task_id TEXT NOT NULL DEFAULT '';\nALTER TABLE trigger_rules ADD COLUMN continue_on_reply INTEGER NOT NULL DEFAULT 0;\nUPDATE trigger_rules SET continue_on_reply = 1;\nALTER TABLE scheduled_tasks ADD COLUMN continue_on_reply INTEGER NOT NULL DEFAULT 0;\nALTER TABLE scheduled_tasks ADD COLUMN dropped_event_count INTEGER NOT NULL DEFAULT 0;\nALTER TABLE scheduled_tasks ADD COLUMN rate_limited_event_count INTEGER NOT NULL DEFAULT 0;\nUPDATE scheduled_tasks SET continue_on_reply = 1\n WHERE CASE WHEN json_valid(destinations) THEN EXISTS (\n           SELECT 1 FROM json_each(scheduled_tasks.destinations) AS entry\n            WHERE CASE WHEN entry.type = 'object'\n                       THEN json_extract(entry.value, '$.type') = 'slack'\n                       ELSE 0 END)\n       ELSE 0 END;\n"
+    },
+    {
+      "version": 49,
+      "sql": "ALTER TABLE user_settings ADD COLUMN claude_retention_prompt_answered INTEGER NOT NULL DEFAULT 0;\n"
+    },
+    {
+      "version": 50,
+      "sql": "UPDATE integrations SET inbound_enabled = 1\n WHERE type = 'telegram' AND webhook_status = 'active';\n"
+    },
+    {
+      "version": 51,
+      "sql": "UPDATE trigger_rules SET enabled = 0\n WHERE enabled = 1\n   AND integration_id IN (SELECT id FROM integrations WHERE type = 'telegram')\n   AND NOT EXISTS (\n       SELECT 1 FROM json_each(\n           CASE WHEN json_valid(trigger_rules.filter_chat_ids)\n                THEN CASE WHEN json_type(trigger_rules.filter_chat_ids) = 'array'\n                          THEN trigger_rules.filter_chat_ids ELSE '[]' END\n                ELSE '[]' END) AS entry\n        WHERE entry.type = 'text' AND entry.value != '');\n"
+    },
+    {
+      "version": 52,
+      "sql": "\n-- Run summaries (#678). Authored here like 31-51, and additive: two defaulted\n-- columns on job_history, so an older build opening this database keeps\n-- working. Every run recorded before this migration was run by this install,\n-- on the only harness there was, so the backfill is exact and not a guess.\nALTER TABLE job_history ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';\nALTER TABLE job_history ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude';\nUPDATE job_history\n   SET machine_id = COALESCE((SELECT machine_id FROM install_identity), '');\n"
+    },
+    {
+      "version": 53,
+      "sql": "\n-- Slack rule allowed users (#688). Authored here like 31-52, and additive: one\n-- defaulted column on trigger_rules, so an older build opening this database\n-- keeps working. No row is rewritten and enabled is not touched: an existing\n-- Slack rule keeps its switch and answers nobody until a user is listed.\nALTER TABLE trigger_rules ADD COLUMN filter_user_ids TEXT NOT NULL DEFAULT '[]';\n"
+    },
+    {
+      "version": 54,
+      "sql": "\n-- Per-task run limits for event runs (#691). Authored here like 31-53, and\n-- additive: three defaulted columns on scheduled_tasks, so an older build\n-- opening this database keeps working. Every existing task takes the defaults:\n-- one event run at a time, five waiting, ten an hour.\nALTER TABLE scheduled_tasks ADD COLUMN max_concurrent_runs INTEGER NOT NULL DEFAULT 1;\nALTER TABLE scheduled_tasks ADD COLUMN max_queued_events INTEGER NOT NULL DEFAULT 5;\nALTER TABLE scheduled_tasks ADD COLUMN max_runs_per_hour INTEGER NOT NULL DEFAULT 10;\n"
+    },
+    {
+      "version": 55,
+      "sql": "\n-- Rewrite the database URL snippets stored before #741. Authored here like\n-- 31-54, and it adds no column. Until ruleset 2 a masked snippet kept the last\n-- four characters of the match, and a database URL's match ends at the end of\n-- the host, so a host under four characters left the '@' and the end of the\n-- password in the stored tail. A rescan rewrites a live session's rows, but it\n-- never reaches a session whose transcript has expired or cannot be read, nor\n-- any session while the checker is off. The old form is always four characters,\n-- eight stars and a four-character tail, and only a leaking tail holds an '@',\n-- so the repair needs no transcript: keep the first twelve characters and what\n-- follows the '@', which is the host. The new form never holds an '@', so this\n-- touches no row written since and is safe to run on any database.\nUPDATE credential_findings\n   SET masked_snippet = substr(masked_snippet, 1, 12)\n                        || substr(masked_snippet, instr(masked_snippet, '@') + 1)\n WHERE rule_id = 'database-url-credentials'\n   AND instr(masked_snippet, '@') != 0;\n"
     }
   ]
 }

@@ -171,7 +171,8 @@ export interface Integration {
    * answers 422 without one.
    */
   has_app_token: boolean;
-  /** Whether the Slack inbound worker should be running for this row (#566). */
+  /** Whether the inbound worker — Slack's socket (#566) or Telegram's long
+      poll (#676) — should be running for this row. */
   inbound_enabled: boolean;
   /** What that worker is doing, or `""` when it has never run (#566). */
   inbound_status: string;
@@ -199,6 +200,9 @@ export interface TriggerRule {
   filter_prefix: string;
   filter_keywords: string[] | null;
   filter_chat_ids: string[] | null;
+  /** The Slack users a rule answers (#688). On a Slack rule empty is nobody;
+      every other provider stores it and never reads it. */
+  filter_user_ids: string[] | null;
   /** The execution settings a rule may override, migration 39 (#563). Every
       one is empty/0 for "whatever the dispatcher already does", which is what
       every rule written before that migration reads back as. */
@@ -215,13 +219,6 @@ export interface TriggerRule {
   continue_on_reply: boolean;
   created_at: string;
   updated_at: string;
-}
-
-export interface WebhookStatus {
-  status: string;
-  url: string;
-  has_secret: boolean;
-  error: string;
 }
 
 /* --- Scheduled tasks (internal/storage/task_store.go) -------------------- */
@@ -260,6 +257,15 @@ export interface SlackChannel {
   name: string;
   is_private: boolean;
   is_member: boolean;
+}
+
+/** One member from `GET /api/integrations/{id}/slack/users` (#689): a person,
+ *  never a bot, a deleted account or Slackbot. `name` is the handle;
+ *  `real_name` is "" when Slack has none. */
+export interface SlackUser {
+  id: string;
+  name: string;
+  real_name: string;
 }
 
 /** Numeric chat ids only, as strings (#639). */
@@ -301,6 +307,14 @@ export interface ScheduledTask {
   destinations?: TaskDestination[] | null;
   /** Whether a reply to this task's output continues the conversation (#681). */
   continue_on_reply: boolean;
+  /**
+   * Limits on the task's event runs (#691): at once (1-3), waiting (1-100),
+   * and starts in any hour (1-1000). A write that omits one, or sends 0,
+   * stores the default: 1, 5 and 10.
+   */
+  max_concurrent_runs: number;
+  max_queued_events: number;
+  max_runs_per_hour: number;
   /** Events the task did not run for (#681). Server-owned: a write ignores both. */
   dropped_event_count: number;
   rate_limited_event_count: number;
@@ -357,6 +371,10 @@ export interface JobHistory {
   continues_job_id?: string;
   /** The event that started the run (#681). Omitted when there was none. */
   event_payload?: string;
+  /** The install that ran it (#678): `install_identity.machine_id`. */
+  machine_id: string;
+  /** The harness that ran it (#678); "claude" today. */
+  harness: string;
   /** Omitted when the run delivered nowhere (#635). */
   deliveries?: JobDelivery[] | null;
 }
@@ -407,11 +425,17 @@ export interface UserSettings {
    * default), otherwise 180 or 365. Age is the session's end, not its expiry.
    */
   session_history_retention_days: number;
+  /**
+   * Whether the one-time retention prompt has been answered (#720). Once true
+   * the server keeps it true, whatever a later PUT sends.
+   */
+  claude_retention_prompt_answered: boolean;
 }
 
 /**
  * `GET /api/settings/claude-retention` (#718): Claude Code's own transcript
- * retention, one entry per indexed config dir, default first. Read-only.
+ * retention, one entry per indexed config dir, default first. The `PUT`
+ * answers the same document.
  */
 export interface ClaudeRetention {
   dirs: ClaudeRetentionDir[] | null;
@@ -428,6 +452,16 @@ export interface ClaudeRetentionDir {
    */
   source: "settings" | "default" | "unknown";
   reason?: string;
+}
+
+/**
+ * `PUT /api/settings/claude-retention` (#720). Raise-only: the server answers
+ * 422 for a value lower than the one on disk, for a dir at `0` and for a dir
+ * whose `source` is `unknown`.
+ */
+export interface ClaudeRetentionRequest {
+  config_dir: string;
+  cleanup_period_days: number;
 }
 
 /**

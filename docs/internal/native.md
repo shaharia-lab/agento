@@ -25,7 +25,7 @@
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   48 migrations, embedded from parity/ — applied at startup
+    migrate.rs   55 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -55,7 +55,9 @@
       repos.rs / issues.rs / pulls.rs / actions.rs / releases.rs  one per service
     settings.rs  GET+PUT /api/settings and /settings/claude-config-dirs (a
                  filesystem probe; answered on both platforms since #374); the
-                 preferences + config dirs a read is scoped to
+                 preferences + config dirs a read is scoped to; and
+                 POST /settings/retention-prompt/answered, the retention
+                 prompt's one-column write (#751)
     claude_settings/ Claude Code's own settings.json and the profiles beside it (#304) —
       mod.rs     the run config dir, Go's `any`/`MarshalIndent`/`Indent`, GET+PUT
                  /api/claude-settings, and the request decoder that is NOT writes::decode_body
@@ -73,7 +75,8 @@
                  reduced in SQL too — to `has_credentials` (#515) and, through
                  an allowlist, `auth_mode` (#513); plus POST
                  /api/integrations, the trigger-rule writes (#277),
-                 PUT/DELETE /{id} (#311) and PUT /{id}/inbound (#566)
+                 PUT/DELETE /{id} (#311) and PUT /{id}/inbound (#566,
+                 and Telegram rows since #676)
     integrations/registry.rs
                  Start/Reload/Stop for the MCP servers of HOSTED_TYPES. The one
                  place a credential is read, behind its own projection
@@ -97,7 +100,7 @@
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte.
                  PATCH also takes model and permission_mode (#722): the
                  mode is 422-checked against CHAT_PERMISSION_MODES, since
-                 the runner reads an unknown mode as bypass
+                 the runner fails a turn on an unknown mode (#675)
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between
                  them, the five task writes, and POST /api/tasks/{id}/run
                  (#541) — the desktop-only route that fires a task on demand,
@@ -406,10 +409,16 @@ Four rules the write path is built on:
   `["My Agent"]` would create an agent. A `null` body, conversely, is a zero
   value with no error, so it reaches the handler and fails validation with a
   422.
-- **Deleting a missing agent or chat answers 500, not 404** — the store returns
-  a plain error and the not-found arm never fires. Job history's delete *is* a
-  real 404, because its service checks first. Both are inherited behaviour; see
-  the known-bugs list under Status.
+- **Deleting a missing agent or chat answers 404** (#670): `agent "<slug>" not
+  found` and `chat not found`, the same bodies their update routes answer. Both
+  were 500s inherited from a store that returned a plain error.
+- **`WriteError::Fallback` is never the answer to client input** (#670). It is
+  a database, filesystem, encoder or invariant failure. Input the client can
+  fix is `InvalidBody`/`BadRequest` (400, malformed), `Validation` (422, a
+  well-formed body with one unusable field, named) or `NotFound` (404). When a
+  value comes from a file or a row rather than the request — a `settings.json`
+  that is not UTF-8, a stored credentials blob that is not JSON — it stays a
+  500, because no request can fix it.
 
 ## The write surface is enumerated, not described (#296)
 
@@ -479,10 +488,17 @@ are authored there directly.
   exactly that; decoding it into a `serde_json::Value` and re-encoding would
   ship `{"a":1,"z":1.5}` — reordered and respelled, with nothing to signal it.
   `native/gojson.rs::compact` is the byte pass that avoids it.
-- **The project filter differs between endpoints.** `/claude-analytics` matches
-  `decoded_path`; `/claude-sessions` matches `project_path` literally, which is
-  the dash-encoded name for some sessions and a real path for others. Sending
-  the wrong one returns an empty result with no error — a silent wrong answer.
+- **The project filter is one value on every endpoint, and it is not always a
+  path.** `/claude-analytics` (`analytics/report.rs::in_project`) and
+  `/claude-sessions` (`sessions/query.rs::build_filter`) both compare
+  `project_path` for equality, and `/claude-sessions/projects` ships that same
+  value as `decoded_path` (`sessions/projects.rs::list`), so what the picker
+  offers is what both filters match. Why it is not always a path:
+  `scanner/walk.rs::decode_project_path` answers the raw dash-encoded directory
+  name whenever the decoded path does not exist on disk, so a project whose
+  directory was moved or deleted is keyed — and filtered — on its encoded name.
+  A value that matches no stored `project_path` returns an empty result with no
+  error.
 - **Go `omitempty` drops zero values** the JSON otherwise implies are always
   present (`InsightCard.percent/count/model`, `ProjectBreakdown.folded_projects`,
   `SessionFacets.config_dirs`). Default with `?? 0`; do not trust the type.

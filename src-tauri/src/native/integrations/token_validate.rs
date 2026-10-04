@@ -302,16 +302,17 @@ async fn call(
                 Refusal::Reproducible(failure) => {
                     CallFailure::validation("credentials", "invalid credentials: ", failure)
                 }
-                // A `url.Parse` refusal, whose wording is not reproducible. It
-                // can only arise **before** the request, so a 500 costs nothing
-                // — see `confluence::validate`'s header — and nothing was
-                // refused, so it changes no stored state either.
-                Refusal::Unreproducible(why) => CallFailure {
-                    kind: CheckKind::Unreachable,
-                    error: WriteError::Fallback(format!(
-                        "confluence site URL needs net/url's own message: {why}"
-                    )),
-                },
+                // A site URL this build will not send a request to, in its
+                // own `invalid site URL: …` wording. The URL is the stored
+                // field and the user's to fix, so it is the route's 400 naming
+                // that field (#670) — it was a 500 while only another
+                // implementation could word it. It arises before the request,
+                // so nothing was asked and no stored state changes.
+                Refusal::SiteUrl(why) => CallFailure::validation(
+                    "credentials.site_url",
+                    "",
+                    CheckFailure::unreachable(why),
+                ),
             })?;
             r#"{"validated":true}"#.to_string()
         }
@@ -778,6 +779,35 @@ mod tests {
         let (auth, _, updated) = row(&db, "ji");
         assert_eq!(auth, "");
         assert_eq!(updated, "2026-01-01 00:00:00 +0000 UTC");
+    }
+
+    /// A stored confluence site URL that the write-time rules admit and this
+    /// build still will not send a request to — one carrying a query — is the
+    /// route's 400 naming `credentials.site_url` (#670). It was a 500.
+    #[tokio::test]
+    async fn a_confluence_site_url_this_build_cannot_call_is_a_400_on_the_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(
+            dir.path(),
+            "cfq",
+            "confluence",
+            r#"{"site_url":"https://acme.atlassian.net/wiki?x=1","email":"a@b.c","api_token":"t"}"#,
+        );
+        let db2 = db.clone();
+        let answer = tokio::task::spawn_blocking(move || serve(&db2, "cfq"))
+            .await
+            .expect("join")
+            .expect("answered, not a 500");
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_of(&answer),
+            concat!(
+                r#"{"error":"validation error for \"credentials.site_url\": "#,
+                "invalid site URL: a query or fragment leaves the path open",
+                r#"","valid":false,"validated":true}"#,
+                "\n",
+            )
+        );
     }
 
     /// A confluence site URL that `url.Parse` itself refuses used to forward,

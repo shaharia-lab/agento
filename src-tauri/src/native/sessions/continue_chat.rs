@@ -192,8 +192,8 @@ pub fn continue_session(db_path: &std::path::Path, session_id: &str) -> Result<A
 ///
 /// `detail.summary.permission_mode` is the transcript's last `permission-mode`
 /// event, in the CLI's spelling. The table is an allowlist on purpose: the
-/// runner's `_ =>` arm treats an unrecognised mode as bypass, so an unknown
-/// value must land on `""` (the runner asks), never pass through. `acceptEdits`
+/// runner refuses a mode it does not recognise, so an unknown value must land
+/// on `""` (the runner asks), never pass through. `acceptEdits`
 /// and `auto` have no chat spelling and take the same `""`.
 fn chat_mode_from_cli(cli: &str) -> &'static str {
     let mode = match cli {

@@ -69,20 +69,38 @@ a `409` whose message says *"already exists"*, because it raises a
 `ConflictError`; and a rename onto another profile's slug is a 409 while
 **create** with the same name silently deduplicates to `-2`.
 
-What forwards rather than being guessed at: a **non-ASCII profile name** (Go
-slugifies by Unicode category and then rejects the id it built, unless every
-character happened to be dropped — two answers from tables Rust's
-`char::is_alphabetic` does not match); a **relative** recorded path
-(`filepath.Abs` resolves it against the Go server's working directory, not ours);
-a document deeper than serde's 128-level recursion limit but inside Go's 10000
-(`json.Valid` is fine — `IgnoredAny` skips iteratively, and the 10000 cap is
-checked by hand — but a `Value` decode is not); **bytes that are not UTF-8** (see
-below); and everything Go answers with a 500.
+**What a request can get wrong, and what it answers (#670).** None of these is
+a 500 any more:
+
+- **A non-ASCII profile name is accepted.** The name is stored as typed; the id
+  is `slugify`'s, which keeps ASCII letters and digits and drops everything
+  else, so `Café` gets the id `caf` and a name with no ASCII letter or digit
+  gets `profile` (then `profile-2`, by the usual deduplication). The id stays
+  ASCII because it is a file name and the UI puts it in a URL path unescaped.
+  **Renaming** a profile to a name with no ASCII letter or digit keeps its id
+  and file and changes only the name, so it can never hit the rename 409 on
+  the `profile` fallback.
+- **A value nested past serde's 128-level recursion limit** but inside the
+  scanner's 10000 (`json.Valid` is fine — `IgnoredAny` skips iteratively, and
+  the 10000 cap is checked by hand — but a `Value` decode is not) is
+  `400 invalid JSON settings: the value is nested more than 128 levels deep` on
+  `PUT /api/claude-settings`, and a 422 on `settings` with the same reason on a
+  profile update.
+- **A value the syntax check admits and the parse refuses** — a lone surrogate
+  escape such as `"\ud800"` — is `400 invalid JSON settings: the value could
+  not be parsed`, and on a profile update a 422 on `settings`.
+- **A request body that is not UTF-8** is `400 invalid JSON body` (see below).
+
+What still answers 500, because no request can fix it: a **relative** recorded
+path or one outside the settings dir in a hand-edited index, a profiles index
+that does not parse, a `settings.json` on disk that is not UTF-8 or is nested
+past 128 levels when the first list seeds the default profile from it, and a
+filesystem failure.
 
 **Why a forward is safe here is not "it happens before any mutation" — several
 do not.** `create` runs `ensureDefaultProfileExists`, which writes the index,
-*before* `slugify` reaches the non-ASCII forward; `put_settings` runs `MkdirAll`
-before its undecidable-value forward; `update`, `delete`, `duplicate` and
+*before* its own file write can fail; `put_settings` runs `MkdirAll`
+before it refuses a value it cannot parse; `update`, `delete`, `duplicate` and
 `set_default` can forward after a profile file has already moved. What makes all
 of them safe is that **every step this surface takes before a forward is
 idempotent**: seeding no-ops on a non-empty index, `MkdirAll` no-ops on an
@@ -193,11 +211,11 @@ dir alone and answers 500 for invalid JSON, which is right for the editor. This
 route never fails over a file's content, so a broken `settings.json` cannot
 turn Settings → Data into an error; the only 500 is an unreadable database.
 
-**It is a read and only a read.** The claim is GET-only, and
+**The `GET` is a read and only a read.**
 `the_route_answers_every_indexed_dir_and_writes_nothing` compares every file's
 bytes and modification time before and after, including a default dir that has
-no `settings.json` and must not gain one. Writing the key is
-`claude_settings::patch` (#719, below); its route is #720's.
+no `settings.json` and must not gain one. Writing the key is the `PUT` on the
+same path (#720, below), through `claude_settings::patch` (#719).
 
 Two limits, stated rather than solved. Only the user-level file is read, while
 Claude Code also takes the key from managed, project-level and
@@ -206,16 +224,89 @@ is not "delete at once": Claude Code 2.1.285 rejects it (`cleanupPeriodDays
 must be at least 1`) and skips cleanup until it is fixed, so the Data pane
 words `0` as its own sentence instead of "after 0 days".
 
-The route has no Go counterpart, so it is recorded in
+Neither route has a Go counterpart, so both are recorded in
 `parity/desktop_routes.json` through `claude_settings::retention::ROUTES`.
+
+## Raising Claude Code's retention, and never lowering it (#720)
+
+`PUT /api/settings/claude-retention`, `write` scope, body
+`{"config_dir": "<absolute path>", "cleanup_period_days": <whole number>}`.
+It answers 200 with the `GET`'s document, read again after the write.
+
+**The value may only be raised.** Lowering `cleanupPeriodDays` makes Claude
+Code permanently delete every transcript older than the new value, so the
+handler refuses anything that would shorten retention, with a 422 and nothing
+written. The request is checked first:
+
+- `cleanup_period_days` missing or `null` is `is required`; a fraction, a
+  negative, `0`, a string, or anything above 36500 is `must be a whole number
+  from 1 to 36500`. Neither is ever decoded as a zero value. `90.0` counts as
+  90, as it does on the read.
+- `config_dir` must be one of `settings::indexed_claude_config_dirs`, compared
+  as stored.
+
+Then `retention::guard`, a pure function over what `read_retention` reports for
+that dir:
+
+| on disk | requested | answer |
+|---|---|---|
+| `source: "unknown"` | any | 422. Agento does not write a file it could not read |
+| `0` | any | 422. Claude Code rejects `0` and skips cleanup, so any valid number would *start* deletion |
+| `n`, from the file or the default 30 | lower than `n` | 422, `<requested> is lower than the current <n>` |
+| `n`, from the file | `n` | 200, nothing written |
+| `n` | higher than `n`, or `n` when it is the default | 200, the key written |
+
+An absent file or key therefore counts as 30, and anything under 30 is refused
+there. `the_guard_only_ever_lets_the_value_rise` is the table as a test, and
+the handler tests assert every file's bytes and modification time after each
+refusal.
+
+**The guard is decided on the bytes the write replaces.** Claude Code edits
+this file too, so a check made on one read and a write built from another
+would leave a window in which a value Claude Code had just raised, or set to
+`0`, is overwritten with a lower one. `put` therefore runs the guard twice:
+once on `read_retention`, so a file that cannot be read at all is a 422 with
+its reason, and again as the `allow` closure of
+`patch::set_top_level_key_if`, which is handed the exact bytes the splice is
+built from. `patch` then refuses the write (`ChangedUnderneath`) if the file
+differs from those bytes just before it is replaced. What remains is `patch`'s
+own window between that second read and the rename, stated in its doc and not
+solved. `a_value_raised_or_zeroed_before_the_write_is_not_lowered` pins it.
+
+`patch`'s own refusals map as: `ChangedUnderneath` is a 409 with its message;
+a dir that is not indexed and the four unreadable-file cases are 422; an I/O
+failure is the default 500.
+
+**This is the only route that calls `set_top_level_key_if`**, and outside
+tests `patch` has no entry point without an `allow`. Do not add a caller whose
+`allow` is not the guard.
+
+The prompt that calls it, and the `claude_retention_prompt_answered` flag on
+`user_settings` (migration 49) that records it as answered, are in
+`docs/internal/frontend.md`. The prompt sets the flag through its own route,
+`POST /api/settings/retention-prompt/answered` (#751,
+`settings::mark_retention_prompt_answered`): no body, one upsert that sets that
+column and no other, a 200 with `{"claude_retention_prompt_answered":true}` on
+every call, and no rescan or Credentials Checker sync. It does not use
+`PUT /api/settings`, because that replaces the whole row and the prompt would
+be posting back a resolved one, which stores `default_model` and
+`default_working_dir` and so switches the soft
+`ANTHROPIC_DEFAULT_SONNET_MODEL` default off. On an install with no
+`user_settings` row the upsert creates it from the schema defaults.
+`PUT /api/settings` keeps the flag true once it is true
+(`settings::apply_update`), because the Settings form posts the whole row and
+an omitted key decodes to `false`.
 
 ## Writing one key of a config dir's `settings.json` (#719)
 
-`claude_settings::patch::set_top_level_key(indexed, dir, key, value)` sets one
-top-level key and leaves every other byte of the file as it was. `value` is
-already-encoded JSON. It has **no route**: the retention prompt (#720) is its
-only intended caller and adds the route together with the raise-only guard,
-because a general "set one key" route would be a way to lower
+`claude_settings::patch::set_top_level_key_if(indexed, dir, key, value, allow)`
+sets one top-level key and leaves every other byte of the file as it was.
+`value` is already-encoded JSON, and `allow` is asked first, with the bytes the
+splice is built from (`None` for no file); a `false` writes nothing and answers
+`Ok(false)`. `set_top_level_key`, without `allow`, exists for tests only. It
+has **no route of its own**: the retention `PUT`
+(#720, above) is its only caller and reaches it only through the raise-only
+guard, because a general "set one key" route would be a way to lower
 `cleanupPeriodDays`, which deletes transcripts.
 
 **It splices bytes; it never decodes the document.** `serde_json` is built

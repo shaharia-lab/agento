@@ -199,21 +199,36 @@ the other process's view immediately afterwards. Always go through
 busy timeout.
 
 
+**A trigger rule carries `filter_user_ids`** (#688, migration 53). On the wire
+it follows `filter_chat_ids`, and it is always a list: a write stores the given
+entries trimmed, without blanks or repeats, and an omitted key stores `[]`. It
+is replaced on `PUT` like the rest of the rule. Only Slack reads or validates
+it (`docs/internal/native-integrations-slack.md`); a Telegram rule stores
+whatever it is given and is never asked for one.
+
 **A trigger rule can name a task, and says whether a reply continues** (#681,
 epic #679). Migration 48 adds `trigger_rules.task_id` and
 `trigger_rules.continue_on_reply`; on the wire both follow `timeout_minutes`,
 before the timestamps, and are always present. `task_id` is `""` while the rule
 is not linked. It has **no foreign key** (`ADD COLUMN` cannot add a `NOT NULL`
 reference), so `check_rule_task` is the only guard: a non-empty id that names
-no task is a 422 on both routes, and a task deleted later leaves a dangling id
-the reader must tolerate. Both fields are **replaced** on `PUT` like the rest
-of the rule, which is why the Integrations form carries them in `RuleDraft` and
-in both `RuleWrite` builders although no control edits them yet. **Migration 48
+no task is a 422 on `POST`, and on `PUT` when it differs from the stored id. A
+task deleted later leaves a dangling id the reader must tolerate, and **`PUT`
+accepts the stored id back unchecked** (#687): the form and the row's enabled
+switch both send it, so refusing it would leave that rule impossible to edit or
+turn off (`a_rule_whose_task_was_deleted_can_still_be_updated`). Both fields are
+**replaced** on `PUT` like the rest of the rule, which is why the Integrations
+form carries them in `RuleDraft` and in both `RuleWrite` builders; `task_id` is
+edited by the form's **Task** picker (#687) and `continue_on_reply` by no
+control yet (#686). **Migration 48
 set `continue_on_reply` on every rule that existed**, because those already
-continue; a rule created afterwards defaults to off. Nothing reads either
-column at run time yet — the dispatcher's `load_rules` does not select them —
-and `agent_slug` is still required whether or not a task is linked. The task's
-half is in `docs/internal/native-schedule.md`.
+continue; a rule created afterwards defaults to off. **`task_id` is read at run
+time by Slack only** (#685): the dispatcher's `load_rules` selects it into
+`Rule.task_id`, and `slack/inbound.rs` starts that task for a top-level mention
+(`docs/internal/native-integrations-slack.md`). Telegram's dispatcher carries
+the field and ignores it until #684. `continue_on_reply` is still read by
+nothing (#686), and `agent_slug` is still required whether or not a task is
+linked. The task's half is in `docs/internal/native-schedule.md`.
 
 ## The OAuth flow (#318)
 
@@ -273,7 +288,11 @@ flow that actually errored.
   introduce a UI that echoes them back; the API scrubs them and the UI must not
   reintroduce them.
 
-## Slack inbound: the app token and the switch (#566)
+## The inbound switch: Slack's app token, Telegram's bot token (#566, #676)
+
+The switch serves two transports since #676: Slack's Socket Mode and Telegram's
+long poll (`docs/internal/native-integrations-telegram.md`). The bullets below
+were written for Slack; where a rule now covers both, it says so.
 
 - **`credentials.app_token` is a field, not an `auth_mode`.** Socket Mode needs
   a Slack app-level token (`xapp-…`) *beside* whichever of `bot_token`/`oauth`
@@ -296,30 +315,34 @@ flow that actually errored.
   not a field on `PUT /api/integrations/{id}`: that write is byte-exact against
   Go and its three-valued `credentials` contract (#515) would otherwise have to
   be resent to flip a boolean. It refuses before it writes — 404 unknown id, 400
-  for any type but `slack`, 422 naming `credentials.app_token` when *enabling* a
-  row that stores none. Disabling is never refused on the credential axis, so a
-  row whose credentials were scrubbed cannot get stuck on. It writes
-  `inbound_enabled` alone and ends in `registry::reload_blocking`, which is what
-  starts and stops the socket worker. **The route is desktop-only**, so it is
+  for a type with no inbound transport (anything but `slack` and `telegram`),
+  and 422 when *enabling* a row that does not store the token its worker needs:
+  `credentials.app_token` for Slack, `credentials.bot_token` for Telegram.
+  `inbound_token_key` is the one table of which type needs which key. Disabling
+  is never refused on the credential axis, so a row whose credentials were
+  scrubbed cannot get stuck on. It writes `inbound_enabled` alone and ends in
+  `registry::reload_blocking`, which is what starts and stops the worker. **The route is desktop-only**, so it is
   recorded in `parity/desktop_routes.json` through `integrations::ROUTES` — the
   **fourth** owner of that file, and the union in
   `the_desktop_only_routes_are_recorded_in_both_directions` has to name it or
   the set-equality assertion silently weakens.
 - **The 422 and the 400 are only worth something because `update` clears the
   column.** `PUT /api/integrations/{id}` can invalidate the switch on either
-  axis — a replacing blob that drops `app_token` (#515 makes a sent blob replace
-  wholly, and the Slack form emits only its mode's fields), or a `type` written
-  straight from the request body, which this write validates not at all. The
-  second is the sharper one: `update_inbound` answers 400 for a non-Slack row
-  *whichever way* the switch is being moved, so a row that left `slack` with the
-  switch on could never be turned off again. `clears_inbound` is therefore
-  `type != "slack" || a replacing blob with no app token`, and it is applied on
-  **both** arms of the `UPDATE` — the credentials-omitted arm assigns fewer
-  columns and is the one that misses it.
+  axis — a replacing blob that drops the type's token (#515 makes a sent blob
+  replace wholly, and the Slack form emits only its mode's fields), or a `type`
+  written straight from the request body, which this write validates not at
+  all. The second is the sharper one: `update_inbound` answers 400 for a type
+  with no inbound transport *whichever way* the switch is being moved, so a row
+  that left `slack` for `github` with the switch on could never be turned off
+  again. `clears_inbound` is therefore true when the new type has no inbound
+  transport, when the type changed at all (the switch was turned on for the
+  other transport), or when a replacing blob lacks the new type's token. It is
+  applied on **both** arms of the `UPDATE` — the credentials-omitted arm assigns
+  fewer columns and is the one that misses it.
 - `has_app_token_sql` is **not** scoped by `type`. No validator rejects an
   unknown key, so an API caller can put an `app_token` into a Telegram blob and
-  see the read report `true`; nothing follows from it, because the switch that
-  consults it refuses any type but `slack`.
+  see the read report `true`; nothing follows from it, because the switch asks
+  about the row's own key (`inbound_target` selects by `type`).
 - **`inbound_status` and `inbound_error` are the worker's to write** (#567), and
   so is `updated_at` left alone: a disable that cleared the status would erase
   the reason the user is looking at, and a worker rewriting its state on every

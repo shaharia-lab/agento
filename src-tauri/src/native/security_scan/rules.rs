@@ -27,10 +27,16 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use super::store;
+
 /// Bumped whenever a rule is added, removed or changed; sessions scanned under
 /// an older version are rescanned. The same contract as
 /// `insights::processors::CURRENT_PROCESSOR_VERSION`.
-pub const CURRENT_RULESET_VERSION: i64 = 1;
+///
+/// 2 (#741): no rule changed, the *stored form* did — a database URL's masked
+/// snippet no longer keeps the end of the password when the host is short, and
+/// only a rescan rewrites a snippet stored under 1.
+pub const CURRENT_RULESET_VERSION: i64 = 2;
 
 /// How sure a rule is that a match is a live secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +68,10 @@ pub struct Rule {
     pub(super) accept: Option<fn(&str) -> bool>,
     /// Only credited within [`PAIR_WINDOW`] bytes of a finding of this rule.
     pub(super) paired_with: Option<&'static str>,
+    /// The rule's own display form, for a match whose last four characters are
+    /// not safe to show; `None` is [`store::mask`]. Reached only through
+    /// [`store::mask_for`], which has already hidden a short match whole.
+    pub(super) mask: Option<fn(&str) -> String>,
 }
 
 /// How close, in bytes, a paired rule's match must sit to its partner's.
@@ -75,6 +85,7 @@ const RULES: &[Rule] = &[
         pattern: r"\bAKIA[0-9A-Z]{16}\b",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     // Forty base64-ish characters are also a SHA-1 in hex, a git object id, a
     // chunk of any base64 blob — so this one is never credited on its own
@@ -94,6 +105,7 @@ const RULES: &[Rule] = &[
         pattern: r"[A-Za-z0-9/+]{40,}={0,2}",
         accept: Some(aws_secret_shape),
         paired_with: Some("aws-access-key-id"),
+        mask: None,
     },
     // The `private_key` member of a service-account key file. Matches both the
     // JSON-escaped form (`\n`) a transcript holds and a decoded one.
@@ -104,6 +116,7 @@ const RULES: &[Rule] = &[
         pattern: r#""private_key"\s*:\s*"-----BEGIN PRIVATE KEY-----[^"]{64,}?-----END PRIVATE KEY-----(?:\\n|\n)?""#,
         accept: None,
         paired_with: None,
+        mask: None,
     },
     // Storage (`AccountKey=`) and Service Bus / Event Hubs (`SharedAccessKey=`)
     // connection strings. The key is what leaks, so the key is what matches.
@@ -114,6 +127,7 @@ const RULES: &[Rule] = &[
         pattern: r"\b(?:AccountKey|SharedAccessKey)=[A-Za-z0-9+/]{40,}={0,2}",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     Rule {
         id: "github-pat",
@@ -122,6 +136,7 @@ const RULES: &[Rule] = &[
         pattern: r"\bghp_[A-Za-z0-9]{36}\b",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     Rule {
         id: "github-oauth",
@@ -130,6 +145,7 @@ const RULES: &[Rule] = &[
         pattern: r"\bgho_[A-Za-z0-9]{36}\b",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     Rule {
         id: "github-fine-grained-pat",
@@ -138,6 +154,7 @@ const RULES: &[Rule] = &[
         pattern: r"\bgithub_pat_[A-Za-z0-9_]{82}\b",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     // Digits after the prefix, unlike a bare `xox[baprs]-.+`: a real token is
     // `xoxb-<team>-<bot>-<secret>`, and a docs placeholder such as
@@ -149,6 +166,7 @@ const RULES: &[Rule] = &[
         pattern: r"\bxox[baprs]-[0-9]{8,}-[A-Za-z0-9-]{8,}",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     Rule {
         id: "stripe-live-key",
@@ -157,6 +175,7 @@ const RULES: &[Rule] = &[
         pattern: r"\b(?:sk|rk)_live_[A-Za-z0-9]{24,}\b",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     // The legacy `sk-` + alphanumerics shape, and the project/service-account/
     // admin keys OpenAI issues now, whose body also carries `_` and `-`.
@@ -168,6 +187,7 @@ const RULES: &[Rule] = &[
         pattern: r"\bsk-(?:[A-Za-z0-9]{20,}|(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,})",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     // `sk-ant-api03-…`, `sk-ant-admin01-…`, `sk-ant-oat01-…`: a kind and a
     // two-digit version before the body.
@@ -178,6 +198,7 @@ const RULES: &[Rule] = &[
         pattern: r"\bsk-ant-[a-z]+[0-9]{2}-[A-Za-z0-9_-]{20,}",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     Rule {
         id: "npm-access-token",
@@ -186,6 +207,7 @@ const RULES: &[Rule] = &[
         pattern: r"\bnpm_[A-Za-z0-9]{36}\b",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     // `scheme://user:password@host`. A template (`${DB_PASSWORD}`,
     // `<password>`) cannot match the password class. `%` can, because a
@@ -193,6 +215,11 @@ const RULES: &[Rule] = &[
     // `real_db_password` credits a `%` only as an escape (`%40`), refusing
     // format strings (`%s`, `%(pw)s`) and batch variables (`%VAR%`), along with
     // the placeholder words docs and compose files use.
+    //
+    // The match is the whole URL up to the end of the host, so the default
+    // mask's four-character tail would reach past the `@` into the password
+    // whenever the host is shorter than four characters. `mask_db_url` takes
+    // its tail from the host alone (#741).
     Rule {
         id: "database-url-credentials",
         provider: "Postgres/MySQL",
@@ -200,6 +227,7 @@ const RULES: &[Rule] = &[
         pattern: r#"\b(?:postgres(?:ql)?|mysql|mariadb)(?:\+[a-z0-9]+)?://[^:/@\s"'<>]+:[^@/\s"'<>${}]+@[A-Za-z0-9.-]+"#,
         accept: Some(real_db_password),
         paired_with: None,
+        mask: Some(mask_db_url),
     },
     // gitleaks' `private-key`, which requires 64 characters of body so a bare
     // header in documentation is not a key. `\\` is in the body class because a
@@ -211,6 +239,7 @@ const RULES: &[Rule] = &[
         pattern: r"-----BEGIN (?:(?:RSA|EC|DSA|OPENSSH|PGP|ENCRYPTED) )?PRIVATE KEY(?: BLOCK)?-----[A-Za-z0-9+/=\s\\:,.-]{64,}?-----END (?:(?:RSA|EC|DSA|OPENSSH|PGP|ENCRYPTED) )?PRIVATE KEY(?: BLOCK)?-----",
         accept: None,
         paired_with: None,
+        mask: None,
     },
     // `eyJ` is base64 for `{"`, so this is a JSON header, a JSON payload and a
     // signature. Medium because a JWT is often not a secret at all — an ID
@@ -222,6 +251,7 @@ const RULES: &[Rule] = &[
         pattern: r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
         accept: None,
         paired_with: None,
+        mask: None,
     },
 ];
 
@@ -238,6 +268,12 @@ pub fn compiled() -> &'static [(Rule, Regex)] {
             })
             .collect()
     })
+}
+
+/// The custom mask of the rule `id`, if it has one. An id outside the table
+/// has none.
+pub(super) fn mask_of(id: &str) -> Option<fn(&str) -> String> {
+    RULES.iter().find(|r| r.id == id).and_then(|r| r.mask)
 }
 
 fn aws_secret_shape(s: &str) -> bool {
@@ -293,6 +329,22 @@ fn real_db_password(url: &str) -> bool {
         .any(|p| password.eq_ignore_ascii_case(p))
 }
 
+/// A database URL's display form: the first four characters, which always lie
+/// inside the scheme, the fixed run, and the last four characters **of the
+/// host** — fewer when the host is shorter, so the tail never reaches back
+/// past the `@`. The password class excludes `@`, so the last one is the
+/// delimiter, the same split [`real_db_password`] makes. A text with no `@`
+/// is not this rule's match and shows nothing.
+fn mask_db_url(url: &str) -> String {
+    let Some((_, host)) = url.rsplit_once('@') else {
+        return store::MASK_RUN.to_string();
+    };
+    let head: String = url.chars().take(4).collect();
+    let host: Vec<char> = host.chars().collect();
+    let tail: String = host[host.len().saturating_sub(4)..].iter().collect();
+    format!("{head}{}{tail}", store::MASK_RUN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +367,19 @@ mod tests {
             .map(|r| r.id)
             .collect();
         assert_eq!(medium, ["jwt"]);
+    }
+
+    #[test]
+    fn the_database_url_is_the_only_rule_with_its_own_mask() {
+        let custom: Vec<_> = RULES
+            .iter()
+            .filter(|r| r.mask.is_some())
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(custom, ["database-url-credentials"]);
+        assert!(mask_of("database-url-credentials").is_some());
+        assert!(mask_of("github-pat").is_none());
+        assert!(mask_of("no-such-rule").is_none());
     }
 
     #[test]

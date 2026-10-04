@@ -1,34 +1,48 @@
 # Security Policy
 
-## Reporting a Vulnerability
-
 We take security seriously and appreciate your help in keeping Agento safe for everyone.
 
-### GitHub Issues
+Agento starts agent CLIs with shell access and stores integration credentials, so a
+vulnerability described in public can be used against every install before a fix ships.
+**Please report every suspected vulnerability privately** — do not open a public issue,
+pull request or discussion for it, whatever its severity.
 
-For most security concerns, please open a GitHub issue describing the vulnerability, its potential impact, and steps to reproduce if possible.
+## Reporting a Vulnerability
 
-### Private Disclosure for Critical Vulnerabilities
+1. **Use GitHub's private form:**
+   [Report a vulnerability](https://github.com/shaharia-lab/agento/security/advisories/new).
+   It opens a private thread that only you and the maintainers can read.
+2. **If you cannot use the form** — you have no GitHub account, or the form is not
+   available to you — email **hello@shaharialab.com** instead.
 
-If you discover a zero-day vulnerability or a critical issue that could be actively exploited, please report it privately by email:
+You do not need to decide how serious the finding is before choosing a route. If you are
+unsure whether something is a vulnerability at all, report it privately; we will tell you
+if it belongs in the public tracker.
 
-**hello@shaharialab.com**
-
-Use email when:
-
-- The vulnerability is a zero-day or has no known fix.
-- Public disclosure could put users at immediate risk.
-- The issue involves sensitive data exposure or remote code execution.
-- You believe the vulnerability is being actively exploited.
-
-In your email, please include:
+Please include:
 
 - A description of the vulnerability.
 - Steps to reproduce or a proof of concept.
 - The potential impact and affected components.
+- The Agento version and operating system.
 - Any suggested fixes, if you have them.
 
-We will acknowledge your report within 48 hours and work with you to understand the scope and coordinate a fix before any public disclosure.
+## What to Expect
+
+- We aim to acknowledge your report **within 7 days**.
+- We will work with you in the private thread to understand the scope and coordinate a
+  fix before anything is made public.
+- Fixes are disclosed through
+  [GitHub Security Advisories](https://github.com/shaharia-lab/agento/security/advisories),
+  published once a fixed release is available.
+
+## What Is Fine to File Publicly
+
+General hardening suggestions that carry **no exploit detail** — a stricter default, an
+extra safeguard, a documentation improvement — are welcome as
+[regular issues](https://github.com/shaharia-lab/agento/issues). If describing the idea
+would require explaining how to attack an existing install, it is a vulnerability report:
+use the private form above.
 
 ## Supported Versions
 

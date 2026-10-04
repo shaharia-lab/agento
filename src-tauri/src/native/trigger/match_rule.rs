@@ -33,6 +33,9 @@ pub struct RuleFilters {
     pub prefix: String,
     pub keywords: Vec<String>,
     pub chat_ids: Vec<String>,
+    /// The Slack users a rule answers (#688). [`match_rule`] never reads it:
+    /// the Slack handler asks [`sender_allowed`] with it before the matcher.
+    pub user_ids: Vec<String>,
 }
 
 /// `matchRule`: `Some(prompt)` when the rule fires.
@@ -89,6 +92,22 @@ fn matches_keywords(keywords: &[String], text: &str) -> bool {
 /// `matchesChatIDs`: empty is "everything", otherwise an exact string compare.
 fn matches_chat_ids(allowed: &[String], chat_id: &str) -> bool {
     allowed.is_empty() || allowed.iter().any(|id| id == chat_id)
+}
+
+/// Whether a rule's sender allowlist names this sender (#674, #688).
+///
+/// **Empty is nobody here**, the opposite of [`matches_chat_ids`]: a rule
+/// answers only a sender it lists, so a rule that lists none answers none. A
+/// blank entry names nobody either, and the compare is exact, so a Slack id in
+/// another case is another id.
+///
+/// Both transports ask this before [`match_rule`], each with its own list. On
+/// Telegram the sender is the chat and the list is `filter_chat_ids`. On Slack
+/// it is the mention's user and the list is `filter_user_ids`; Slack's
+/// `filter_chat_ids` is a channel selection made by `select_rule`, where empty
+/// is the workspace default, and is never asked here.
+pub fn sender_allowed(allowed: &[String], sender: &str) -> bool {
+    !sender.is_empty() && allowed.iter().any(|id| id == sender)
 }
 
 /// `strings.EqualFold` over bytes, with Go's UTF-8 decoding.
@@ -223,6 +242,8 @@ mod tests {
                 prefix: case.filter_prefix.clone(),
                 keywords: case.filter_keywords.clone().unwrap_or_default(),
                 chat_ids: case.filter_chat_ids.clone().unwrap_or_default(),
+                // The vectors predate the list and the matcher never reads it.
+                user_ids: Vec::new(),
             };
             let got = match_rule(&filters, &case.text, &case.chat_id);
             assert_eq!(got.is_some(), case.matched, "case {:?}: matched", case.name);
@@ -233,6 +254,31 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn a_sender_is_allowed_only_when_the_list_names_it() {
+        let list = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Allowed: named, alone or among others.
+        assert!(sender_allowed(&list(&["42"]), "42"));
+        assert!(sender_allowed(
+            &list(&["7", "-1001234567890"]),
+            "-1001234567890"
+        ));
+        // Not allowed: the list names someone else. Exact compare, no prefix.
+        assert!(!sender_allowed(&list(&["42"]), "99"));
+        assert!(!sender_allowed(&list(&["42"]), "4"));
+        assert!(!sender_allowed(&list(&["42"]), "420"));
+        // Unset: nobody, where `matches_chat_ids` says everybody.
+        assert!(!sender_allowed(&[], "42"));
+        assert!(matches_chat_ids(&[], "42"));
+        // A blank entry is not a wildcard, and a blank chat id matches nothing.
+        assert!(!sender_allowed(&list(&[""]), "42"));
+        assert!(!sender_allowed(&list(&[""]), ""));
+        // A Slack user id (#688): the same rule, and case is part of the id.
+        assert!(sender_allowed(&list(&["U0123ABCD"]), "U0123ABCD"));
+        assert!(!sender_allowed(&list(&["U0123ABCD"]), "u0123abcd"));
+        assert!(!sender_allowed(&list(&["U0123ABCD"]), ""));
     }
 
     #[test]

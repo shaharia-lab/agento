@@ -356,9 +356,13 @@ fn status_lock(integration_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 /// One thing to record about the connection.
-struct StatusMsg {
-    status: &'static str,
-    error: String,
+///
+/// `pub(crate)` since #676: Telegram's long-poll worker posts the same
+/// transitions through the same [`status_writer`], so the two inbound workers
+/// cannot disagree about who may write the row.
+pub(crate) struct StatusMsg {
+    pub(crate) status: &'static str,
+    pub(crate) error: String,
 }
 
 /// The one place `inbound_status` is written, and the reason the worker posts
@@ -396,7 +400,7 @@ struct StatusMsg {
 /// the handle, which makes epoch order and acceptance order the same order by
 /// construction. A worker that is never accepted keeps [`NOT_ACCEPTED`], which
 /// matches nothing.
-async fn status_writer(
+pub(crate) async fn status_writer(
     db_path: PathBuf,
     integration_id: String,
     epoch: Arc<std::sync::atomic::AtomicU64>,
@@ -419,7 +423,7 @@ async fn status_writer(
             continue;
         }
         let (path, id) = (db_path.clone(), integration_id.clone());
-        db::blocking("slack inbound status", move || {
+        db::blocking("inbound status", move || {
             write_status_blocking(&path, &id, status, &error);
         })
         .await;
@@ -990,13 +994,14 @@ pub async fn clear_status(db_path: &Path, integration_id: &str, epoch: u64) {
         return;
     }
     let (path, id) = (db_path.to_path_buf(), integration_id.to_string());
-    db::blocking("slack inbound clear", move || {
+    db::blocking("inbound clear", move || {
         clear_status_blocking(&path, &id);
     })
     .await;
 }
 
-/// Clear the inbound state of **every** Slack row. Boot only.
+/// Clear the inbound state of **every** row that can have an inbound worker —
+/// Slack's socket and, since #676, Telegram's long poll. Boot only.
 ///
 /// A fresh process has no workers, so any status left in the database is about a
 /// connection that no longer exists — including one a crash left reading
@@ -1013,7 +1018,8 @@ pub fn clear_all_inbound_status_blocking(db_path: &Path) {
     run_status_write(
         db_path,
         "UPDATE integrations SET inbound_status = '', inbound_error = ''
-         WHERE type = 'slack' AND (inbound_status != '' OR inbound_error != '')",
+         WHERE type IN ('slack', 'telegram')
+           AND (inbound_status != '' OR inbound_error != '')",
         rusqlite::params![],
         "*",
     );
@@ -1027,7 +1033,7 @@ fn run_status_write(db_path: &Path, sql: &str, params: impl rusqlite::Params, wh
         Ok(())
     };
     if let Err(e) = write() {
-        log::error!("failed to write the slack inbound status integration_id={what:?} error={e}");
+        log::error!("failed to write the inbound status integration_id={what:?} error={e}");
     }
 }
 
@@ -1040,7 +1046,7 @@ fn run_status_write(db_path: &Path, sql: &str, params: impl rusqlite::Params, wh
 /// **strictly increasing** below the cap — two workers reconnecting in lockstep
 /// is what jitter is for, and a jitter wide enough to reorder two steps would
 /// make "the second attempt waits longer than the first" untrue.
-fn backoff_for(failures: u32, base: Duration, max: Duration, ratio: f64) -> Duration {
+pub(crate) fn backoff_for(failures: u32, base: Duration, max: Duration, ratio: f64) -> Duration {
     let step = base
         .checked_mul(1u32.checked_shl(failures.min(31)).unwrap_or(u32::MAX))
         .unwrap_or(max)
@@ -1055,7 +1061,7 @@ fn backoff_for(failures: u32, base: Duration, max: Duration, ratio: f64) -> Dura
 /// needs no distribution guarantees at all — only that two processes waking at
 /// the same instant do not pick the same wait. The nanosecond field of the wall
 /// clock is exactly that.
-fn jitter_ratio() -> f64 {
+pub(crate) fn jitter_ratio() -> f64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
@@ -1143,10 +1149,10 @@ mod tests {
     /// clear that forgot to scope by type would blank a column another
     /// integration's own inbound half might one day own.
     #[test]
-    fn a_boot_clears_every_slack_rows_inbound_state_and_no_others() {
+    fn a_boot_clears_every_inbound_rows_state_and_no_others() {
         let file = db();
         let conn = rusqlite::Connection::open(file.path()).expect("open");
-        for (id, kind) in [("s1", "slack"), ("s2", "slack"), ("t1", "telegram")] {
+        for (id, kind) in [("s1", "slack"), ("t1", "telegram"), ("g1", "github")] {
             conn.execute(
                 "INSERT INTO integrations
                     (id, name, type, enabled, credentials, services, created_at, updated_at,
@@ -1169,7 +1175,7 @@ mod tests {
             )
             .expect("read back")
         };
-        for id in ["s1", "s2"] {
+        for id in ["s1", "t1"] {
             assert_eq!(
                 read(id),
                 (String::new(), String::new(), "then".to_string()),
@@ -1177,13 +1183,13 @@ mod tests {
             );
         }
         assert_eq!(
-            read("t1"),
+            read("g1"),
             (
                 "connected".to_string(),
                 "boom".to_string(),
                 "then".to_string()
             ),
-            "a non-slack row is not this clear's business"
+            "a row with no inbound worker is not this clear's business"
         );
     }
 

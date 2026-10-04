@@ -62,7 +62,31 @@
 //! `scheduled_tasks`, and the two per-task event counters. It also backfills:
 //! every existing rule and every task with a Slack destination is switched to
 //! `continue_on_reply`, because those already continue on a reply (#681, epic
-//! #679).
+//! #679). Migration **49** is the nineteenth:
+//! `user_settings.claude_retention_prompt_answered`, whether the one-time
+//! retention prompt has been answered, default no (#720, epic #703).
+//! Migration **50** is the twentieth and adds no column: it turns
+//! `inbound_enabled` on for every Telegram row whose webhook was `active`, so a
+//! trigger that worked over the webhook keeps working over the long poll that
+//! replaces it (#676).
+//! Migration **51** is the twenty-first and adds no column either: it turns
+//! off every enabled Telegram trigger rule whose `filter_chat_ids` names no
+//! chat, because such a rule now answers nobody and the write refuses one
+//! (#674). The rule and its settings are kept; listing a chat turns it back on.
+//! Migration **52** is the twenty-second: `job_history.machine_id` and
+//! `harness`, which install ran a run and on what. Existing rows are backfilled
+//! with this install's `install_identity.machine_id` and `claude` (#678).
+//! Migration **53** is the twenty-third: `trigger_rules.filter_user_ids`, the
+//! users a Slack rule answers, default `[]`. No row is rewritten and `enabled`
+//! is not touched, so an existing Slack rule keeps its switch and answers
+//! nobody until a user is listed (#688).
+//! Migration **54** is the twenty-fourth: `scheduled_tasks.max_concurrent_runs`,
+//! `max_queued_events` and `max_runs_per_hour`, the per-task limits on event
+//! runs, defaulting to 1, 5 and 10 (#691).
+//! Migration **55** is the twenty-fifth and adds no column: it rewrites the
+//! `database-url-credentials` snippets stored under ruleset 1 whose tail held
+//! the `@` and the end of the password, because a rescan never reaches an
+//! expired session's rows (#741).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -294,8 +318,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 48, "expected 48 migrations");
-        assert_eq!(expected_version(), 48);
+        assert_eq!(all.len(), 55, "expected 55 migrations");
+        assert_eq!(expected_version(), 55);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -389,7 +413,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 48);
+        assert_eq!(current_version(&conn).expect("version"), 55);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -607,7 +631,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 48);
+        assert_eq!(current_version(&conn).expect("version"), 55);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -667,7 +691,7 @@ mod tests {
         .expect("seed rows at 47");
 
         apply(&mut conn).expect("apply 48 and later");
-        assert_eq!(current_version(&conn).expect("version"), 48);
+        assert_eq!(current_version(&conn).expect("version"), 55);
 
         let flagged = |table: &str| -> Vec<String> {
             let mut stmt = conn
@@ -839,7 +863,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 48);
+        assert_eq!(current_version(&conn).expect("version"), 55);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -904,6 +928,331 @@ mod tests {
         );
     }
 
+    /// Migration 50 (#676): a Telegram row whose webhook was active comes out
+    /// with the inbound switch on, so its triggers move to the long poll with
+    /// no user action. Nothing else is touched — a Telegram row with no active
+    /// webhook never received anything, and a Slack row's switch is its own.
+    #[test]
+    fn migration_50_turns_inbound_on_for_an_active_telegram_webhook() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 49);
+        for (id, kind, status) in [
+            ("tg-active", "telegram", "active"),
+            ("tg-inactive", "telegram", "inactive"),
+            ("tg-never", "telegram", ""),
+            ("tg-error", "telegram", "error"),
+            ("sl", "slack", "active"),
+        ] {
+            conn.execute(
+                "INSERT INTO integrations
+                    (id, name, type, enabled, credentials, services, webhook_status,
+                     created_at, updated_at)
+                 VALUES (?1, ?1, ?2, 1, '{}', '{}', ?3, 'then', 'then')",
+                rusqlite::params![id, kind, status],
+            )
+            .expect("seed");
+        }
+
+        apply(&mut conn).expect("apply 50");
+
+        let switched: Vec<String> = conn
+            .prepare("SELECT id FROM integrations WHERE inbound_enabled = 1 ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(switched, ["tg-active"]);
+        let updated_at: String = conn
+            .query_row(
+                "SELECT updated_at FROM integrations WHERE id = 'tg-active'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read");
+        assert_eq!(updated_at, "then", "a backfill is not a user edit");
+    }
+
+    /// Migration 55 (#741): a database URL snippet stored under ruleset 1 on a
+    /// short host loses the `@` and the password characters before it, without
+    /// a rescan — the session here has expired, so no rescan will ever come.
+    /// Every other row is left as it was, and a second run changes nothing.
+    #[test]
+    fn migration_55_rewrites_a_database_url_snippet_that_kept_the_password_tail() {
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+        seed_at(&conn, 54);
+        conn.execute_batch(
+            "INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time, last_activity,
+                  transcript_expired_at)
+             VALUES ('gone', '/a', '/a/gone.jsonl', '2026-01-01 00:00:00+00:00',
+                     '2026-01-01 00:00:00+00:00', '2026-01-01 00:00:00+00:00',
+                     '2026-02-01 00:00:00+00:00');
+             INSERT INTO credential_findings
+                 (session_id, project_path, rule_id, location_start, confidence,
+                  masked_snippet, location_end, ruleset_version, match_hash, detected_at)
+             VALUES
+               ('gone', '/a', 'database-url-credentials', 10, 'high', 'post********K@db', 40, 1, 'h1', 't'),
+               ('gone', '/a', 'database-url-credentials', 50, 'high', 'mysq********ZK@h', 80, 1, 'h2', 't'),
+               ('gone', '/a', 'database-url-credentials', 90, 'high', 'post********@pg1', 120, 1, 'h3', 't'),
+               ('gone', '/a', 'database-url-credentials', 130, 'high', 'post********.com', 170, 1, 'h4', 't'),
+               ('gone', '/a', 'database-url-credentials', 180, 'high', '********', 190, 1, 'h5', 't'),
+               ('gone', '/a', 'github-pat', 200, 'high', 'ghp_********a@bc', 240, 1, 'h6', 't');",
+        )
+        .expect("seed rows at 54");
+
+        let snippets = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT masked_snippet FROM credential_findings ORDER BY location_start")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("rows")
+        };
+        let expected = [
+            "post********db",
+            "mysq********h",
+            "post********pg1",
+            "post********.com",
+            "********",
+            // Another rule's snippet is not this migration's to touch.
+            "ghp_********a@bc",
+        ];
+
+        apply(&mut conn).expect("apply 55");
+        assert_eq!(snippets(&conn), expected);
+
+        let sql = &migrations()[54].sql;
+        conn.execute_batch(sql).expect("a second run");
+        assert_eq!(snippets(&conn), expected);
+    }
+
+    /// Migration 54 (#691): a task that existed before it reads back with the
+    /// default limits, and an older build's insert, which names none of the
+    /// three columns, still lands with them.
+    #[test]
+    fn migration_54_gives_every_task_the_default_event_run_limits() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 53);
+        let insert = |conn: &Connection, id: &str| {
+            conn.execute(
+                "INSERT INTO scheduled_tasks (id, name, prompt) VALUES (?1, 'T', 'p')",
+                [id],
+            )
+            .expect("insert task");
+        };
+        insert(&conn, "existing");
+
+        apply(&mut conn).expect("apply 54");
+        insert(&conn, "older-build");
+
+        let rows: Vec<(String, i64, i64, i64)> = conn
+            .prepare(
+                "SELECT id, max_concurrent_runs, max_queued_events, max_runs_per_hour
+                 FROM scheduled_tasks ORDER BY id",
+            )
+            .expect("prepare")
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("existing".to_string(), 1, 5, 10),
+                ("older-build".to_string(), 1, 5, 10),
+            ]
+        );
+    }
+
+    /// Migration 53 (#688): a rule that existed before it reads back with an
+    /// empty `filter_user_ids` and the `enabled` it had, and an older build's
+    /// insert, which does not name the column, still lands.
+    #[test]
+    fn migration_53_gives_existing_rules_an_empty_user_list_and_keeps_them_on() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 52);
+        conn.execute(
+            "INSERT INTO integrations
+                (id, name, type, enabled, credentials, services, created_at, updated_at)
+             VALUES ('sl', 'sl', 'slack', 1, '{}', '{}', 'then', 'then')",
+            [],
+        )
+        .expect("seed integration");
+        let insert = |conn: &Connection, id: &str, enabled: i64| {
+            conn.execute(
+                "INSERT INTO trigger_rules
+                    (id, integration_id, name, agent_slug, enabled, created_at, updated_at)
+                 VALUES (?1, 'sl', ?1, 'a', ?2, 'then', 'then')",
+                rusqlite::params![id, enabled],
+            )
+            .expect("insert rule");
+        };
+        insert(&conn, "on", 1);
+        insert(&conn, "off", 0);
+
+        apply(&mut conn).expect("apply 53");
+        insert(&conn, "older-build", 1);
+
+        let rows: Vec<(String, i64, String)> = conn
+            .prepare("SELECT id, enabled, filter_user_ids FROM trigger_rules ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        let empty = || "[]".to_string();
+        assert_eq!(
+            rows,
+            vec![
+                ("off".to_string(), 0, empty()),
+                ("older-build".to_string(), 1, empty()),
+                ("on".to_string(), 1, empty()),
+            ]
+        );
+    }
+
+    /// Migration 52 (#678): every run recorded before it comes out naming this
+    /// install and `claude`, because nothing else could have run it. Seeded at
+    /// 51, since the backfill is about the rows an install already has. The
+    /// last insert is an older build's — it names neither column — and must
+    /// still land, which is what "additive" promises.
+    #[test]
+    fn migration_52_backfills_existing_runs_with_this_install_and_claude() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 51);
+        conn.execute_batch(
+            "INSERT INTO scheduled_tasks (id, name, prompt) VALUES ('t1', 'T', 'p');
+             INSERT INTO job_history (id, task_id, task_name, started_at, triggered_by)
+             VALUES ('old-1', 't1', 'T', '2026-01-01 00:00:00 +0000 UTC', 'schedule'),
+                    ('old-2', 't1', 'T', '2026-01-02 00:00:00 +0000 UTC', 'slack');",
+        )
+        .expect("seed runs at 51");
+
+        apply(&mut conn).expect("apply 52");
+
+        let machine_id: String = conn
+            .query_row("SELECT machine_id FROM install_identity", [], |row| {
+                row.get(0)
+            })
+            .expect("identity");
+        assert_eq!(machine_id.len(), 32, "{machine_id:?}");
+        let rows = |conn: &Connection| -> Vec<(String, String, String)> {
+            conn.prepare("SELECT id, machine_id, harness FROM job_history ORDER BY id")
+                .expect("prepare")
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("rows")
+        };
+        let claude = || "claude".to_string();
+        assert_eq!(
+            rows(&conn),
+            vec![
+                ("old-1".to_string(), machine_id.clone(), claude()),
+                ("old-2".to_string(), machine_id.clone(), claude()),
+            ]
+        );
+
+        conn.execute(
+            "INSERT INTO job_history (id, task_id, task_name, started_at)
+             VALUES ('older-build', 't1', 'T', '2026-01-03 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("an insert that names neither column still lands");
+        assert_eq!(
+            rows(&conn)[2],
+            ("older-build".to_string(), String::new(), claude())
+        );
+    }
+
+    /// Migration 51 (#674): an enabled Telegram rule whose `filter_chat_ids`
+    /// names no chat comes out turned off, whatever shape "names no chat"
+    /// takes in the column. A rule that lists one, a rule already off and a
+    /// Slack rule (where an empty list is the workspace default) are untouched.
+    #[test]
+    fn migration_51_turns_off_telegram_rules_that_list_no_chat() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        seed_at(&conn, 50);
+        for (id, kind) in [("tg", "telegram"), ("sl", "slack")] {
+            conn.execute(
+                "INSERT INTO integrations
+                    (id, name, type, enabled, credentials, services, created_at, updated_at)
+                 VALUES (?1, ?1, ?2, 1, '{}', '{}', 'then', 'then')",
+                [id, kind],
+            )
+            .expect("seed integration");
+        }
+        for (id, integration, enabled, chat_ids) in [
+            ("tg-empty", "tg", 1, "[]"),
+            ("tg-null", "tg", 1, "null"),
+            ("tg-blank", "tg", 1, ""),
+            ("tg-broken", "tg", 1, "not json"),
+            ("tg-object", "tg", 1, r#"{"42":1}"#),
+            ("tg-string", "tg", 1, r#""42""#),
+            ("tg-blank-entry", "tg", 1, r#"["",null]"#),
+            ("tg-number-entry", "tg", 1, "[42]"),
+            ("tg-listed", "tg", 1, r#"["42"]"#),
+            ("tg-listed-among-blanks", "tg", 1, r#"["","-100"]"#),
+            ("tg-off-empty", "tg", 0, "[]"),
+            ("sl-empty", "sl", 1, "[]"),
+            ("sl-listed", "sl", 1, r#"["C1"]"#),
+        ] {
+            conn.execute(
+                "INSERT INTO trigger_rules
+                    (id, integration_id, name, agent_slug, enabled, filter_chat_ids,
+                     model, created_at, updated_at)
+                 VALUES (?1, ?2, ?1, 'a', ?3, ?4, 'opus', 'then', 'then')",
+                rusqlite::params![id, integration, enabled, chat_ids],
+            )
+            .expect("seed rule");
+        }
+
+        apply(&mut conn).expect("apply 51");
+
+        let on: Vec<String> = conn
+            .prepare("SELECT id FROM trigger_rules WHERE enabled = 1 ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            on,
+            [
+                "sl-empty",
+                "sl-listed",
+                "tg-listed",
+                "tg-listed-among-blanks"
+            ]
+        );
+        // Turned off, not rewritten: the rule keeps everything else it held.
+        let kept: (i64, String, String, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(model), MAX(model), MAX(updated_at) FROM trigger_rules",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read");
+        assert_eq!(kept, (13, "opus".into(), "opus".into(), "then".into()));
+        let chat_ids: String = conn
+            .query_row(
+                "SELECT filter_chat_ids FROM trigger_rules WHERE id = 'tg-broken'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read");
+        assert_eq!(chat_ids, "not json");
+    }
+
     /// The property this whole function exists for, and the one sequential
     /// idempotence does **not** prove: two processes applying at once must both
     /// succeed rather than one failing on duplicate DDL — which is exactly what
@@ -950,7 +1299,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 48);
+        assert_eq!(current_version(&conn).expect("version"), 55);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -959,7 +1308,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 48);
+        assert_eq!(recorded, 55);
     }
 
     #[test]

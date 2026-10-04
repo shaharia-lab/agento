@@ -1,6 +1,8 @@
 /* The Slack destination's channel picker (#641), imported by
-   components/SlackChannelPicker.tsx. Rows keep the 28px rhythm, and the
-   checkbox and its label are siblings — a Checkbox is a <button>. */
+   components/SlackChannelPicker.tsx, and the Slack rule's allowed-users picker
+   (#689), components/SlackUserPicker.tsx, which is the same control over
+   members. Rows keep the 28px rhythm, and the checkbox and its label are
+   siblings — a Checkbox is a <button>. */
 
 .chanpick {
   display: flex;
@@ -71,8 +73,16 @@
   font-size: var(--text-base);
 }
 
-.chanpick__row > .badge {
+.chanpick__row > .badge,
+.chanpick__row > .btn {
   flex: none;
+}
+
+/* A member's @handle beside their real name (#689). */
+.chanpick__handle {
+  margin-left: var(--sp-3);
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
 }
 
 .chanpick__note {

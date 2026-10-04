@@ -254,11 +254,13 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 /// blocking one; see `gateway_api::CATALOG_ROUTE`.
 ///
 /// #641 added a second: `GET /api/integrations/{id}/slack/channels` pages
-/// through Slack's `conversations.list` on the same terms.
+/// through Slack's `conversations.list` on the same terms, and #689 a third:
+/// `GET /api/integrations/{id}/slack/users` over `users.list`.
 const STREAM_ENDPOINTS: &[StreamEndpoint] = &[
     chat::ENDPOINT,
     gateway_api::STREAM_ENDPOINT,
     integrations::slack::channels::STREAM_ENDPOINT,
+    integrations::slack::users::STREAM_ENDPOINT,
 ];
 
 /// Whether this request is answered by a *streaming* native handler.
@@ -498,10 +500,19 @@ mod tests {
         assert!(claims(&Method::GET, "/api/settings/claude-config-dirs"));
         assert!(claims(&Method::PUT, "/api/settings"));
         assert!(!claims(&Method::PUT, "/api/settings/claude-config-dirs"));
-        // Claude Code's own retention, read per config dir (#718). A read and
-        // only a read: writing the key is #719's, under its own route.
+        // The retention prompt's own write (#751): one column, a `POST` only.
+        assert!(claims(
+            &Method::POST,
+            "/api/settings/retention-prompt/answered"
+        ));
+        assert!(!claims(
+            &Method::GET,
+            "/api/settings/retention-prompt/answered"
+        ));
+        // Claude Code's own retention, read per config dir (#718) and raised,
+        // never lowered, by the retention prompt's `PUT` (#720).
         assert!(claims(&Method::GET, "/api/settings/claude-retention"));
-        assert!(!claims(&Method::PUT, "/api/settings/claude-retention"));
+        assert!(claims(&Method::PUT, "/api/settings/claude-retention"));
         assert!(!claims(&Method::POST, "/api/settings/claude-retention"));
         assert!(!claims(&Method::DELETE, "/api/settings/claude-retention"));
         // Claude Code's own settings.json and the profiles beside it: a
@@ -855,8 +866,8 @@ mod tests {
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
         //
-        // The file has **seven owners** since #718, so the claimed set is the
-        // union of all seven modules' consts. An eighth owner appends here;
+        // The file has **eight owners** since #751, so the claimed set is the
+        // union of all eight modules' consts. A ninth owner appends here;
         // leaving it out would silently weaken the assertion from set equality
         // to "the owners I remembered", which is the one-directional property
         // this test exists to escape.
@@ -868,6 +879,7 @@ mod tests {
             .chain(security_scan::api::ROUTES.iter())
             .chain(sessions::ROUTES.iter())
             .chain(claude_settings::retention::ROUTES.iter())
+            .chain(settings::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(

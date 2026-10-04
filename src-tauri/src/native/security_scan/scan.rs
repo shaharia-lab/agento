@@ -14,9 +14,10 @@
 //! Findings come back ordered by `start`, then by rule table order.
 //!
 //! [`mask_text`] is the second export (#680): the same findings, applied. It
-//! answers the input with every finding replaced by [`store::mask`]'s display
-//! form and every other byte untouched. **Its output is safe to store and its
-//! input is not** — an event payload goes through it before it is written.
+//! answers the input with every finding replaced by its rule's display form
+//! ([`store::mask_for`]) and every other byte untouched. **Its output is safe
+//! to store and its input is not** — an event payload goes through it before it
+//! is written.
 
 use super::rules::{self, Confidence, PAIR_WINDOW};
 use super::store;
@@ -66,32 +67,77 @@ pub fn scan(text: &str) -> Vec<Finding> {
 /// plays no part — it suppresses *reporting* a finding, not storing its value.
 /// A secret no rule knows passes through raw; the rule table is the one source.
 pub fn mask_text(text: &str) -> String {
-    let ranges = merge_ranges(&scan(text));
+    mask_findings(text, &scan(text))
+}
+
+/// [`mask_text`] over findings already computed from `text`, ordered by
+/// `start` as [`scan`] returns them.
+fn mask_findings(text: &str, findings: &[Finding]) -> String {
+    let ranges = merge_ranges(findings);
     if ranges.is_empty() {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
-    for (start, end) in ranges {
+    for range in ranges {
         // Regex match offsets are character boundaries, so the slices are safe.
-        out.push_str(&text[copied..start]);
-        out.push_str(&store::mask(&text[start..end]));
-        copied = end;
+        out.push_str(&text[copied..range.start]);
+        let matched = &text[range.start..range.end];
+        match range.form {
+            Form::Rule(rule_id) => out.push_str(&store::mask_for(rule_id, matched)),
+            Form::Default => out.push_str(&store::mask(matched)),
+            Form::Hidden => out.push_str(store::MASK_RUN),
+        }
+        copied = range.end;
     }
     out.push_str(&text[copied..]);
     out
+}
+
+/// One replacement: a byte range of the text and the form it is masked in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Range {
+    start: usize,
+    end: usize,
+    form: Form,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    /// One finding: the form its rule gives it ([`store::mask_for`]), which is
+    /// the form `credential_findings.masked_snippet` holds for the same match.
+    Rule(&'static str),
+    /// Several overlapping findings, none of a rule with its own mask.
+    Default,
+    /// Several overlapping findings, one of a rule with its own mask. That
+    /// rule says the ends of its match are not safe to show, and the joined
+    /// span is no longer the match it was written for, so nothing is shown.
+    Hidden,
 }
 
 /// The findings' spans with overlapping ones joined, so two rules on one span
 /// — or straddling each other — are one replacement, not two masks spliced
 /// together. `findings` is ordered by `start`, as `scan` returns it. Spans
 /// that merely touch stay separate.
-fn merge_ranges(findings: &[Finding]) -> Vec<(usize, usize)> {
-    let mut merged: Vec<(usize, usize)> = Vec::new();
+fn merge_ranges(findings: &[Finding]) -> Vec<Range> {
+    let custom = |rule_id: &str| rules::mask_of(rule_id).is_some();
+    let mut merged: Vec<Range> = Vec::new();
     for f in findings {
         match merged.last_mut() {
-            Some((_, end)) if f.start < *end => *end = (*end).max(f.end),
-            _ => merged.push((f.start, f.end)),
+            Some(last) if f.start < last.end => {
+                last.end = last.end.max(f.end);
+                last.form = match last.form {
+                    Form::Hidden => Form::Hidden,
+                    Form::Rule(first) if custom(first) => Form::Hidden,
+                    _ if custom(f.rule_id) => Form::Hidden,
+                    _ => Form::Default,
+                };
+            }
+            _ => merged.push(Range {
+                start: f.start,
+                end: f.end,
+                form: Form::Rule(f.rule_id),
+            }),
         }
     }
     merged
@@ -678,6 +724,12 @@ mod tests {
                     "@db.internal.example.com",
                 ]),
             ),
+            // A host under four characters: the default tail would reach past
+            // the `@` into the password (#741).
+            vector(
+                "database-url-credentials",
+                cat(&["postgres://app:", "Tr0ub4dor-3xq", "@db"]),
+            ),
             vector("private-key", pem("RSA ")),
             vector(
                 "jwt",
@@ -696,7 +748,9 @@ mod tests {
     fn every_rule_has_a_masking_vector() {
         // A rule added to the table without a vector here fails this, so no
         // rule's masking goes unproved.
-        let covered: Vec<&str> = mask_vectors().iter().map(|v| v.rule).collect();
+        // A rule may have several, side by side.
+        let mut covered: Vec<&str> = mask_vectors().iter().map(|v| v.rule).collect();
+        covered.dedup();
         let table: Vec<&str> = rules::compiled().iter().map(|(r, _)| r.id).collect();
         assert_eq!(covered, table);
     }
@@ -712,10 +766,18 @@ mod tests {
             for secret in &v.secrets {
                 assert!(!masked.contains(secret.as_str()), "{} survives", v.rule);
                 assert!(
-                    masked.contains(&store::mask(secret)),
+                    masked.contains(&store::mask_for(v.rule, secret)),
                     "{} is not in its masked form",
                     v.rule
                 );
+                // Only the database URL has a form of its own (#741).
+                if v.rule != "database-url-credentials" {
+                    assert!(
+                        store::mask_for(v.rule, secret) == store::mask(secret),
+                        "{} left the default form",
+                        v.rule
+                    );
+                }
             }
             assert!(masked.starts_with(LEAD), "{} changed the prefix", v.rule);
             assert!(masked.ends_with(TAIL), "{} changed the suffix", v.rule);
@@ -788,15 +850,98 @@ mod tests {
             start,
             end,
         };
+        let spans = |findings: &[Finding]| -> Vec<(usize, usize, Form)> {
+            merge_ranges(findings)
+                .into_iter()
+                .map(|r| (r.start, r.end, r.form))
+                .collect()
+        };
+        let (one, many) = (Form::Rule("x"), Form::Default);
         // Identical, straddling, touching, apart.
-        assert_eq!(merge_ranges(&[f(2, 9), f(2, 9)]), [(2, 9)]);
-        assert_eq!(merge_ranges(&[f(2, 9), f(5, 14)]), [(2, 14)]);
-        assert_eq!(merge_ranges(&[f(2, 9), f(9, 14)]), [(2, 9), (9, 14)]);
+        assert_eq!(spans(&[f(2, 9), f(2, 9)]), [(2, 9, many)]);
+        assert_eq!(spans(&[f(2, 9), f(5, 14)]), [(2, 14, many)]);
+        assert_eq!(spans(&[f(2, 9), f(9, 14)]), [(2, 9, one), (9, 14, one)]);
         assert_eq!(
-            merge_ranges(&[f(0, 4), f(3, 6), f(5, 8), f(20, 30)]),
-            [(0, 8), (20, 30)]
+            spans(&[f(0, 4), f(3, 6), f(5, 8), f(20, 30)]),
+            [(0, 8, many), (20, 30, one)]
         );
         assert!(merge_ranges(&[]).is_empty());
+    }
+
+    // ── the database URL's own mask (#741) ────────────────────────────────
+
+    /// A password of `n` characters, none of which occurs in the scheme, the
+    /// user or any host below, so "no password character survives" is a plain
+    /// character test on the masked form.
+    fn db_password(n: usize) -> String {
+        body("QZ7XK9WJ", n)
+    }
+
+    const DB_HOSTS: [&str; 5] = ["h", "db", "pg1", "data", "db.internal1"];
+
+    #[test]
+    fn a_database_urls_mask_never_shows_a_password_character() {
+        for host in DB_HOSTS {
+            for len in [3, 7, 13] {
+                let password = db_password(len);
+                let url = cat(&["postgres://app:", &password, "@", host]);
+                let case = format!("host of {}, password of {len}", host.len());
+                assert!(ids(&url) == ["database-url-credentials"], "{case}: found");
+
+                let masked = mask_text(&cat(&[LEAD, &url, TAIL]));
+                let shown = masked
+                    .strip_prefix(LEAD)
+                    .and_then(|m| m.strip_suffix(TAIL))
+                    .unwrap_or_else(|| panic!("{case}: the surrounding text changed"));
+                assert!(
+                    !shown.chars().any(|c| password.contains(c)),
+                    "{case}: a password character survives"
+                );
+                // The head, the run, and the host's last four — fewer when the
+                // host is shorter. Four or more is the form it always had.
+                let tail = &host[host.len().saturating_sub(4)..];
+                assert!(
+                    shown == cat(&["post", "********", tail]),
+                    "{case}: the form"
+                );
+                if host.len() >= 4 {
+                    assert!(shown == store::mask(&url), "{case}: left the default");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_database_url_under_the_minimum_shows_nothing() {
+        // Fifteen characters: under `MASK_MIN_CHARS`, as for every rule.
+        let url = cat(&["mysql://u:", &db_password(3), "@h"]);
+        assert!(ids(&url) == ["database-url-credentials"]);
+        assert!(mask_text(&url) == "********");
+    }
+
+    #[test]
+    fn a_span_joined_with_a_database_url_shows_nothing() {
+        let url = cat(&["postgres://app:", &db_password(7), "@db"]);
+        let text = cat(&[&url, "-and-more-text"]);
+        let db = Finding {
+            rule_id: "database-url-credentials",
+            confidence: Confidence::High,
+            start: 0,
+            end: url.len(),
+        };
+        let other = |start| Finding {
+            rule_id: "github-pat",
+            confidence: Confidence::High,
+            start,
+            end: text.len(),
+        };
+        // Alone, the URL keeps its own form; straddled, in either order, the
+        // joined span is not the match that form was written for.
+        assert!(mask_findings(&text, &[db]) == cat(&["post", "********", "db-and-more-text"]));
+        assert!(mask_findings(&text, &[db, other(url.len() - 4)]) == "********");
+        let late = Finding { start: 4, ..db };
+        let masked = mask_findings(&text, &[other(0), late]);
+        assert!(masked == "********");
     }
 
     #[test]

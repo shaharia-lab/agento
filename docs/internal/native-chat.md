@@ -18,7 +18,7 @@
   in `Message` — that is how the answer reaches the model. Not a bug.
 - **The busy lock has two callers, and they answer with one string** (#564).
   `live::try_lock` was the interactive turn's alone while every headless run
-  minted a fresh chat; `agent_run::run_resumed` runs a turn on an *existing*
+  minted a fresh chat; `agent_run::Runner::resume` runs a turn on an *existing*
   chat, so a UI send and an inbound one can now collide on one row — two CLI
   processes each reading the other's stale `sdk_session_id`. Both refuse with
   `live::CHAT_BUSY`, the chat route's own 409 body, because an inbound worker
@@ -59,12 +59,15 @@
   `continue_chat.rs::chat_mode_from_cli`: `bypassPermissions` → `bypass`, and
   `default`, `plan`, `dontAsk` one-to-one. Everything else — `""`,
   `acceptEdits`, `auto`, a mode the CLI adds later — becomes `""`, so the
-  runner asks. The table stays closed because the runner's `_ =>` arm treats an
-  unrecognised mode as bypass. A reopened chat (the idempotent path above)
+  runner asks. The table stays closed because the runner refuses a mode it does
+  not recognise (#675), which would fail every turn of the chat. A reopened chat (the idempotent path above)
   keeps whatever mode it already has.
 - **A chat's permission mode is the chat's, then the agent's, then `default`.**
   `chat_sessions.permission_mode` (migration 30) beats the rule that an
   interactive handler forces `default`; empty means "no choice", not a mode.
+  **With no handler the last rung is not `default` and not bypass** (#675): a
+  headless run with nothing chosen denies prompts, and an unknown mode fails
+  the turn on either path. `docs/internal/native-schedule.md` has the table.
 - **There is no terminal SSE event**, and `result` can arrive more than once in
   one request (an `AskUserQuestion` keeps the stream open past it). End the
   turn on stream close, never on `result`.

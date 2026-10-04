@@ -36,6 +36,8 @@ use super::{filtered_prompt, reply_for, strip_mention, Dropped, ERROR_REPLY, NO_
 
 const BOT_USER: &str = "U0BOT";
 const CHANNEL: &str = "C1";
+/// Who every fixture mention is from, and who every seeded rule lists (#688).
+const SENDER: &str = "U1";
 
 // ─── The fake Slack ──────────────────────────────────────────────────────────
 
@@ -339,8 +341,8 @@ fn seed_filtered_rule(
         "INSERT INTO trigger_rules
             (id, integration_id, name, agent_slug, enabled, filter_prefix, filter_keywords,
              filter_chat_ids, model, working_directory, settings_profile_id, permission_mode,
-             timeout_minutes, created_at, updated_at)
-         VALUES (?1, ?2, ?1, '', ?3, ?8, ?9, ?4, ?5, ?6, '', 'plan', 0, ?7, ?7)",
+             timeout_minutes, created_at, updated_at, filter_user_ids)
+         VALUES (?1, ?2, ?1, '', ?3, ?8, ?9, ?4, ?5, ?6, '', 'plan', 0, ?7, ?7, ?10)",
         rusqlite::params![
             id,
             integration_id,
@@ -350,7 +352,9 @@ fn seed_filtered_rule(
             working_directory,
             created_at,
             prefix,
-            keywords
+            keywords,
+            // Every seeded rule lists the fixture's sender (#688).
+            format!(r#"["{SENDER}"]"#)
         ],
     )
     .expect("seed a rule");
@@ -395,7 +399,7 @@ fn mention(text: &str, ts: &str, thread_ts: &str, integration_id: &str) -> AppMe
     AppMention {
         integration_id: integration_id.to_string(),
         channel: CHANNEL.to_string(),
-        user: "U1".to_string(),
+        user: SENDER.to_string(),
         text: text.to_string(),
         ts: ts.to_string(),
         thread_ts: thread_ts.to_string(),
@@ -450,6 +454,7 @@ fn filters(prefix: &str, keywords: &[&str], channels: &[&str]) -> RuleFilters {
         prefix: prefix.to_string(),
         keywords: keywords.iter().map(|k| k.to_string()).collect(),
         chat_ids: channels.iter().map(|c| c.to_string()).collect(),
+        user_ids: Vec::new(),
     }
 }
 
@@ -1379,8 +1384,29 @@ fn the_global_bound_is_taken_around_the_run_and_not_around_the_wait() {
         .find("\"slack mention prompt")
         .expect("the turn logs its prompt before it runs");
     let run = flat
-        .find("agent_run::run_resumed(")
-        .expect("the turn calls run_resumed");
+        .find("agent_run::runner() .resume(")
+        .expect("the turn resumes the chat through the runner");
+    // The linked arm (#685) takes the same permit, around its own run.
+    let event_acquire = flat[run..]
+        .find("dispatcher::semaphore().acquire()")
+        .map(|at| run + at)
+        .expect("the event run must take the dispatcher's permit too");
+    let event_run = flat
+        .find("executor::run_admitted(")
+        .expect("the linked arm runs the admitted event");
+    assert!(
+        event_acquire < event_run,
+        "the event run's permit is taken immediately before the run"
+    );
+    // #691: and after the task's own limiter, so an event waiting in its
+    // task's queue holds none of the ten.
+    let admit = flat
+        .find("executor::admit_event(")
+        .expect("the linked arm passes the task's limiter");
+    assert!(
+        admit < event_acquire,
+        "admission comes before the dispatcher's permit"
+    );
     // Presence alone would stay green if the acquire moved back to `accept`,
     // which is the regression this test is named for. Its *position* is the
     // claim: after the chat has been resolved, immediately before the run.
@@ -1459,4 +1485,783 @@ async fn a_long_answer_arrives_as_consecutive_messages_in_one_thread() {
         answer,
         "in order, and losing nothing"
     );
+}
+
+// ─── A rule linked to a task (#685) ──────────────────────────────────────────
+
+const TASK_PROMPT: &str = "Triage what the sender reports.";
+
+/// An active (or `status`) task `t1` carrying `destinations` as stored.
+fn seed_task(db_path: &Path, status: &str, destinations: &str) {
+    let conn = rusqlite::Connection::open(db_path).expect("open");
+    conn.execute(
+        "INSERT INTO scheduled_tasks
+            (id, name, prompt, schedule_type, schedule_config, status, destinations,
+             run_count, stop_after_count, created_at, updated_at)
+         VALUES ('t1', 'Triage', ?1, 'interval', '{}', ?2, ?3, 0, 0,
+                 '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+        rusqlite::params![TASK_PROMPT, status, destinations],
+    )
+    .expect("seed the task");
+}
+
+/// What the API's rule `PUT` does to link a rule: #687's picker is not built.
+fn link_rule(db_path: &Path, rule_id: &str, task_id: &str) {
+    let conn = rusqlite::Connection::open(db_path).expect("open");
+    let changed = conn
+        .execute(
+            "UPDATE trigger_rules SET task_id = ?2 WHERE id = ?1",
+            [rule_id, task_id],
+        )
+        .expect("link the rule");
+    assert_eq!(changed, 1, "the rule exists");
+}
+
+/// One integration, one unfiltered rule `r` carrying settings of its own, and
+/// that rule linked to task `t1`.
+fn linked(dir: &Path, integration_id: &str, status: &str, destinations: &str) -> PathBuf {
+    let db = migrated(dir, integration_id);
+    seed_rule(
+        &db,
+        integration_id,
+        "r",
+        true,
+        "[]",
+        "rule-model",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+    );
+    seed_task(&db, status, destinations);
+    link_rule(&db, "r", "t1");
+    // `migrated`'s row is enough for a handler, which is handed its token. A
+    // `reply` delivery resolves the token itself, behind the registry's
+    // enabled-and-authenticated check, so the row has to pass that too.
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute(
+            r#"UPDATE integrations
+               SET auth = '{}', credentials = '{"auth_mode":"bot_token","bot_token":"xoxb-t"}'"#,
+            [],
+        )
+        .expect("authenticate the integration");
+    db
+}
+
+/// `(id, triggered_by, event_payload, status, chat_session_id)` of every run.
+fn jobs(db_path: &Path) -> Vec<(String, String, String, String, String)> {
+    let conn = rusqlite::Connection::open(db_path).expect("open");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, triggered_by, event_payload, status, chat_session_id
+             FROM job_history ORDER BY started_at",
+        )
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .expect("query");
+    rows.map(|row| row.expect("a row")).collect()
+}
+
+/// `(type, status)` of a run's deliveries once `n` of them have settled.
+/// Delivery is spawned, never awaited by the run, so this is a poll.
+async fn settled_deliveries(db_path: &Path, job_id: &str, n: usize) -> Vec<(String, String)> {
+    use crate::native::schedule::delivery::tests::rows;
+    for _ in 0..1000 {
+        let found = rows(db_path, job_id);
+        if found.len() == n && found.iter().all(|row| row.3 != "pending") {
+            return found.into_iter().map(|row| (row.1, row.3)).collect();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("deliveries never settled: {:?}", rows(db_path, job_id));
+}
+
+const REPLY_ALWAYS: &str = r#"[{"type":"reply","when":"always"}]"#;
+
+/// The first acceptance criterion: one run, recorded as Slack's, of the
+/// **task** — its instructions, with what was said as a data block — and the
+/// answer arriving in the thread as the task's `reply` delivery, once.
+#[tokio::test]
+async fn a_linked_rules_mention_runs_the_task_and_replies_through_delivery() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-linked", "active", REPLY_ALWAYS);
+    let cli = fake_cli(dir.path(), "triaged {n}", "sess", false, 0);
+    // Built from pieces, and never printed: the Credentials Checker must see a
+    // key in what was said, and nothing else here may.
+    let said = format!("the deploy broke, key AKIA{}", "Q7ZP2M4XK9WT3HVB");
+    let masked = crate::native::security_scan::scan::mask_text(&said);
+    assert!(masked != said, "the fixture carries something to mask");
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-linked",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention(
+        &format!("<@U0BOT> {said}"),
+        "1700000000.000100",
+        "",
+        "s-linked",
+    )))
+    .await;
+    let runs = jobs(&db);
+    assert_eq!(runs.len(), 1, "exactly one job_history row");
+    let (job_id, triggered_by, payload, status, chat_id) = runs[0].clone();
+    // The reply is the delivery's, which the run does not wait for.
+    let deliveries = settled_deliveries(&db, &job_id, 1).await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(triggered_by, "slack");
+    assert_eq!(status, "success");
+    assert!(payload == masked, "the stripped, filtered text, masked");
+    assert_eq!(
+        deliveries,
+        vec![("reply".to_string(), "sent".to_string())],
+        "one reply delivery, sent"
+    );
+    assert_eq!(
+        slack.posted(),
+        vec![("1700000000.000100".to_string(), "triaged 1".to_string())],
+        "one post, in the mention's thread — the handler itself answered nothing"
+    );
+
+    let argv = spawns(dir.path());
+    assert_eq!(argv.len(), 1, "one CLI process");
+    assert_ne!(
+        flag(&argv[0].0, "--model"),
+        Some("rule-model"),
+        "the rule's settings are not the task's"
+    );
+    assert_ne!(flag(&argv[0].0, "--permission-mode"), Some("plan"));
+
+    // The prompt reaches the CLI on stdin; the chat's own first message is the
+    // record of it.
+    let turns = messages(&db, &chat_id);
+    let prompt = &turns[0].1;
+    assert!(
+        prompt.starts_with(&format!("{TASK_PROMPT}\n\n")),
+        "the task's instructions lead"
+    );
+    assert!(prompt.contains("<event-payload source=\"slack\" id=\""));
+    assert!(
+        prompt.contains(&format!("\">\n{masked}\n</event-payload id=\"")),
+        "what was said is the data block, masked"
+    );
+    assert!(!prompt.contains(&said), "and never raw");
+}
+
+/// The second: the mention's thread is mapped to the run's chat, so a reply in
+/// it resumes that chat as an ordinary turn and is answered inline.
+#[tokio::test]
+async fn a_linked_mentions_thread_is_mapped_and_a_reply_resumes_its_chat() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-linked-2", "active", REPLY_ALWAYS);
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-linked-2",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention(
+        "<@U0BOT> first",
+        "1700000000.000100",
+        "",
+        "s-linked-2",
+    )))
+    .await;
+    let runs = jobs(&db);
+    assert_eq!(runs.len(), 1);
+    let (job_id, chat_id) = (runs[0].0.clone(), runs[0].4.clone());
+    settled_deliveries(&db, &job_id, 1).await;
+    assert_eq!(
+        threads(&db),
+        vec![(
+            "1700000000.000100".to_string(),
+            chat_id.clone(),
+            "https://slack.example/p/1".to_string()
+        )],
+        "(integration, channel, mention ts) → the run's chat"
+    );
+
+    finish(handler(mention(
+        "<@U0BOT> and then?",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-linked-2",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(jobs(&db).len(), 1, "the reply is a chat turn, not a run");
+    let argv = spawns(dir.path());
+    assert_eq!(argv.len(), 2);
+    assert_eq!(
+        flag(&argv[1].0, "--resume"),
+        Some("sess-1"),
+        "the reply resumes the session the event run minted"
+    );
+    assert_eq!(
+        slack.posted(),
+        vec![
+            ("1700000000.000100".to_string(), "answer 1".to_string()),
+            ("1700000000.000100".to_string(), "answer 2".to_string()),
+        ],
+        "the delivery's reply, then the inline one, in one thread"
+    );
+    assert_eq!(
+        messages(&db, &chat_id).last(),
+        Some(&("assistant".to_string(), "answer 2".to_string())),
+        "appended to the run's chat"
+    );
+}
+
+/// The reply is not implied: a linked task without a `reply` destination runs
+/// and is recorded, and Slack hears nothing.
+#[tokio::test]
+async fn a_linked_task_with_no_reply_destination_runs_and_stays_silent() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-quiet", "active", "[]");
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-quiet",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention(
+        "<@U0BOT> anything",
+        "1700000000.000100",
+        "",
+        "s-quiet",
+    )))
+    .await;
+    let runs = jobs(&db);
+    assert_eq!(runs.len(), 1, "it ran, and the run is recorded");
+    assert_eq!(
+        (runs[0].1.as_str(), runs[0].3.as_str()),
+        ("slack", "success")
+    );
+    // Nothing to wait for by name, so give a stray delivery time to show.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(slack.posted(), vec![], "nothing posted");
+    assert!(
+        crate::native::schedule::delivery::tests::rows(&db, &runs[0].0).is_empty(),
+        "and no delivery row"
+    );
+    assert_eq!(threads(&db).len(), 1, "the thread is still mapped");
+}
+
+/// #691: a mention the task's run limits refuse — past its queue, or past
+/// its hourly cap — posts nothing, writes no row and reaches no CLI. Each is
+/// counted on the task, which is the only record it leaves.
+#[tokio::test]
+async fn a_mention_refused_by_the_tasks_run_limits_is_silent_and_counted() {
+    use crate::native::schedule::limiter::Limits;
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-limited", "active", REPLY_ALWAYS);
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    conn.execute(
+        "UPDATE scheduled_tasks SET max_queued_events = 1, max_runs_per_hour = 3",
+        [],
+    )
+    .expect("tighten the limits");
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = crate::native::schedule::runtime::detached(&db);
+    let handler = super::handler_with_scheduler(&db, "s-limited", "xoxb-t", Arc::clone(&scheduler));
+
+    // The task's one slot and its one queue place are both taken.
+    let limits = Limits {
+        concurrent: 1,
+        queued: 1,
+        per_hour: 3,
+    };
+    let now = chrono::Utc::now();
+    let running = scheduler
+        .limiter()
+        .admit("t1", limits, now)
+        .await
+        .expect("the slot");
+    let queued = {
+        let scheduler = Arc::clone(&scheduler);
+        tokio::spawn(async move { scheduler.limiter().admit("t1", limits, now).await })
+    };
+    for _ in 0..1000 {
+        if scheduler.limiter().load("t1") == (1, 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(scheduler.limiter().load("t1"), (1, 1));
+    finish(handler(mention(
+        "<@U0BOT> past the queue",
+        "1700000000.000100",
+        "",
+        "s-limited",
+    )))
+    .await;
+
+    // The running event and the queued one are two of the hour already, so
+    // at a cap of two the next mention is rate-limited rather than dropped.
+    conn.execute("UPDATE scheduled_tasks SET max_runs_per_hour = 2", [])
+        .expect("lower the cap");
+    finish(handler(mention(
+        "<@U0BOT> past the cap",
+        "1700000000.000200",
+        "",
+        "s-limited",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(slack.posted(), vec![], "neither refusal says anything");
+    assert!(jobs(&db).is_empty(), "nor writes a job_history row");
+    assert!(spawns(dir.path()).is_empty(), "nor reaches a CLI");
+    assert!(threads(&db).is_empty(), "nor maps a thread");
+    let counts: (i64, i64) = conn
+        .query_row(
+            "SELECT dropped_event_count, rate_limited_event_count FROM scheduled_tasks
+             WHERE id = 't1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("counters");
+    assert_eq!(counts, (1, 1), "one dropped, one rate-limited");
+    drop(running);
+    queued.abort();
+}
+
+/// Every refusal writes no row. Pause is the off switch and is silent; a task
+/// that is gone, or a process with no scheduler, answers the failure sentence
+/// — and none of them falls back to running the sender's words as a prompt.
+#[tokio::test]
+async fn a_paused_linked_task_is_silent_and_a_dangling_one_answers_the_failure_sentence() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-refused", "paused", REPLY_ALWAYS);
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-refused",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention(
+        "<@U0BOT> while paused",
+        "1700000000.000100",
+        "",
+        "s-refused",
+    )))
+    .await;
+    assert_eq!(slack.posted(), vec![], "a paused task says nothing");
+
+    link_rule(&db, "r", "t-gone");
+    finish(handler(mention(
+        "<@U0BOT> while dangling",
+        "1700000000.000200",
+        "",
+        "s-refused",
+    )))
+    .await;
+
+    // The production constructor in a process that schedules nothing.
+    link_rule(&db, "r", "t1");
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE scheduled_tasks SET status = 'active'", [])
+        .expect("resume the task");
+    let unscheduled = super::handler(&db, "s-refused", "xoxb-t");
+    finish(unscheduled(mention(
+        "<@U0BOT> with no scheduler",
+        "1700000000.000300",
+        "",
+        "s-refused",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(
+        slack.posted(),
+        vec![
+            ("1700000000.000200".to_string(), ERROR_REPLY.to_string()),
+            ("1700000000.000300".to_string(), ERROR_REPLY.to_string()),
+        ],
+        "the dangling link and the missing scheduler each answer once, in their own thread"
+    );
+    assert!(jobs(&db).is_empty(), "no refusal writes a job_history row");
+    assert!(spawns(dir.path()).is_empty(), "and none reached a CLI");
+    assert!(threads(&db).is_empty(), "nor mapped a thread");
+    let chats: i64 = rusqlite::Connection::open(&db)
+        .expect("open")
+        .query_row("SELECT count(*) FROM chat_sessions", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(chats, 0, "nor started a chat of the rule's own");
+}
+
+/// Linking a rule changes what a *top-level* mention does and nothing else: a
+/// thread mapped before the link still resumes its chat, inline, with no run.
+#[tokio::test]
+async fn an_existing_thread_resumes_even_when_its_rule_is_now_linked() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-older", "active", REPLY_ALWAYS);
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute_batch(
+            "INSERT INTO chat_sessions
+                (id, title, agent_slug, sdk_session_id, working_directory, created_at, updated_at)
+             VALUES ('old-chat', '[Slack] #general: earlier', '', 'old-sess', '',
+                     '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC');",
+        )
+        .expect("seed the earlier chat");
+    super::insert_thread(
+        &db,
+        "s-older",
+        CHANNEL,
+        "1700000000.000100",
+        "old-chat",
+        "https://slack.example/p/1",
+    )
+    .expect("map the earlier thread");
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-older",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention(
+        "<@U0BOT> carry on",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-older",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert!(jobs(&db).is_empty(), "a resume is not a run");
+    let argv = spawns(dir.path());
+    assert_eq!(argv.len(), 1);
+    assert_eq!(flag(&argv[0].0, "--resume"), Some("old-sess"));
+    assert_eq!(
+        slack.posted(),
+        vec![("1700000000.000100".to_string(), "answer 1".to_string())],
+        "answered inline, as before the link"
+    );
+    assert_eq!(
+        messages(&db, "old-chat"),
+        vec![
+            ("user".to_string(), "carry on".to_string()),
+            ("assistant".to_string(), "answer 1".to_string()),
+        ],
+        "the words are the prompt on this path, as they always were"
+    );
+}
+
+// ─── Allowed users (#688) ────────────────────────────────────────────────────
+
+/// `t1`'s dropped-event counter.
+fn dropped_events(db_path: &Path) -> i64 {
+    rusqlite::Connection::open(db_path)
+        .expect("open")
+        .query_row(
+            "SELECT dropped_event_count FROM scheduled_tasks WHERE id = 't1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the task exists")
+}
+
+fn chat_count(db_path: &Path) -> i64 {
+    rusqlite::Connection::open(db_path)
+        .expect("open")
+        .query_row("SELECT COUNT(*) FROM chat_sessions", [], |row| row.get(0))
+        .expect("count chats")
+}
+
+/// `mention`, from `user` rather than from [`SENDER`].
+fn mention_from(user: &str, text: &str, ts: &str, integration_id: &str) -> AppMention {
+    let mut mention = mention(text, ts, "", integration_id);
+    mention.user = user.to_string();
+    mention
+}
+
+/// The issue's gate: a mention from a user the rule does not list is no run, no
+/// chat, no mapped thread and no reply, and the linked task counts it once. A
+/// mention that names no user at all is refused the same way, and so is every
+/// mention under a rule that lists nobody.
+#[tokio::test]
+async fn a_mention_from_an_unlisted_user_runs_nothing_and_is_counted_on_the_task() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = linked(dir.path(), "s-users", "active", REPLY_ALWAYS);
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-users",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention_from(
+        "U9STRANGER",
+        "<@U0BOT> run it",
+        "1700000000.000100",
+        "s-users",
+    )))
+    .await;
+    assert_eq!(dropped_events(&db), 1, "counted exactly once");
+
+    finish(handler(mention_from(
+        "",
+        "<@U0BOT> run it",
+        "1700000000.000200",
+        "s-users",
+    )))
+    .await;
+    // Case is part of a Slack id: `u1` is not `U1`.
+    finish(handler(mention_from(
+        &SENDER.to_lowercase(),
+        "<@U0BOT> run it",
+        "1700000000.000300",
+        "s-users",
+    )))
+    .await;
+    assert_eq!(dropped_events(&db), 3);
+
+    // A rule that lists nobody answers nobody, the listed sender included.
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE trigger_rules SET filter_user_ids = '[]'", [])
+        .expect("clear the list");
+    finish(handler(mention(
+        "<@U0BOT> run it",
+        "1700000000.000400",
+        "",
+        "s-users",
+    )))
+    .await;
+    // Nothing to wait for by name, so give a stray run time to show.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(dropped_events(&db), 4);
+    assert!(
+        slack.calls().is_empty(),
+        "nothing was asked of Slack, `auth.test` included: {:?}",
+        slack.calls()
+    );
+    assert!(jobs(&db).is_empty(), "no run was recorded");
+    assert!(threads(&db).is_empty(), "no thread was mapped");
+    assert_eq!(chat_count(&db), 0, "no chat was created");
+}
+
+/// The sender is decided before the prefix and keywords: an unlisted user whose
+/// text would also fail the prefix is a dropped sender (counted, no
+/// `auth.test`), while the listed user failing the same prefix is an ordinary
+/// filtered mention, which is not counted.
+#[tokio::test]
+async fn the_sender_is_checked_before_the_prefix_and_before_auth_test() {
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-order");
+    seed_filtered_rule(
+        &db,
+        "s-order",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+        "/ask",
+        "[]",
+    );
+    seed_task(&db, "active", "[]");
+    link_rule(&db, "r", "t1");
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-order",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+
+    finish(handler(mention_from(
+        "U9STRANGER",
+        "<@U0BOT> no prefix here",
+        "1700000000.000100",
+        "s-order",
+    )))
+    .await;
+    assert_eq!(dropped_events(&db), 1, "dropped as a sender");
+    assert!(
+        slack.calls().is_empty(),
+        "the bot's id was never fetched: {:?}",
+        slack.calls()
+    );
+
+    finish(handler(mention(
+        "<@U0BOT> no prefix here",
+        "1700000000.000200",
+        "",
+        "s-order",
+    )))
+    .await;
+    set_api_base(None);
+
+    assert_eq!(
+        dropped_events(&db),
+        1,
+        "a listed sender failing the prefix is filtered, not counted"
+    );
+    assert_eq!(
+        slack
+            .calls()
+            .iter()
+            .map(|call| call.method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["auth.test"],
+        "the listed sender got as far as the filters, and no reply"
+    );
+    assert!(jobs(&db).is_empty());
+}
+
+/// A rule with no linked task has nowhere to count, and still drops: the listed
+/// sender is answered as before, and an unlisted user's reply inside that same
+/// thread, one Agento started, adds no turn and no message.
+#[tokio::test]
+async fn an_unlinked_rule_drops_an_unlisted_user_even_inside_its_own_thread() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-plain");
+    seed_rule(
+        &db,
+        "s-plain",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+    );
+    // A task exists and the rule is not linked to it.
+    seed_task(&db, "active", "[]");
+    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler(&db, "s-plain", "xoxb-t");
+    finish(handler(mention(
+        "<@U0BOT> first",
+        "1700000000.000100",
+        "",
+        "s-plain",
+    )))
+    .await;
+    let mut reply = mention(
+        "<@U0BOT> second",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-plain",
+    );
+    reply.user = "U9STRANGER".to_string();
+    finish(handler(reply)).await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(
+        slack.posted(),
+        vec![("1700000000.000100".to_string(), "answer 1".to_string())],
+        "the listed sender is answered, the stranger's reply is not"
+    );
+    let mapped = threads(&db);
+    assert_eq!(mapped.len(), 1);
+    assert_eq!(
+        messages(&db, &mapped[0].1).len(),
+        2,
+        "the chat holds the one turn"
+    );
+    assert_eq!(dropped_events(&db), 0, "an unlinked rule counts nowhere");
 }

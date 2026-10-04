@@ -23,12 +23,13 @@
 //! because the message was **a log line**: `Start`'s error is logged by the
 //! registry and reaches neither a response nor the model.
 //!
-//! #318 changes that. This function's error is interpolated into the 400 body
-//! `auth/validate` answers, so a port-worded refusal would be a visible
-//! divergence. Hence [`Refusal`]: the two rules stated outright (HTTPS, and a
-//! hostname) are answered here with their own wording, while the `url.Parse`
-//! refusals — whose text is not reproducible — become a plain 500. That is free
-//! at this point, because nothing has been called yet.
+//! #318 changed that: this function's error is interpolated into the 400 body
+//! `auth/validate` answers. Hence [`Refusal`], which keeps the two apart: the
+//! rules stated outright (HTTPS, and a hostname) carry their inherited
+//! sentences under `credentials`, and the rest — this build's own `invalid site
+//! URL: …` wording — is answered under `credentials.site_url`. Both are 400s
+//! (#670); the second was a 500 while its text had to match another
+//! implementation's. Neither has called anything yet.
 //!
 //! The response is decoded into `confluenceSpacesResponse` and **thrown away**.
 //! That is not dead code to delete: a 200 carrying non-JSON is a failure, and
@@ -44,11 +45,11 @@ pub enum Refusal {
     /// A sentence Go produces verbatim, safe to put on the wire — carrying the
     /// outcome's kind (#521) as well as its wording.
     Reproducible(CheckFailure),
-    /// A wording this build does not reproduce. The caller answers a 500 with
-    /// the reason in the log rather than inventing a sentence the user sees —
-    /// safe here because it can only arise before the network call, which is
-    /// also why it needs no kind: nothing was asked, so nothing was refused.
-    Unreproducible(String),
+    /// This build's own wording for a site URL it will not send a request to.
+    /// The caller answers it as a 400 on `credentials.site_url` (#670). It can
+    /// only arise before the network call, which is why it needs no kind:
+    /// nothing was asked, so nothing was refused.
+    SiteUrl(String),
 }
 
 /// `io.LimitReader(resp.Body, 1*1024*1024)` — validate.go's own cap.
@@ -88,7 +89,7 @@ pub async fn validate_credentials(
     // `url.Parse`'s wording; see the module header.
     let clean = super::validate_site_url(site_url).map_err(|e| {
         if e.starts_with("invalid site URL: ") {
-            Refusal::Unreproducible(e)
+            Refusal::SiteUrl(e)
         } else {
             // A site URL this build refuses outright never reached Atlassian,
             // so it says nothing about the token.
@@ -98,10 +99,9 @@ pub async fn validate_credentials(
 
     let failed = "calling confluence API: request failed".to_string();
     let url = reqwest::Url::parse(&format!("{clean}/wiki/api/v2/spaces?limit=1"))
-        // `http.NewRequestWithContext` failing has a wording this build does
-        // not reproduce, so this is a 500 rather than an invented sentence —
-        // and nothing has been called yet.
-        .map_err(|e| Refusal::Unreproducible(format!("creating confluence request: {e}")))?;
+        // The cleaned site URL does not make a request URL: the same refusal
+        // as the ones above, and nothing has been called yet.
+        .map_err(|e| Refusal::SiteUrl(format!("invalid site URL: {e}")))?;
 
     let request = http_client()
         .ok_or_else(|| Refusal::Reproducible(CheckFailure::unreachable(failed.clone())))?

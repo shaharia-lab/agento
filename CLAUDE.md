@@ -48,6 +48,7 @@ required, not optional, and this table is the only thing that will prompt it.
 | `native/scanner/`, `native/insights/` | `docs/internal/native-scanner.md`, `docs/internal/native-insights.md` — the scan, the insight worker, the search index and its numbers |
 | `native/security_scan/` | `docs/internal/native-security-scan.md` — the Credentials Checker: rules, store, and the setting-gated worker |
 | `native/schedule/` | `docs/internal/native-schedule.md` — the scheduler, the executor, gocron and cron semantics, manual runs |
+| `native/agent_run.rs` | `docs/internal/native-runner.md` — the `Runner` seam every headless run goes through, and each harness's fail-open flag combinations |
 | `native/integrations/` | `docs/internal/native-integrations.md` — the registry, credentials, OAuth |
 | each provider under `native/integrations/` | `docs/internal/native-integrations-slack.md`, `-telegram.md`, `-github.md`, `-google.md`, `-jira.md`, `-confluence.md` — one file per ported integration |
 | `native/claude_settings/`, `native/notifications/` | `docs/internal/native-claude-settings.md`, `docs/internal/native-notifications.md` |
@@ -198,8 +199,8 @@ shim would not. **Do not remove it** to "simplify".
 
 Dev uses a separate data directory on purpose: two Agento processes sharing
 `~/.agento` share one SQLite file *and* one scheduler, so a scheduled task
-fires twice and the Telegram webhook gets re-registered underneath whichever
-instance registered it last.
+fires twice and two workers long-poll one Telegram bot token, each refused
+with a 409 in turn.
 
 ---
 
@@ -423,29 +424,26 @@ endpoint is served in-process. What remains is listed here.
   `claude_settings::write_file` reproduces it rather than building a DACL, and
   says so at its site. A file under `%USERPROFILE%` is readable by local
   administrators where `0600` would not be.
-- **The Windows CI job type-checks everything and *tests* three modules.**
+- **The Windows CI job type-checks everything and *tests* a named few.**
   `ci.yml`'s `windows_rules` runs `cargo clippy --lib -- -D warnings`, which
   covers every line of the library for that target — the thing a Linux run
   cannot do. Its test step is filtered to `native::gopath`,
-  `native::sessions::projects` and one profiles guard, and **floored at 25
-  tests**, because `cargo test` treats "the filter matched nothing" as success
+  `native::sessions::projects`, one profiles guard, two `claude::process`
+  tests and the Telegram client's truncated-body test (#671), and **floored at
+  28 tests**, because `cargo test` treats "the filter matched nothing" as success
   and an allowlist with no floor is a job that goes silently vacuous on a
   rename.
 
-  The filter is measured, not assumed. An unfiltered `cargo test --lib` there is
-  red at **1394/1422** (it was 1388 before `core.autocrlf=false` was set on the
-  checkout; those six were pure CRLF against the byte-exact goldens). **27 of
-  the 28 are Unix-shaped fixtures** rather than defects — `settings::tests` 10,
+  The filter is measured, not assumed. An unfiltered `cargo test --lib` there was
+  red at **1394/1422** when measured (it was 1388 before `core.autocrlf=false` was set on the
+  checkout; those six were pure CRLF against the byte-exact goldens). The 28th
+  was fixed by #671 and is in the filter; **the other 27 are Unix-shaped
+  fixtures** rather than defects — `settings::tests` 10,
   `claude_settings` 9, `fs::tests` 5, `scanner::walk` 2, `uploads::tests` 1:
   `absolute_dir("/var/lib/claude")` is correctly `None` on Windows,
   `validate_path_within_dir("/h/.claude/x", "/h/.claude")` is correctly refused,
   `HOME=/home//u` correctly cleans to `\home\u`. Porting them is general
   Windows support and is the work that has to land before the filter widens.
-- **The 28th Windows failure is not a path fixture.**
-  `integrations::telegram::client::tests::a_body_that_dies_mid_stream_still_names_nothing_secret`
-  fails there with *"must fail in the body stream, not the send"* — a
-  stream-timing difference, pre-existing and newly visible. Nothing to do with
-  #374; it needs its own look.
 - **`src-tauri/tests/` does not run on Windows at all.** `chat_turn.rs`,
   `claude_sdk.rs` and `scheduled_run.rs` make their fake Claude CLI executable
   through `std::os::unix::fs::PermissionsExt`, so they do not compile there —
@@ -455,12 +453,16 @@ endpoint is served in-process. What remains is listed here.
   mistyped. The three typed bodies (404 missing, 400 unreadable, 500 no home)
   were never written, because at the time an `Err` here reached an
   implementation that had them. Fixing it means giving `fs::list` a typed error.
-- **Several surfaces answer 500 for input they cannot decide about**, rather
-  than reproducing an answer they cannot be sure of: a non-ASCII settings-profile
-  name, a request body that is not UTF-8, duplicate JSON keys, a document past
-  serde's recursion limit, a site URL `url::Url` rejects. Each is documented at
-  its site. They were invisible while something else could answer; they are
-  user-visible 500s now, and each is a small piece of work to resolve properly.
+- **A 500 from a write means the machinery broke, and no client input should
+  produce one** (#670). `WriteError::Fallback` is for a database, filesystem,
+  encoder or invariant failure; input the client can fix answers 400
+  (malformed), 422 (well-formed, one field invalid) or 404 (names nothing).
+  `POST /api/fs/mkdir` answers 422 on `path` when the path itself is why the
+  directory cannot be created. Three 500s remain that a user can meet without
+  anything being broken, each about stored state rather than the request:
+  `PUT /api/notifications/settings` on an install with no `user_settings` row,
+  a `PUT`/`DELETE` on a stored WhatsApp integration, and a first profile list
+  when `settings.json` on disk is not UTF-8 or is nested past 128 levels.
 - `useAppStats` counters refresh on a 30s poll and on window focus, not on
   mutation, so a create in one view lags in the sidebar briefly.
 - Session table is not virtualised; 900+ rows render eagerly after "Load more".
@@ -493,10 +495,6 @@ these are now simply Agento's bugs, and fixing them is unblocked.
   carries the reasoning.
 - **An agent's `permission_mode` cannot be persisted.** `AgentRequest` has no
   such field, so the API silently drops it even though the config type and the
-  validator both know about it.
-- **The project filter means different things on two endpoints** —
-  `decoded_path` on `/api/claude-analytics`, `project_path` on
-  `/api/claude-sessions`. Sending the wrong one returns an empty result with no
-  error.
-- **`/api/claude-sessions/projects` returns `decoded_path` identical to
-  `encoded_name`**, so the decode never actually happens for the picker.
+  validator both know about it. An agent's empty mode is no longer bypass
+  (#675): a headless run with no mode of its own denies prompts, and only a
+  scheduled or manual task run bypasses, by naming it.

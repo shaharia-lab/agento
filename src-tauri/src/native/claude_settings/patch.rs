@@ -45,13 +45,11 @@
 //!
 //! # The one caller
 //!
-//! The retention prompt (#720) is the only intended caller, and it adds the
-//! route together with its raise-only guard. There is deliberately no route
-//! here: a general "set one key" route would be a way to lower
-//! `cleanupPeriodDays`, which permanently deletes transcripts.
-
-// The caller is #720's route; until it lands only the tests reach this.
-#![cfg_attr(not(test), allow(dead_code))]
+//! `PUT /api/settings/claude-retention` (#720, [`super::retention`]) is the
+//! only caller, and its raise-only guard is the `allow` it passes to
+//! [`set_top_level_key_if`], so the rule is decided on the bytes that are
+//! replaced. There is deliberately no route here: a general "set one key" route would be a
+//! way to lower `cleanupPeriodDays`, which permanently deletes transcripts.
 
 use std::fmt;
 use std::io;
@@ -100,23 +98,44 @@ impl fmt::Display for PatchError {
     }
 }
 
-/// Set `key` to `value` in `<dir>/settings.json`, changing nothing else.
+/// Set `key` to `value` in `<dir>/settings.json`, changing nothing else,
+/// **if `allow` agrees**.
 ///
 /// `indexed` is `settings::indexed_claude_config_dirs`, resolved by the
 /// caller on the blocking side, which keeps this module free of SQLite.
 /// `dir` must be one of them, compared as stored. `value` is already-encoded
 /// JSON, for #720 a whole number.
+///
+/// `allow` is handed the exact bytes the splice is built from (`None` when
+/// there is no file) and answers whether to write. Those are the bytes the
+/// second read is compared against, so a rule decided on them holds for the
+/// file that is replaced: there is no window between the caller's check and
+/// this function's read. `Ok(false)` means `allow` declined and nothing was
+/// written. This is the only entry point outside tests, so every production
+/// write is one a caller's rule agreed to.
+pub(crate) fn set_top_level_key_if(
+    indexed: &[String],
+    dir: &str,
+    key: &str,
+    value: &str,
+    allow: impl FnOnce(Option<&[u8]>) -> bool,
+) -> Result<bool, PatchError> {
+    set_with(indexed, dir, key, value, allow, |_| {}, write_file)
+}
+
+/// [`set_top_level_key_if`] with nothing to ask.
+#[cfg(test)]
 pub(crate) fn set_top_level_key(
     indexed: &[String],
     dir: &str,
     key: &str,
     value: &str,
 ) -> Result<(), PatchError> {
-    set_with(indexed, dir, key, value, |_| {}, write_file)
+    set_top_level_key_if(indexed, dir, key, value, |_| true).map(|_| ())
 }
 
-/// [`set_top_level_key`] with its two seams: `between` runs after the first
-/// read and before the second, and `write` stands in for
+/// [`set_top_level_key_if`] with its two seams: `between` runs after the
+/// first read and before the second, and `write` stands in for
 /// [`super::write_file`]. Tests use both; production passes a no-op and the
 /// real write.
 fn set_with(
@@ -124,14 +143,18 @@ fn set_with(
     dir: &str,
     key: &str,
     value: &str,
+    allow: impl FnOnce(Option<&[u8]>) -> bool,
     between: impl FnOnce(&str),
     write: impl FnOnce(&str, &[u8]) -> io::Result<()>,
-) -> Result<(), PatchError> {
+) -> Result<bool, PatchError> {
     if !indexed.iter().any(|d| d == dir) {
         return Err(PatchError::DirNotIndexed);
     }
     let path = settings_json_path(dir);
     let first = read_if_present(&path)?;
+    if !allow(first.as_deref()) {
+        return Ok(false);
+    }
     let patched = match &first {
         Some(bytes) if !is_utf8(bytes) => return Err(PatchError::NotUtf8),
         Some(bytes) => splice(&String::from_utf8_lossy(bytes), key, value)?,
@@ -144,7 +167,8 @@ fn set_with(
     }
 
     mkdir_all(dir).map_err(|e| PatchError::Io(e.to_string()))?;
-    write(&path, patched.as_bytes()).map_err(|e| PatchError::Io(e.to_string()))
+    write(&path, patched.as_bytes()).map_err(|e| PatchError::Io(e.to_string()))?;
+    Ok(true)
 }
 
 /// The file's bytes, or `None` when there is no file yet.

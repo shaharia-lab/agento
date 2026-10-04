@@ -195,9 +195,17 @@ pub struct ScheduledTask {
     /// (#681). Stored and round-tripped only: Slack delivery maps every thread
     /// whatever this says until #686 reads it.
     pub continue_on_reply: bool,
+    /// The limits on this task's **event** runs (#691): how many run at once,
+    /// how many events wait for a slot, and how many runs start in any sixty
+    /// minutes. Scheduled and manual runs are not limited by them. Read by
+    /// [`super::schedule::limiter`] through `executor::admit_event`.
+    pub max_concurrent_runs: i64,
+    pub max_queued_events: i64,
+    pub max_runs_per_hour: i64,
     /// Events this task did not run for (#681). **Server-owned**: no route
-    /// writes either counter, [`update_task_in`] leaves both columns out of
-    /// its `SET` list, and nothing increments them yet.
+    /// writes either counter and [`update_task_in`] leaves both columns out of
+    /// its `SET` list. [`count_dropped_event`] and
+    /// [`count_rate_limited_event`] are the only writers.
     pub dropped_event_count: i64,
     pub rate_limited_event_count: i64,
     /// "active" or "paused".
@@ -251,6 +259,14 @@ pub struct JobHistory {
     pub continues_job_id: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub event_payload: String,
+    /// Which install ran this (#678): `install_identity.machine_id`. Always
+    /// present. **Read back, never supplied** — [`insert_job_history`] takes
+    /// it from the database and ignores this field, so no run path can write a
+    /// row without it or with another install's.
+    pub machine_id: String,
+    /// The harness that ran it (#678) — `Runner::harness()`, `"claude"` today.
+    /// Always present; a row older than the column reads `"claude"`.
+    pub harness: String,
     /// Where the run's output was delivered and how each went (#635), read
     /// from `job_deliveries`. **Last, and absent when empty** rather than `[]`,
     /// so a job with no deliveries keeps the bytes it had before the field
@@ -340,7 +356,8 @@ const TASK_COLUMNS: &str =
        settings_profile_id, timeout_minutes, schedule_type, schedule_config,
        stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
        last_run_status, next_run_at, created_at, updated_at, destinations,
-       continue_on_reply, dropped_event_count, rate_limited_event_count
+       continue_on_reply, dropped_event_count, rate_limited_event_count,
+       max_concurrent_runs, max_queued_events, max_runs_per_hour
 FROM scheduled_tasks";
 
 const JOB_COLUMNS: &str =
@@ -348,7 +365,7 @@ const JOB_COLUMNS: &str =
        duration_ms, chat_session_id, model, prompt_preview, error_message,
        total_input_tokens, total_output_tokens,
        total_cache_creation_tokens, total_cache_read_tokens, response_text,
-       triggered_by, continues_job_id, event_payload
+       triggered_by, continues_job_id, event_payload, machine_id, harness
 FROM job_history";
 
 /// Every task, most recently created first, as the store orders them.
@@ -565,6 +582,9 @@ fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
             )
         })?,
         continue_on_reply: row.get(22)?,
+        max_concurrent_runs: row.get(25)?,
+        max_queued_events: row.get(26)?,
+        max_runs_per_hour: row.get(27)?,
         dropped_event_count: row.get(23)?,
         rate_limited_event_count: row.get(24)?,
         status: row.get(14)?,
@@ -611,6 +631,8 @@ fn scan_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobHistory> {
         triggered_by: row.get(17)?,
         continues_job_id: row.get(18)?,
         event_payload: row.get(19)?,
+        machine_id: row.get(20)?,
+        harness: row.get(21)?,
         deliveries: Vec::new(),
     })
 }
@@ -975,7 +997,10 @@ mod tests {
             destinations        TEXT NOT NULL DEFAULT '[]',
             continue_on_reply   INTEGER NOT NULL DEFAULT 0,
             dropped_event_count INTEGER NOT NULL DEFAULT 0,
-            rate_limited_event_count INTEGER NOT NULL DEFAULT 0
+            rate_limited_event_count INTEGER NOT NULL DEFAULT 0,
+            max_concurrent_runs INTEGER NOT NULL DEFAULT 1,
+            max_queued_events   INTEGER NOT NULL DEFAULT 5,
+            max_runs_per_hour   INTEGER NOT NULL DEFAULT 10
         );
         CREATE TABLE job_history (
             id                          TEXT PRIMARY KEY,
@@ -997,7 +1022,9 @@ mod tests {
             response_text               TEXT NOT NULL DEFAULT '',
             triggered_by                TEXT NOT NULL DEFAULT 'schedule',
             continues_job_id            TEXT NOT NULL DEFAULT '',
-            event_payload               TEXT NOT NULL DEFAULT ''
+            event_payload               TEXT NOT NULL DEFAULT '',
+            machine_id                  TEXT NOT NULL DEFAULT '',
+            harness                     TEXT NOT NULL DEFAULT 'claude'
         );
         CREATE TABLE job_deliveries (
             id          TEXT PRIMARY KEY,
@@ -1092,7 +1119,7 @@ mod tests {
         let tasks = list_tasks(file.path()).expect("list");
         assert_eq!(
             encoded(&tasks[0]),
-            r#"{"id":"full","name":"Cron \u003creport\u003e \u0026 co","description":"ünïcödé 😀","prompt":"summarise","agent_slug":"writer","working_directory":"/w","model":"claude-opus-4-1","settings_profile_id":"work-profile","timeout_minutes":45,"schedule_type":"cron","schedule_config":{"expression":"0 2 * * *"},"stop_after_count":10,"stop_after_time":"2027-06-01T12:00:00Z","save_output":true,"continue_on_reply":false,"dropped_event_count":0,"rate_limited_event_count":0,"status":"paused","run_count":7,"last_run_at":"2026-08-14T23:15:04.5Z","last_run_status":"success","next_run_at":"2026-08-16T02:00:00Z","created_at":"2026-03-04T05:06:07.123456789Z","updated_at":"2026-03-04T05:06:08Z"}"#
+            r#"{"id":"full","name":"Cron \u003creport\u003e \u0026 co","description":"ünïcödé 😀","prompt":"summarise","agent_slug":"writer","working_directory":"/w","model":"claude-opus-4-1","settings_profile_id":"work-profile","timeout_minutes":45,"schedule_type":"cron","schedule_config":{"expression":"0 2 * * *"},"stop_after_count":10,"stop_after_time":"2027-06-01T12:00:00Z","save_output":true,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":0,"rate_limited_event_count":0,"status":"paused","run_count":7,"last_run_at":"2026-08-14T23:15:04.5Z","last_run_status":"success","next_run_at":"2026-08-16T02:00:00Z","created_at":"2026-03-04T05:06:07.123456789Z","updated_at":"2026-03-04T05:06:08Z"}"#
         );
     }
 
@@ -1105,7 +1132,7 @@ mod tests {
         let tasks = list_tasks(file.path()).expect("list");
         assert_eq!(
             encoded(&tasks[1]),
-            r#"{"id":"bare","name":"Bare","description":"","prompt":"do it","agent_slug":"writer","working_directory":"","model":"","settings_profile_id":"","timeout_minutes":30,"schedule_type":"run_immediately","schedule_config":{},"stop_after_count":0,"save_output":false,"continue_on_reply":false,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","run_count":0,"last_run_status":"","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}"#
+            r#"{"id":"bare","name":"Bare","description":"","prompt":"do it","agent_slug":"writer","working_directory":"","model":"","settings_profile_id":"","timeout_minutes":30,"schedule_type":"run_immediately","schedule_config":{},"stop_after_count":0,"save_output":false,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","run_count":0,"last_run_status":"","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}"#
         );
     }
 
@@ -1119,11 +1146,11 @@ mod tests {
         );
         assert_eq!(
             encoded(&history[0]),
-            r#"{"id":"job-new","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"running","started_at":"2026-08-15T01:00:00Z","duration_ms":0,"chat_session_id":"","model":"","prompt_preview":"","error_message":"","total_input_tokens":0,"total_output_tokens":0,"total_cache_creation_tokens":0,"total_cache_read_tokens":0,"response_text":"","triggered_by":"schedule"}"#
+            r#"{"id":"job-new","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"running","started_at":"2026-08-15T01:00:00Z","duration_ms":0,"chat_session_id":"","model":"","prompt_preview":"","error_message":"","total_input_tokens":0,"total_output_tokens":0,"total_cache_creation_tokens":0,"total_cache_read_tokens":0,"response_text":"","triggered_by":"schedule","machine_id":"","harness":"claude"}"#
         );
         assert_eq!(
             encoded(&history[1]),
-            r#"{"id":"job-old","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"success","started_at":"2026-08-14T02:00:00.123456789Z","finished_at":"2026-08-14T02:04:31.5Z","duration_ms":271500,"chat_session_id":"chat-1","model":"claude-opus-4-1","prompt_preview":"summarise \u003cb\u003efast\u003c/b\u003e","error_message":"","total_input_tokens":1200,"total_output_tokens":340,"total_cache_creation_tokens":90,"total_cache_read_tokens":7700,"response_text":"done \u0026 dusted","triggered_by":"schedule"}"#
+            r#"{"id":"job-old","task_id":"full","task_name":"Cron \u003creport\u003e \u0026 co","agent_slug":"writer","status":"success","started_at":"2026-08-14T02:00:00.123456789Z","finished_at":"2026-08-14T02:04:31.5Z","duration_ms":271500,"chat_session_id":"chat-1","model":"claude-opus-4-1","prompt_preview":"summarise \u003cb\u003efast\u003c/b\u003e","error_message":"","total_input_tokens":1200,"total_output_tokens":340,"total_cache_creation_tokens":90,"total_cache_read_tokens":7700,"response_text":"done \u0026 dusted","triggered_by":"schedule","machine_id":"","harness":"claude"}"#
         );
     }
 
@@ -1154,7 +1181,7 @@ mod tests {
         let task = get_task(file.path(), "bare").expect("get").expect("task");
         assert!(
             encoded(&task).contains(
-                r#""save_output":false,"continue_on_reply":true,"dropped_event_count":4,"rate_limited_event_count":2,"status":"active","#
+                r#""save_output":false,"continue_on_reply":true,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":4,"rate_limited_event_count":2,"status":"active","#
             ),
             "{}",
             encoded(&task)
@@ -1165,11 +1192,41 @@ mod tests {
             .expect("job");
         assert!(
             encoded(&job).ends_with(
-                r#""response_text":"","triggered_by":"reply","continues_job_id":"job-old","event_payload":"{\"text\":\"a \u003cb\u003e \u0026 c\"}"}"#
+                r#""response_text":"","triggered_by":"reply","continues_job_id":"job-old","event_payload":"{\"text\":\"a \u003cb\u003e \u0026 c\"}","machine_id":"","harness":"claude"}"#
             ),
             "{}",
             encoded(&job)
         );
+    }
+
+    /// **The run summary's two fields, in wire order** (#678).
+    ///
+    /// `machine_id` and `harness` follow `event_payload` and are always
+    /// present; `deliveries` stays last. The golden is the whole row, on each
+    /// of the three reads that answer one.
+    #[test]
+    fn a_run_names_its_install_and_harness_with_the_golden_bytes() {
+        let file = fixture();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "UPDATE job_history
+                SET machine_id = '0123456789abcdef0123456789abcdef',
+                    triggered_by = 'slack', event_payload = 'a <b> & c'
+              WHERE id = 'job-old'",
+            [],
+        )
+        .expect("set the summary columns");
+        drop(conn);
+
+        let want = include_str!("../../../parity/job_history_run_summary_golden.json").trim_end();
+        let all = list_all_job_history(file.path(), 50, 0).expect("all");
+        let task = list_task_job_history(file.path(), "full", 50).expect("task");
+        let one = get_job_history(file.path(), "job-old")
+            .expect("get")
+            .expect("job");
+        for job in [&all[1], &task[1], &one] {
+            assert_eq!(encoded(job), want);
+        }
     }
 
     /// The six spellings `job_history.triggered_by` may hold (#681), which
@@ -1262,7 +1319,7 @@ mod tests {
             Some(GoTime::parse_go_string("2026-08-14 02:04:35 +0000 UTC").unwrap());
         insert_pending_delivery(file.path(), &failed).expect("insert");
 
-        let want = r#""response_text":"done \u0026 dusted","triggered_by":"schedule","deliveries":[{"id":"d-failed","type":"slack","target":"Acme Slack · C0123ABCD","status":"failed","error":"channel_not_found \u003cC0\u003e","created_at":"2026-08-14T02:04:31.9Z","finished_at":"2026-08-14T02:04:35Z"},{"id":"d-pending","type":"slack","target":"Acme Slack · C0123ABCD","status":"pending","error":"","created_at":"2026-08-14T02:04:32Z"},{"id":"d-sent","type":"slack","target":"Acme Slack · C0123ABCD","status":"sent","error":"","created_at":"2026-08-14T02:04:33Z","finished_at":"2026-08-14T02:04:34.25Z"}]}"#;
+        let want = r#""response_text":"done \u0026 dusted","triggered_by":"schedule","machine_id":"","harness":"claude","deliveries":[{"id":"d-failed","type":"slack","target":"Acme Slack · C0123ABCD","status":"failed","error":"channel_not_found \u003cC0\u003e","created_at":"2026-08-14T02:04:31.9Z","finished_at":"2026-08-14T02:04:35Z"},{"id":"d-pending","type":"slack","target":"Acme Slack · C0123ABCD","status":"pending","error":"","created_at":"2026-08-14T02:04:32Z"},{"id":"d-sent","type":"slack","target":"Acme Slack · C0123ABCD","status":"sent","error":"","created_at":"2026-08-14T02:04:33Z","finished_at":"2026-08-14T02:04:34.25Z"}]}"#;
         let all = list_all_job_history(file.path(), 50, 0).expect("all");
         let task = list_task_job_history(file.path(), "full", 50).expect("task");
         let one = get_job_history(file.path(), "job-old")
@@ -1788,7 +1845,7 @@ mod tests {
                  "dropped_event_count":50,"rate_limited_event_count":60}"#,
         )
         .expect("update");
-        let wire = r#""continue_on_reply":true,"dropped_event_count":3,"rate_limited_event_count":2,"status":"#;
+        let wire = r#""continue_on_reply":true,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":3,"rate_limited_event_count":2,"status":"#;
         let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
         assert!(
             body.contains(wire),
@@ -1822,6 +1879,278 @@ mod tests {
                 "an edit never resets the counters"
             );
         }
+    }
+
+    /// #688: a refused event moves the one task's counter by one, an edit made
+    /// afterwards keeps the count, and a task that is gone is not an error.
+    #[test]
+    fn a_dropped_event_is_counted_on_its_task_and_nowhere_else() {
+        let file = migrated();
+        let counted = created(&file, r#"{"name":"A","prompt":"p"}"#);
+        let other = created(&file, r#"{"name":"B","prompt":"p"}"#);
+        let dropped = |id: &str| {
+            get_task(file.path(), id)
+                .expect("read")
+                .expect("task")
+                .dropped_event_count
+        };
+
+        count_dropped_event(file.path(), &counted.id).expect("count");
+        count_dropped_event(file.path(), &counted.id).expect("count");
+        assert_eq!((dropped(&counted.id), dropped(&other.id)), (2, 0));
+
+        update_task(file.path(), &counted.id, br#"{"name":"A2","prompt":"p"}"#).expect("edit");
+        assert_eq!(dropped(&counted.id), 2, "an edit keeps the count");
+
+        count_dropped_event(file.path(), "no-such-task").expect("a missing task is not an error");
+        assert_eq!((dropped(&counted.id), dropped(&other.id)), (2, 0));
+    }
+
+    /// #691: the three event-run limits are request fields like any other —
+    /// stored on a create, replaced on an update — and a body that names none,
+    /// `null` or `0` stores the defaults, as `timeout_minutes` does.
+    #[test]
+    fn the_event_run_limits_are_stored_replaced_and_default_to_1_5_and_10() {
+        let file = migrated();
+        let limits = |task: &ScheduledTask| {
+            (
+                task.max_concurrent_runs,
+                task.max_queued_events,
+                task.max_runs_per_hour,
+            )
+        };
+        let stored = |id: &str| limits(&get_task(file.path(), id).expect("read").expect("task"));
+
+        let plain = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        assert_eq!(limits(&plain), (1, 5, 10), "a body without them");
+        assert_eq!(stored(&plain.id), (1, 5, 10));
+
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","max_concurrent_runs":3,
+                "max_queued_events":100,"max_runs_per_hour":1000}"#,
+        );
+        assert_eq!(limits(&task), (3, 100, 1000), "the top of each range");
+        assert_eq!(stored(&task.id), (3, 100, 1000));
+
+        let answer = update_task(
+            file.path(),
+            &task.id,
+            br#"{"name":"N","prompt":"p","max_concurrent_runs":2,
+                 "max_queued_events":1,"max_runs_per_hour":1}"#,
+        )
+        .expect("update");
+        let wire = r#""continue_on_reply":false,"max_concurrent_runs":2,"max_queued_events":1,"max_runs_per_hour":1,"dropped_event_count":0,"#;
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert!(body.contains(wire), "in wire order: {body}");
+        assert_eq!(stored(&task.id), (2, 1, 1));
+        let read = String::from_utf8(
+            gojson::to_vec(
+                &get_task(file.path(), &task.id)
+                    .expect("read")
+                    .expect("task"),
+            )
+            .expect("encode"),
+        )
+        .expect("utf-8");
+        assert!(read.contains(wire), "and the read carries them: {read}");
+
+        // Replace, not preserve: omitted, `null` and `0` each reset all three.
+        for body in [
+            &br#"{"name":"N","prompt":"p"}"#[..],
+            &br#"{"name":"N","prompt":"p","max_concurrent_runs":null,
+                  "max_queued_events":null,"max_runs_per_hour":null}"#[..],
+            &br#"{"name":"N","prompt":"p","max_concurrent_runs":0,
+                  "max_queued_events":0,"max_runs_per_hour":0}"#[..],
+        ] {
+            rusqlite::Connection::open(file.path())
+                .expect("open")
+                .execute(
+                    "UPDATE scheduled_tasks SET max_concurrent_runs = 2,
+                        max_queued_events = 9, max_runs_per_hour = 99",
+                    [],
+                )
+                .expect("set them");
+            update_task(file.path(), &task.id, body).expect("update");
+            assert_eq!(stored(&task.id), (1, 5, 10));
+        }
+    }
+
+    /// #691: a limit outside its range is a 422 naming the field, on both
+    /// writes, and stores nothing.
+    #[test]
+    fn an_event_run_limit_outside_its_range_is_a_422_naming_the_field() {
+        let file = migrated();
+        let existing = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let cases = [
+            ("max_concurrent_runs", 4, 3),
+            ("max_concurrent_runs", -1, 3),
+            ("max_queued_events", 101, 100),
+            ("max_queued_events", -1, 100),
+            ("max_runs_per_hour", 1001, 1000),
+            ("max_runs_per_hour", -1, 1000),
+        ];
+        for (field, value, max) in cases {
+            let body = format!(r#"{{"name":"n","prompt":"p","{field}":{value}}}"#);
+            let want = format!(r#"validation error for "{field}": must be between 1 and {max}"#);
+            for err in [
+                create_task(file.path(), body.as_bytes()).unwrap_err(),
+                update_task(file.path(), &existing.id, body.as_bytes()).unwrap_err(),
+            ] {
+                assert_eq!(err.message(), want, "for {body}");
+                assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY, "for {body}");
+            }
+        }
+        assert_eq!(list_tasks(file.path()).expect("list").len(), 1);
+        let kept = get_task(file.path(), &existing.id)
+            .expect("read")
+            .expect("task");
+        assert_eq!(
+            (
+                kept.max_concurrent_runs,
+                kept.max_queued_events,
+                kept.max_runs_per_hour
+            ),
+            (1, 5, 10),
+            "a refused update changes nothing"
+        );
+    }
+
+    /// #691: a rate-limited event moves its own counter on its own task, and
+    /// leaves the dropped count alone.
+    #[test]
+    fn a_rate_limited_event_is_counted_on_its_task_and_nowhere_else() {
+        let file = migrated();
+        let counted = created(&file, r#"{"name":"A","prompt":"p"}"#);
+        let other = created(&file, r#"{"name":"B","prompt":"p"}"#);
+        let counts = |id: &str| {
+            let task = get_task(file.path(), id).expect("read").expect("task");
+            (task.dropped_event_count, task.rate_limited_event_count)
+        };
+
+        count_rate_limited_event(file.path(), &counted.id).expect("count");
+        count_rate_limited_event(file.path(), &counted.id).expect("count");
+        assert_eq!((counts(&counted.id), counts(&other.id)), ((0, 2), (0, 0)));
+
+        update_task(file.path(), &counted.id, br#"{"name":"A2","prompt":"p"}"#).expect("edit");
+        assert_eq!(counts(&counted.id), (0, 2), "an edit keeps the count");
+
+        count_rate_limited_event(file.path(), "no-such-task")
+            .expect("a missing task is not an error");
+        assert_eq!((counts(&counted.id), counts(&other.id)), ((0, 2), (0, 0)));
+    }
+
+    /// #691: the hour a restart seeds from is the task's own **event** runs
+    /// that started after the cutoff — not another task's, not a scheduled or
+    /// manual run, not one on or before the cutoff — newest first and bounded.
+    #[test]
+    fn the_seed_for_the_hourly_window_is_the_tasks_recent_event_runs_only() {
+        let file = migrated_with_history();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let task_id: String = conn
+            .query_row("SELECT id FROM scheduled_tasks LIMIT 1", [], |r| r.get(0))
+            .expect("a task");
+        conn.execute(
+            "INSERT INTO scheduled_tasks (id, name, prompt, created_at, updated_at)
+             VALUES ('other', 'O', 'p', '2026-01-01 00:00:00 +0000 UTC',
+                     '2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("another task");
+        conn.execute("DELETE FROM job_history", [])
+            .expect("a clean history");
+        let rows = [
+            (
+                "e-slack",
+                task_id.as_str(),
+                "slack",
+                "2026-10-04 10:30:00 +0000 UTC",
+            ),
+            (
+                "e-telegram",
+                task_id.as_str(),
+                "telegram",
+                "2026-10-04 10:10:00.5 +0000 UTC",
+            ),
+            (
+                "e-webhook",
+                task_id.as_str(),
+                "webhook",
+                "2026-10-04 10:20:00 +0000 UTC",
+            ),
+            (
+                "e-reply",
+                task_id.as_str(),
+                "reply",
+                "2026-10-04 10:40:00.123456789 +0000 UTC",
+            ),
+            (
+                "on-the-cutoff",
+                task_id.as_str(),
+                "slack",
+                "2026-10-04 10:00:00 +0000 UTC",
+            ),
+            (
+                "too-old",
+                task_id.as_str(),
+                "slack",
+                "2026-10-04 09:59:59 +0000 UTC",
+            ),
+            (
+                "scheduled",
+                task_id.as_str(),
+                "schedule",
+                "2026-10-04 10:35:00 +0000 UTC",
+            ),
+            (
+                "manual",
+                task_id.as_str(),
+                "manual",
+                "2026-10-04 10:36:00 +0000 UTC",
+            ),
+            (
+                "elsewhere",
+                "other",
+                "slack",
+                "2026-10-04 10:37:00 +0000 UTC",
+            ),
+        ];
+        for (id, task, source, started) in rows {
+            conn.execute(
+                "INSERT INTO job_history (id, task_id, task_name, status, started_at, triggered_by)
+                 VALUES (?1, ?2, 'T', 'success', ?3, ?4)",
+                rusqlite::params![id, task, started, source],
+            )
+            .expect("a run");
+        }
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .expect("a timestamp")
+                .with_timezone(&chrono::Utc)
+        };
+        let cutoff = at("2026-10-04T10:00:00Z");
+
+        assert_eq!(
+            event_starts_since(file.path(), &task_id, cutoff, 1000).expect("read"),
+            vec![
+                at("2026-10-04T10:40:00.123456789Z"),
+                at("2026-10-04T10:30:00Z"),
+                at("2026-10-04T10:20:00Z"),
+                at("2026-10-04T10:10:00.5Z"),
+            ]
+        );
+        assert_eq!(
+            event_starts_since(file.path(), &task_id, cutoff, 2)
+                .expect("read")
+                .len(),
+            2,
+            "never more than the cap could use"
+        );
+        assert!(
+            event_starts_since(file.path(), "no-such-task", cutoff, 1000)
+                .expect("read")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1911,7 +2240,7 @@ mod tests {
         // list after `save_output` and ahead of #681's three, and an omitted
         // `when` defaulted to `success`. A Slack task created after migration
         // 48 does not continue on a reply: the backfill was not a new default.
-        let want = r#""save_output":false,"destinations":[{"type":"slack","when":"success","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0456EFGH"]}}],"continue_on_reply":false,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#;
+        let want = r#""save_output":false,"destinations":[{"type":"slack","when":"success","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0456EFGH"]}}],"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#;
         let one = encoded(&get_task(file.path(), &id).expect("get").expect("task"));
         assert!(one.contains(want), "{one}");
         let listed = encoded(&list_tasks(file.path()).expect("list")[0]);
@@ -1935,7 +2264,7 @@ mod tests {
         assert!(!bytes.contains("destinations"), "{bytes}");
         assert!(
             bytes.contains(
-                r#""save_output":false,"continue_on_reply":false,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#
+                r#""save_output":false,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#
             ),
             "{bytes}"
         );
@@ -2735,6 +3064,78 @@ mod tests {
         file
     }
 
+    fn a_run(id: &str, machine_id: &str) -> JobHistory {
+        JobHistory {
+            id: id.to_string(),
+            task_id: "t1".to_string(),
+            task_name: "T".to_string(),
+            agent_slug: String::new(),
+            status: "running".to_string(),
+            started_at: GoTime::parse_go_string("2026-02-01 00:00:00 +0000 UTC").unwrap(),
+            finished_at: None,
+            duration_ms: 0,
+            chat_session_id: String::new(),
+            model: String::new(),
+            prompt_preview: String::new(),
+            error_message: String::new(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
+            response_text: String::new(),
+            triggered_by: "schedule".to_string(),
+            continues_job_id: String::new(),
+            event_payload: String::new(),
+            machine_id: machine_id.to_string(),
+            harness: "claude".to_string(),
+            deliveries: Vec::new(),
+        }
+    }
+
+    /// **No caller supplies `machine_id`** (#678): the insert reads it from
+    /// `install_identity`, so a row carries this install's id whether the
+    /// caller left the field empty or named another machine. `harness` is the
+    /// caller's, and a finish does not touch either.
+    #[test]
+    fn an_inserted_run_carries_the_installs_machine_id_whatever_the_caller_passed() {
+        let file = migrated_with_history();
+        let machine_id: String = rusqlite::Connection::open(file.path())
+            .expect("open")
+            .query_row("SELECT machine_id FROM install_identity", [], |r| r.get(0))
+            .expect("identity");
+        assert!(!machine_id.is_empty());
+
+        for (id, passed) in [("j-empty", ""), ("j-other", "another-machine")] {
+            let mut job = a_run(id, passed);
+            insert_job_history(file.path(), &job).expect("insert");
+            job.status = "success".to_string();
+            update_job_history(file.path(), &job).expect("finish");
+
+            let stored = get_job_history(file.path(), id).expect("get").expect("row");
+            assert_eq!(stored.status, "success");
+            assert_eq!(stored.machine_id, machine_id, "{id}");
+            assert_eq!(stored.harness, "claude", "{id}");
+        }
+    }
+
+    /// A database whose identity row is gone still records the run — with an
+    /// empty `machine_id` — rather than failing the insert and leaving a run
+    /// with no row at all.
+    #[test]
+    fn a_run_is_still_recorded_when_the_identity_row_is_missing() {
+        let file = migrated_with_history();
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute("DELETE FROM install_identity", [])
+            .expect("drop the identity");
+
+        insert_job_history(file.path(), &a_run("j-anon", "x")).expect("insert");
+        let stored = get_job_history(file.path(), "j-anon")
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.machine_id, "");
+    }
+
     fn history_ids(file: &tempfile::NamedTempFile) -> Vec<String> {
         let conn = rusqlite::Connection::open(file.path()).expect("open");
         let mut stmt = conn
@@ -3269,8 +3670,9 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 stop_after_count = ?11, stop_after_time = ?12, save_output = ?13, status = ?14,
                 run_count = ?15, last_run_at = ?16, last_run_status = ?17,
                 next_run_at = ?18, updated_at = ?19, destinations = ?20,
-                continue_on_reply = ?21
-             WHERE id = ?22",
+                continue_on_reply = ?21, max_concurrent_runs = ?22,
+                max_queued_events = ?23, max_runs_per_hour = ?24
+             WHERE id = ?25",
             rusqlite::params![
                 task.name,
                 task.description,
@@ -3293,6 +3695,9 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 now,
                 destinations,
                 task.continue_on_reply,
+                task.max_concurrent_runs,
+                task.max_queued_events,
+                task.max_runs_per_hour,
                 task.id,
             ],
         )
@@ -3320,9 +3725,9 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
              settings_profile_id, timeout_minutes, schedule_type, schedule_config,
              stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
              last_run_status, next_run_at, created_at, updated_at, destinations,
-             continue_on_reply)
+             continue_on_reply, max_concurrent_runs, max_queued_events, max_runs_per_hour)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         rusqlite::params![
             task.id,
             task.name,
@@ -3347,6 +3752,9 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
             super::gotime::to_go_string_utc(task.updated_at),
             destinations,
             task.continue_on_reply,
+            task.max_concurrent_runs,
+            task.max_queued_events,
+            task.max_runs_per_hour,
         ],
     )
     .map_err(|e| format!("creating task: {e}"))?;
@@ -3354,6 +3762,14 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
 }
 
 /// `SQLiteTaskStore.CreateJobHistory`.
+///
+/// **`machine_id` is not a parameter** (#678). The statement reads it from
+/// `install_identity`, the single row migration 46 generated, so every run path
+/// that reaches this insert — schedule, manual, event, reply — records the
+/// install it ran on without being able to forget it or pass another's.
+/// `job.machine_id` is ignored. The `COALESCE` is for a database whose identity
+/// row is gone: the run is still recorded, with `''`, rather than the insert
+/// failing a `NOT NULL` and leaving a run with no row at all.
 pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String> {
     let conn = db::open_read_write(db_path)?;
     conn.execute(
@@ -3362,9 +3778,10 @@ pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String
              duration_ms, chat_session_id, model, prompt_preview, error_message,
              total_input_tokens, total_output_tokens,
              total_cache_creation_tokens, total_cache_read_tokens, response_text,
-             triggered_by, continues_job_id, event_payload)
+             triggered_by, continues_job_id, event_payload, machine_id, harness)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20)",
+                 ?18, ?19, ?20,
+                 COALESCE((SELECT machine_id FROM install_identity), ''), ?21)",
         rusqlite::params![
             job.id,
             job.task_id,
@@ -3386,6 +3803,7 @@ pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String
             job.triggered_by,
             job.continues_job_id,
             job.event_payload,
+            job.harness,
         ],
     )
     .map_err(|e| format!("creating job history: {e}"))?;
@@ -3585,6 +4003,75 @@ pub fn finish_delivery(
     Ok(changed > 0)
 }
 
+/// Counts one event a rule refused on `task_id` (#688): an inbound message
+/// that produced no run and no reply.
+///
+/// The column is the server's, so this writes it directly: `update_task_in`
+/// leaves it out of its `SET` list, which is what keeps a concurrent task edit
+/// or a run's write-back from undoing an increment. A task deleted since the
+/// rule was linked changes no row, and that is not an error.
+pub fn count_dropped_event(db_path: &Path, task_id: &str) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "UPDATE scheduled_tasks SET dropped_event_count = dropped_event_count + 1 WHERE id = ?1",
+        [task_id],
+    )
+    .map_err(|e| format!("counting a dropped event: {e}"))?;
+    Ok(())
+}
+
+/// Counts one event `task_id` refused because it had already started its
+/// hour's worth of event runs (#691). The same shape as
+/// [`count_dropped_event`], for the same reason.
+pub fn count_rate_limited_event(db_path: &Path, task_id: &str) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "UPDATE scheduled_tasks SET rate_limited_event_count = rate_limited_event_count + 1
+         WHERE id = ?1",
+        [task_id],
+    )
+    .map_err(|e| format!("counting a rate-limited event: {e}"))?;
+    Ok(())
+}
+
+/// When each **event** run of `task_id` started, for the runs that started
+/// after `cutoff` — what seeds the task's hourly window after a restart
+/// (#691). Newest first, and never more than `limit`: the cap is at most
+/// that, so older starts could not change a decision.
+///
+/// A scheduled or manual run is not an event and is not here. The filter on
+/// `cutoff` is on parsed instants rather than the stored text, as
+/// [`reap_pending_deliveries`] compares, so the rows read are the task's
+/// newest `limit` event runs whatever their age.
+pub fn event_starts_since(
+    db_path: &Path,
+    task_id: &str,
+    cutoff: chrono::DateTime<chrono::Utc>,
+    limit: i64,
+) -> Result<Vec<chrono::DateTime<chrono::Utc>>, String> {
+    let conn = db::open_read_only(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT started_at FROM job_history
+             WHERE task_id = ?1 AND triggered_by IN ('telegram', 'slack', 'webhook', 'reply')
+             ORDER BY started_at DESC LIMIT ?2",
+        )
+        .map_err(|e| format!("reading event run starts: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![task_id, limit], |row| timestamp(row, 0))
+        .map_err(|e| format!("reading event run starts: {e}"))?;
+    let mut starts = Vec::new();
+    for row in rows {
+        let started = row
+            .map_err(|e| format!("reading event run starts: {e}"))?
+            .instant();
+        if started > cutoff {
+            starts.push(started);
+        }
+    }
+    Ok(starts)
+}
+
 /// Fails every delivery a previous session left `pending`, with `reason` as its
 /// error. Answers how many rows changed.
 ///
@@ -3710,12 +4197,22 @@ struct TaskRequest {
     /// **not** here — they are the server's, so a body naming them is ignored.
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     continue_on_reply: bool,
+    /// The three event-run limits (#691), replaced like every other field.
+    /// Absent, `null` and `0` all store the default, as `timeout_minutes`
+    /// does — see [`apply_defaults`].
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    max_concurrent_runs: i64,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    max_queued_events: i64,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    max_runs_per_hour: i64,
 }
 
 impl TaskRequest {
     /// The `storage.ScheduledTask` both handlers build from the request — the
-    /// sixteen fields they copy (`destinations` since #634, `continue_on_reply`
-    /// since #681), and nothing else.
+    /// nineteen fields they copy (`destinations` since #634,
+    /// `continue_on_reply` since #681, the three event-run limits since
+    /// #691), and nothing else.
     ///
     /// The other nine are the row's own, and they split three ways. `id` is
     /// minted on a create and re-set from the URL on an update; `updated_at` is
@@ -3746,6 +4243,9 @@ impl TaskRequest {
                 .map(|list| list.0.into_iter().map(|entry| entry.0).collect())
                 .unwrap_or_default(),
             continue_on_reply: self.continue_on_reply,
+            max_concurrent_runs: self.max_concurrent_runs,
+            max_queued_events: self.max_queued_events,
+            max_runs_per_hour: self.max_runs_per_hour,
             dropped_event_count: 0,
             rate_limited_event_count: 0,
             status: self.status,
@@ -3780,6 +4280,34 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
             "timeout_minutes",
             "timeout must be between 1 and 240 minutes",
         ));
+    }
+    // The three event-run limits (#691). Zero passes for `timeout_minutes`'s
+    // reason: it is "not set", and the caller stores the default for it.
+    use super::schedule::limiter;
+    let limits = [
+        (
+            "max_concurrent_runs",
+            task.max_concurrent_runs,
+            limiter::MAX_CONCURRENT_RUNS,
+        ),
+        (
+            "max_queued_events",
+            task.max_queued_events,
+            limiter::MAX_QUEUED_EVENTS,
+        ),
+        (
+            "max_runs_per_hour",
+            task.max_runs_per_hour,
+            limiter::MAX_RUNS_PER_HOUR,
+        ),
+    ];
+    for (field, value, max) in limits {
+        if value < 0 || value > max {
+            return Err(WriteError::validation(
+                field,
+                format!("must be between 1 and {max}"),
+            ));
+        }
     }
 
     match task.schedule_type.as_str() {
@@ -4140,6 +4668,25 @@ fn destination_integration(dest: &TaskDestination) -> Option<(&'static str, &'st
 /// admits one.
 const DEFAULT_TIMEOUT_MINUTES: i64 = 30;
 
+/// What a validated task stores for a value the request left at zero: the
+/// timeout, and since #691 the three event-run limits. Both writes call it
+/// after [`validate_task`], so a stored 0 is impossible for any of the four.
+fn apply_defaults(task: &mut ScheduledTask) {
+    use super::schedule::limiter;
+    if task.timeout_minutes == 0 {
+        task.timeout_minutes = DEFAULT_TIMEOUT_MINUTES;
+    }
+    if task.max_concurrent_runs == 0 {
+        task.max_concurrent_runs = limiter::DEFAULT_MAX_CONCURRENT_RUNS;
+    }
+    if task.max_queued_events == 0 {
+        task.max_queued_events = limiter::DEFAULT_MAX_QUEUED_EVENTS;
+    }
+    if task.max_runs_per_hour == 0 {
+        task.max_runs_per_hour = limiter::DEFAULT_MAX_RUNS_PER_HOUR;
+    }
+}
+
 /// `taskService.CreateTask`.
 ///
 /// `pub(crate)` for one caller outside this module: the scheduler's own
@@ -4154,9 +4701,7 @@ pub(crate) fn create_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, 
     if task.status.is_empty() {
         task.status = "active".to_string();
     }
-    if task.timeout_minutes == 0 {
-        task.timeout_minutes = DEFAULT_TIMEOUT_MINUTES;
-    }
+    apply_defaults(&mut task);
 
     task.id = uuid::Uuid::new_v4().to_string();
     let now = super::gotime::now_go_text();
@@ -4225,9 +4770,7 @@ fn update_task(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, W
 
     validate_task(&mut task)?;
     check_destination_integrations(&tx, &task.destinations, &existing.destinations)?;
-    if task.timeout_minutes == 0 {
-        task.timeout_minutes = DEFAULT_TIMEOUT_MINUTES;
-    }
+    apply_defaults(&mut task);
 
     update_task_in(&tx, &mut task).map_err(WriteError::Fallback)?;
     let encoded = super::gojson::to_vec(&task)

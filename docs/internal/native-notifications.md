@@ -27,12 +27,13 @@ are load-bearing:
   *nospace* table and applies to unquoted attribute values rather than text.
   The template skeleton is Go's **output**, not its source, because
   `html/template` elides HTML comments and `emailTmpl` has six.
-- **A failed send forwards; only success is answered.** Go's 400 carries
-  go-mail's and the Go runtime's wording, none of it reproducible. Forwarding
-  costs a second dial and is safe for one reason only: `send` reports success
-  after the server has accepted the message, so an error means nothing was
-  delivered. Nothing fallible may run after that point — the response bytes are
-  encoded before the dial for exactly that reason.
+- **A failed test send answers `400 test notification failed: <reason>`**
+  (#670), in this build's own wording: the step that failed plus lettre's error.
+  Every cause is the saved SMTP settings, so the user is told which. It is safe
+  for one reason only: `send` reports success after the server has accepted the
+  message, so an error means nothing was delivered. Nothing fallible may run
+  after that point — the response bytes are encoded before the dial for exactly
+  that reason. A stored settings blob that does not decode is still a 500.
 - **The settings write touches one column**, deliberately. The inherited
   implementation saved all fourteen from an in-memory snapshot, which is how one
   notification save could revert the hidden-project list and the idle threshold

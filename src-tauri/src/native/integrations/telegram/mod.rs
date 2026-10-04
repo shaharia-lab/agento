@@ -53,6 +53,7 @@
 pub mod client;
 pub mod delivery;
 pub mod messaging;
+pub mod polling;
 pub mod validate;
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ import type {
   JobDelivery,
   JobHistory,
   JobStatus,
+  ScheduledTask,
 } from "../lib/types";
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import {
@@ -26,7 +27,8 @@ import {
 } from "../lib/format";
 import { Icon } from "../lib/icons";
 import { Empty, InspGroup, InspRow, Search, Segmented, Splitter } from "../components/ui";
-import { StatusBadge } from "./TasksView";
+import { CopyButton } from "../components/CopyButton";
+import { StatusBadge, triggerLabel } from "./TasksView";
 import { SessionLink, findSessionById } from "./sessions/SessionLink";
 import "../styles/tasks.css";
 
@@ -124,7 +126,13 @@ export function JobsView({
     return rows.filter((j) => {
       if (filter !== "all" && j.status !== filter) return false;
       if (!q) return true;
-      return [j.task_name, j.agent_slug, j.model, j.prompt_preview]
+      return [
+        j.task_name,
+        j.agent_slug,
+        j.model,
+        j.prompt_preview,
+        triggerLabel(j.triggered_by),
+      ]
         .join(" ")
         .toLowerCase()
         .includes(q);
@@ -177,6 +185,22 @@ export function JobsView({
   // A running job's output and timing land after the row was first read.
   usePoll(detail.reload, POLL_MS, job?.status === "running");
 
+  // The run's task, for the two refused-event counts (#692). They are the
+  // task's totals: a refused event writes no `job_history` row, so no run owns
+  // one. A deleted task fails this read, and the rows are then left out. It
+  // is re-read for each focused run, so stepping through one task's runs does
+  // not keep the first answer.
+  const taskId = job?.task_id ?? "";
+  const task = useResource<ScheduledTask | null>(
+    (signal) => (taskId ? api.get(`/tasks/${taskId}`, signal) : Promise.resolve(null)),
+    [taskId, focusedId]
+  );
+  // `useResource` keeps the previous answer across a failed read and through
+  // the render in which `taskId` changes, so it is taken only when it is about
+  // this run's task and the last read of it succeeded.
+  const jobTask =
+    task.data && task.data.id === taskId && !task.error ? task.data : null;
+
   /**
    * A hand-off from a task's *Recent runs* (#542): select that run.
    *
@@ -227,6 +251,20 @@ export function JobsView({
     scrollTo.current = null;
     row.scrollIntoView({ block: "nearest" });
   }, [groups]);
+
+  /**
+   * Select the run this one continues (#687) — the hand-off effect's own four
+   * steps, from inside the view. `openId` is what keeps the selection when the
+   * run is older than the loaded page, and a deleted one lands on the pane's
+   * existing "Couldn't load this run" state through `detail`'s 404.
+   */
+  function openRun(id: string) {
+    setConfirming(false);
+    setOpenId(id);
+    setFocusedId(id);
+    setSelected(new Set([id]));
+    scrollTo.current = id;
+  }
 
   async function loadMore() {
     setLoadingMore(true);
@@ -350,7 +388,7 @@ export function JobsView({
           <Empty
             icon="history"
             title="No runs yet"
-            text="Every scheduled task run lands here with its output, timing and token use."
+            text="Every run lands here, whether a schedule, Run now or a message started it."
           />
         ) : filtered.length === 0 ? (
           <Empty
@@ -376,6 +414,7 @@ export function JobsView({
                 <tr>
                   <th style={{ width: "32%" }}>Task</th>
                   <th style={{ width: 160 }}>Agent</th>
+                  <th style={{ width: 96 }}>Trigger</th>
                   <th style={{ width: 108 }}>Started</th>
                   <th className="num" style={{ width: 92 }}>
                     Duration
@@ -390,7 +429,7 @@ export function JobsView({
                 {groups.map(([group, items]) => (
                   <Fragment key={group}>
                     <tr className="rowgroup">
-                      <td colSpan={6}>
+                      <td colSpan={7}>
                         {group} · {items.length} {items.length === 1 ? "run" : "runs"}
                       </td>
                     </tr>
@@ -404,6 +443,9 @@ export function JobsView({
                         <td>{j.task_name || "—"}</td>
                         <td style={{ color: "var(--fg-secondary)" }}>
                           {j.agent_slug || "No agent"}
+                        </td>
+                        <td style={{ color: "var(--fg-secondary)" }}>
+                          {triggerLabel(j.triggered_by)}
                         </td>
                         <td className="tnum" title={dateTime(j.started_at)}>
                           {relativeTime(j.started_at)}
@@ -458,6 +500,22 @@ export function JobsView({
                     <InspRow label="Task">{job.task_name || "—"}</InspRow>
                     <InspRow label="Agent">{job.agent_slug || "No agent"}</InspRow>
                     <InspRow label="Model">{job.model || "—"}</InspRow>
+                    <InspRow label="Trigger">{triggerLabel(job.triggered_by)}</InspRow>
+                    {job.continues_job_id && (
+                      <InspRow label="Continues">
+                        <button
+                          type="button"
+                          className="runrow runrow--link"
+                          title="Open the run this one continues"
+                          onClick={() => openRun(job.continues_job_id!)}
+                        >
+                          <span className="runrow__when mono">
+                            {job.continues_job_id}
+                          </span>
+                          <Icon name="chevronR" size={12} />
+                        </button>
+                      </InspRow>
+                    )}
                     <InspRow label="Status">
                       <StatusBadge status={job.status} />
                     </InspRow>
@@ -470,6 +528,18 @@ export function JobsView({
                       {job.finished_at ? dateTime(job.finished_at) : "—"}
                     </InspRow>
                     <InspRow label="Duration">{runDuration(job)}</InspRow>
+                    {jobTask && (
+                      <>
+                        <InspRow label="Task's dropped events">
+                          <span className="tnum">{jobTask.dropped_event_count}</span>
+                        </InspRow>
+                        <InspRow label="Task's rate-limited events">
+                          <span className="tnum">
+                            {jobTask.rate_limited_event_count}
+                          </span>
+                        </InspRow>
+                      </>
+                    )}
                   </InspGroup>
 
                   <InspGroup title="Tokens">
@@ -495,6 +565,24 @@ export function JobsView({
                   {job.prompt_preview && (
                     <InspGroup title="Prompt">
                       <div className="logblock">{job.prompt_preview}</div>
+                    </InspGroup>
+                  )}
+
+                  {/* What an outside sender sent (#687), already masked by the
+                      executor. A JSX text child and nothing else: this is
+                      untrusted input, so it is never handed to `Markdown` and
+                      never set as HTML. */}
+                  {job.event_payload && (
+                    <InspGroup title="Event payload">
+                      <div className="runrow">
+                        {/* Not `.runrow__when`: that one truncates, and this
+                            is a sentence that has to be read whole. */}
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          Sent by an outside sender. Secrets are masked.
+                        </span>
+                        <CopyButton text={job.event_payload} title="Copy payload" />
+                      </div>
+                      <div className="logblock">{job.event_payload}</div>
                     </InspGroup>
                   )}
 

@@ -193,6 +193,21 @@ fn job_rows(path: &Path) -> Vec<(String, String, String, i64, i64)> {
     rows.map(|r| r.expect("row")).collect()
 }
 
+/// #678: a real run's row names the install that ran it — read from
+/// `install_identity` by the insert, never passed in — and the harness.
+fn assert_run_summary(path: &Path, job_id: &str) {
+    let machine_id: String = rusqlite::Connection::open(path)
+        .expect("open")
+        .query_row("SELECT machine_id FROM install_identity", [], |r| r.get(0))
+        .expect("the install's identity");
+    assert!(!machine_id.is_empty());
+    let job = agento_lib::native::tasks::get_job_history(path, job_id)
+        .expect("read")
+        .expect("the row");
+    assert_eq!(job.machine_id, machine_id, "{job_id}");
+    assert_eq!(job.harness, "claude", "{job_id}");
+}
+
 #[tokio::test]
 async fn a_scheduled_run_records_a_successful_job_and_persists_its_chat() {
     if python3().is_none() {
@@ -259,6 +274,8 @@ async fn a_scheduled_run_records_a_successful_job_and_persists_its_chat() {
     assert_eq!(task.last_run_status, "success");
     assert!(task.last_run_at.is_some());
     assert_eq!(task.status, "active", "a cron task keeps running");
+
+    assert_run_summary(&db, &only_job_id(&db));
 }
 
 /// #559, the executor's half: a task with no `working_directory` runs the CLI
@@ -392,6 +409,7 @@ async fn a_manual_run_fires_a_paused_task_at_its_limit_and_moves_no_counter() {
             .expect("the job row");
         assert_eq!(id, "job-manual-1", "the route's id is the row's id");
     }
+    assert_run_summary(&db, "job-manual-1");
     assert_eq!(session_count(&db), 1, "and the chat is persisted");
 
     // …and the schedule is exactly where it was.
@@ -497,7 +515,9 @@ async fn a_task_with_no_agent_runs_on_the_default_model_with_every_built_in_tool
             .any(|a| a == "--system-prompt" || a == "--append-system-prompt"),
         "no system prompt flag: {argv:?}"
     );
-    // An empty `permission_mode` falls to the bypass arm of `build_options`.
+    // Bypassed, as every scheduled run always has been — and since #675
+    // because the executor says so (`RunKind::permission_mode`), not because
+    // the runner fell through to it.
     assert_eq!(
         flag_value(&argv, "--permission-mode"),
         Some("bypassPermissions"),
@@ -681,6 +701,62 @@ async fn an_agent_whose_tools_this_build_cannot_host_is_a_recorded_failure() {
         .expect("row");
     assert_eq!(task.run_count, 1);
     assert_eq!(task.last_run_status, "failed");
+}
+
+/// #675. The scheduler names `bypass` only for an agent with no mode of its
+/// own: a stored one is the agent's, and a scheduled run does not speak over
+/// it. An agent's mode cannot be written through the API, so the row is edited
+/// directly — which is the only way a real one comes to hold a value.
+#[tokio::test]
+async fn a_scheduled_run_leaves_an_agents_own_permission_mode_alone() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with(&db, "go", "planner", 30, Some("{}"));
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE agents SET permission_mode = 'plan'", [])
+        .expect("store a mode");
+    let cli = fake_cli(dir.path(), ANSWERING_CLI);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let (status, error, ..) = job_rows(&db).remove(0);
+    assert_eq!(status, "success", "error was {error:?}");
+    let argv = argv(dir.path());
+    assert_eq!(
+        flag_value(&argv, "--permission-mode"),
+        Some("plan"),
+        "{argv:?}"
+    );
+}
+
+/// #675. A stored mode that is not one fails the run with a row that names the
+/// value — never silence, and never a guess at what was meant.
+#[tokio::test]
+async fn an_agent_with_an_unknown_permission_mode_is_a_recorded_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with(&db, "go", "typo", 30, Some("{}"));
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE agents SET permission_mode = 'yolo'", [])
+        .expect("store a mode");
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "the refusal is recorded, not silent");
+    let (status, error, ..) = &jobs[0];
+    assert_eq!(status, "failed");
+    assert_eq!(error, r#"agent setup: unknown permission mode "yolo""#);
 }
 
 /// An unresolvable `{{name}}` in the *task's* prompt fails the run before
@@ -1606,6 +1682,22 @@ async fn an_event_run_hands_the_cli_a_delimited_payload_and_delivers_to_its_orig
     );
     assert!(!block_id.is_empty());
 
+    // #675: an outside sender started this run and the task's agent names no
+    // mode, so it denies prompts — and is not offered bypass — where a
+    // scheduled or manual run of the same task bypasses.
+    let argv = argv(dir.path());
+    assert_eq!(
+        flag_value(&argv, "--permission-mode"),
+        Some("dontAsk"),
+        "{argv:?}"
+    );
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"),
+        "{argv:?}"
+    );
+
     // One row, a success, started by Slack, with the payload stored.
     let (status, error, response, _, _) = job_rows(&db).remove(0);
     assert_eq!(status, "success", "error was {error:?}");
@@ -1616,6 +1708,7 @@ async fn an_event_run_hands_the_cli_a_delimited_payload_and_delivers_to_its_orig
     assert_eq!(job.triggered_by, "slack");
     assert_eq!(job.event_payload, "what happened today?");
     assert_eq!(job.prompt_preview, "summarise the day");
+    assert_run_summary(&db, "job-event-1");
 
     // Delivered, with the event's origin.
     assert_eq!(
@@ -1673,4 +1766,5 @@ async fn an_event_run_that_outlives_its_timeout_is_one_failed_row() {
         .expect("the row");
     assert_eq!(job.triggered_by, "telegram");
     assert_eq!(job.event_payload, "ping");
+    assert_run_summary(&db, "job-event-timeout");
 }

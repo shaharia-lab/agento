@@ -1,0 +1,85 @@
+name: Dependency audit
+
+# Fails when a dependency Agento ships has a published security advisory:
+# `cargo audit` over `src-tauri/Cargo.lock` and `npm audit` over the frontend's
+# production tree (#667).
+#
+# Its own workflow rather than a job in ci.yml because of the `schedule`
+# trigger. An advisory is published against a lockfile nobody touched, so the
+# check has to run without a pull request too — and a schedule on ci.yml would
+# rebuild and retest the whole app weekly to learn nothing new.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # Mondays 06:00 UTC: after Dependabot's weekly run (06:00 Europe/Berlin, so
+  # 04:00 or 05:00 UTC), and at the start of the week rather than the end.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Reads the checkout and two advisory databases, writes nothing back.
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      # Bump the version and the checksum together; the checksum is
+      # `sha256sum` of the release's x86_64-unknown-linux-musl .tgz. Dependabot
+      # does not see this pin, so nothing bumps it for you.
+      CARGO_AUDIT_VERSION: 0.22.2
+      CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      # The prebuilt release binary, pinned by checksum. Not `cargo install`:
+      # that compiles for several minutes on every run. Not an installer
+      # action: the repository's `allowed_actions` list has none, and a
+      # workflow naming an action outside it fails at startup with no job logs.
+      # And not `rustsec/audit-check`, which is on that list: it reports by
+      # creating check runs and issues, so it needs a write token — which a
+      # pull request from a fork does not get — where a step that exits
+      # non-zero needs only the `contents: read` above.
+      - name: Install cargo-audit
+        run: |
+          name="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "${RUNNER_TEMP}/cargo-audit.tgz" \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/${name}.tgz"
+          echo "${CARGO_AUDIT_SHA256}  ${RUNNER_TEMP}/cargo-audit.tgz" | sha256sum --check -
+          tar -xzf "${RUNNER_TEMP}/cargo-audit.tgz" -C "${RUNNER_TEMP}"
+          install -m 0755 "${RUNNER_TEMP}/${name}/cargo-audit" "${HOME}/.cargo/bin/cargo-audit"
+          cargo audit --version
+
+      # Run from src-tauri/ so `.cargo/audit.toml` — the ignore list — is read.
+      # A vulnerability fails the step. *Unmaintained*, *unsound* and *yanked*
+      # notices print as warnings and do not: Tauri on Linux pulls the GTK3
+      # bindings, which carry several, and none of them has a fixed version to
+      # move to.
+      - name: Rust advisories (cargo audit)
+        working-directory: src-tauri
+        run: cargo audit
+
+      # `if: always()` so one red audit does not hide the other.
+      #
+      # No `npm ci` first: `npm audit` resolves the tree from package-lock.json
+      # alone, so nothing is downloaded and no install script runs. `--omit=dev`
+      # is what the app ships; the build toolchain is not in the bundle.
+      # The same Node, and so the same npm, that ci.yml installs with.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        if: always()
+        with:
+          node-version: 22
+
+      - name: npm advisories (npm audit)
+        if: always()
+        run: npm audit --omit=dev --audit-level=high

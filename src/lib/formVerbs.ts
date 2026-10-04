@@ -35,11 +35,11 @@
    `Remove` reads as *detach without destroying*, which is not what
    `DELETE /api/integrations/{id}` does — the row and its stored credentials go.
 
-   What `Remove` still means, and why it survives in two places: taking a row
-   out of a list that is not stored yet (a gateway alias's fallback target) and
-   unregistering something from a third party while the record it belongs to
-   stays (the Telegram webhook). Both really are detaching, so both keep the
-   word this module deliberately does not lend them.
+   What `Remove` still means, and why it survives: taking a row out of a list
+   that is not stored yet (a gateway alias's fallback target). That really is
+   detaching, so it keeps the word this module deliberately does not lend it.
+   Its second use, unregistering the Telegram webhook, went with the webhook
+   panel (#676).
    ========================================================================== */
 
 import type { Eq, Expect } from "./typeAssert";

@@ -99,6 +99,18 @@ fn prepare(db_path: &Path, id: &str) -> Result<Registration, WriteError> {
         ));
     }
 
+    // Long-polling is on (#676): a webhook set now would make Telegram refuse
+    // every `getUpdates` with a 409, and the two receivers would split the
+    // bot's updates until the next worker start deleted it again. Refused
+    // here, before the network call, so a stale client cannot do it.
+    if row.inbound_enabled {
+        return Err(WriteError::ConflictMessage(
+            "this integration receives messages by long-polling; \
+             turn inbound off before registering a webhook"
+                .to_string(),
+        ));
+    }
+
     #[derive(serde::Deserialize)]
     struct Creds {
         #[serde(
@@ -315,6 +327,28 @@ mod tests {
         assert_eq!(
             err.message(),
             r#"validation error for "type": webhooks are only supported for telegram integrations"#
+        );
+    }
+
+    /// A row that long-polls refuses a webhook before anything is called
+    /// (#676): `setWebhook` would make Telegram answer every poll with a 409.
+    #[test]
+    fn a_polling_integration_is_a_409_before_anything_is_called() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path(), "telegram", "https://x.example");
+        rusqlite::Connection::open(&db)
+            .expect("open")
+            .execute(
+                "UPDATE integrations SET inbound_enabled = 1 WHERE id = 'tg'",
+                [],
+            )
+            .expect("turn inbound on");
+        let err = prepare(&db, "tg").unwrap_err();
+        assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
+        assert!(
+            err.message().contains("long-polling"),
+            "the 409 says why: {}",
+            err.message()
         );
     }
 

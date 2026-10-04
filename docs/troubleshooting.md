@@ -322,6 +322,59 @@ still listed and its data is safe, but it cannot be edited or used.
 
 ---
 
+## Telegram
+
+These cover **long polling**, the inbound half, where a message to the bot runs
+an agent. Setting it up is in the
+[user guide](user-guide.md#telegram-long-polling). The badge under
+**Integrations → Telegram → Inbound** uses the same five states as Slack's,
+described [below](#what-the-socket-mode-badge-is-telling-you), and `ERROR`
+keeps retrying in the same way.
+
+### Telegram says something else is polling this bot token
+
+The badge reads `RECONNECTING` or `ERROR`, and the reason under it starts with
+*Something else is polling this bot token*.
+
+Telegram lets one program poll a bot at a time, and refuses the other with a
+`409 Conflict`. The usual cause is a second Agento using the same bot token: an
+installed Agento and a development build (`npm run app`) both running, or
+Agento on two machines. Another program built on the same bot does it too.
+
+- Close the other program, or turn **Long polling** off in one of the two.
+- Or give each its own bot. `@BotFather` creates one in a minute.
+
+The worker reconnects by itself once the other poller stops. Nothing needs
+restarting.
+
+### Telegram says a webhook is set for this bot
+
+The reason starts with *A webhook is set for this bot somewhere else*. Agento
+removes a bot's webhook when long polling starts, so this means something set
+one again afterwards, usually another program or a script calling
+`setWebhook`.
+
+Turn **Long polling** off and on again. Agento removes the webhook and starts
+polling. If it comes back, find what is setting it and stop that.
+
+### Long polling says Connected but a message does nothing
+
+- The integration has no enabled trigger rule, or none whose prefix, keywords
+  and chat ids match the message.
+- The chat is not in the rule's **Chat IDs**. A rule answers only the chats it
+  lists, and a message from any other chat is ignored without a reply.
+- The rule is off because it lists no chat ids. Its row says so; edit it and add
+  at least one.
+- The message has no text. Photos, stickers and joins are received and ignored.
+- The bot is in a group with privacy mode on, so Telegram only gives it
+  commands and replies. `@BotFather` → `/setprivacy` changes that.
+
+The log lines worth knowing: `telegram poll worker started` / `stopped`,
+`telegram poll: … attempt=N status=…` for each failed attempt with its reason,
+and `trigger rule matched …` for a message that ran.
+
+---
+
 ## Slack
 
 These cover **Socket Mode** — the inbound half, where a mention in a channel runs
@@ -371,11 +424,11 @@ Three things that look like this and are not:
 
 ### Socket Mode says Connected but a mention does nothing
 
-Every one of these is silent by design. Of the nine, two say nothing in the log
-at all, six are at **`debug`** level — so raise the level before you go looking
-— and one is at `error`. Two of the six have a second, database cause that logs
-at `warn` or `error` just above them, and each says so below. Work down the
-list:
+Every one of these is silent by design. Of the eleven, two say nothing in the
+log at all, seven are at **`debug`** level — so raise the level before you go
+looking — one is at `info` and one is at `error`. Two of the seven have a
+second, database cause that logs at `warn` or `error` just above them, and each
+says so below. Work down the list:
 
 - **The app is not in the channel.** Slack never sent the event at all — nothing
   appears in the log. `/invite @Agento` in that channel.
@@ -388,6 +441,19 @@ list:
   a channel explicitly wins over a blank-list rule *even when it is switched
   off*, so disabling it silences that one channel rather than falling back. Turn
   it on, or take the channel out of its list.
+- **The rule does not list the person who mentioned the app.** Log:
+  `slack mention ignored, the rule does not list the sender`. A Slack rule
+  answers only its **Allowed users**, and a rule saved before that list existed
+  has none, so after updating it answers nobody and its row reads *No allowed
+  users, not responding*. Edit the rule and add the person's Slack member id.
+  When the rule starts a task, each of these is counted on that task.
+- **The rule's task is at its run limits.** Log, at `info`:
+  `slack mention ignored, the rule's task is at its run limits`, with
+  `reason=Dropped` or `reason=RateLimited`. A task runs one message-started run
+  at a time, keeps five more waiting and starts ten in any hour, unless its
+  limits were changed. A mention past the queue is dropped and one past the
+  hour's count is rate-limited; each is counted on the task and gets no reply.
+  Wait for the running one to finish or for the hour to move on.
 - **The thread was not started by Agento.** Log:
   `slack mention ignored, a thread Agento did not start`. Only a mention that
   starts a new thread can start a chat; inside an existing thread Agento answers
@@ -415,6 +481,28 @@ list:
   `debug`** — the only line in this list that is. A mention that *starts* a
   thread gets the error sentence instead; one inside a thread is dropped
   silently, because Agento cannot tell whether the thread was its own.
+
+### The rule form says "Couldn't list members"
+
+The **Allowed users** list on a Slack rule is read from Slack each time the
+rule section opens. When that fails the form shows the reason and falls back to
+a field of comma-separated member ids, so the rule can still be saved.
+
+- **`the Slack app needs users:read … (missing_scope)`.** The app was installed
+  without the `users:read` scope, which the guide's Socket Mode manifest did
+  not list before this picker existed. In the Slack app's settings open
+  **OAuth & Permissions**, add `users:read` under **Bot Token Scopes**,
+  reinstall the app to the workspace, then choose **Retry**.
+- **`the Slack token was rejected`.** The bot token is wrong or revoked.
+  Replace it under **Bot token**.
+- **`slack rate limited`.** Slack allows about 20 member-list calls a minute.
+  Wait a minute and choose **Retry**.
+- **`the Slack integration is disabled`** or **`is not connected`**. The list
+  is read with the integration's own token, so the integration has to be on and
+  connected first.
+
+Until the list loads, add people by member id: open the person's Slack profile,
+choose **More**, then **Copy member ID**.
 
 ### The reply is "Sorry, something went wrong."
 

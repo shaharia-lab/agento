@@ -158,6 +158,31 @@ npm run build                 # tsc --noEmit plus the Vite build
 CI runs exactly those four, on every push and pull request, unfiltered — with
 one tree there is no change that cannot affect the app.
 
+### Dependency advisories
+
+A second workflow, *Dependency audit*, fails when a dependency the app ships has
+a published security advisory. It runs on every pull request, on every push to
+`main`, and weekly — an advisory is published against a lockfile nobody touched,
+so a pull request is not the only time to look. To run the same two checks
+locally:
+
+```bash
+cargo install cargo-audit --locked      # once
+cd src-tauri && cargo audit             # reads src-tauri/.cargo/audit.toml
+```
+
+```bash
+npm audit --omit=dev --audit-level=high # from the repository root
+```
+
+`cargo audit` fails on a vulnerability and only warns about *unmaintained*,
+*unsound* or *yanked* crates; the GTK3 bindings Tauri uses on Linux carry
+several of those warnings and they are expected. The fix for a failure is
+almost always `cargo update -p <crate>` or `npm update <package>`. When no fixed
+version exists, add the advisory id to `src-tauri/.cargo/audit.toml` with a
+comment saying why and when the entry comes out — an entry without one is
+rejected in review.
+
 ### Tests that need something
 
 Several suites are `#[ignore]`d because they need a corpus or a database that CI

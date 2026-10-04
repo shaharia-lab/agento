@@ -34,10 +34,9 @@ export const MODELS: Option[] = [
  *
  * They are the *wire's* values, not the UI's: the trigger-rule write validates
  * against exactly this set and answers 422 for anything else, and the chat
- * runner routes every mode it does not recognise into bypass — so a typo here
- * is not a broken control, it is an unattended run with no permission gate at
- * all. `npm run build` is the whole frontend gate, so the literals are pinned
- * below rather than tested.
+ * runner refuses to run a mode it does not recognise — so a typo here is a
+ * control whose every choice is rejected. `npm run build` is the whole
+ * frontend gate, so the literals are pinned below rather than tested.
  */
 const PERMISSION_VALUES = ["bypass", "default", "plan", "dontAsk"] as const;
 

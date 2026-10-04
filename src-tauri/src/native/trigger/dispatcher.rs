@@ -28,9 +28,9 @@ use std::path::Path;
 
 use tokio::sync::Semaphore;
 
-use super::match_rule::{match_rule, RuleFilters};
+use super::match_rule::{match_rule, sender_allowed, RuleFilters};
 use super::receiver::{TelegramMsg, TelegramUpdate};
-use crate::native::agent_run;
+use crate::native::agent_run::{self, Runner as _};
 use crate::native::agents::Agent;
 use crate::native::db;
 
@@ -115,7 +115,7 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
     // here where Go's is two statements.
     // **Every database call this module makes goes through [`db::blocking`],**
     // each under its own label so the log says which one panicked. (Not every
-    // call the *dispatch* makes: `run_headless` opens SQLite on the worker while
+    // call the *dispatch* makes: `Runner::run` opens SQLite on the worker while
     // building its options, which chat and the scheduler share verbatim.)
     // `process` runs on an axum worker, and each of these opens a connection and
     // may sit on
@@ -180,11 +180,15 @@ pub struct Rule {
     pub filters: RuleFilters,
     /// Migration 39's four spec-reachable execution settings (#563), as
     /// [`load_rules`] read them — with an unusable `permission_mode` already
-    /// dropped, see [`usable_permission_mode`].
+    /// replaced by `dontAsk`, see [`usable_permission_mode`].
     pub settings: agent_run::ExecutionSettings,
     /// Migration 39's fifth. `0` is "the dispatcher's own default", **not** a
     /// run that times out instantly — see [`run_timeout`].
     pub timeout_minutes: i64,
+    /// The task this rule starts through `executor::run_event` (#685); empty
+    /// for a rule that runs its own agent, which is every rule migration 48
+    /// found.
+    pub task_id: String,
 }
 
 /// `findMatchingRule`: the first **enabled** rule that matches, in the order the
@@ -209,6 +213,11 @@ fn find_matching_rule(
         // the answer is the same one: the first enabled rule that matches, in
         // store order.
         .filter(|rule| rule.enabled)
+        // Senders are denied by default (#674): a rule is considered only for
+        // a chat its list names, so an empty, null or unparseable
+        // `filter_chat_ids` matches nobody. Asked here, ahead of `match_rule`,
+        // whose own chat clause reads empty as "everything" for Slack.
+        .filter(|rule| sender_allowed(&rule.filters.chat_ids, &chat_id))
         .find_map(|rule| match_rule(&rule.filters, &msg.text, &chat_id).map(|p| (rule, p)))
 }
 
@@ -231,7 +240,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
         .prepare(
             "SELECT id, name, agent_slug, enabled, filter_prefix, filter_keywords,
                     filter_chat_ids, model, working_directory, settings_profile_id,
-                    permission_mode, timeout_minutes
+                    permission_mode, timeout_minutes, task_id, filter_user_ids
              FROM trigger_rules
              WHERE integration_id = ?1
              ORDER BY created_at ASC",
@@ -243,6 +252,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
             let keywords: String = row.get(5)?;
             let chat_ids: String = row.get(6)?;
             let permission_mode: String = row.get(10)?;
+            let user_ids: String = row.get(13)?;
             Ok(Rule {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -252,6 +262,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
                     prefix: row.get(4)?,
                     keywords: decode_list(&keywords),
                     chat_ids: decode_list(&chat_ids),
+                    user_ids: decode_list(&user_ids),
                 },
                 settings: agent_run::ExecutionSettings {
                     model: row.get(7)?,
@@ -260,6 +271,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
                     permission_mode: usable_permission_mode(permission_mode),
                 },
                 timeout_minutes: row.get(11)?,
+                task_id: row.get(12)?,
             })
         })
         .map_err(|e| format!("querying trigger rules: {e}"))?;
@@ -271,9 +283,9 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
     Ok(out)
 }
 
-/// A stored `[]string` column. An unparseable or null value is an empty list,
-/// which the matcher reads as "no filter" — the same answer Go's zero slice
-/// gives.
+/// A stored `[]string` column. An unparseable or null value is an empty list:
+/// "no filter" for keywords, and for Telegram's `filter_chat_ids` and Slack's
+/// `filter_user_ids` an allowlist that names nobody (#674, #688).
 fn decode_list(raw: &str) -> Vec<String> {
     serde_json::from_str::<Option<Vec<Option<String>>>>(raw)
         .ok()
@@ -282,22 +294,23 @@ fn decode_list(raw: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A stored `permission_mode`, or empty when it is not one Agento knows.
+/// A stored `permission_mode`, or `dontAsk` when it is not one Agento knows.
 ///
 /// `integrations::validate_rule_settings` rejects anything outside
 /// [`crate::native::chats::CHAT_PERMISSION_MODES`] at the write (#563), but the
 /// dispatcher reads *stored rows* — hand-edited, restored from a backup, or
-/// written before that validation existed. An unknown mode is not inert:
-/// `chat/runner.rs`' `match` routes everything it does not recognise into
-/// `with_bypass_permissions()`, so one typo would run the agent with permissions
-/// fully bypassed. Falling back to empty runs it on the agent's own configured
-/// mode, which is what a rule that sets nothing already does.
+/// written before that validation existed. `chat/runner.rs` refuses a mode it
+/// does not know, and a refused run here is a sender who gets the error reply
+/// for every message until somebody edits the row. So the rule runs with
+/// prompts denied instead (#675): the most restrictive mode that still
+/// answers. Not empty — empty would hand the choice to the agent's own mode,
+/// and a rule that named *something* did not ask for that.
 fn usable_permission_mode(stored: String) -> String {
     if crate::native::chats::is_valid_permission_mode(&stored) {
         return stored;
     }
-    log::warn!("ignoring unknown trigger rule permission mode {stored:?}");
-    String::new()
+    log::warn!("unknown trigger rule permission mode {stored:?}, running with prompts denied");
+    "dontAsk".to_string()
 }
 
 /// How long one run of `rule` may take.
@@ -313,9 +326,8 @@ fn usable_permission_mode(stored: String) -> String {
 /// that validation existed. This clamps rather than refusing, because refusing
 /// here means an inbound message silently going unanswered, and an absurd value
 /// would otherwise hold one of the ten concurrency slots for as long as it says.
-/// It is [`usable_permission_mode`]'s premise with the opposite answer, and for
-/// the same reason both are stated: a clamped timeout is a run that still
-/// happens, where a bad mode is a run that must not.
+/// It is [`usable_permission_mode`]'s premise and its answer: a row that never
+/// went through validation still runs, on the nearest value that is safe.
 pub(crate) fn run_timeout(rule: &Rule) -> std::time::Duration {
     if rule.timeout_minutes <= 0 {
         return RUN_TIMEOUT;
@@ -405,7 +417,7 @@ async fn execute_and_reply(
     };
 
     let (spec, timeout) = run_inputs(db_path, agent, rule);
-    let result = agent_run::run_headless(&spec, prompt, timeout, None).await;
+    let result = agent_run::runner().run(&spec, prompt, timeout, None).await;
 
     let result = match result {
         Ok(result) => result,
@@ -687,7 +699,7 @@ mod tests {
             true,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
         add_rule(
@@ -696,7 +708,7 @@ mod tests {
             true,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-02-01 00:00:00 +0000 UTC",
         );
 
@@ -715,7 +727,7 @@ mod tests {
             false,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
         assert!(find_matching_rule(&db, "tg", &msg("anything", 42)).is_none());
@@ -727,7 +739,7 @@ mod tests {
             true,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-02-01 00:00:00 +0000 UTC",
         );
         assert_eq!(
@@ -773,29 +785,95 @@ mod tests {
             true,
             "",
             "[]",
-            "[]",
+            r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
         assert!(find_matching_rule(&db, "other", &msg("hi", 42)).is_none());
     }
 
     #[test]
-    fn a_null_or_broken_filter_column_is_no_filter_rather_than_no_match() {
+    fn a_null_or_broken_keyword_column_is_no_filter_rather_than_no_match() {
         // Go decodes these into a nil slice, which `matchesKeywords` reads as
         // "everything". A port treating the failure as "match nothing" would
         // silently stop a working rule.
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(dir.path());
+        for (id, keywords) in [("null", "null"), ("broken", "not json")] {
+            add_rule(
+                &db,
+                id,
+                true,
+                "",
+                keywords,
+                r#"["42"]"#,
+                "2026-01-01 00:00:00 +0000 UTC",
+            );
+        }
+        assert!(find_matching_rule(&db, "tg", &msg("anything", 42)).is_some());
+    }
+
+    /// #674: the allowed-chats list is the one filter where "unset" is not
+    /// "everything". Whatever the column holds that names no chat — empty,
+    /// null, unparseable, a blank entry — the rule answers nobody.
+    #[test]
+    fn a_rule_that_names_no_chat_answers_nobody() {
+        for chat_ids in [
+            "[]",
+            "null",
+            "",
+            "not json",
+            r#"[""]"#,
+            "[null]",
+            r#"{"42":1}"#,
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db = migrated(dir.path());
+            add_rule(
+                &db,
+                "open",
+                true,
+                "",
+                "[]",
+                chat_ids,
+                "2026-01-01 00:00:00 +0000 UTC",
+            );
+            assert!(
+                find_matching_rule(&db, "tg", &msg("anything", 42)).is_none(),
+                "filter_chat_ids {chat_ids:?}"
+            );
+        }
+    }
+
+    /// The allowed, not-allowed and fall-through cases at the dispatcher: a
+    /// sender one rule does not name is not answered by it, and is still
+    /// answered by a later rule that does name it.
+    #[test]
+    fn a_sender_is_matched_only_by_a_rule_that_names_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
         add_rule(
             &db,
-            "nulls",
+            "first",
             true,
             "",
-            "null",
-            "not json",
+            "[]",
+            r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
-        assert!(find_matching_rule(&db, "tg", &msg("anything", 42)).is_some());
+        add_rule(
+            &db,
+            "second",
+            true,
+            "",
+            "[]",
+            r#"["7","-100"]"#,
+            "2026-02-01 00:00:00 +0000 UTC",
+        );
+        let matched = |chat| find_matching_rule(&db, "tg", &msg("hi", chat)).map(|(r, _)| r.id);
+        assert_eq!(matched(42).as_deref(), Some("first"));
+        assert_eq!(matched(-100).as_deref(), Some("second"));
+        assert_eq!(matched(99), None);
+        assert_eq!(matched(4), None, "an exact compare, not a prefix");
     }
 
     #[test]
@@ -929,11 +1007,11 @@ mod tests {
         );
     }
 
-    /// An unknown mode is not inert: `build_options`' catch-all would run the
-    /// agent with permissions fully bypassed, so a stored value outside
-    /// `CHAT_PERMISSION_MODES` is dropped rather than forwarded.
+    /// A stored value outside `CHAT_PERMISSION_MODES` is neither forwarded,
+    /// which `build_options` would refuse, nor emptied, which would run the
+    /// agent's own mode: it runs with prompts denied.
     #[test]
-    fn an_unusable_permission_mode_is_dropped_rather_than_escalating_to_bypass() {
+    fn an_unusable_permission_mode_runs_with_prompts_denied() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(dir.path());
         add_configured_rule(
@@ -951,8 +1029,8 @@ mod tests {
 
         let rules = load_rules(&db, "tg").expect("load");
         assert_eq!(
-            rules[0].settings.permission_mode, "",
-            "\"yolo\" would reach `with_bypass_permissions()`; empty runs the agent's own mode"
+            rules[0].settings.permission_mode, "dontAsk",
+            "\"yolo\" is not a mode, and empty would run the agent's own"
         );
         for mode in crate::native::chats::CHAT_PERMISSION_MODES {
             assert_eq!(usable_permission_mode(mode.to_string()), mode);
@@ -972,6 +1050,7 @@ mod tests {
             filters: RuleFilters::default(),
             settings: Default::default(),
             timeout_minutes: minutes,
+            task_id: String::new(),
         };
 
         assert_eq!(run_timeout(&rule(0)), RUN_TIMEOUT);

@@ -206,11 +206,35 @@ pub fn mkdir(body: &[u8]) -> Result<super::Answer, WriteError> {
     })
     .map_err(|e| WriteError::Fallback(format!("encoding mkdir response: {e}")))?;
 
-    // Nothing below this line may return `Fallback`.
-    create_dir_all_0750(&clean)
-        .map_err(|e| WriteError::Fallback(format!("creating {clean:?}: {e}")))?;
+    // The one effect, and the last fallible step.
+    create_dir_all_0750(&clean).map_err(|e| {
+        if is_about_the_path(&e) {
+            WriteError::validation("path", format!("cannot create {clean:?}: {e}"))
+        } else {
+            WriteError::Fallback(format!("creating {clean:?}: {e}"))
+        }
+    })?;
 
     Ok(super::Answer::json(encoded))
+}
+
+/// Whether a failed `MkdirAll` is about the path the request named (#670): the
+/// user may not write there, a regular file sits where a directory has to be,
+/// the name holds a NUL or a component too long for the filesystem, or the
+/// filesystem is read-only. The user fixes each by typing a different path, so
+/// they are a 422 on `path`. Anything else — a full disk, an I/O error — is
+/// the machinery and stays a 500.
+fn is_about_the_path(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::PermissionDenied
+            | ErrorKind::NotADirectory
+            | ErrorKind::AlreadyExists
+            | ErrorKind::InvalidInput
+            | ErrorKind::InvalidFilename
+            | ErrorKind::ReadOnlyFilesystem
+    )
 }
 
 /// `os.MkdirAll(path, 0750)`.
@@ -418,6 +442,63 @@ mod tests {
     }
 
     // ─── `POST /api/fs/mkdir` (#296) ──────────────────────────────────────────
+
+    /// A path that cannot be created because a regular file is in the way is a
+    /// 422 on `path` (#670), whether the file is the target or a parent of it.
+    /// It was a 500.
+    #[test]
+    fn mkdir_through_a_regular_file_is_a_422_on_path() {
+        let blocker = tempfile::NamedTempFile::new().expect("temp file");
+        let file = blocker.path().to_string_lossy().into_owned();
+        let root = tempfile::tempdir().expect("temp dir");
+        let root = root.path().to_string_lossy().into_owned();
+        for target in [
+            file.clone(),
+            format!("{file}/inside"),
+            // A NUL in the name, and a component past `NAME_MAX`.
+            format!("{root}/a\0b"),
+            format!("{root}/{}", "n".repeat(300)),
+        ] {
+            let body = format!("{{\"path\":{}}}", serde_json::json!(target));
+            let err = mkdir(body.as_bytes()).unwrap_err();
+            assert_eq!(
+                err.status(),
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "{target}"
+            );
+            assert!(
+                err.message()
+                    .starts_with("validation error for \"path\": cannot create "),
+                "{}",
+                err.message()
+            );
+        }
+    }
+
+    /// A parent the user may not write to is the same 422 (#670). Root ignores
+    /// the mode, so when the create succeeds there is nothing to assert.
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_under_a_parent_that_is_not_writable_is_a_422_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("temp dir");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500))
+            .expect("chmod");
+        let target = format!("{}/inside", root.path().display());
+
+        let result = mkdir(mkdir_body(&target).as_bytes());
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod back");
+        if let Err(err) = result {
+            assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                err.message()
+                    .starts_with("validation error for \"path\": cannot create "),
+                "{}",
+                err.message()
+            );
+        }
+    }
 
     fn mkdir_body(dir: &str) -> String {
         format!(

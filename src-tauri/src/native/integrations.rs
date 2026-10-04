@@ -318,6 +318,10 @@ pub struct TriggerRule {
     pub filter_prefix: String,
     pub filter_keywords: Option<Vec<String>>,
     pub filter_chat_ids: Option<Vec<String>>,
+    /// The Slack users this rule answers (#688), and on Slack empty is nobody.
+    /// Stored trimmed and deduplicated, never `null`: a write always stores a
+    /// list and migration 53 defaulted the column to `[]`.
+    pub filter_user_ids: Option<Vec<String>>,
     pub model: String,
     pub working_directory: String,
     pub settings_profile_id: String,
@@ -490,15 +494,39 @@ fn has_credentials_sql() -> String {
 /// because nothing of the value crosses the boundary — only whether there is
 /// one.
 fn has_app_token_sql() -> String {
+    has_token_sql("app_token")
+}
+
+/// [`has_app_token_sql`]'s rule for any one credential key (#676): Slack's
+/// inbound worker needs `app_token`, Telegram's needs `bot_token`, and the
+/// inbound switch asks the same question of each.
+///
+/// `key` is a constant from [`inbound_token_key`], never request data — it is
+/// formatted into the statement.
+fn has_token_sql(key: &str) -> String {
     // The same four bytes `has_credentials_sql` trims.
     const WS: &str = "char(32) || char(9) || char(10) || char(13)";
     format!(
         "CASE WHEN json_valid(credentials) THEN
-                CASE WHEN json_type(credentials, '$.app_token') = 'text'
-                     THEN TRIM(json_extract(credentials, '$.app_token'), {WS}) != ''
+                CASE WHEN json_type(credentials, '$.{key}') = 'text'
+                     THEN TRIM(json_extract(credentials, '$.{key}'), {WS}) != ''
                      ELSE 0 END
               ELSE 0 END"
     )
+}
+
+/// The credential an integration type's inbound worker cannot run without, or
+/// `None` for a type with no inbound transport.
+///
+/// One table, read by the two writes that must agree: `update_inbound`, which
+/// refuses to enable a row that stores none, and `update`, which turns the
+/// switch off when a write removes it.
+fn inbound_token_key(integration_type: &str) -> Option<&'static str> {
+    match integration_type {
+        "slack" => Some("app_token"),
+        "telegram" => Some("bot_token"),
+        _ => None,
+    }
 }
 
 /// [`has_app_token_sql`] over bytes this process already holds, for the writes
@@ -507,10 +535,15 @@ fn has_app_token_sql() -> String {
 /// Kept in step with the SQL by [`tests::the_two_has_app_token_rules_agree`],
 /// exactly as [`stores_a_credential`] is with [`has_credentials_sql`].
 pub(crate) fn stores_an_app_token(raw: &str) -> bool {
+    stores_a_token(raw, "app_token")
+}
+
+/// [`has_token_sql`] over bytes this process already holds.
+fn stores_a_token(raw: &str, key: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(raw)
         .ok()
         .as_ref()
-        .and_then(|v| v.get("app_token"))
+        .and_then(|v| v.get(key))
         .and_then(|v| v.as_str())
         // `str::trim`, deliberately not — see `stores_a_credential`.
         .is_some_and(|token| !token.trim_matches([' ', '\t', '\n', '\r']).is_empty())
@@ -668,7 +701,7 @@ const TRIGGER_RULE_COLUMNS: &str = "SELECT id, integration_id, name, agent_slug,
                     model, working_directory, settings_profile_id,
                     permission_mode, timeout_minutes,
                     created_at, updated_at,
-                    task_id, continue_on_reply
+                    task_id, continue_on_reply, filter_user_ids
              FROM trigger_rules";
 
 fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
@@ -678,6 +711,7 @@ fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
     let created_at: String = row.get(13)?;
     let updated_at: String = row.get(14)?;
     let continue_on_reply: i64 = row.get(16)?;
+    let user_ids: String = row.get(17)?;
     Ok(TriggerRule {
         id: row.get(0)?,
         integration_id: row.get(1)?,
@@ -687,6 +721,7 @@ fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
         filter_prefix: row.get(5)?,
         filter_keywords: super::gojson::decode_string_list(&keywords),
         filter_chat_ids: super::gojson::decode_string_list(&chat_ids),
+        filter_user_ids: super::gojson::decode_string_list(&user_ids),
         model: row.get(8)?,
         working_directory: row.get(9)?,
         settings_profile_id: row.get(10)?,
@@ -748,9 +783,11 @@ fn start_oauth(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 ///
 /// `slack::channels::ROUTE` (#641) is recorded here too, though the streaming
 /// registry answers it: this module owns the `/api/integrations` prefix.
+/// `slack::users::ROUTE` (#689) is the same.
 pub const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/integrations/{id}/inbound"),
     slack::channels::ROUTE,
+    slack::users::ROUTE,
 ];
 
 /// This module's entry in `native::ENDPOINTS`.
@@ -1253,16 +1290,25 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     //   arm: an omitted blob preserves the credential, so it preserves the
     //   switch too.
     // - **The type.** `type` is written straight from the request body and this
-    //   write validates nothing, so a row can become `telegram` with the switch
+    //   write validates nothing, so a row can become `github` with the switch
     //   still on — and there is no way back, because `update_inbound` answers
-    //   400 for a non-Slack row whichever way the switch is being moved. That
-    //   refusal is the one the acceptance criteria pin, so the stranding is
-    //   fixed here, at the write that causes it, rather than by weakening it.
+    //   400 for a type with no inbound transport whichever way the switch is
+    //   being moved. A change *between* the two types that have one clears it
+    //   as well: the switch was turned on for the other transport, and the
+    //   credential it was checked against is not the one the new type needs.
+    //
+    // The credential is the type's own (#676): `app_token` for Slack,
+    // `bot_token` for Telegram — see `inbound_token_key`.
     //
     // Cleared in the same statement, on both arms, rather than left for the
     // worker to discover.
-    let clears_inbound = req.integration_type != "slack"
-        || credentials.is_some_and(|blob| !stores_an_app_token(blob));
+    let clears_inbound = match inbound_token_key(&req.integration_type) {
+        None => true,
+        Some(key) => {
+            existing.integration_type != req.integration_type
+                || credentials.is_some_and(|blob| !stores_a_token(blob, key))
+        }
+    };
     match credentials {
         Some(blob) => conn.execute(
             "UPDATE integrations SET
@@ -1390,8 +1436,8 @@ fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     Ok(super::Answer::no_content())
 }
 
-/// `PUT /api/integrations/{id}/inbound` — the Slack inbound on/off switch
-/// (#566).
+/// `PUT /api/integrations/{id}/inbound` — the inbound on/off switch: Slack's
+/// Socket Mode connection (#566) and Telegram's long poll (#676).
 ///
 /// **A route of its own rather than a field on `PUT /api/integrations/{id}`**,
 /// and that is the decision worth reading. The integration write is byte-exact
@@ -1405,13 +1451,13 @@ fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 /// that was half changed.
 ///
 /// - **404** when no row has that id.
-/// - **400** for any type but `slack`. There is one inbound implementation and
-///   it is Socket Mode; a Telegram row's inbound half is a webhook, and it has
-///   its own routes.
-/// - **422**, naming `credentials.app_token`, when enabling a row that stores
-///   no app-level token — the switch would otherwise turn on a worker that can
-///   only fail to connect. Disabling is always allowed, so a row whose
-///   credentials were later scrubbed can still be turned off.
+/// - **400** for a type with no inbound transport — anything but `slack` and
+///   `telegram` ([`inbound_token_key`]).
+/// - **422** when enabling a row that does not store the token its worker
+///   needs, naming `credentials.app_token` for Slack and
+///   `credentials.bot_token` for Telegram — the switch would otherwise turn on
+///   a worker that can only fail to connect. Disabling is always allowed, so a
+///   row whose credentials were later scrubbed can still be turned off.
 ///
 /// `inbound_status` and `inbound_error` are **not** touched. They are the
 /// worker's to write (#567), and a disable that cleared them would erase the
@@ -1429,17 +1475,23 @@ fn update_inbound(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer
             id: id.to_string(),
         });
     };
-    if target.integration_type != "slack" {
+    let Some(token_key) = inbound_token_key(&target.integration_type) else {
         return Err(WriteError::BadRequest(format!(
             "integration {id:?} is of type {:?}, which has no inbound connection",
             target.integration_type
         )));
-    }
-    if req.enabled && !target.has_app_token {
-        return Err(WriteError::validation(
-            "credentials.app_token",
-            "an app-level token is required before inbound can be enabled",
-        ));
+    };
+    if req.enabled && !target.has_inbound_token {
+        return Err(match token_key {
+            "app_token" => WriteError::validation(
+                "credentials.app_token",
+                "an app-level token is required before inbound can be enabled",
+            ),
+            _ => WriteError::validation(
+                "credentials.bot_token",
+                "a bot token is required before inbound can be enabled",
+            ),
+        });
     }
 
     // Encoded **before** the mutation, per the invariant in `writes.rs`: a
@@ -1458,8 +1510,8 @@ fn update_inbound(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer
 
     // Nothing below this line may return Fallback.
     //
-    // The reload **is** the effect: starting and stopping the socket worker is
-    // the registry's job (#567), so this write ends the way `update` does, and
+    // The reload **is** the effect: starting and stopping the inbound worker is
+    // the registry's job (#567, #676), so this write ends the way `update` does, and
     // its failure is swallowed for the same reason — the column is already
     // written, and a 500 here would invite a retry of a write that landed.
     registry::reload_blocking(db_path, id);
@@ -1492,12 +1544,12 @@ struct InboundState {
 
 /// What [`update_inbound`] needs before it may write, and nothing else.
 ///
-/// `has_app_token` is computed by [`has_app_token_sql`], so this stays a read
-/// that cannot hold the token — the module header's rule, kept on the one write
-/// whose decision depends on a credential.
+/// `has_inbound_token` is computed by [`has_token_sql`] for the key the row's
+/// own type needs, so this stays a read that cannot hold the token — the module
+/// header's rule, kept on the one write whose decision depends on a credential.
 struct InboundTarget {
     integration_type: String,
-    has_app_token: bool,
+    has_inbound_token: bool,
 }
 
 fn inbound_target(
@@ -1506,15 +1558,20 @@ fn inbound_target(
 ) -> Result<Option<InboundTarget>, WriteError> {
     conn.query_row(
         &format!(
-            "SELECT type, {} AS has_app_token FROM integrations WHERE id = ?1",
-            has_app_token_sql()
+            "SELECT type,
+                    CASE type WHEN 'slack' THEN {}
+                              WHEN 'telegram' THEN {}
+                              ELSE 0 END AS has_inbound_token
+               FROM integrations WHERE id = ?1",
+            has_token_sql("app_token"),
+            has_token_sql("bot_token")
         ),
         [id],
         |row| {
-            let has_app_token: i64 = row.get(1)?;
+            let has_inbound_token: i64 = row.get(1)?;
             Ok(InboundTarget {
                 integration_type: row.get(0)?,
-                has_app_token: has_app_token != 0,
+                has_inbound_token: has_inbound_token != 0,
             })
         },
     )
@@ -1638,6 +1695,9 @@ struct TriggerRuleRequest {
     /// A `null` element is `""` to Go, not an error (#295).
     filter_keywords: Option<super::gojson::GoList<String>>,
     filter_chat_ids: Option<super::gojson::GoList<String>>,
+    /// The Slack sender allowlist (#688). Replaced like the rest: an omitted
+    /// key stores `[]`.
+    filter_user_ids: Option<super::gojson::GoList<String>>,
     /// Migration 39's five execution settings (#563).
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     model: String,
@@ -1660,7 +1720,8 @@ struct TriggerRuleRequest {
 
 /// A rule may link only to a task that exists (#681). Empty is "not linked"
 /// and is never looked up; the column has no foreign key, so this check at the
-/// write is the only thing that keeps a mistyped id out.
+/// write is the only thing that keeps a mistyped id out. `update` runs it only
+/// for an id that differs from the stored one (#687).
 fn check_rule_task(conn: &rusqlite::Connection, task_id: &str) -> Result<(), WriteError> {
     if task_id.is_empty() {
         return Ok(());
@@ -1680,12 +1741,11 @@ fn check_rule_task(conn: &rusqlite::Connection, task_id: &str) -> Result<(), Wri
 
 /// The checks `create` and `update` share, after `agent_slug`.
 ///
-/// **An unknown `permission_mode` is not a run that fails, it is a run with no
-/// permissions at all.** `chat/runner.rs` matches `default`, `plan` and
-/// `dontAsk` and routes *everything else* — `bypass`, empty, and any typo alike
-/// — into `with_permission_mode(BYPASS_PERMISSIONS).with_bypass_permissions()`,
-/// so `"yolo"` would silently escalate rather than error. That catch-all is why
-/// the set is checked here, at the write, and why it is
+/// **An unknown `permission_mode` is refused here, at the write**, so the one
+/// who typed it is told. `chat/runner.rs` no longer runs a mode it does not
+/// know (#675) and the dispatcher runs such a stored row with prompts denied,
+/// but both of those are answers to a row that got past this check, and
+/// neither tells anyone which field was wrong. The set is
 /// [`chats::CHAT_PERMISSION_MODES`] rather than a list of this module's own.
 ///
 /// `timeout_minutes` is refused rather than clamped for the same reason a bad
@@ -1704,6 +1764,100 @@ fn validate_rule_settings(req: &TriggerRuleRequest) -> Result<(), WriteError> {
             // `tasks.rs`' wording for the same field name under the same
             // bound, minus its "1" -- 0 is this field's "use the default".
             format!("timeout must be between 0 and {RULE_MAX_TIMEOUT_MINUTES} minutes"),
+        ));
+    }
+    Ok(())
+}
+
+/// A rule must name the senders it answers: a Telegram rule its chats (#674),
+/// a Slack rule its users (#688, [`validate_rule_users`]).
+///
+/// On Telegram `filter_chat_ids` is the rule's sender allowlist, and the dispatcher reads
+/// an empty one as nobody (`match_rule::sender_allowed`), so a rule stored
+/// without one could never fire. It is refused here rather than stored, so
+/// the write and the filter agree and neither is the only guard. Every entry
+/// is a numeric chat id in its canonical spelling, the form the dispatcher
+/// compares against (`msg.chat.id.to_string()`): `+42`, `042` and `@name`
+/// would be stored and then never match.
+///
+/// The chat-id check is Telegram's alone. On a Slack rule the same column is a
+/// channel selection, and empty there is the workspace-wide default
+/// (`select_rule`); a Slack rule's senders are `filter_user_ids`.
+fn validate_rule_senders(
+    integration_type: &str,
+    req: &TriggerRuleRequest,
+) -> Result<(), WriteError> {
+    if integration_type == "slack" {
+        return validate_rule_users(req);
+    }
+    if integration_type != "telegram" {
+        return Ok(());
+    }
+    let chat_ids = req.filter_chat_ids.as_ref().map(|list| list.0.as_slice());
+    let chat_ids = chat_ids.unwrap_or_default();
+    if chat_ids.is_empty() {
+        return Err(WriteError::validation(
+            "filter_chat_ids",
+            "at least one chat id is required: a Telegram rule answers only the chats it lists",
+        ));
+    }
+    for chat in chat_ids {
+        if chat.parse::<i64>().map(|n| n.to_string()).as_deref() != Ok(chat.as_str()) {
+            return Err(WriteError::validation(
+                "filter_chat_ids",
+                format!("chat id {chat:?} is not a numeric Telegram chat id"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A rule's `filter_user_ids` as it is stored (#688): each entry trimmed,
+/// blanks dropped, duplicates removed keeping the first. An omitted or `null`
+/// key is an empty list.
+fn rule_user_ids(req: &TriggerRuleRequest) -> Vec<String> {
+    let given = req.filter_user_ids.as_ref().map(|list| list.0.as_slice());
+    let mut out: Vec<String> = Vec::new();
+    for id in given.unwrap_or_default() {
+        let id = id.trim();
+        if !id.is_empty() && !out.iter().any(|kept| kept == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
+}
+
+/// Whether `id` is spelled like a Slack user id: `U` or `W`, then one or more
+/// uppercase letters or digits.
+fn is_slack_user_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    matches!(bytes.next(), Some(b'U' | b'W'))
+        && id.len() > 1
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// A Slack rule that is on must name the users it answers (#688).
+///
+/// `slack::inbound` reads an empty `filter_user_ids` as nobody
+/// (`match_rule::sender_allowed`), so an enabled rule stored without one could
+/// never fire. It is refused here rather than stored, so the write and the
+/// filter agree and neither is the only guard. A rule that is off may be saved
+/// with no users: that is how a rule from before migration 53 is edited, and
+/// the enabled switch posts the stored rule back, so this same 422 is what
+/// keeps it off until a user is listed. An entry that is not spelled like a
+/// user id is refused either way, because it would be stored and never match.
+fn validate_rule_users(req: &TriggerRuleRequest) -> Result<(), WriteError> {
+    let user_ids = rule_user_ids(req);
+    if let Some(bad) = user_ids.iter().find(|id| !is_slack_user_id(id)) {
+        return Err(WriteError::validation(
+            "filter_user_ids",
+            format!("user id {bad:?} is not a Slack user id"),
+        ));
+    }
+    if req.enabled && user_ids.is_empty() {
+        return Err(WriteError::validation(
+            "filter_user_ids",
+            "at least one user id is required to enable: a Slack rule answers only the users it lists",
         ));
     }
     Ok(())
@@ -1730,12 +1884,13 @@ fn create_trigger_rule(
     validate_rule_settings(&req)?;
 
     let conn = open_for_write(db_path)?;
-    if !integration_exists(&conn, integration_id)? {
+    let Some(integration_type) = integration_type_of(&conn, integration_id)? else {
         return Err(WriteError::NotFound {
             resource: "integration".to_string(),
             id: integration_id.to_string(),
         });
-    }
+    };
+    validate_rule_senders(&integration_type, &req)?;
     check_rule_task(&conn, &req.task_id)?;
 
     // One `now` for both columns and for the response: Go takes a single
@@ -1743,6 +1898,7 @@ fn create_trigger_rule(
     // whose `created_at` and `updated_at` differ by a nanosecond.
     let now = super::gotime::now_go_text();
     let stamp = parse_written(&now)?;
+    let user_ids = rule_user_ids(&req);
     let rule = TriggerRule {
         id: uuid::Uuid::new_v4().to_string(),
         integration_id: integration_id.to_string(),
@@ -1752,6 +1908,7 @@ fn create_trigger_rule(
         filter_prefix: req.filter_prefix,
         filter_keywords: req.filter_keywords.map(|list| list.0),
         filter_chat_ids: req.filter_chat_ids.map(|list| list.0),
+        filter_user_ids: Some(user_ids),
         model: req.model,
         working_directory: req.working_directory,
         settings_profile_id: req.settings_profile_id,
@@ -1797,11 +1954,23 @@ fn update_trigger_rule(
         ));
     }
     validate_rule_settings(&req)?;
-    check_rule_task(&conn, &req.task_id)?;
+    // The on/off switch posts the stored rule back, so this also refuses
+    // turning on a rule that migration 51 turned off, until it lists a chat,
+    // and a Slack rule from before migration 53, until it lists a user.
+    let integration_type = integration_type_of(&conn, &existing.integration_id)?;
+    validate_rule_senders(integration_type.as_deref().unwrap_or_default(), &req)?;
+    // Only a *changed* link is looked up (#687). A task deleted after the rule
+    // was linked leaves a dangling id here, and the form and the row's enabled
+    // switch both send the stored id back: refusing it would make that rule
+    // impossible to edit or turn off until it was relinked.
+    if req.task_id != existing.task_id {
+        check_rule_task(&conn, &req.task_id)?;
+    }
 
     // `UpdateRule` keeps the stored id, integration and creation time and
     // replaces everything else — a field the caller omitted is cleared, not kept.
     let now = super::gotime::now_go_text();
+    let user_ids = rule_user_ids(&req);
     let rule = TriggerRule {
         id: existing.id,
         integration_id: existing.integration_id,
@@ -1811,6 +1980,7 @@ fn update_trigger_rule(
         filter_prefix: req.filter_prefix,
         filter_keywords: req.filter_keywords.map(|list| list.0),
         filter_chat_ids: req.filter_chat_ids.map(|list| list.0),
+        filter_user_ids: Some(user_ids),
         model: req.model,
         working_directory: req.working_directory,
         settings_profile_id: req.settings_profile_id,
@@ -1828,8 +1998,9 @@ fn update_trigger_rule(
             filter_prefix = ?4, filter_keywords = ?5, filter_chat_ids = ?6,
             model = ?7, working_directory = ?8, settings_profile_id = ?9,
             permission_mode = ?10, timeout_minutes = ?11,
-            updated_at = ?12, task_id = ?13, continue_on_reply = ?14
-         WHERE id = ?15",
+            updated_at = ?12, task_id = ?13, continue_on_reply = ?14,
+            filter_user_ids = ?15
+         WHERE id = ?16",
         rusqlite::params![
             &rule.name,
             &rule.agent_slug,
@@ -1845,6 +2016,7 @@ fn update_trigger_rule(
             &now,
             &rule.task_id,
             i64::from(rule.continue_on_reply),
+            &marshal_list(&rule.filter_user_ids)?,
             &rule.id,
         ],
     )
@@ -1885,8 +2057,9 @@ fn insert_rule(
             (id, integration_id, name, agent_slug, enabled,
              filter_prefix, filter_keywords, filter_chat_ids,
              model, working_directory, settings_profile_id, permission_mode,
-             timeout_minutes, created_at, updated_at, task_id, continue_on_reply)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             timeout_minutes, created_at, updated_at, task_id, continue_on_reply,
+             filter_user_ids)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             &rule.id,
             &rule.integration_id,
@@ -1905,6 +2078,7 @@ fn insert_rule(
             now,
             &rule.task_id,
             i64::from(rule.continue_on_reply),
+            &marshal_list(&rule.filter_user_ids)?,
         ],
     )
     .map_err(|e| WriteError::Fallback(format!("creating trigger rule: {e}")))?;
@@ -1940,15 +2114,6 @@ fn integration_type_of(
     })
     .optional()
     .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
-}
-
-fn integration_exists(conn: &rusqlite::Connection, id: &str) -> Result<bool, WriteError> {
-    conn.query_row("SELECT 1 FROM integrations WHERE id = ?1", [id], |_| {
-        Ok(true)
-    })
-    .optional()
-    .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
-    .map(|found| found.unwrap_or(false))
 }
 
 /// Re-read a timestamp this process just formatted.
@@ -2020,7 +2185,8 @@ mod tests {
             created_at          DATETIME NOT NULL,
             updated_at          DATETIME NOT NULL,
             task_id             TEXT NOT NULL DEFAULT '',
-            continue_on_reply   INTEGER NOT NULL DEFAULT 0
+            continue_on_reply   INTEGER NOT NULL DEFAULT 0,
+            filter_user_ids     TEXT NOT NULL DEFAULT '[]'
         );";
 
     /// The secret is a distinctive string so a leak is unmistakable in any
@@ -3241,7 +3407,8 @@ mod tests {
                 "slack",
                 r#"{"auth_mode":"bot_token","bot_token":"xoxb-1"}"#,
             ),
-            ("telegram", "telegram", r#"{"bot_token":"123:abc"}"#),
+            ("github", "github", r#"{"personal_access_token":"ghp_x"}"#),
+            ("tg-no-token", "telegram", r#"{"bot_token":"  "}"#),
         ] {
             conn.execute(
                 "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
@@ -3257,8 +3424,26 @@ mod tests {
         assert_eq!(unknown.status(), axum::http::StatusCode::NOT_FOUND);
 
         let wrong_type =
-            update_inbound(file.path(), "telegram", br#"{"enabled":true}"#).expect_err("400");
+            update_inbound(file.path(), "github", br#"{"enabled":true}"#).expect_err("400");
         assert_eq!(wrong_type.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let no_bot_token =
+            update_inbound(file.path(), "tg-no-token", br#"{"enabled":true}"#).expect_err("422");
+        assert_eq!(
+            no_bot_token.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert!(
+            no_bot_token.message().contains("bot_token"),
+            "the 422 must name the field: {}",
+            no_bot_token.message()
+        );
+        assert!(
+            !get(file.path(), "tg-no-token")
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        );
 
         let no_token =
             update_inbound(file.path(), "no-token", br#"{"enabled":true}"#).expect_err("422");
@@ -3272,7 +3457,7 @@ mod tests {
             no_token.message()
         );
 
-        // Nothing was written by any of the three.
+        // Nothing was written by any of the four.
         assert!(
             !get(file.path(), "no-token")
                 .expect("get")
@@ -3428,14 +3613,33 @@ mod tests {
                 .inbound_enabled
         );
 
-        // A type change strands the switch just as surely: `update_inbound`
-        // answers 400 for a non-Slack row **whichever way** it is being moved,
-        // so a row that leaves `slack` with the switch on could never be turned
-        // off again. Both arms clear it — this `PUT` omits `credentials` on
-        // purpose, because that arm assigns fewer columns and was the one that
-        // missed it.
-        let retyped =
+        // A change between the two inbound types clears it too (#676): the
+        // switch was turned on for the other transport.
+        let to_telegram =
             update(file.path(), &id, br#"{"name":"R2","type":"telegram"}"#).expect("update");
+        assert!(
+            body_of(&to_telegram).contains(r#""inbound_enabled":false"#),
+            "{}",
+            body_of(&to_telegram)
+        );
+        update(
+            file.path(),
+            &id,
+            br#"{"name":"R2","type":"slack",
+                 "credentials":{"auth_mode":"bot_token","bot_token":"xoxb-3",
+                                "app_token":"xapp-1-abc"}}"#,
+        )
+        .expect("update");
+        update_inbound(file.path(), &id, br#"{"enabled":true}"#).expect("enable");
+
+        // A type change strands the switch just as surely: `update_inbound`
+        // answers 400 for a type with no inbound transport **whichever way** it
+        // is being moved, so a row that leaves `slack` with the switch on could
+        // never be turned off again. Both arms clear it — this `PUT` omits
+        // `credentials` on purpose, because that arm assigns fewer columns and
+        // was the one that missed it.
+        let retyped =
+            update(file.path(), &id, br#"{"name":"R2","type":"github"}"#).expect("update");
         assert!(
             body_of(&retyped).contains(r#""inbound_enabled":false"#),
             "{}",
@@ -3454,6 +3658,66 @@ mod tests {
             axum::http::StatusCode::BAD_REQUEST,
             "the 400 is unconditional, which is why the write above has to clear the column"
         );
+    }
+
+    /// The switch on a Telegram row (#676): it needs a stored bot token to turn
+    /// on, and a `PUT` that replaces the blob with one holding none turns it
+    /// off, exactly as the Slack row's app token does.
+    #[test]
+    fn the_inbound_switch_follows_a_telegram_rows_bot_token() {
+        let file = migrated();
+        let created = create(
+            file.path(),
+            br#"{"name":"T","type":"telegram","credentials":{"bot_token":"123:abc"}}"#,
+        )
+        .expect("create");
+        let id = serde_json::from_str::<serde_json::Value>(&body_of(&created)).expect("json")["id"]
+            .as_str()
+            .expect("an id")
+            .to_string();
+        let enabled = |file: &tempfile::NamedTempFile| {
+            get(file.path(), &id)
+                .expect("get")
+                .expect("a row")
+                .inbound_enabled
+        };
+
+        let answer = update_inbound(file.path(), &id, br#"{"enabled":true}"#).expect("enable");
+        assert_eq!(body_of(&answer), "{\"inbound_enabled\":true}\n");
+        assert!(enabled(&file));
+
+        // A rename omits `credentials`, so the token and the switch both stay.
+        let renamed =
+            update(file.path(), &id, br#"{"name":"T2","type":"telegram"}"#).expect("update");
+        assert!(
+            body_of(&renamed).contains(r#""inbound_enabled":true"#),
+            "{}",
+            body_of(&renamed)
+        );
+        // …and so does a blob that still holds a bot token.
+        update(
+            file.path(),
+            &id,
+            br#"{"name":"T2","type":"telegram","credentials":{"bot_token":"456:def"}}"#,
+        )
+        .expect("update");
+        assert!(enabled(&file));
+
+        // A blob with no bot token takes the switch with it.
+        let emptied = update(
+            file.path(),
+            &id,
+            br#"{"name":"T2","type":"telegram","credentials":{"bot_token":""}}"#,
+        )
+        .expect("update");
+        assert!(
+            body_of(&emptied).contains(r#""inbound_enabled":false"#),
+            "{}",
+            body_of(&emptied)
+        );
+        assert!(!enabled(&file));
+        // Off is always allowed, token or not.
+        update_inbound(file.path(), &id, br#"{"enabled":false}"#).expect("disable");
     }
 
     /// One rule, two spellings — [`has_credentials_sql`] and
@@ -3732,17 +3996,429 @@ mod tests {
         );
     }
 
+    /// A Slack row, for the rule tests that are about the write itself: their
+    /// bodies name no channel, which Slack allows and Telegram refuses (#674).
     fn seed_integration(file: &tempfile::NamedTempFile, id: &str) {
+        seed_integration_of(file, id, "slack");
+    }
+
+    fn seed_integration_of(file: &tempfile::NamedTempFile, id: &str, kind: &str) {
         Connection::open(file.path())
             .expect("open")
             .execute(
                 "INSERT INTO integrations (id, name, type, enabled, credentials, services,
                                            created_at, updated_at)
-                 VALUES (?1, 'n', 'telegram', 1, '{}', '{}', '2026-01-01 00:00:00 +0000 UTC',
+                 VALUES (?1, 'n', ?2, 1, '{}', '{}', '2026-01-01 00:00:00 +0000 UTC',
                          '2026-01-01 00:00:00 +0000 UTC')",
-                [id],
+                [id, kind],
             )
             .expect("seed");
+    }
+
+    /// Every body that names no usable chat, and the message each is refused
+    /// with. The first four are "unset"; the rest name something that is not a
+    /// chat id the dispatcher could ever compare equal to.
+    fn refused_sender_lists() -> Vec<(&'static str, String)> {
+        let required =
+            "at least one chat id is required: a Telegram rule answers only the chats it lists";
+        let not_numeric =
+            |chat: &str| format!("chat id {chat:?} is not a numeric Telegram chat id");
+        vec![
+            (r#"{"agent_slug":"a","enabled":true}"#, required.to_string()),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_chat_ids":null}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_chat_ids":[]}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":false,"filter_chat_ids":[]}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":[null]}"#,
+                not_numeric(""),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["42",""]}"#,
+                not_numeric(""),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["*"]}"#,
+                not_numeric("*"),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["@me"]}"#,
+                not_numeric("@me"),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["+42"]}"#,
+                not_numeric("+42"),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":["042"]}"#,
+                not_numeric("042"),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_chat_ids":[" 42"]}"#,
+                not_numeric(" 42"),
+            ),
+        ]
+    }
+
+    fn assert_refused_on_senders(err: &WriteError, want: &str, body: &str) {
+        assert_eq!(
+            err.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        assert_eq!(
+            err.message(),
+            format!(r#"validation error for "filter_chat_ids": {want}"#),
+            "{body}"
+        );
+    }
+
+    /// #674, the create: a Telegram rule that lists no chat is refused on the
+    /// field, and nothing is stored.
+    #[test]
+    fn a_telegram_rule_that_lists_no_chat_cannot_be_created() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        for (body, want) in refused_sender_lists() {
+            let err = create_trigger_rule(file.path(), "tg", body.as_bytes())
+                .expect_err("no allowed chat");
+            assert_refused_on_senders(&err, &want, body);
+        }
+        assert_eq!(
+            stored(&file, "SELECT CAST(COUNT(*) AS TEXT) FROM trigger_rules"),
+            "0"
+        );
+    }
+
+    /// #674, the update: the same refusal, and the stored rule keeps the list
+    /// it had. The write is replace, so a body that omits the key would
+    /// otherwise clear it.
+    #[test]
+    fn a_telegram_rule_cannot_be_updated_into_listing_no_chat() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        create_trigger_rule(
+            file.path(),
+            "tg",
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["42"]}"#,
+        )
+        .expect("create");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        for (body, want) in refused_sender_lists() {
+            let err = update_trigger_rule(file.path(), "tg", &id, body.as_bytes())
+                .expect_err("no allowed chat");
+            assert_refused_on_senders(&err, &want, body);
+            assert_eq!(
+                stored(
+                    &file,
+                    "SELECT filter_chat_ids || '/' || enabled FROM trigger_rules"
+                ),
+                r#"["42"]/1"#,
+                "{body}"
+            );
+        }
+    }
+
+    /// #674, the allowed case: a list of canonical chat ids is stored as sent,
+    /// negative group ids included.
+    #[test]
+    fn a_telegram_rule_that_lists_its_chats_is_stored() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        let created = create_trigger_rule(
+            file.path(),
+            "tg",
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["42","-1001234567890"]}"#,
+        )
+        .expect("create");
+        assert_eq!(created.status, axum::http::StatusCode::CREATED);
+        let body = body_of(&created);
+        assert!(
+            body.contains(r#""filter_chat_ids":["42","-1001234567890"]"#),
+            "{body}"
+        );
+
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        update_trigger_rule(
+            file.path(),
+            "tg",
+            &id,
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["7"]}"#,
+        )
+        .expect("update");
+        assert_eq!(
+            stored(&file, "SELECT filter_chat_ids FROM trigger_rules"),
+            r#"["7"]"#
+        );
+    }
+
+    /// A rule stored before the requirement, as migration 51 leaves it: off,
+    /// with no list. The row's on/off switch posts the stored rule back with
+    /// `enabled` flipped, and that is refused until the rule lists a chat.
+    #[test]
+    fn a_stored_telegram_rule_with_no_chat_cannot_be_turned_on() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO trigger_rules
+                    (id, integration_id, name, agent_slug, enabled, filter_chat_ids,
+                     created_at, updated_at)
+                 VALUES ('old', 'tg', 'Old', 'a', 0, '[]',
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("seed rule");
+
+        let body = r#"{"name":"Old","agent_slug":"a","enabled":true,"filter_chat_ids":null}"#;
+        let err = update_trigger_rule(file.path(), "tg", "old", body.as_bytes())
+            .expect_err("still lists no chat");
+        assert_refused_on_senders(
+            &err,
+            "at least one chat id is required: a Telegram rule answers only the chats it lists",
+            body,
+        );
+        assert_eq!(
+            stored(&file, "SELECT CAST(enabled AS TEXT) FROM trigger_rules"),
+            "0"
+        );
+
+        // Listing one is what turns it back on.
+        update_trigger_rule(
+            file.path(),
+            "tg",
+            "old",
+            br#"{"name":"Old","agent_slug":"a","enabled":true,"filter_chat_ids":["42"]}"#,
+        )
+        .expect("update");
+        assert_eq!(
+            stored(&file, "SELECT CAST(enabled AS TEXT) FROM trigger_rules"),
+            "1"
+        );
+    }
+
+    /// The chat requirement is Telegram's. A Slack rule's list is a channel
+    /// selection, and one with none is the workspace-wide default.
+    #[test]
+    fn a_slack_rule_may_still_list_no_channel() {
+        let file = migrated();
+        seed_integration_of(&file, "sl", "slack");
+        for body in [
+            &br#"{"agent_slug":"a","enabled":true,"filter_user_ids":["U0123ABCD"]}"#[..],
+            br#"{"agent_slug":"a","enabled":true,"filter_user_ids":["U0123ABCD"],"filter_chat_ids":[]}"#,
+            br#"{"agent_slug":"a","enabled":true,"filter_user_ids":["U0123ABCD"],"filter_chat_ids":["C0123ABCD"]}"#,
+        ] {
+            let created = create_trigger_rule(file.path(), "sl", body).expect("create");
+            assert_eq!(created.status, axum::http::StatusCode::CREATED);
+        }
+    }
+
+    /// #688: a Slack rule that is on must list a user. Both writes refuse it on
+    /// the field, whatever shape "lists nobody" takes, and store nothing.
+    #[test]
+    fn a_slack_rule_cannot_be_enabled_without_an_allowed_user() {
+        let file = migrated();
+        seed_integration_of(&file, "sl", "slack");
+        create_trigger_rule(
+            file.path(),
+            "sl",
+            br#"{"agent_slug":"a","enabled":true,"filter_user_ids":["U0123ABCD"]}"#,
+        )
+        .expect("create");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        let required = "at least one user id is required to enable: \
+                        a Slack rule answers only the users it lists";
+        for (body, want) in [
+            (r#"{"agent_slug":"a","enabled":true}"#, required.to_string()),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_user_ids":null}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_user_ids":[]}"#,
+                required.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_user_ids":[null,""," "]}"#,
+                required.to_string(),
+            ),
+            // Not spelled like a user id: refused on or off, since it would be
+            // stored and never match.
+            (
+                r#"{"agent_slug":"a","enabled":true,"filter_user_ids":["u0123abcd"]}"#,
+                r#"user id "u0123abcd" is not a Slack user id"#.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","enabled":false,"filter_user_ids":["U0123ABCD","@ada"]}"#,
+                r#"user id "@ada" is not a Slack user id"#.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_user_ids":["C0123ABCD"]}"#,
+                r#"user id "C0123ABCD" is not a Slack user id"#.to_string(),
+            ),
+            (
+                r#"{"agent_slug":"a","filter_user_ids":["U"]}"#,
+                r#"user id "U" is not a Slack user id"#.to_string(),
+            ),
+        ] {
+            for err in [
+                create_trigger_rule(file.path(), "sl", body.as_bytes()).expect_err("create"),
+                update_trigger_rule(file.path(), "sl", &id, body.as_bytes()).expect_err("update"),
+            ] {
+                assert_eq!(
+                    err.status(),
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "{body}"
+                );
+                assert_eq!(
+                    err.message(),
+                    format!(r#"validation error for "filter_user_ids": {want}"#),
+                    "{body}"
+                );
+            }
+        }
+        assert_eq!(
+            stored(
+                &file,
+                "SELECT CAST(COUNT(*) AS TEXT) || '/' || MAX(filter_user_ids) FROM trigger_rules"
+            ),
+            r#"1/["U0123ABCD"]"#,
+            "nothing was created and the stored list was not replaced"
+        );
+    }
+
+    /// #688: a Slack rule that is off may be stored with no users, which is how
+    /// a rule from before migration 53 is edited. The stored list is the given
+    /// one trimmed, without blanks or repeats, and it ships after
+    /// `filter_chat_ids`; an omitted key stores `[]`, not `null`.
+    #[test]
+    fn a_slack_rules_users_are_stored_normalised_and_an_off_rule_needs_none() {
+        let file = migrated();
+        seed_integration_of(&file, "sl", "slack");
+
+        let off = create_trigger_rule(file.path(), "sl", br#"{"agent_slug":"a","enabled":false}"#)
+            .expect("an off rule needs no users");
+        assert!(
+            body_of(&off)
+                .contains(r#""enabled":false,"filter_prefix":"","filter_keywords":null,"filter_chat_ids":null,"filter_user_ids":[],"model":"#),
+            "{}",
+            body_of(&off)
+        );
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        assert_eq!(
+            stored(&file, "SELECT filter_user_ids FROM trigger_rules"),
+            "[]"
+        );
+
+        let on = update_trigger_rule(
+            file.path(),
+            "sl",
+            &id,
+            br#"{"agent_slug":"a","enabled":true,
+                 "filter_user_ids":[" U0123ABCD ","",null,"W9ENTERPRISE","U0123ABCD"]}"#,
+        )
+        .expect("enable with users");
+        let wire =
+            r#""filter_chat_ids":null,"filter_user_ids":["U0123ABCD","W9ENTERPRISE"],"model":"#;
+        assert!(body_of(&on).contains(wire), "{}", body_of(&on));
+        assert_eq!(
+            stored(&file, "SELECT filter_user_ids FROM trigger_rules"),
+            r#"["U0123ABCD","W9ENTERPRISE"]"#
+        );
+        let listed = list_trigger_rules(file.path(), "sl").expect("list");
+        assert_eq!(
+            listed[0].filter_user_ids,
+            Some(vec!["U0123ABCD".to_string(), "W9ENTERPRISE".to_string()])
+        );
+
+        // Replace, like every other field: turning it off without the key
+        // clears the list.
+        update_trigger_rule(file.path(), "sl", &id, br#"{"agent_slug":"a"}"#).expect("off");
+        assert_eq!(
+            stored(&file, "SELECT filter_user_ids FROM trigger_rules"),
+            "[]"
+        );
+    }
+
+    /// #688: the user list is Slack's requirement. A Telegram rule stores
+    /// whatever it is given there, unchecked, and is never asked for one.
+    #[test]
+    fn a_telegram_rule_stores_a_user_list_and_never_needs_one() {
+        let file = migrated();
+        seed_integration_of(&file, "tg", "telegram");
+        let created = create_trigger_rule(
+            file.path(),
+            "tg",
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["42"]}"#,
+        )
+        .expect("no user list");
+        assert!(
+            body_of(&created).contains(r#""filter_chat_ids":["42"],"filter_user_ids":[],"#),
+            "{}",
+            body_of(&created)
+        );
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        update_trigger_rule(
+            file.path(),
+            "tg",
+            &id,
+            br#"{"agent_slug":"a","enabled":true,"filter_chat_ids":["42"],
+                 "filter_user_ids":["not a slack id"]}"#,
+        )
+        .expect("stored, not validated");
+        assert_eq!(
+            stored(&file, "SELECT filter_user_ids FROM trigger_rules"),
+            r#"["not a slack id"]"#
+        );
+    }
+
+    /// #688: a Slack rule from before migration 53 is on with no users. The
+    /// row's enabled switch posts the stored rule back, and that is refused
+    /// until a user is listed; turning it off, or editing it while off, works.
+    #[test]
+    fn a_slack_rule_predating_the_user_list_reads_back_empty_and_cannot_be_re_enabled() {
+        let file = migrated();
+        seed_integration_of(&file, "sl", "slack");
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO trigger_rules
+                    (id, integration_id, name, agent_slug, enabled, created_at, updated_at)
+                 VALUES ('old', 'sl', 'Old', 'a', 1,
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("a rule written by an older build");
+        let listed = list_trigger_rules(file.path(), "sl").expect("list");
+        assert!(listed[0].enabled, "the migration left it on");
+        assert_eq!(listed[0].filter_user_ids, Some(vec![]));
+
+        let err = update_trigger_rule(
+            file.path(),
+            "sl",
+            "old",
+            br#"{"name":"Old","agent_slug":"a","enabled":true,"filter_user_ids":[]}"#,
+        )
+        .expect_err("posting it back as it is");
+        assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        update_trigger_rule(
+            file.path(),
+            "sl",
+            "old",
+            br#"{"name":"Old","agent_slug":"a","enabled":false,"filter_user_ids":[]}"#,
+        )
+        .expect("turning it off");
     }
 
     #[test]
@@ -3753,7 +4429,8 @@ mod tests {
         let created = create_trigger_rule(
             file.path(),
             "int-1",
-            br#"{"name":"R","agent_slug":"a","enabled":true,"filter_keywords":["x"]}"#,
+            br#"{"name":"R","agent_slug":"a","enabled":true,"filter_keywords":["x"],
+                 "filter_user_ids":["U0123ABCD"]}"#,
         )
         .expect("create rule");
         assert_eq!(created.status, axum::http::StatusCode::CREATED);
@@ -3853,7 +4530,7 @@ mod tests {
         // the filters and the timestamps, not merely their presence.
         assert!(
             body.contains(
-                r#""filter_chat_ids":null,"model":"claude-opus-4-6","working_directory":"/srv/work","settings_profile_id":"p-7","permission_mode":"plan","timeout_minutes":45,"task_id":"","continue_on_reply":false,"created_at":"#
+                r#""filter_chat_ids":null,"filter_user_ids":[],"model":"claude-opus-4-6","working_directory":"/srv/work","settings_profile_id":"p-7","permission_mode":"plan","timeout_minutes":45,"task_id":"","continue_on_reply":false,"created_at":"#
             ),
             "{body}"
         );
@@ -3985,6 +4662,70 @@ mod tests {
             ),
             "1/a",
             "neither refusal wrote anything"
+        );
+    }
+
+    /// #687: nothing clears `task_id` when its task is deleted, so the update
+    /// accepts the stored id back — a save that leaves the link alone and the
+    /// row's enabled switch both send it — and still refuses a *new* unknown one.
+    #[test]
+    fn a_rule_whose_task_was_deleted_can_still_be_updated() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO scheduled_tasks (id, name, prompt) VALUES ('task-1', 'T', 'p')",
+                [],
+            )
+            .expect("seed task");
+        create_trigger_rule(
+            file.path(),
+            "int-1",
+            br#"{"agent_slug":"a","enabled":true,"task_id":"task-1","filter_user_ids":["U0123ABCD"]}"#,
+        )
+        .expect("linked rule");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        Connection::open(file.path())
+            .expect("open")
+            .execute("DELETE FROM scheduled_tasks WHERE id = 'task-1'", [])
+            .expect("delete task");
+
+        let answer = update_trigger_rule(
+            file.path(),
+            "int-1",
+            &id,
+            br#"{"agent_slug":"b","enabled":false,"task_id":"task-1"}"#,
+        )
+        .unwrap_or_else(|e| panic!("the stored id is accepted back: {}", e.message()));
+        assert_eq!(answer.status, axum::http::StatusCode::OK);
+        assert_eq!(
+            stored(
+                &file,
+                "SELECT agent_slug || '/' || enabled || '/' || task_id FROM trigger_rules"
+            ),
+            "b/0/task-1",
+            "the write landed and kept the link"
+        );
+
+        let err = update_trigger_rule(
+            file.path(),
+            "int-1",
+            &id,
+            br#"{"agent_slug":"c","task_id":"another-missing-task"}"#,
+        )
+        .expect_err("a different unknown id");
+        assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            err.message()
+                .starts_with(r#"validation error for "task_id""#),
+            "{}",
+            err.message()
+        );
+        assert_eq!(
+            stored(&file, "SELECT agent_slug FROM trigger_rules"),
+            "b",
+            "the refusal wrote nothing"
         );
     }
 

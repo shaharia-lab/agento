@@ -47,8 +47,8 @@ src/
                  options, lifted out of views/AgentsView.tsx by #569 for its
                  second consumer (the Slack trigger-rule form). The four
                  permission values are pinned through typeAssert.ts, because an
-                 unrecognised mode is not a 422 on the chat runner — it routes
-                 everything it does not recognise into bypass.
+                 unrecognised mode is not a 422 on the chat runner — it fails
+                 every run that carries it (#675).
                  **views/chat/NewChatBar.tsx deliberately keeps its own list**:
                  a chat is chat-shaped (an explicit "agent default" entry,
                  "Permissions: …" labels) and a trigger run is unattended
@@ -87,6 +87,28 @@ src/
                  stylesheet (styles/charts.css) so a consumer outside the
                  analytics section does not have to import that section's sheet.
                  The `.a-` class prefix is history, not scope
+    RetentionPrompt.tsx  the one-time retention prompt (#720), mounted in
+                 `App.tsx`'s banner area above every view. It reads
+                 `GET /api/settings` and `GET /api/settings/claude-retention`
+                 itself and renders nothing once
+                 `claude_retention_prompt_answered` is true, or while no
+                 indexed dir has a known retention. Three radio options, `Keep
+                 summaries in Agento` pre-selected; only `Extend Claude Code's
+                 retention` writes, one `PUT /api/settings/claude-retention`
+                 per chosen dir. **It has no control that can lower the
+                 value**: the presets come from `lib/claudeRetention.ts`'s
+                 `extendOptions`, which offers only those strictly above the
+                 dir's current value and none for a dir at `0` or `unknown`
+                 (the reason is shown as text beside the dir, #713). Confirm
+                 and the × both record the prompt as answered through
+                 `POST /api/settings/retention-prompt/answered` (#751), which
+                 stores that one flag. It must not go through the settings
+                 `PUT`: that replaces the whole row, and posting back what the
+                 `GET` answered stores the defaults the `GET` filled in. The
+                 server keeps the flag true once set, so a Settings draft
+                 loaded earlier cannot bring the prompt back.
+                 A failed write shows the server's message inline and leaves
+                 the prompt open. Its stylesheet is styles/retentionprompt.css
     SaveBar.tsx  the one action strip at the foot of a form (#519) — the six
                  savebar views' shared submit/partner pair, its verbs taken
                  from lib/formVerbs.ts and not overridable. Lifted out of
@@ -134,11 +156,12 @@ src/
                  hand-off in `SessionsView` resolves through it too — the by-id
                  route is only the fallback for a session with no list row,
                  because `SessionDetail` fetches the transcript itself on mount
-                 and taking it first reads every message twice. A caller must
-                 **not** pass `decoded_path` as `projectPath`: analytics ranks
-                 on it and the sessions list keys on `project_path` literally,
-                 so "Copy project path" would copy a string nothing filters
-                 on. Carries `styles/sessionlink.css` itself, the
+                 and taking it first reads every message twice. `projectPath`
+                 is the row's `project_path` and nothing else path-shaped.
+                 Analytics' `SessionRanking.project` and the picker's
+                 `decoded_path` are that same value (`docs/internal/native.md`,
+                 *Wire-format traps*), but the rankings pass nothing and
+                 "Copy project path" waits for the hydrated row. Carries `styles/sessionlink.css` itself, the
                  `components/charts.tsx` shape, since its consumers are in
                  sections that do not import `styles/sessions.css`.
                  **A caller that only has an id must resolve the row before
@@ -325,6 +348,47 @@ summary gains ` · ⚠`, so an untouched save round-trips it. Warnings wait unti
 *within* the owned name, not only equal to it. The channel field keeps its raw
 text row-locally and writes the parsed array through `edit()`.
 
+**A Slack rule's allowed users** (#688). `Provider.triggerSenders` in
+`views/integrations/catalog.ts` is set for Slack only and carries the field's
+words and the write's id pattern. `RuleForm` shows the **Allowed users**
+picker when it is set, and Save is shut, with the reason in
+text, while the rule is on and the list is empty or an entry is not a user id.
+A stored rule's row reads `N allowed user(s)`, and one with no users shows
+`triggerSenders.off` instead. Its switch is
+**not** disabled, unlike a Telegram rule with no chats: migration 53 left such a
+rule on, so the switch has to stay usable to turn it off, and turning it on is
+refused by the write with a 422 that the section's error line shows.
+`filter_user_ids` is in `RuleDraft` and both `RuleWrite` builders for every
+provider, because the `PUT` is replace.
+
+**The picker is `components/SlackUserPicker.tsx`** (#689), `SlackChannelPicker`
+over `GET /api/integrations/{id}/slack/users`, sharing `channelpicker.css`.
+`TriggerRules` caches the list per integration (`loadUsers`). The draft still
+holds the list as the comma-separated text, which is what the picker's
+`fallback` field edits when the list cannot be loaded; the picker reads and
+writes the same value as ids, so nothing typed is lost when the list arrives.
+A stored id the list lacks stays as `U… (not in list)`, and a search that is
+itself a user id (`triggerSenders.pattern`) offers an **Add** row, which is how
+a member past the route's page cap is allowed.
+
+**A trigger rule's task link, and what a run shows about its trigger** (#687).
+`RuleForm` (`IntegrationsView.tsx`) has a **Task** `Dropdown` over `GET
+/api/tasks`: `No task` is `task_id: ""`, and a stored id the loaded list does
+not hold stays selectable as `<id> (missing)`, so a save that leaves the control
+alone round-trips it. `linkedTask` is the one decision, and it has four answers:
+`none`, `found`, `missing` and `unknown`. `unknown` is a list that is still
+loading or whose read failed, and it shows no warning and no badge, because "not
+in a list that never arrived" is not "missing". The rule row reads `→ task:
+<name>` with a `badge--amber` of `paused` or `missing`. The agent and the five
+execution controls stay editable while a task is linked. In `JobsView`,
+`event_payload` is rendered as a JSX text child in a `.logblock` and nothing
+else: it is what an outside sender sent, so it never goes through `Markdown` or
+`dangerouslySetInnerHTML`. The **Continues** row selects the continued run with
+`openRun`, which does what the #542 hand-off effect does, so a run outside the
+loaded page or a deleted one behaves as a hand-off does. `triggerLabel`
+(`TasksView.tsx`, beside `StatusBadge`) is the one spelling of
+`triggered_by`, a `Record<TriggeredBy, string>` so a new wire value fails `tsc`.
+
 **The Tasks inspector previews an unsaved task** (#633): in create mode it
 renders `TaskPreviewBody` from `POST /api/tasks/preview`, requested through
 `useDebounced(draft, 250)` and `useResource`'s abort signal, and only while the
@@ -421,10 +485,8 @@ compile-time pin; `Delete` won because it was already the majority and because
   count and the bound in place of a name (`Delete 3 expired sessions that
   ended before 1 Sept 2026? Their … go with them.`).
 - **`Remove` survives for detaching, and only that**: taking a row out of a
-  list nothing has stored yet (a gateway alias's fallback target), or
-  unregistering something from a third party while the record it belongs to
-  stays (the Telegram webhook). If the record is gone afterwards, it is
-  `Delete`.
+  list nothing has stored yet (a gateway alias's fallback target). If the
+  record is gone afterwards, it is `Delete`.
 
 **One connection state gets one word, and it is `Connected`** (#518).
 `Integration.authenticated` renders in four places visible at once — the

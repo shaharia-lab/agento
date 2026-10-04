@@ -440,6 +440,14 @@ mod tests {
         tokio::spawn(async move {
             if let Ok((mut socket, _)) = listener.accept().await {
                 use tokio::io::AsyncWriteExt;
+                // The request is consumed first, and that is what makes the
+                // close below a clean end-of-stream on every platform. A
+                // socket closed with received bytes still unread is *reset*
+                // rather than finished, and Windows then discards what the
+                // client had not yet read — so the failure surfaced in the
+                // send there, not in the body, and this test asserted nothing
+                // about the path it exists for (#671).
+                read_request(&mut socket).await;
                 let _ = socket
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n{\"ok\":true")
                     .await;
@@ -467,6 +475,31 @@ mod tests {
         );
 
         set_api_base(None);
+    }
+
+    /// Reads one whole request off `socket`: the head, then as many body bytes
+    /// as its `Content-Length` promises.
+    async fn read_request(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            if let Some(head_end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
+                let body_len = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if seen.len() >= head_end + 4 + body_len {
+                    return;
+                }
+            }
+            match socket.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => seen.extend_from_slice(&chunk[..n]),
+            }
+        }
     }
 
     #[tokio::test]

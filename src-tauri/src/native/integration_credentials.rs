@@ -497,11 +497,17 @@ fn split_url(raw: &str) -> Result<(String, String), WriteError> {
             return Err(refuse());
         }
     }
-    // The **whole authority**, port included: both Go validators test `u.Host`,
-    // which keeps the port. Returning only the pre-colon part made
-    // `https://:8080` — a valid `Host` of `:8080` to Go — look like no host at
-    // all and answer 422. Emptiness is the only thing the callers test, so
-    // including the port changes nothing else.
+    // The host returned is the **whole authority**, port included. Emptiness
+    // is the only thing the callers test.
+    //
+    // Last, the parser every request to this site is built with (#670). A URL
+    // that passed everything above and that `url` still refuses — a port past
+    // 65535, an authority that is only a port — used to be stored and then
+    // fail at check time as a 500 or as "unreachable". It is the field that is
+    // wrong, so it is refused here, on the field.
+    if reqwest::Url::parse(raw).is_err() {
+        return Err(refuse());
+    }
     Ok((scheme, authority.to_string()))
 }
 
@@ -761,6 +767,34 @@ mod tests {
         );
     }
 
+    /// A site URL that passes every `net/url` rule above and that the request
+    /// parser still refuses is a 422 on `credentials.site_url` at write time
+    /// (#670), for Jira and Confluence alike — where it used to be stored and
+    /// then fail at check time.
+    #[test]
+    fn a_site_url_the_request_parser_refuses_is_a_422_on_the_field() {
+        for integration_type in ["jira", "confluence"] {
+            for url in ["https://x.net:99999", "https://:8080"] {
+                let e = err(
+                    integration_type,
+                    &format!(r#"{{"site_url":"{url}","email":"e","api_token":"t"}}"#),
+                );
+                assert_eq!(
+                    e.status(),
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "{integration_type} {url}"
+                );
+                assert_eq!(
+                    e.message(),
+                    format!(
+                        r#"validation error for "credentials.site_url": invalid site URL {url:?}"#
+                    ),
+                    "{integration_type} {url}"
+                );
+            }
+        }
+    }
+
     /// Accepting a URL `url.Parse` would refuse would store a `site_url` the
     /// hosting code cannot read; each of these is refused as a 422 (Go's own
     /// class for site-url failures), with this build's wording since #278.
@@ -812,11 +846,20 @@ mod tests {
     }
 
     /// The other side of the allowlist: punctuation that *looks* rejectable but
-    /// which is accepted must not be refused, or this over-rejects.
+    /// which is accepted must not be refused, or this over-rejects. `<` and
+    /// `>` pass the allowlist and are refused by the request parser (#670), so
+    /// they are no longer storable.
     #[test]
     fn the_punctuation_allowed_in_a_host_is_not_refused() {
+        for refused in ['<', '>'] {
+            let url = format!("https://x.net{refused}a");
+            assert!(
+                split_url(&url).is_err(),
+                "{url:?} is a host no request can be sent to"
+            );
+        }
         for ok in [
-            '!', '"', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '<', '=', '>', '_', '~',
+            '!', '"', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', '_', '~',
         ] {
             let url = format!("https://x.net{ok}a");
             let (scheme, host) = split_url(&url)
@@ -829,15 +872,12 @@ mod tests {
         assert_eq!(host, "ex\u{e4}mple.net");
     }
 
-    /// Both Go validators test `u.Host`, which **includes the port** — so an
-    /// empty hostname with a valid port is not an empty host.
+    /// The host this returns **includes the port**. An authority that is only
+    /// a port used to be returned as the host `:8080` — `net/url`'s reading —
+    /// and is refused since #670, because no request can be sent to it.
     #[test]
-    fn a_port_with_no_hostname_is_still_a_host() {
-        let (_, host) = split_url("https://:8080").expect("valid to Go");
-        assert_eq!(
-            host, ":8080",
-            "Go reads Host as \":8080\", which is not empty"
-        );
+    fn the_host_includes_the_port_and_a_port_alone_is_refused() {
+        assert!(split_url("https://:8080").is_err());
         // …and the whole authority is the host, port included.
         let (_, host) = split_url("https://x.net:8443/wiki").expect("valid");
         assert_eq!(host, "x.net:8443");

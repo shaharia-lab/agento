@@ -1,0 +1,51 @@
+/* The one-time retention prompt (#720): a banner with more than one line. */
+.banner.retention-prompt {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-3);
+}
+.retention-prompt__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+.retention-prompt__head > .iconbtn {
+  margin-left: auto;
+}
+.retention-prompt__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-left: calc(14px + var(--sp-4));
+}
+.retention-prompt__option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.retention-prompt__option input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+.retention-prompt__note {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+.retention-prompt__dirs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-left: calc(13px + var(--sp-3));
+}
+.retention-prompt__dir {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+}
+.retention-prompt__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-left: calc(14px + var(--sp-4));
+}

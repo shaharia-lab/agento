@@ -195,9 +195,16 @@ Beyond that, who decides depends on whether anyone is watching:
   mode, chosen when you start it — see [Permissions, per
   conversation](#permissions-per-conversation). Left at *Agent default* it falls
   back to the agent's, and to asking you if the agent has no preference.
-- **In an unattended run**, meaning a scheduled task, the agent's **permission
-  mode** field decides. Left unset those runs proceed without prompting, because
-  the alternative is a task that hangs until it times out.
+- **In an unattended run**, the agent's **permission mode** field decides, and
+  what happens when it is unset depends on who started the run. A scheduled
+  task, or one you start with **Run now**, proceeds without prompting, because
+  the alternative is a task that hangs until it times out. A run started by a
+  Slack or Telegram message never prompts either, but it **denies** what it
+  would have asked about instead of going ahead. That limits an agent to the
+  tools it lists. **An agent that lists no tools is allowed every built-in
+  one, including shell commands and file writes**, so give the agent an
+  explicit tool list if a message-started run should be held to less. Set the
+  rule's permission mode to *Bypass* if it should not be held back at all.
 
 **Known limitation:** the permission mode you pick on an *agent* is not currently
 saved. The underlying API drops the field, and the desktop app reproduces the
@@ -302,6 +309,52 @@ A Telegram integration can also run agents on incoming messages. Add a trigger
 rule saying which messages match and which agent handles them. The agent's reply
 goes back to the same chat.
 
+**Chat IDs** is required. A rule answers only the chats it lists, by numeric id:
+your own id for a private chat with the bot, or a group's id, which is negative.
+A message from any other chat starts nothing and gets no reply. To find an id,
+message `@userinfobot` on Telegram, or add `@RawDataBot` to the group for a
+moment.
+
+A rule saved by an earlier version with no chat ids is turned off when Agento
+updates, and its row says so. Edit the rule, add the chats it should answer, and
+turn it back on.
+
+A rule with no **permission mode** runs with prompts denied: anything the agent
+would have asked about is refused. Earlier versions ran such a rule with
+permission checks skipped, so a rule that relied on that needs *Bypass* chosen
+on it. An agent that lists no tools is still allowed every built-in one,
+including shell commands and file writes, so give the rule's agent an explicit
+tool list to limit what a message can make it do.
+
+The rule form has the same **Task** picker as a Slack rule's. A Telegram message
+does not start the linked task yet: it still runs the rule's own agent.
+
+### Telegram long polling
+
+Agento receives Telegram messages by asking Telegram for them over an outbound
+connection, called long polling. It needs no public URL, no tunnel and no
+inbound firewall rule.
+
+1. Store the bot token on the integration and save.
+2. Turn on **Inbound → Long polling**. The badge beside it reads `CONNECTING`,
+   then `CONNECTED` within a second or two.
+3. Add at least one trigger rule. With no rules, messages are received and
+   ignored.
+
+Turning it on removes any webhook registered for the bot, because Telegram
+does not deliver to a webhook and a poll at once. Messages sent while Agento
+was closed are delivered when it next starts, as long as Telegram still holds
+them (about a day).
+
+A Telegram trigger that already worked through a webhook in an earlier version
+is switched to long polling when you upgrade, and needs nothing from you.
+
+Only one program can poll a bot at a time. If the badge reads `ERROR` and names
+a second poller, see
+[Troubleshooting](troubleshooting.md#telegram-says-something-else-is-polling-this-bot-token).
+
+Turning **Long polling** off stops receiving immediately and nothing is deleted.
+
 ### Slack Socket Mode
 
 A Slack integration can also run agents on **mentions of the app** in a channel.
@@ -343,15 +396,18 @@ oauth_config:
       # Reads the channel's name, used to title the chat. Use groups:read
       # instead if the channel is private.
       - channels:read
+      # Lists the workspace's members, so a rule's Allowed users can be
+      # picked by name.
+      - users:read
 ```
 
-**That is the minimum for Socket Mode, and only for Socket Mode.** The same
+**That is what Socket Mode and its rule form use, and nothing more.** The same
 integration also gives your agents seven Slack *tools*, and most of them need
 scopes this manifest does not grant. Add what you want:
 
 - `read_messages` needs `channels:history`, and `groups:history` as well for a
   private channel.
-- `list_users` needs `users:read`.
+- `list_users` needs `users:read`, which the manifest above grants already.
 - `get_channel_info` reaches a **private** channel only with `groups:read`.
 - `list_channels` needs `groups:read` outright, not only for the private half:
   it asks Slack for public and private channels together, so without it the
@@ -377,9 +433,13 @@ Then:
    and then `CONNECTED`.
 5. In Slack, **invite the app to the channel** — `/invite @Agento`. Slack does
    not deliver `app_mention` from a channel the app is not in.
-6. Add a **trigger rule** on the same integration: which agent runs, and which
-   channels it answers in. Leave the channel list blank to answer in every
-   channel the app is in.
+6. Add a **trigger rule** on the same integration: which agent runs, which
+   channels it answers in, and which **Allowed users** it answers. Leave the
+   channel list blank to answer in every channel the app is in. At least one
+   allowed user is required, yourself included: search the workspace's members
+   by name and tick each one (see
+   [Who can run an agent this way](#who-can-run-an-agent-this-way)). To start a scheduled task instead of the agent, pick
+   it under **Task** (see [A rule that starts a task](#a-rule-that-starts-a-task)).
 
 Now `@Agento what changed in this repo today?` in that channel starts a run, and
 the answer arrives as a threaded reply.
@@ -395,6 +455,40 @@ not.
 A mention in a thread Agento did not start is ignored — it is somebody else's
 conversation, and joining it uninvited is worse than staying quiet.
 
+#### A rule that starts a task
+
+A rule can name a scheduled **task** instead of running its own agent. A
+mention that opens a thread then starts one run of that task: the task's own
+instructions are the prompt, what was said is handed to it as data, and the run
+is recorded in **Job history** like any other. The rule's agent, model and
+permission mode are not used for it. A run started this way does not skip
+permission checks the way a scheduled run of the same task does: anything the
+task's agent would have asked about is denied. An agent that lists no tools,
+and a task with no agent, is still allowed every built-in tool, including shell
+commands and file writes.
+
+**The task answers in the thread only if it has a *Reply to sender*
+destination** (see *Delivery* under Tasks). Without one the task still runs and
+is recorded, and nothing is posted in Slack. A paused task is not run and says
+nothing. Later mentions in the same thread continue that run's chat, as in any
+other thread.
+
+**A task limits how often messages can start it.** Each task runs one
+message-started run at a time, keeps up to five more messages waiting in the
+order they arrived, and starts at most ten such runs in any hour. A message
+that arrives when the queue is full, or after the hour's ten, starts nothing
+and gets no reply; the task counts it. These limits apply only to runs a
+message starts, not to the task's schedule or to **Run now**. Change them in
+the task form's **Limits** section; the task's inspector shows its counts of
+dropped and rate-limited messages (see *Scheduled tasks*).
+
+Link a rule in its form: the **Task** picker lists every task, and **No task**
+unlinks it. The rule's row then reads `→ task: <name>` instead of `→ <agent>`.
+A row marked `paused` names a task that is paused, and the form says a matching
+message starts nothing. A row marked `missing` names a task that was deleted:
+the rule can still be edited and switched off, and the form asks you to choose
+another task or **No task**.
+
 #### It only goes one way
 
 Slack drives the chat; the chat does not drive Slack. Turns you take in the
@@ -404,23 +498,52 @@ thread to see an answer, ask in the thread.
 
 #### Who can run an agent this way
 
-**Anyone who can post in a configured channel can run that rule's agent** — with
-the rule's **permission mode**, in the rule's **working directory**, on your
-machine, as you. Agento checks that the message came from a human rather than
-another bot, and nothing else: there is no allowlist of Slack users.
+**Only the users a rule lists can run it.** A Slack rule has an **Allowed
+users** list of Slack user ids, and a rule cannot be turned on while the list is
+empty. A mention from anyone else starts nothing and gets no reply, in a thread
+Agento started as much as anywhere else.
 
-**The channel list is the only filter a Slack rule applies.** The rule form also
-offers a **Prefix** and **Keywords**, because the same form serves Telegram —
-but a mention over Socket Mode is matched on its channel alone, so neither
-narrows what triggers a run. Do not reach for them as a safety measure.
+The rule form lists the workspace's members: search by name or handle and tick
+the people the rule should answer. Bots, deactivated accounts and Slackbot are
+not listed. Listing members needs the `users:read` scope, which the manifest
+above grants; an app installed without it shows *the Slack app needs
+users:read* and falls back to typing comma-separated member ids. Add the scope
+under **OAuth & Permissions** and reinstall the app to get the list.
 
-So treat the channel list as the access control it is:
+A member id still works everywhere: paste one into the search box and choose
+**Add**. To find an id, open the person's Slack profile, choose **More**, then
+**Copy member ID**; it looks like `U0123ABCDEF`. A saved id the list does not
+show, such as a deactivated account, stays on the rule as
+`U0123ABCDEF (not in list)` until you remove it.
+
+A listed user runs the rule's agent with the rule's **permission mode**, in the
+rule's **working directory**, on your machine, as you. So list only people you
+would grant a shell to.
+
+**A rule saved by an earlier version has no allowed users, so it stops
+answering when Agento updates**, and its row says *No allowed users, not
+responding*. Edit the rule and add the users it should answer.
+
+When the rule starts a task, each mention it refused from an unlisted user is
+counted on that task. A rule with no task does not count them.
+
+The **Prefix** and **Keywords** on a rule narrow which messages from an allowed
+user start a run. They are not a safety measure: who may run the rule is the
+user list, and where is the channel list.
+
+Beyond the user list:
 
 - Name the channels explicitly in the rule rather than leaving the list blank,
   and make them channels whose membership you would grant a shell to.
 - Set the rule's **permission mode** and **working directory** deliberately. A
   rule left on a permissive mode in your home directory is a rule that lets a
-  channel member read and change anything you can.
+  channel member read and change anything you can. A rule with no permission
+  mode runs with prompts denied: anything the agent would have asked about is
+  refused. Earlier versions ran such a rule with permission checks skipped, so
+  a rule that relied on that needs *Bypass* chosen on it.
+- Give the rule's agent an explicit **tool list**. An agent that lists no tools
+  is allowed every built-in one, including shell commands and file writes, and
+  prompts denied does not take those away.
 - Remember that inviting the app to a new channel silently widens this when the
   rule's channel list is blank.
 
@@ -443,7 +566,8 @@ happened.
 Create one with a name and the **prompt** sent verbatim on every run. The agent
 is optional: **No agent** is the default, and runs Claude Code with the default
 model (or the task's own **Model**) and all built-in tools, no system prompt and
-no integrations, with permission prompts skipped. Pick an agent from the list
+no integrations, with permission prompts skipped when it runs on its schedule
+or from **Run now**. Pick an agent from the list
 instead to run with its model, tools, system prompt and integrations.
 
 **Schedules:**
@@ -466,7 +590,17 @@ Other options:
 - **Stop after**: **No limit**, or a **Run limit** of N runs.
 - **Stop at**: **No end date**, or an **End date**. Switching back to *No end
   date* clears a date you already chose.
+- **Runs at once** (1 to 3, normally 1), **Events that can wait** (1 to 100,
+  normally 5) and **Runs per hour** (1 to 1000, normally 10): the limits on
+  runs an event starts, such as a Slack or Telegram message. They do not limit
+  the schedule or **Run now**. A value outside its range is refused, and the
+  field says so.
 - **Enabled**: pause without deleting.
+
+The inspector's **Reliability** group counts the events the task refused:
+**Dropped events** arrived when the waiting list was full, and **Rate-limited
+events** arrived after the hour's runs were used up. Neither started a run, so
+neither has a row in the history.
 
 ### Delivery
 
@@ -553,6 +687,19 @@ task, when it started, how long it
 took, whether it succeeded, the tokens and cost, and the output if you asked for
 it to be saved.
 
+The **Trigger** column says what started each run: `Schedule`, `Manual` (Run
+now), `Telegram`, `Slack`, `Webhook` or `Reply`. Searching for one of those
+words finds its runs. A task's **Recent runs** names the trigger too, for every
+run the schedule did not start.
+
+A run started by a message shows what was sent under **Event payload**, as plain
+text with a copy button. It is stored with secrets masked. A run that continues
+an earlier one has a **Continues** row that selects that run.
+
+A run's **Overview** also shows **Task's dropped events** and **Task's
+rate-limited events**. These are totals for the run's task, not for that run,
+and they are left out when the task has been deleted.
+
 Failed runs carry the reason. A run that hit its timeout says so. A run that
 delivered its output somewhere lists each channel under **Delivery**, with
 whether it was sent, failed or skipped, and why.
@@ -627,6 +774,27 @@ tokens, cost and duration unchanged, because those were stored when the session
 was scanned. What is gone is the conversation itself, so viewing the session,
 continuing it in chat and exporting it are switched off for that row, and the
 inspector says so. You can still star it.
+
+The first time Agento sees how long Claude Code keeps transcripts, a notice at
+the top of the window says so (for example, "Claude Code deletes transcripts
+after 30 days.") and offers three choices:
+
+- **Keep summaries in Agento** (selected by default): nothing changes in Claude
+  Code. Agento keeps each session's summary after the transcript is gone.
+- **Extend Claude Code's retention**: choose **90 days**, **1 year** or
+  **5 years** and Agento raises `cleanupPeriodDays` in that config directory's
+  `settings.json`, changing nothing else in the file. With several config
+  directories you choose for each one, or leave it as it is. Only values higher
+  than the current one are offered. Agento never lowers this number, because a
+  lower value makes Claude Code delete older transcripts for good. A directory
+  set to `0`, or one whose `settings.json` cannot be read, cannot be extended
+  here, and the notice says why.
+- **Do nothing**: nothing is changed.
+
+**Confirm** applies your choice and the notice does not come back. Closing it
+with **×** changes nothing and also does not ask again. After an extend,
+Claude Code applies the new value itself, and managed or project settings can
+still override it.
 
 ### Deleting expired sessions
 
@@ -1021,7 +1189,8 @@ instead, revoke that token by name in **Settings → Security**.
   any chat, task or rule without a working directory of its own runs in. Agento
   creates it if it does not exist.
 - **Default model**: used when neither the chat nor the agent picks one.
-- **Public URL**: only relevant if you also run the server.
+- **Public URL**: not needed for anything in the app today. Telegram and Slack
+  triggers both receive over outbound connections.
 - **Updates**: how Agento behaves when a new version exists. See
   [Updates](installation.md#updates).
 
@@ -1074,8 +1243,9 @@ configuration works before you rely on it.
   before deleting it, shown so you can see the number that makes sessions
   expire. It is read from `cleanupPeriodDays` in the `settings.json` of each
   indexed Claude config directory, one line per directory when you have several,
-  and it is 30 days when the file does not set it. Agento only shows it and
-  never changes it. If a `settings.json` cannot be read, the line says which
+  and it is 30 days when the file does not set it. Agento changes it only when
+  you choose to extend it in the retention notice (see *Expired transcripts*),
+  and never lowers it. If a `settings.json` cannot be read, the line says which
   file and why. Claude Code can also take this value from managed or project
   settings, which Agento does not read.
 - **Hidden projects**: keep a project out of every chart and list. Its data is

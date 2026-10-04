@@ -18,8 +18,8 @@
 //!
 //! A [`Finding`] is a byte range, not text. The matched bytes are sliced out of
 //! the caller's input only long enough to compute the two redacted forms that
-//! are stored — [`mask`] and [`hash_match`] — and are dropped before the row is
-//! written.
+//! are stored — [`mask_for`] and [`hash_match`] — and are dropped before the row
+//! is written.
 //!
 //! ## The hash scheme, decided here once
 //!
@@ -150,7 +150,24 @@ pub fn mask(matched: &str) -> String {
     format!("{head}{MASK_RUN}{tail}")
 }
 
-const MASK_RUN: &str = "********";
+/// The display form of a match of the rule `rule_id`: the rule's own mask
+/// where it has one (`rules::Rule::mask`), [`mask`] otherwise. **This is the
+/// one entry point for both stored forms** — `credential_findings.masked_snippet`
+/// and [`super::scan::mask_text`] — so they cannot disagree on one match.
+///
+/// The [`MASK_MIN_CHARS`] rule is applied here, ahead of either, so a rule's
+/// own mask never has to restate it.
+pub fn mask_for(rule_id: &str, matched: &str) -> String {
+    if matched.chars().count() < MASK_MIN_CHARS {
+        return MASK_RUN.to_string();
+    }
+    match super::rules::mask_of(rule_id) {
+        Some(custom) => custom(matched),
+        None => mask(matched),
+    }
+}
+
+pub(super) const MASK_RUN: &str = "********";
 const MASK_MIN_CHARS: usize = 16;
 
 /// Whether a match is suppressed — by a whitelist entry for its rule, or for
@@ -227,7 +244,7 @@ pub fn record_scan(
                     f.rule_id, f.start, f.end
                 )
             })?;
-            (mask(matched), hash_match(matched))
+            (mask_for(f.rule_id, matched), hash_match(matched))
         };
         if is_whitelisted(&tx, f.rule_id, &hash)? {
             // Never written as `open`: no insert. A row this match already has
@@ -882,6 +899,117 @@ mod tests {
             )
             .expect("count");
         assert_eq!(leaked, 0);
+    }
+
+    // The database URL fixtures are assembled from pieces, as `scan.rs`'s are,
+    // and no failure message prints one.
+
+    fn db_url(host: &str) -> String {
+        ["postgres://app:", "QZ7XK9WJQZ7XK", "@", host].concat()
+    }
+
+    fn snippets(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT masked_snippet FROM credential_findings ORDER BY location_start")
+            .expect("prepare");
+        stmt.query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+    }
+
+    /// One match, two stored forms (#741): the snippet of a finding and the
+    /// same span of a masked payload are the same string, whatever the host.
+    #[test]
+    fn the_stored_snippet_is_the_form_mask_text_gives_the_same_match() {
+        use super::super::scan;
+        for (host, form) in [
+            ("h", "post********h"),
+            ("db", "post********db"),
+            ("pg1", "post********pg1"),
+            ("db.internal.example.com", "post********.com"),
+        ] {
+            let (lead, tail) = ("DATABASE_URL=", " # set");
+            let text = [lead, &db_url(host), tail].concat();
+            let findings = scan::scan(&text);
+            assert!(findings.len() == 1, "a host of {}", host.len());
+
+            let mut conn = db();
+            record_scan(&mut conn, "s1", "/a", 2, &text, &findings).expect("record");
+            let stored = snippets(&conn);
+            assert!(stored == [form], "the snippet, host of {}", host.len());
+            assert!(
+                scan::mask_text(&text) == [lead, form, tail].concat(),
+                "the masked text, host of {}",
+                host.len()
+            );
+        }
+    }
+
+    /// A snippet stored under ruleset 1 kept the end of the password when the
+    /// host was short. The bump to 2 queues its session again, and the rescan
+    /// rewrites the row in place.
+    #[test]
+    fn a_snippet_stored_under_the_old_ruleset_is_rewritten_by_one_rescan() {
+        use super::super::{rules::CURRENT_RULESET_VERSION, scan};
+        let text = ["DATABASE_URL=", &db_url("db")].concat();
+        let findings = scan::scan(&text);
+        let old_form = mask(&text[findings[0].start..findings[0].end]);
+
+        let mut conn = db();
+        cache_row(&conn, "s1", "/a");
+        record_scan(&mut conn, "s1", "/a", 1, &text, &findings).expect("record");
+        conn.execute(
+            "UPDATE credential_findings SET masked_snippet = ?1",
+            [&old_form],
+        )
+        .expect("the form ruleset 1 stored");
+        let id: i64 = conn
+            .query_row("SELECT id FROM credential_findings", [], |r| r.get(0))
+            .expect("id");
+
+        assert_eq!(
+            pending_ids(&conn, CURRENT_RULESET_VERSION),
+            vec![("s1".into(), "/a".into())]
+        );
+        record_scan(
+            &mut conn,
+            "s1",
+            "/a",
+            CURRENT_RULESET_VERSION,
+            &text,
+            &findings,
+        )
+        .expect("rescan");
+
+        assert!(snippets(&conn) == ["post********db"], "rewritten");
+        assert!(old_form != "post********db", "the old form differed");
+        let (same_id, version): (i64, i64) = conn
+            .query_row(
+                "SELECT id, ruleset_version FROM credential_findings",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!((same_id, version), (id, CURRENT_RULESET_VERSION));
+        assert!(pending_ids(&conn, CURRENT_RULESET_VERSION).is_empty());
+    }
+
+    #[test]
+    fn mask_for_hides_a_short_match_whatever_the_rule() {
+        assert_eq!(
+            mask_for("database-url-credentials", "short-value"),
+            "********"
+        );
+        assert_eq!(mask_for("github-pat", "short-value"), "********");
+        // A rule with no mask of its own, and an id outside the table, get the
+        // default form.
+        for rule in ["github-pat", "rule-a"] {
+            assert_eq!(
+                mask_for(rule, "leaked-value-alpha-0001"),
+                "leak********0001"
+            );
+        }
     }
 
     #[test]

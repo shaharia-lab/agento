@@ -9,8 +9,8 @@
 > notes, not instructions: the goldens are frozen (`parity/README.md`).
 
 **Only one process may schedule.** Two schedulers over one `scheduled_tasks`
-table fire every task twice and re-register the Telegram webhook under whichever
-registered last. `runtime::shell_owns_scheduler` is now simply "is there a
+table fire every task twice, and two workers long-polling one Telegram bot
+token are each refused with a 409 in turn. `runtime::shell_owns_scheduler` is now simply "is there a
 database".
 
 **Three pieces, and they had to move together:**
@@ -23,6 +23,9 @@ database".
 - `native/schedule/runtime.rs` is `scheduler.go`: the `task id → timer` registry,
   `ScheduleTask`/`UnscheduleTask`, the three-slot semaphore, and `Start`.
 - `native/schedule/executor.rs` is `executor.go`: one run, end to end.
+- `native/schedule/limiter.rs` has no Go counterpart: the per-task limits on
+  event runs (#691), described under *An event passes its task's limiter
+  first* below.
 - The five task writes (`POST /api/tasks`, `PUT`/`DELETE /api/tasks/{id}`,
   `pause`, `resume`) moved with them, because each also registers or unregisters
   a cron entry — a task stored by one process and scheduled by the other is a
@@ -73,8 +76,41 @@ Go models this as `if opts.PermissionHandler != nil` in *two* places, so the
 parameter is now `Option<PermissionHandler>` and both branches are reproduced:
 with a handler, `WithDefaultPermissions` overrides whatever the agent configured
 (which is why a `plan` agent still prompts in the UI); without one, the agent's
-own `permission_mode` applies — and an empty one means **bypass**, which is what
-an unattended run needs since nothing is there to answer a prompt. `chat_id`
+own `permission_mode` applies.
+
+**Nothing resolves to bypass but the literal `"bypass"` (#675).** The match in
+`chat/runner.rs` is `PermissionChoice::resolve`, it has no catch-all, and it
+runs before anything binds a port:
+
+- **Empty with nobody to ask is `Unchosen`**: `--permission-mode dontAsk` with
+  `--allow-dangerously-skip-permissions` *not* sent. Nothing prompts, and a call
+  the allowlist does not already cover is denied. This is what a Telegram or
+  Slack rule with no mode runs with, and an event run of a task.
+- **A value outside `chats::CHAT_PERMISSION_MODES` is an `Err`** naming it, on
+  the run's mode and on the agent's alike. `run_headless` returns it as
+  `agent setup: unknown permission mode "…"`, which is a failed `job_history`
+  row for a task and the error reply for a rule. Only a hand-edited row can
+  hold one.
+- **A scheduled or manual run of an agent with no mode bypasses because the
+  executor says so.** `RunKind::permission_mode` answers `"bypass"` for those
+  two when the agent's mode is empty, and `""` otherwise — for an event run,
+  and for any agent that stores a mode, because a run's mode beats its agent's
+  and naming one would speak over a `plan` agent. Such a run bypassed before
+  this by passing nothing; a task has no mode column until #693, which replaces
+  that constant with the task's required mode.
+- **"Prompts denied" is only as narrow as the allowlist.** `dontAsk` denies
+  what `--allowedTools` does not already cover, and `allowed_tools` gives an
+  agent that names no tool at all — the shape the agent form creates, and the
+  scheduler's no-agent stand-in — all twelve built-ins, the shell and file
+  writes among them. So `Unchosen` removes the bypass, not those tools.
+
+Pinned by `only_the_literal_bypass_bypasses_and_an_unknown_mode_is_refused`
+(every stored spelling × the agent's × with and without a handler),
+`a_scheduled_or_manual_run_names_bypass_and_an_event_run_names_nothing`, and
+on the spawned CLI's argv in `tests/trigger_run.rs`, `tests/scheduled_run.rs`
+(`a_scheduled_run_leaves_an_agents_own_permission_mode_alone`,
+`an_agent_with_an_unknown_permission_mode_is_a_recorded_failure`) and
+`tests/headless_resume.rs`. `chat_id`
 likewise became `custom_session_id`: a chat pins a new CLI session to its own id,
 while `buildRunOptions` sets neither session field, so the CLI generates one and
 `saveSessionResults` stores it back.
@@ -84,8 +120,9 @@ while `buildRunOptions` sets neither session field, so the CLI generates one and
 `config.AgentConfig` there, and `resolveToolsAndMCP` gives a non-nil config with
 empty capabilities **all twelve built-in tools** while a nil config gets none.
 `None` would run a no-agent task with no `--allowedTools` argument at all. What
-that stand-in spawns — the Settings default model, all twelve tools in order, no
-system prompt, no MCP servers, permissions bypassed — is pinned by
+that stand-in spawns on a schedule — the Settings default model, all twelve
+tools in order, no system prompt, no MCP servers, permissions bypassed
+explicitly — is pinned by
 `a_task_with_no_agent_runs_on_the_default_model_with_every_built_in_tool` in
 `tests/scheduled_run.rs` (#629).
 
@@ -239,15 +276,18 @@ one and the first to finish would clear an entry the second still owns.
 **An event starts a run through `executor::run_event`, and nothing else**
 (#683, epic #679). A transport — Telegram, Slack, the webhook, a reply —
 authenticates its sender, builds an `EventInput` (whose constructor refuses
-`schedule` and `manual` as a source) and calls it; no transport does yet
-(#684, #685, #696). It is `run_manual`'s shape — mark in flight, take one of
-the three permits, re-read the task — with these rules:
+`schedule` and `manual` as a source) and calls it. Slack does
+(`slack/inbound.rs::run_linked`, #685); Telegram and the webhook do not yet
+(#684, #696). It is two steps, `admit_event` and then `run_admitted`: the
+task's own limiter (#691, below), then `run_manual`'s shape — mark in flight,
+take one of the three permits, re-read the task — with these rules:
 
-- **Three refusals, and none writes a row**, since no run started:
+- **Five refusals, and none writes a row**, since no run started:
   `NoSuchTask` (absent, or deleted while it queued — `job_history.task_id`
   cascades), `Paused` (any status but `active`: pause is the user's off switch
-  for an automation, unlike **Run now**) and `Unavailable` (the read failed or
-  the semaphore is closed). Counting refusals belongs to #690/#691.
+  for an automation, unlike **Run now**), `Unavailable` (the read failed or
+  the semaphore is closed), and the limiter's two, `Dropped` and
+  `RateLimited`, which are counted on the task instead.
 - **`RunKind::Event(source)` spends nothing**: `advances_schedule()` is false, so
   `run_count`, `last_run_*` and the auto-pause rules stay where they were, as for
   a manual run. Every run that starts ends in exactly one `job_history` row with
@@ -270,9 +310,72 @@ the three permits, re-read the task — with these rules:
   `template::interpolate` runs on `task.prompt` only — `{{…}}` in an event is
   data. `prompt_preview` is cut from the instructions alone. Pinned by
   `the_event_prompt_is_the_instructions_then_one_delimited_data_block`.
-- **The event chooses nothing.** The task, its agent, permission mode, model
-  and destinations are the row's; each run gets a fresh chat session; the
-  event's origin reaches delivery only as `DeliveryReport::reply_to`.
+- **The event chooses nothing.** The task, its agent, model and destinations
+  are the row's; each run gets a fresh chat session; the event's origin reaches
+  delivery only as `DeliveryReport::reply_to`.
+- **An event run is not bypassed (#675).** It names no permission mode, so it
+  runs on the task's agent's own, and with prompts denied when that is empty —
+  where a scheduled or manual run of the same task bypasses. Prompts denied
+  still allows every tool the agent's allowlist covers; see above. The linking rule's
+  mode is not read, as none of its execution settings are.
+
+**An event passes its task's limiter first** (#691). `schedule/limiter.rs` is a
+small in-memory state per task, owned by the `Scheduler` and asked only by
+`executor::admit_event`. A timer's fire and **Run now** never reach it and are
+not counted by it. Each task stores three limits (migration 54), and the
+decision is `limiter::decide`, a pure function made once, when the event
+arrives, in this order:
+
+1. The hour's `reserved` count is at `max_runs_per_hour` (default 10, 1 to
+   1000) → `RateLimited`, and `rate_limited_event_count` goes up by one.
+2. Fewer than `max_concurrent_runs` (default 1, 1 to 3) event runs hold a slot
+   → the event takes one.
+3. Fewer than `max_queued_events` (default 5, 1 to 100) events are waiting →
+   it waits, first in, first out.
+4. Otherwise → `Dropped`, and `dropped_event_count` goes up by one.
+
+Six things about it are specification:
+
+- **`reserved` is every start in the last sixty minutes plus every admitted or
+  queued event that has not started yet.** Counting the ones still to start is
+  what lets the rate be checked at arrival and never again, so a queued event is
+  never refused after it waited. The issue's wording was "started in the last
+  hour + running + queued"; a running event is counted once here, as a
+  reservation until its run starts and as a start after, rather than twice.
+  `no_sixty_minutes_holds_more_starts_than_the_cap` pins the cap.
+- **A start is stamped with the instant its `job_history` row carries**
+  (`RunSlot::started(run.started_at)`), and it counts for sixty minutes from
+  then whether or not the run has finished. An event that is admitted and then
+  refused further on — its task paused or deleted while it waited for a permit
+  — started nothing and is not charged.
+- **A restart does not reset the hour.** The first time a scheduler sees a
+  task, `admit_event` reads `tasks::event_starts_since` — the task's
+  `job_history` rows whose `triggered_by` is `telegram`, `slack`, `webhook` or
+  `reply` — and seeds the window with it. The first seed wins.
+  `the_hourly_cap_survives_a_restart_and_counts_only_event_runs` pins it.
+- **A waiting event holds nothing global.** The scheduler's three permits are
+  taken in `run_admitted`, and a transport takes its own bound between the two
+  steps (Slack's ten-slot dispatcher permit), so one task's burst queues behind
+  that task and nowhere else. Both global bounds stay as the outer limit.
+- **The slot is a guard.** `RunSlot` frees what it holds on drop — a queue place
+  while it waits, a running slot after — and wakes the task's next waiter, so a
+  cancelled waiter cannot leak a place. The limiter's one `std::sync::Mutex` is
+  held for arithmetic only and never across an `await`.
+- **No SQLite in the limiter.** It is handed the time and the seed. The read,
+  the seed query and the refusal's count all run in `admit_event` through
+  `db::blocking`; `a_refusals_contended_write_lock_does_not_stall_the_runtime`
+  is this path's copy of the contended-lock test.
+
+A paused or missing task is refused before the limiter as well as after the
+permit, so it takes no queue place and moves neither counter. A queued event is
+not marked in `Scheduler::in_flight` until it has a slot. The limits are read
+from the row at each arrival; a raised `max_concurrent_runs` reaches the events
+already waiting before the arrival that carried it.
+
+On the wire the limits are replace like the rest of the task: an omitted key,
+`null` and `0` all store the default, as `timeout_minutes` does, and a value
+outside its range is a 422 naming the field. A queue of zero is therefore not
+expressible.
 
 **A task write can fail after storing a row, so the timers are swept.**
 `Scheduler::reconcile` runs every 60 seconds and brings the installed timers
@@ -412,7 +515,7 @@ the run produces anything** (#594, migration 40). `claude/process.rs` spawns
 every CLI — chat and headless alike — with `process_group(0)` on Unix and
 `CREATE_NEW_PROCESS_GROUP` on Windows, so a signal to `-pid` reaches the MCP
 servers and tool children the CLI started, not just the CLI. The executor
-passes `run_headless` a `SpawnHook` that writes `job_history.pid` and
+passes `Runner::run` a `SpawnHook` that writes `job_history.pid` and
 `pid_started_at` through `tasks::record_job_process`; the spawn **awaits** it
 before the initialize handshake, which is what makes "written before any output
 is read" a property rather than a race. `pid_started_at` is the wall-clock time
@@ -505,6 +608,23 @@ epic #679). Migration 48 adds eight columns across three tables.
   On the wire `triggered_by` follows `response_text` and is always present; the
   other two follow it and are **omitted when empty**, so a scheduled run's row
   gains one key. `deliveries` stays last.
+- **`job_history.machine_id` and `harness`** are the run summary (#678,
+  migration 52): which install ran a run, and on what. `machine_id` is
+  `install_identity.machine_id` and **no caller supplies it** —
+  `tasks::insert_job_history` reads it in the statement and ignores the struct's
+  field, so every path that reaches the one insert (schedule, manual, event,
+  reply, and a run that failed before it started) records it
+  (`an_inserted_run_carries_the_installs_machine_id_whatever_the_caller_passed`).
+  A database with no identity row stores `''` rather than failing the insert.
+  `harness` is `Runner::harness()`, asked of `agent_run::runner()` by
+  `executor::harness()` at both inserts; it is `claude` on every row today.
+  `update_job_history` names neither column, so a finish cannot rewrite them.
+  **Every row older than the migration was backfilled** with this install's id
+  and `claude`. The id copies with the database (#704's known limit), so a
+  database moved to another machine keeps calling its runs this install's.
+  On the wire both follow `event_payload`, before `deliveries`, and are
+  **always present** — pinned by `parity/job_history_run_summary_golden.json`.
+  No view shows either yet.
 - **`scheduled_tasks.continue_on_reply`** is a request field, replaced on `PUT`
   like every other (absent and `null` store `false`). Slack delivery still maps
   every thread whatever it says, until #686 reads it. **Migration 48 turned it
@@ -516,12 +636,15 @@ epic #679). Migration 48 adds eight columns across three tables.
   `TaskRequest` has neither, `update_task_in` leaves both out of its `SET` list
   — so no task write can reset them, the run's write-back included
   (`the_runs_write_back_leaves_the_automations_columns_alone`) — and
-  `update_task` copies the stored values into its response only. Whatever
-  increments them (#690, #691) must write the column directly, not through
-  `update_task_in`.
+  `update_task` copies the stored values into its response only. Their two
+  writers, `tasks::count_dropped_event` (#688, #691) and
+  `tasks::count_rate_limited_event` (#691), each write the column directly,
+  not through `update_task_in`.
 
-On the wire the three task fields sit between `destinations` and `status` and
-are always present. The rule's half — `trigger_rules.task_id` and its own
+On the wire the task's fields sit between `destinations` and `status`, in the
+order `continue_on_reply`, the three limits of migration 54
+(`max_concurrent_runs`, `max_queued_events`, `max_runs_per_hour`), then the two
+counters, and are always present. The rule's half — `trigger_rules.task_id` and its own
 `continue_on_reply` — is in `docs/internal/native-integrations.md`.
 
 **Delivery results live in `job_deliveries`, never on the run's row** (#635,

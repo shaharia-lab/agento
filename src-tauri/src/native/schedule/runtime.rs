@@ -51,6 +51,7 @@ use chrono_tz::Tz;
 use tokio::sync::Semaphore;
 use tokio::task::AbortHandle;
 
+use super::limiter::TaskLimiter;
 use super::{advance_past_now, build_job_definition, next_runs, setup, JobSchedule};
 use crate::native::tasks::ScheduledTask;
 
@@ -149,6 +150,10 @@ pub struct Scheduler {
     /// When this scheduler was built — the line between this session's runs
     /// and the previous sessions' for [`Scheduler::reap_stale_runs`] (#596).
     booted_at: DateTime<Utc>,
+    /// The per-task limits on event runs (#691). Only
+    /// [`super::executor::admit_event`] asks it: a timer's fire and a manual
+    /// run are bounded by `semaphore` alone.
+    limiter: TaskLimiter,
 }
 
 /// What one [`Scheduler::reap_stale_runs`] pass did, for its log line.
@@ -200,6 +205,11 @@ impl Scheduler {
     /// scheduled runs already using them rather than beside them.
     pub fn semaphore(&self) -> Arc<Semaphore> {
         Arc::clone(&self.semaphore)
+    }
+
+    /// The per-task limiter every event run is admitted through (#691).
+    pub fn limiter(&self) -> &TaskLimiter {
+        &self.limiter
     }
 
     /// Record that a run of `task_id` has started. Always succeeds.
@@ -683,6 +693,7 @@ pub fn start(db_path: PathBuf) {
         semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
         in_flight: Mutex::new(HashMap::new()),
         booted_at: Utc::now(),
+        limiter: TaskLimiter::new(),
     });
     if RUNNING.set(Arc::clone(&scheduler)).is_err() {
         log::warn!("task scheduler already started; ignoring a second start");
@@ -808,6 +819,7 @@ pub fn detached(db_path: impl Into<PathBuf>) -> Arc<Scheduler> {
         semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
         in_flight: Mutex::new(HashMap::new()),
         booted_at: Utc::now(),
+        limiter: TaskLimiter::new(),
     })
 }
 
@@ -871,6 +883,9 @@ mod tests {
             save_output: false,
             destinations: Vec::new(),
             continue_on_reply: false,
+            max_concurrent_runs: 1,
+            max_queued_events: 5,
+            max_runs_per_hour: 10,
             dropped_event_count: 0,
             rate_limited_event_count: 0,
             status: "active".to_string(),
@@ -928,6 +943,7 @@ mod tests {
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
             in_flight: Mutex::new(HashMap::new()),
             booted_at: Utc::now(),
+            limiter: TaskLimiter::new(),
         });
         let task = ScheduledTask {
             id: "legacy".to_string(),
@@ -949,6 +965,9 @@ mod tests {
             save_output: false,
             destinations: Vec::new(),
             continue_on_reply: false,
+            max_concurrent_runs: 1,
+            max_queued_events: 5,
+            max_runs_per_hour: 10,
             dropped_event_count: 0,
             rate_limited_event_count: 0,
             status: "active".to_string(),

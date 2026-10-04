@@ -81,6 +81,50 @@ export interface TriggerTargets {
    * `app_mention` begins with a bot id no user typed.
    */
   filterHelp: string;
+  /**
+   * Set when a rule must list at least one target to be saved (#674), with
+   * the words for the two places that requirement shows.
+   *
+   * Telegram sets it: there the list is who may start a run, the write
+   * refuses a rule without one, and the dispatcher answers nobody for an
+   * empty one. Slack does not: its list selects channels, and a rule with
+   * none is the workspace-wide default.
+   */
+  required?: RequiredTargets;
+}
+
+/**
+ * Set on a provider whose rules name the people they answer in a list of
+ * their own, apart from `filter_chat_ids` (#688).
+ *
+ * Slack sets it: its target list selects channels, and who may start a run is
+ * `filter_user_ids`. The write refuses turning a rule on while that list is
+ * empty, and the handler answers nobody for an empty one. Telegram does not:
+ * there the chat list is the sender list (`RequiredTargets`).
+ */
+export interface TriggerSenders {
+  /** The comma-separated field's, shown when the member list cannot load. */
+  placeholder: string;
+  help: string;
+  /** One entry as the write accepts it. */
+  pattern: RegExp;
+  /** Beside the form's disabled Save, while the rule is on and the list empty. */
+  missing: string;
+  /** Under the field, ahead of the entries that do not match `pattern`. */
+  invalid: string;
+  /** On a stored rule's row while its list is empty. */
+  off: string;
+}
+
+export interface RequiredTargets {
+  /** One entry as the write accepts it. */
+  pattern: RegExp;
+  /** Beside the form's disabled Save, while the list is empty. */
+  missing: string;
+  /** Under the field, ahead of the entries that do not match `pattern`. */
+  invalid: string;
+  /** On a stored rule's row while its list is empty, beside its shut switch. */
+  off: string;
 }
 
 export interface Provider {
@@ -95,16 +139,20 @@ export interface Provider {
   services: ServiceInfo[];
   /**
    * Whether inbound messages can start an agent here, i.e. whether the trigger
-   * rules list is offered. Telegram and Slack both are — but by different
-   * transports, which is what the two flags below distinguish (#566, #569).
+   * rules list is offered. Telegram and Slack both are, each over an outbound
+   * connection Agento holds open — which is what `inbound` describes.
    */
   supportsTriggers?: boolean;
-  /** Telegram: the webhook Telegram pushes updates to. */
-  supportsWebhook?: boolean;
-  /** Slack: the Socket Mode connection Agento holds open (#569). */
-  supportsInbound?: boolean;
+  /**
+   * The inbound connection, when the provider has one: Slack's Socket Mode
+   * (#569) and Telegram's long polling (#676). Its presence is what offers the
+   * Inbound switch; the words are here so the panel has none of its own.
+   */
+  inbound?: InboundCopy;
   /** Only read when `supportsTriggers`. */
   triggerTargets?: TriggerTargets;
+  /** The rule form's allowed-users field, where a provider has one (#688). */
+  triggerSenders?: TriggerSenders;
   /**
    * A credential field that lives *beside* whichever mode the row uses rather
    * than inside one (#569).
@@ -120,6 +168,27 @@ export interface Provider {
    */
   extraField?: CredField;
   docs?: string;
+}
+
+/** What the Inbound panel says for one provider's transport (#676). */
+export interface InboundCopy {
+  /** The row label beside the switch — the transport's name. */
+  label: string;
+  /** What the connection is and what turning it off does. */
+  help: string;
+  /** Why the switch cannot be turned on, shown beside it while it cannot. */
+  needsToken: string;
+  /**
+   * Which scrubbed-read flag says the token the worker needs is stored. Slack
+   * needs its app-level token; a Telegram row's only credential is its bot
+   * token. `PUT /api/integrations/{id}/inbound` answers 422 without it.
+   *
+   * `has_credentials` is an approximation for Telegram: it is true for any
+   * non-empty blob, and the backend asks for a non-blank `bot_token`. A row
+   * storing `{"bot_token":""}` therefore offers the switch and shows the 422
+   * under it, which is the same sentence either way.
+   */
+  tokenFlag: "has_app_token" | "has_credentials";
 }
 
 export const PROVIDERS: Provider[] = [
@@ -227,13 +296,27 @@ export const PROVIDERS: Provider[] = [
       },
     ],
     supportsTriggers: true,
-    supportsInbound: true,
+    inbound: {
+      label: "Socket Mode",
+      help: "Socket Mode holds an outbound connection to Slack so mentions reach Agento without a public URL. Turn it off to close the connection; nothing is deleted.",
+      needsToken: "Store an app-level token above before this can be turned on.",
+      tokenFlag: "has_app_token",
+    },
     triggerTargets: {
       placeholder: "C0123ABCDEF, C0456GHIJKL (blank = any channel)",
       help: "Slack channel ids, comma-separated; empty = every channel the app is in.",
       noun: "channel",
       filterHelp:
-        "Checked after the @mention is removed: the prefix must start what is left, a keyword may appear anywhere in it. Replies inside a thread Agento started are checked too. Leave both empty to answer every mention in a matched channel.",
+        "Checked after the @mention is removed: the prefix must start what is left, a keyword may appear anywhere in it. Replies inside a thread Agento started are checked too. Leave both empty to answer every mention from an allowed user in a matched channel.",
+    },
+    triggerSenders: {
+      placeholder: "Allowed users: U0123ABCDEF, U0456GHIJKL",
+      help: "A rule answers only the users listed here, and cannot be turned on with none. A mention from anyone else starts nothing and gets no reply. Someone the list does not show can be added by member ID: open the person's Slack profile, choose More, then Copy member ID.",
+      /* The write's own rule (`integrations.rs::is_slack_user_id`). */
+      pattern: /^[UW][A-Z0-9]+$/,
+      missing: "Add at least one allowed user to save this rule turned on, or turn it off.",
+      invalid: "Not a Slack user ID:",
+      off: "No allowed users, not responding. Edit the rule and add at least one.",
     },
     extraField: {
       key: "app_token",
@@ -368,16 +451,29 @@ export const PROVIDERS: Provider[] = [
       },
     ],
     supportsTriggers: true,
-    supportsWebhook: true,
+    inbound: {
+      label: "Long polling",
+      help: "Agento asks Telegram for new messages over an outbound connection, so they reach it without a public URL. Turn it off to stop receiving; nothing is deleted.",
+      needsToken: "Store a bot token above before this can be turned on.",
+      tokenFlag: "has_credentials",
+    },
     triggerTargets: {
       /* The strings this provider already showed, moved here unchanged by
          #569 so the field's wording is per-provider rather than Telegram's
          with a Slack special case in the form. */
-      placeholder: "Chat IDs, comma separated (blank = any chat)",
-      help: "Telegram chat ids, comma-separated; empty = every chat the bot is in.",
+      placeholder: "Chat IDs, comma separated (required)",
+      help: "Telegram chat ids, comma-separated. Required: a rule answers only the chats listed here. A message from any other chat starts nothing and gets no reply.",
       noun: "chat",
       filterHelp:
-        "Checked against the message as sent: the prefix must start it, a keyword may appear anywhere in it. Leave both empty to answer every message.",
+        "Checked against the message as sent: the prefix must start it, a keyword may appear anywhere in it. Leave both empty to answer every message from a listed chat.",
+      required: {
+        /* The write's own rule: a signed integer in its canonical spelling,
+           which is how the dispatcher spells the chat it compares against. */
+        pattern: /^(0|-?[1-9]\d*)$/,
+        missing: "Add at least one chat ID to save this rule.",
+        invalid: "Not a numeric chat ID:",
+        off: "Off: this rule lists no chat IDs. A rule answers only the chats it lists, so edit it and add at least one to turn it on.",
+      },
     },
   },
   {
@@ -586,19 +682,19 @@ export type PinNotConnected = Expect<Eq<typeof NOT_CONNECTED, "Not connected">>;
 /* --- The inbound connection's own vocabulary (#569) ----------------------
    A second state on the same screen, and therefore a second set of words
    spelled *here* rather than at the badge — the reason `connectionState`
-   exists at all. `inbound_status` is the Socket Mode worker's column and has
+   exists at all. `inbound_status` is the inbound worker's column and has
    nothing to do with `authenticated`, so the two must not read alike: a Slack
    row shows the Authorisation badge and the Inbound badge inches apart, and
    `Not connected` under both would name two unrelated failures with one
    phrase. Only the *connected* word is shared, deliberately — a live socket is
    connected in the plain sense, and #569 names that word — and the row labels
-   (`Status` / `Socket Mode`) are what separate them.
+   (`Status` / the transport's name) are what separate them.
 
    An unrecognised status is reported as itself: the worker owns this column
    (#567) and may learn a word before this module does. Guessing at it would
    be the one thing worse than showing it. */
 
-/** What a socket that has never run is called — never `Not connected`. */
+/** What a connection that has never run is called — never `Not connected`. */
 export const NOT_RUNNING = "Not running";
 export type PinNotRunning = Expect<Eq<typeof NOT_RUNNING, "Not running">>;
 
