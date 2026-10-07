@@ -448,11 +448,6 @@ endpoint is served in-process. What remains is listed here.
   `claude_sdk.rs` and `scheduled_run.rs` make their fake Claude CLI executable
   through `std::os::unix::fs::PermissionsExt`, so they do not compile there —
   which is what `--lib` excludes.
-- **`GET /api/fs` answers 500 where it should answer 404 or 400.** The
-  directory picker reports "internal server error" for a path the user simply
-  mistyped. The three typed bodies (404 missing, 400 unreadable, 500 no home)
-  were never written, because at the time an `Err` here reached an
-  implementation that had them. Fixing it means giving `fs::list` a typed error.
 - **A 500 from a write means the machinery broke, and no client input should
   produce one** (#670). `WriteError::Fallback` is for a database, filesystem,
   encoder or invariant failure; input the client can fix answers 400
