@@ -75,7 +75,7 @@ jobs:
       # alone, so nothing is downloaded and no install script runs. `--omit=dev`
       # is what the app ships; the build toolchain is not in the bundle.
       # The same Node, and so the same npm, that ci.yml installs with.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v4
         if: always()
         with:
           node-version: 22
