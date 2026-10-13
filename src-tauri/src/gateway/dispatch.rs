@@ -325,6 +325,7 @@ pub fn is_retryable(e: &ProxyError) -> bool {
         // Non-transient — do not retry
         ProxyError::Unauthorized(_) => false,
         ProxyError::Forbidden(_) => false,
+        ProxyError::InvalidRequest { .. } => false,
         ProxyError::ModelNotFound(_) => false,
         ProxyError::RateLimited(_) => false,
         ProxyError::ConfigError(_) => false,
@@ -463,6 +464,10 @@ mod tests {
         for e in [
             ProxyError::Unauthorized("u".into()),
             ProxyError::Forbidden("f".into()),
+            ProxyError::InvalidRequest {
+                message: "i".into(),
+                param: None,
+            },
             ProxyError::ModelNotFound("m".into()),
             ProxyError::RateLimited("r".into()),
             ProxyError::ConfigError("c".into()),
