@@ -35,7 +35,7 @@
 
 use std::path::Path;
 
-use ferrox_providers::config::{DefaultsConfig, ProviderConfig, TimeoutsConfig};
+use ferrox_providers::config::{DefaultsConfig, ProviderConfig, ResponsesMode, TimeoutsConfig};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -365,6 +365,10 @@ impl ProviderRow {
     /// empty rather than to `Some("")`, because ferrox reads `None` as "use the
     /// adapter's own default endpoint" and an empty string is a URL that
     /// resolves nowhere.
+    ///
+    /// `responses` is always `Translate`, ferrox's own default: the embedded
+    /// gateway serves no `/v1/responses` route and a provider row has no column
+    /// for the mode, so `Native` passthrough is not something a row can ask for.
     pub fn to_ferrox(&self) -> ProviderConfig {
         ProviderConfig {
             name: self.name.clone(),
@@ -374,6 +378,7 @@ impl ProviderRow {
             aws: None,
             timeouts: Some(self.timeouts.to_ferrox()),
             circuit_breaker: None,
+            responses: ResponsesMode::Translate,
         }
     }
 
