@@ -21,4 +21,16 @@
 # do not belong here — Tauri's GTK3 bindings on Linux carry several.
 
 [advisories]
-ignore = []
+ignore = [
+    # zip 4.6.1 (RUSTSEC-2026-0367, -0368, -0369: symlink targets, permissions
+    # through symlinks and SUID/SGID bits on extract). The only user is
+    # tauri-plugin-updater, which pins zip ^4 up to its latest release (2.14.0).
+    # It extracts only on Windows, only the update archive, and only after the
+    # archive's minisign signature has been verified against the public key in
+    # tauri.conf.json, so an unsigned archive never reaches `extract`. All three
+    # are Unix permission and symlink behaviour. Remove when
+    # tauri-plugin-updater depends on zip >= 9.0.0.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]
