@@ -605,8 +605,9 @@ Other options:
 
 The inspector's **Reliability** group counts the events the task refused:
 **Dropped events** arrived when the waiting list was full, or came from a Slack
-user or Telegram chat that the task's rules do not list, and **Rate-limited
-events** arrived after the hour's runs were used up. Neither started a run, so
+user the task's rule does not list or a Telegram chat that no enabled rule of
+the integration lists, and **Rate-limited events** arrived after the hour's runs
+were used up. Neither started a run, so
 neither has a row in the history.
 
 ### Delivery

@@ -147,11 +147,7 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
             msg.clone(),
         );
         db::blocking("telegram rule match", move || {
-            let selection = find_matching_rule(&db, &id, &msg);
-            if let Selection::UnknownChat(task_ids) = &selection {
-                drop_unknown_chat(&db, &id, &msg, task_ids);
-            }
-            selection
+            select_and_count(&db, &id, &msg)
         })
         .await
     };
@@ -208,6 +204,16 @@ enum Selection {
     /// A chat no enabled rule names, with the distinct tasks those rules link
     /// to: every one of them refused it, so every one of them counts it.
     UnknownChat(Vec<String>),
+}
+
+/// The rule selection `process` acts on, with an unknown chat already counted:
+/// one call, so the decision and the count share one blocking section (#690).
+fn select_and_count(db_path: &Path, integration_id: &str, msg: &TelegramMsg) -> Selection {
+    let selection = find_matching_rule(db_path, integration_id, msg);
+    if let Selection::UnknownChat(task_ids) = &selection {
+        drop_unknown_chat(db_path, integration_id, msg, task_ids);
+    }
+    selection
 }
 
 /// `findMatchingRule`: the first **enabled** rule that matches, in the order the
@@ -271,7 +277,7 @@ fn linked_tasks(rules: &[Rule]) -> Vec<String> {
 /// task leave nowhere to count, so then it only logs.
 fn drop_unknown_chat(db_path: &Path, integration_id: &str, msg: &TelegramMsg, task_ids: &[String]) {
     log::debug!(
-        "telegram message ignored, unknown chat integration_id={integration_id:?} chat_id={} tasks_counted={}",
+        "telegram message ignored, unknown chat integration_id={integration_id:?} chat_id={} linked_tasks={}",
         msg.chat.id,
         task_ids.len()
     );
@@ -789,15 +795,9 @@ mod tests {
         .expect("count")
     }
 
-    /// What `process` does with one selection, without the run that follows a
-    /// match: count an unknown chat, then answer the selection.
-    fn select_and_count(db: &Path, text: &str, chat_id: i64) -> Selection {
-        let msg = msg(text, chat_id);
-        let selection = find_matching_rule(db, "tg", &msg);
-        if let Selection::UnknownChat(task_ids) = &selection {
-            drop_unknown_chat(db, "tg", &msg, task_ids);
-        }
-        selection
+    /// [`select_and_count`] for one message to the `tg` integration.
+    fn select(db: &Path, text: &str, chat_id: i64) -> Selection {
+        select_and_count(db, "tg", &msg(text, chat_id))
     }
 
     /// #690: a chat no enabled rule names is counted once on each distinct
@@ -818,7 +818,7 @@ mod tests {
             link(&db, rule, task);
         }
 
-        let selection = select_and_count(&db, "hello", 99);
+        let selection = select(&db, "hello", 99);
         assert!(
             matches!(&selection, Selection::UnknownChat(t) if *t == ["t1", "t2"]),
             "{selection:?}"
@@ -851,7 +851,7 @@ mod tests {
         link(&db, "a", "t1");
 
         for text in ["no prefix status", "/ask no keyword"] {
-            let selection = select_and_count(&db, text, 42);
+            let selection = select(&db, text, 42);
             assert!(
                 matches!(selection, Selection::NoMatch),
                 "{text:?}: {selection:?}"
@@ -889,7 +889,7 @@ mod tests {
         link(&db, "on", "on-task");
         link(&db, "off", "off-task");
 
-        let selection = select_and_count(&db, "hi", 7);
+        let selection = select(&db, "hi", 7);
         assert!(
             matches!(&selection, Selection::UnknownChat(t) if *t == ["on-task"]),
             "{selection:?}"
@@ -914,7 +914,7 @@ mod tests {
             "2026-01-01 00:00:00 +0000 UTC",
         );
 
-        let selection = select_and_count(&db, "hi", 99);
+        let selection = select(&db, "hi", 99);
         assert!(
             matches!(&selection, Selection::UnknownChat(t) if t.is_empty()),
             "{selection:?}"

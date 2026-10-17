@@ -143,9 +143,9 @@ could not be read), or `UnknownChat` with the distinct non-empty `task_id`s of
 the enabled rules. The chat is asked first, through `chat_is_known` over
 `match_rule::sender_allowed`, so a prefix or keyword miss is never counted.
 
-An unknown chat gets no reply and starts nothing. `process` calls
-`drop_unknown_chat` in the same `db::blocking` section that made the
-selection, and that adds one to `scheduled_tasks.dropped_event_count` on each
+An unknown chat gets no reply and starts nothing. `process` runs
+`select_and_count` in one `db::blocking` section, so the selection and
+`drop_unknown_chat` share it, and that adds one to `scheduled_tasks.dropped_event_count` on each
 task through `tasks::count_dropped_event`, which Slack's unknown senders share
 (#688). Every one of those tasks refused the message, so each counts it once,
 and two rules linked to one task count it there once. Rules with no task only
