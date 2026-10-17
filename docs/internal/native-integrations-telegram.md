@@ -129,9 +129,11 @@ The rules, each stated in `dispatcher.rs`'s `//!` header:
   `Dropped` and `RateLimited` are silent; `NoSuchTask` (the column has no
   foreign key, so a dangling id reaches here), `Unavailable` and a process with
   no scheduler answer `ERROR_REPLY` inline.
-- **The dispatcher's ten-slot permit is held for the whole run**, taken in
-  `handle_update` before the claim; the task's slot and the scheduler's permit
-  are taken inside it (`docs/internal/native-schedule.md`).
+- **The dispatcher's ten-slot permit is taken around the run, after the
+  task's limiter has admitted the event** (#691), and held until the run ends;
+  the scheduler's permit is taken inside it. A message waiting in its task's
+  queue holds no permit (`docs/internal/native-schedule.md`). An unlinked rule
+  takes the permit after the claim and the match, around its inline run.
 - **A rule with `task_id = ""` runs exactly as before**: the rule's agent, a
   `[Telegram] <rule>` chat, the inline reply, and no `job_history` row.
 
@@ -139,7 +141,8 @@ Pinned by `dispatcher.rs`'s `a_linked_rule_whose_run_fails_answers_through_the_r
 `a_linked_task_with_no_reply_destination_runs_and_sends_nothing`,
 `a_paused_linked_task_is_silent_and_a_dangling_link_answers_the_error_reply`,
 `an_unlinked_rule_takes_the_inline_path_and_writes_no_job_row` and
-`a_linked_run_holds_its_dispatcher_permit_until_the_run_ends`, and by
+`a_linked_run_holds_its_dispatcher_permit_until_the_run_ends` and
+`a_linked_message_waiting_in_its_tasks_queue_holds_no_dispatcher_permit`, and by
 `tests/trigger_run.rs`'s `a_linked_rule_runs_its_task_as_a_telegram_event`.
 
 ## Trigger rules: who may start a run (#674)

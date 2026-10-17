@@ -416,6 +416,7 @@ async fn a_linked_rule_runs_its_task_as_a_telegram_event() {
     let job_id = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         dispatcher::run_linked(
+            &tokio::sync::Semaphore::new(1),
             scheduler,
             "tg",
             &msg,

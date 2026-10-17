@@ -30,12 +30,12 @@
 //! | `Dropped`, `RateLimited` (#691) | nothing — counted on the task |
 //! | `NoSuchTask`, `Unavailable`, no scheduler in this process | [`ERROR_REPLY`] |
 //!
-//! **The ten-slot bound is the outer limit on both paths.** [`handle_update`]
-//! takes a dispatcher permit before [`process`] and holds it until the run
-//! ends; a linked run takes the task's slot and then one of the scheduler's
-//! three permits inside it. Always in that order, so the two cannot deadlock —
-//! and a linked event waiting in its task's queue, or for a scheduler permit,
-//! holds a dispatcher permit while it waits.
+//! **The ten-slot bound is the outer limit on both paths, taken around the
+//! run.** An unlinked rule takes it around [`execute_and_reply`]. A linked one
+//! is first admitted by its task's limiter (#691), so a message waiting in the
+//! task's queue holds nothing global, and then takes it and holds it until the
+//! run ends; the scheduler's three permits are taken inside it. Always in that
+//! order, as Slack's linked path does, so the two cannot deadlock.
 //!
 //! # The fourth caller of the agent runner
 //!
@@ -128,7 +128,7 @@ pub fn handle_update(
     tokio::spawn(async move {
         // Read per update rather than once: `lib.rs` starts the integration
         // registry, and so the polling worker, before the scheduler.
-        handle_under(
+        process(
             semaphore(),
             runtime::running(),
             &db_path,
@@ -140,40 +140,25 @@ pub fn handle_update(
     });
 }
 
-/// [`handle_update`]'s body, with the bound and the scheduler as parameters so
-/// a test can hand it a one-slot semaphore and a detached scheduler.
-///
-/// The permit is held across the whole of [`process`], so a linked run holds
-/// it until `run_event` returns.
-async fn handle_under(
-    sem: &'static Semaphore,
-    scheduler: Option<Arc<Scheduler>>,
-    db_path: &Path,
-    integration_id: &str,
-    bot_token: &str,
-    update: TelegramUpdate,
-) {
-    let Ok(_permit) = sem.acquire().await else {
-        log::warn!(
-            "dispatcher stopped, dropping telegram update integration_id={integration_id:?}"
-        );
-        return;
-    };
-    process(db_path, integration_id, bot_token, scheduler, update).await;
-}
-
 /// What `db::blocking` answering `None` costs at each call site below, since it
 /// is not the same everywhere: `claim_update` and `find_matching_rule` stop the
 /// dispatch, exactly as a failed read already does; `resolve_agent` and
 /// `create_trigger_session` become the error reply; and the two `save_messages`
 /// calls are best-effort in Go too, so they are ignored.
 ///
-/// `processTelegramUpdate`.
+/// `processTelegramUpdate`. The bound and the scheduler are parameters so a
+/// test can hand it a one-slot semaphore and a detached scheduler.
+///
+/// **The ten-slot bound is taken around the run, not around the update** —
+/// for an unlinked rule around [`execute_and_reply`], for a linked one after
+/// the task has admitted the event ([`run_linked`]) — so a message waiting in
+/// its task's queue holds nothing global (#691).
 async fn process(
+    sem: &'static Semaphore,
+    scheduler: Option<Arc<Scheduler>>,
     db_path: &Path,
     integration_id: &str,
     bot_token: &str,
-    scheduler: Option<Arc<Scheduler>>,
     update: TelegramUpdate,
 ) {
     // A non-message update, or one with no text, is not a trigger.
@@ -192,7 +177,7 @@ async fn process(
     // `process` runs on an axum worker, and each of these opens a connection and
     // may sit on
     // `db.rs`'s five-second `busy_timeout` while the session scan batch-writes —
-    // ten of them at `MAX_CONCURRENT` is every worker on a four-core machine,
+    // a handful of them at once is every worker on a four-core machine,
     // stalling the SPA and any SSE stream. `proxy.rs` puts native handlers on the
     // blocking pool for exactly this reason.
     let claimed = {
@@ -237,6 +222,12 @@ async fn process(
     );
 
     if rule.task_id.is_empty() {
+        let Ok(_permit) = sem.acquire().await else {
+            log::warn!(
+                "dispatcher stopped, dropping telegram update integration_id={integration_id:?}"
+            );
+            return;
+        };
         execute_and_reply(db_path, bot_token, &msg, &rule, &prompt).await;
         return;
     }
@@ -253,7 +244,7 @@ async fn process(
         send_error_reply(bot_token, &msg).await;
         return;
     };
-    match run_linked(scheduler, integration_id, &msg, &rule, prompt).await {
+    match run_linked(sem, scheduler, integration_id, &msg, &rule, prompt).await {
         Ok(job_id) => warn_if_unanswered(db_path, &rule, &job_id).await,
         Err(EventRefused::Paused) => {
             log::info!(
@@ -286,11 +277,19 @@ async fn process(
 /// [`find_matching_rule`] matched (prefix stripped), and the origin is the
 /// message itself, so the task's `reply` delivery quotes it.
 ///
+/// The task's own limits come first (`executor::admit_event`, #691): an event
+/// waiting in its task's queue holds no permit of `sem`'s. Only an admitted
+/// one takes a dispatcher permit, and holds it until `executor::run_admitted`
+/// returns, which takes one of the scheduler's three inside it — so the bound
+/// is always taken outside the scheduler's and the two cannot deadlock. A
+/// closed `sem` is `Unavailable`.
+///
 /// Answers the job id once the run has finished, or why no run started. Sends
 /// nothing to Telegram either way — [`process`] decides what a refusal says.
 /// `pub` for [`run_inputs`]'s reason: `tests/trigger_run.rs` binds to the
 /// shipped call rather than re-spelling it.
 pub async fn run_linked(
+    sem: &Semaphore,
     scheduler: Arc<Scheduler>,
     integration_id: &str,
     msg: &TelegramMsg,
@@ -315,7 +314,15 @@ pub async fn run_linked(
         );
         return Err(EventRefused::Unavailable);
     };
-    executor::run_event(scheduler, &rule.task_id, event).await
+    let admitted = executor::admit_event(&scheduler, &rule.task_id).await?;
+    let Ok(_permit) = sem.acquire().await else {
+        log::warn!(
+            "dispatcher stopped, dropping a telegram event task_id={:?}",
+            rule.task_id
+        );
+        return Err(EventRefused::Unavailable);
+    };
+    executor::run_admitted(scheduler, admitted, event).await
 }
 
 /// Names a linked task with no `reply` destination once per run: it ran and
@@ -1776,7 +1783,7 @@ mod tests {
     }
 
     async fn dispatch(db: &Path, scheduler: Option<Arc<Scheduler>>, update: TelegramUpdate) {
-        handle_under(one_slot(), scheduler, db, "tg", "123:T", update).await;
+        process(one_slot(), scheduler, db, "tg", "123:T", update).await;
     }
 
     #[test]
@@ -1933,14 +1940,23 @@ mod tests {
     }
 
     /// The dispatcher permit is held for the whole of a linked run: with a
-    /// one-slot bound and the run waiting on the scheduler's permits, a second
-    /// update is not even claimed until the first run ends.
+    /// one-slot bound and the run waiting on the scheduler's permits, an
+    /// unlinked rule's message is not answered until the linked run ends.
     #[tokio::test]
     async fn a_linked_run_holds_its_dispatcher_permit_until_the_run_ends() {
         let _base = api_base_lock().await;
-        let _telegram = fake_telegram().await;
+        let telegram = fake_telegram().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let db = linked(dir.path(), "active", "[]", "t1");
+        add_rule(
+            &db,
+            "plain",
+            true,
+            "",
+            "[]",
+            r#"["7"]"#,
+            "2026-02-01 00:00:00 +0000 UTC",
+        );
         let scheduler = runtime::detached(&db);
         let held = scheduler
             .semaphore()
@@ -1948,67 +1964,122 @@ mod tests {
             .await
             .expect("the scheduler's three permits");
         let sem = one_slot();
-        let claims = "SELECT COUNT(*) FROM telegram_processed_updates";
 
-        let first = {
-            let (db, scheduler) = (db.clone(), Arc::clone(&scheduler));
-            tokio::spawn(async move {
-                handle_under(
-                    sem,
-                    Some(scheduler),
-                    &db,
-                    "tg",
-                    "123:T",
-                    update(1, "/ask a", 42),
-                )
-                .await
-            })
-        };
+        let first = spawn_under(sem, &scheduler, &db, update(1, "/ask a", 42));
         for _ in 0..1000 {
-            if scheduler.limiter().load("t1").0 == 1 {
+            if sem.available_permits() == 0 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         assert_eq!(
-            scheduler.limiter().load("t1").0,
-            1,
-            "the first run is admitted"
+            sem.available_permits(),
+            0,
+            "the admitted run took the permit"
         );
 
-        let second = {
-            let (db, scheduler) = (db.clone(), Arc::clone(&scheduler));
-            tokio::spawn(async move {
-                handle_under(
-                    sem,
-                    Some(scheduler),
-                    &db,
-                    "tg",
-                    "123:T",
-                    update(2, "/ask b", 42),
-                )
-                .await
-            })
-        };
+        let second = spawn_under(sem, &scheduler, &db, update(2, "inline", 7));
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert_eq!(
-            count(&db, claims),
-            1,
-            "the second update waits for the permit"
+            telegram.methods(),
+            vec!["sendChatAction".to_string()],
+            "only the linked run's typing: the unlinked one waits for the permit"
         );
-        assert_eq!(sem.available_permits(), 0);
 
         drop(held);
-        tokio::time::timeout(std::time::Duration::from_secs(10), first)
-            .await
-            .expect("the first run ends")
-            .expect("join");
-        tokio::time::timeout(std::time::Duration::from_secs(10), second)
-            .await
-            .expect("then the second is processed")
-            .expect("join");
+        join(first).await;
+        join(second).await;
         set_api_base(None);
-        assert_eq!(count(&db, claims), 2);
-        assert_eq!(jobs(&db).len(), 2);
+        assert_eq!(jobs(&db).len(), 1, "the linked run is recorded");
+        assert_eq!(
+            telegram.sent().len(),
+            1,
+            "and then the unlinked rule answers inline"
+        );
+    }
+
+    /// #691's order: the task's limiter first, the dispatcher's bound after.
+    /// A message waiting in its task's queue holds no dispatcher permit, so an
+    /// unlinked rule is answered while it waits.
+    #[tokio::test]
+    async fn a_linked_message_waiting_in_its_tasks_queue_holds_no_dispatcher_permit() {
+        use crate::native::schedule::limiter::Limits;
+        let _base = api_base_lock().await;
+        let telegram = fake_telegram().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = linked(dir.path(), "active", "[]", "t1");
+        add_rule(
+            &db,
+            "plain",
+            true,
+            "",
+            "[]",
+            r#"["7"]"#,
+            "2026-02-01 00:00:00 +0000 UTC",
+        );
+        let scheduler = runtime::detached(&db);
+        let running = scheduler
+            .limiter()
+            .admit(
+                "t1",
+                Limits {
+                    concurrent: 1,
+                    queued: 5,
+                    per_hour: 10,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("the task's one slot");
+        let sem = one_slot();
+
+        let queued = spawn_under(sem, &scheduler, &db, update(1, "/ask a", 42));
+        for _ in 0..1000 {
+            if scheduler.limiter().load("t1") == (1, 1) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(scheduler.limiter().load("t1"), (1, 1), "the message queued");
+        assert_eq!(sem.available_permits(), 1, "holding no dispatcher permit");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            process(
+                sem,
+                Some(Arc::clone(&scheduler)),
+                &db,
+                "tg",
+                "123:T",
+                update(2, "inline", 7),
+            ),
+        )
+        .await
+        .expect("the unlinked rule is not held up by the queued event");
+        assert_eq!(telegram.sent().len(), 1, "it answered inline");
+
+        drop(running);
+        join(queued).await;
+        set_api_base(None);
+        assert_eq!(jobs(&db).len(), 1, "and the queued message then ran");
+    }
+
+    fn spawn_under(
+        sem: &'static Semaphore,
+        scheduler: &Arc<Scheduler>,
+        db: &Path,
+        update: TelegramUpdate,
+    ) -> tokio::task::JoinHandle<()> {
+        let (db, scheduler) = (db.to_path_buf(), Arc::clone(scheduler));
+        tokio::spawn(async move {
+            process(sem, Some(scheduler), &db, "tg", "123:T", update).await;
+        })
+    }
+
+    async fn join(handle: tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("the update is processed")
+            .expect("join");
     }
 }
