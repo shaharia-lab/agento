@@ -332,8 +332,16 @@ on it. An agent that lists no tools is still allowed every built-in one,
 including shell commands and file writes, so give the rule's agent an explicit
 tool list to limit what a message can make it do.
 
-The rule form has the same **Task** picker as a Slack rule's. A Telegram message
-does not start the linked task yet: it still runs the rule's own agent.
+The rule form has the same **Task** picker as a Slack rule's. A matching message
+then starts one run of that task instead of the rule's own agent: the task's
+instructions are the prompt, the message (without the rule's prefix) is handed
+to it as data, and the run is recorded in **Job history**. **The task answers in
+the chat only if it has a *Reply to sender* destination**; without one it still
+runs and nothing is sent. A paused task, or a message past the task's limits,
+starts nothing and gets no reply. If the linked task was deleted, the sender
+gets "Sorry, something went wrong." (see
+[A rule that starts a task](#a-rule-that-starts-a-task) for the limits and the
+permission rules, which are the same).
 
 ### Telegram long polling
 

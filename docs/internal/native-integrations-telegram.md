@@ -108,6 +108,40 @@ and `a_row_with_no_server_keeps_a_telegram_poll_worker_and_clears_the_rest`,
 `integrations.rs`'s `the_inbound_switch_follows_a_telegram_rows_bot_token` and
 `migrate.rs`'s `migration_50_turns_inbound_on_for_an_active_telegram_webhook`.
 
+## Trigger rules linked to a task (#684)
+
+A matched message whose rule has a `task_id` is not run by the dispatcher. It
+becomes one event run of that task through `executor::run_event`
+(`trigger::dispatcher::run_linked`), with `triggered_by = telegram`, the text
+`match_rule` returned (prefix stripped) as the payload, and
+`ReplyTarget::Telegram { integration_id, chat_id, message_id }` as the origin.
+The rules, each stated in `dispatcher.rs`'s `//!` header:
+
+- **The answer is the task's `reply` delivery**, quoting the triggering
+  message, and nothing is sent inline once the run has started. A linked task
+  with no `reply` destination runs, is recorded, and answers nobody; the
+  dispatcher logs that once per run at `warn`. A failed run answers
+  `ERROR_REPLY` through the same delivery when its `when` is `always`.
+- **The rule's `agent_slug`, execution settings and `timeout_minutes` are not
+  read** on this path; the task's are. `sendChatAction` is still sent first,
+  best-effort.
+- **Refusals write no row and never fall back to the inline run.** `Paused`,
+  `Dropped` and `RateLimited` are silent; `NoSuchTask` (the column has no
+  foreign key, so a dangling id reaches here), `Unavailable` and a process with
+  no scheduler answer `ERROR_REPLY` inline.
+- **The dispatcher's ten-slot permit is held for the whole run**, taken in
+  `handle_update` before the claim; the task's slot and the scheduler's permit
+  are taken inside it (`docs/internal/native-schedule.md`).
+- **A rule with `task_id = ""` runs exactly as before**: the rule's agent, a
+  `[Telegram] <rule>` chat, the inline reply, and no `job_history` row.
+
+Pinned by `dispatcher.rs`'s `a_linked_rule_whose_run_fails_answers_through_the_reply_delivery`,
+`a_linked_task_with_no_reply_destination_runs_and_sends_nothing`,
+`a_paused_linked_task_is_silent_and_a_dangling_link_answers_the_error_reply`,
+`an_unlinked_rule_takes_the_inline_path_and_writes_no_job_row` and
+`a_linked_run_holds_its_dispatcher_permit_until_the_run_ends`, and by
+`tests/trigger_run.rs`'s `a_linked_rule_runs_its_task_as_a_telegram_event`.
+
 ## Trigger rules: who may start a run (#674)
 
 On a Telegram rule `filter_chat_ids` is the sender allowlist, and empty means
