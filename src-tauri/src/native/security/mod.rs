@@ -139,6 +139,9 @@ fn token_id(path: &str) -> Option<&str> {
 
 // ─── The guard's entry point ──────────────────────────────────────────────────
 
+/// Where a task's local webhook lives: `/api/hooks/{task_id}` (#695).
+const HOOKS_PREFIX: &str = "/api/hooks/";
+
 /// What scope a request needs, given the method and the path it is on.
 ///
 /// The rule is `guards::is_state_changing` — the safe methods need `read`, the
@@ -175,7 +178,7 @@ fn token_id(path: &str) -> Option<&str> {
 /// the guard is ever moved *after* `route_path`, this comment stops applying and
 /// the check should simply take the route path.
 ///
-/// # This function returns only `read` or `write`, and must keep doing so
+/// # It never returns `llm`, and returns `hook` for one prefix only
 ///
 /// [`Scope::Llm`] is the gateway data plane's scope (#423) and no `/api` route
 /// asks for it. That is not an omission to be tidied up later — it is half of
@@ -183,9 +186,17 @@ fn token_id(path: &str) -> Option<&str> {
 /// nothing on `/api`; this function says `/api` never asks for `llm`. An arm
 /// added here would hand some `/api` route to a credential that is, by design,
 /// pasted into tool configs in plaintext.
+///
+/// [`Scope::Hook`] (#695) is asked for under `/api/hooks/` and nowhere else, on
+/// every method, so no `read` or `write` token is ever served there either.
+/// That prefix is the *scope* half; which task a hook token may start is
+/// checked in [`verify_with`], against the same raw target.
 pub fn required_scope(method: &Method, path: &str) -> Scope {
     if path.starts_with("/api/security/") || path == "/api/security" {
         return Scope::Write;
+    }
+    if path.starts_with(HOOKS_PREFIX) || path == "/api/hooks" {
+        return Scope::Hook;
     }
     if crate::guards::is_state_changing(method) {
         Scope::Write
@@ -239,12 +250,23 @@ fn verify_with(
     let Some(keypair) = keypair else {
         return Err(Denied::Unauthenticated);
     };
-    token::verify_against(
+    let verified = token::verify_against(
         presented,
         required_scope(method, path),
         keypair.decoding(),
         is_revoked,
-    )
+    )?;
+
+    // A hook token opens its own task's hook and nothing else (#695). The
+    // comparison is literal and against the raw target, for the reason in
+    // `required_scope`: an escaped spelling, a trailing segment or another
+    // task's id never matches, so every disagreement fails closed.
+    if verified.scope == Scope::Hook
+        && path.strip_prefix(HOOKS_PREFIX) != verified.task_id.as_deref()
+    {
+        return Err(Denied::InsufficientScope);
+    }
+    Ok(verified)
 }
 
 /// Mint the app's own webview session token.
@@ -491,6 +513,14 @@ fn create_token(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
             WriteError::validation("scope", "scope must be \"read\", \"write\" or \"llm\"")
         })?
     };
+    // A hook token is bound to one task, and this route has no task to bind it
+    // to — minting one here would be a token that can never verify (#695).
+    if scope == Scope::Hook {
+        return Err(WriteError::validation(
+            "scope",
+            "hook tokens are minted per task",
+        ));
+    }
     let days = match req.expires_in_days {
         0 => DEFAULT_TOKEN_DAYS,
         d if !(1..=MAX_TOKEN_DAYS).contains(&d) => {
@@ -633,7 +663,7 @@ mod tests {
             }
         };
 
-        for unknown in ["admin", "READ", "LLM", "llm ", "gateway"] {
+        for unknown in ["admin", "READ", "LLM", "llm ", "gateway", "HOOK"] {
             let message = scope_error(unknown)
                 .unwrap_or_else(|| panic!("{unknown:?} must be refused as a scope"));
             for spelling in ["read", "write", "llm"] {
@@ -723,6 +753,82 @@ mod tests {
             Scope::Write
         );
         assert!(claims(&Method::GET, "/api/security/tokens"));
+    }
+
+    /// A hook token is refused by the generic create route rather than minted
+    /// unbound (#695): the route has no task to bind it to.
+    #[test]
+    fn the_create_route_refuses_a_hook_token() {
+        let db = std::path::Path::new("/nonexistent/agento-create-token-test.db");
+        let err = match create_token(db, br#"{"name":"git hook","scope":"hook"}"#) {
+            Err(e) => e,
+            Ok(_) => panic!("a hook token must not be minted by the generic route"),
+        };
+        assert!(
+            err.message().contains("hook tokens are minted per task"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(
+            writes::finish(Err(err)).expect("answer").status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    /// Every method under `/api/hooks/` needs the hook scope, so neither a
+    /// `read` nor a `write` token is ever asked whether it may go there.
+    #[test]
+    fn the_hook_prefix_needs_the_hook_scope_on_every_method() {
+        for method in [
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ] {
+            for path in ["/api/hooks/task-a", "/api/hooks", "/api/hooks/a/b"] {
+                assert_eq!(
+                    required_scope(&method, path),
+                    Scope::Hook,
+                    "{method} {path}"
+                );
+            }
+            // A neighbour that only shares the letters is not a hook.
+            assert_ne!(required_scope(&method, "/api/hooksx"), Scope::Hook);
+        }
+    }
+
+    /// **The task binding.** A hook token opens its own task's hook, and is
+    /// refused — 403 — on another task's, on a deeper path, and on any escaped
+    /// spelling of its own.
+    #[test]
+    fn a_hook_token_opens_only_its_own_task() {
+        let keypair = keys::Keypair::generate().expect("generate");
+        let hook = token::mint_hook(&keypair, "s", "task-a", 600)
+            .expect("mint")
+            .token;
+        let at = |path: &str| verify_with(&hook, &Method::POST, path, Some(&keypair), &|_| false);
+
+        let verified = at("/api/hooks/task-a").expect("its own hook");
+        assert_eq!(verified.task_id.as_deref(), Some("task-a"));
+
+        for path in [
+            "/api/hooks/task-b",
+            "/api/hooks/task-a/extra",
+            "/api/hooks/task-a/",
+            "/api/hooks/task-",
+            "/api/hooks/",
+            "/api/hooks",
+            "/api/%68ooks/task-a",
+            "/api/hooks/%74ask-a",
+            "/api/hooks%2Ftask-a",
+            "/api/agents",
+            "/api/tasks/task-a/run",
+        ] {
+            assert_eq!(at(path), Err(Denied::InsufficientScope), "{path}");
+        }
     }
 
     /// RFC 8037's shape, which is what makes "a stock library on the other side"

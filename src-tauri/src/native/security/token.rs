@@ -35,7 +35,11 @@
 //! - `scope` — `read` or `write`, compared against what the request's method
 //!   needs. Two levels, mapped onto `guards::is_state_changing`, so there is one
 //!   definition of read-versus-write in the tree; a per-route permission model
-//!   over ~90 endpoints is its own design and is out of scope.
+//!   over ~90 endpoints is its own design and is out of scope. `llm` (#423) and
+//!   `hook` (#695) sit outside that hierarchy.
+//! - `task_id` — present on a `hook` token and on nothing else (#695): the one
+//!   task that token may start. Absent from every other token, so every token
+//!   minted before it existed still verifies unchanged.
 //! - `jti` — the revocation handle. Regenerating the keypair kills everything at
 //!   once; `jti` is what kills exactly one.
 //! - `iat` / `exp` — with [`LEEWAY`] on the latter, because a laptop that
@@ -109,10 +113,20 @@ pub enum Scope {
     /// - Conversely, a credential whose job is to spend provider credits has no
     ///   business reading chat history, so `llm` grants nothing on `/api`.
     ///
-    /// The `aud` claim is still `agento-api` for all three: scope is the
+    /// The `aud` claim is still `agento-api` for all four: scope is the
     /// capability axis, and a second audience would mean a parallel validation
     /// path for no gain.
     Llm,
+    /// Starting **one** task through its local webhook, and nothing else (#695).
+    ///
+    /// Disjoint for the same reason [`Llm`](Self::Llm) is: a hook credential is
+    /// pasted into git hooks, cron lines and CI scripts, so as `write` a leak
+    /// would be arbitrary command execution and as `read` it would be every chat
+    /// transcript. Narrower than `llm` too, because it is bound to a resource: the
+    /// token carries a `task_id` claim, [`verify_against`] refuses a hook token
+    /// without one, and `security::verify_with` serves it only on that task's own
+    /// `/api/hooks/{task_id}`.
+    Hook,
 }
 
 impl Scope {
@@ -122,6 +136,7 @@ impl Scope {
             Self::Read => "read",
             Self::Write => "write",
             Self::Llm => "llm",
+            Self::Hook => "hook",
         }
     }
 
@@ -133,13 +148,14 @@ impl Scope {
             "read" => Some(Self::Read),
             "write" => Some(Self::Write),
             "llm" => Some(Self::Llm),
+            "hook" => Some(Self::Hook),
             _ => None,
         }
     }
 
     /// Whether a credential carrying `self` may serve a request needing
-    /// `required`. `write` covers `read`; nothing covers `write`; and `llm`
-    /// covers only itself, in both directions.
+    /// `required`. `write` covers `read`; nothing covers `write`; and `llm` and
+    /// `hook` each cover only themselves, in both directions.
     ///
     /// **The arms are enumerated, and that is load-bearing.** This was
     /// `(Self::Write, _) | (Self::Read, Scope::Read)` until #423, and the
@@ -155,6 +171,7 @@ impl Scope {
                 | (Self::Write, Scope::Read)
                 | (Self::Read, Scope::Read)
                 | (Self::Llm, Scope::Llm)
+                | (Self::Hook, Scope::Hook)
         )
     }
 }
@@ -169,6 +186,11 @@ pub struct Claims {
     pub jti: String,
     pub iat: i64,
     pub exp: i64,
+    /// The task a `hook` token may start (#695), and absent on every other
+    /// scope. Last, and omitted when `None`, so a token minted without it is
+    /// byte-for-byte what it was before the claim existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// A freshly minted credential and the metadata a caller needs to record.
@@ -189,6 +211,8 @@ pub struct Verified {
     pub subject: String,
     pub scope: Scope,
     pub jti: String,
+    /// The `task_id` claim: `Some` exactly when `scope` is [`Scope::Hook`].
+    pub task_id: Option<String>,
 }
 
 /// Why a credential was refused, and with which status.
@@ -216,10 +240,46 @@ fn now() -> i64 {
 }
 
 /// Sign a token for `subject` with `scope`, good for `ttl_seconds`.
+///
+/// A [`Scope::Hook`] token minted here carries no `task_id` and so never
+/// verifies; [`mint_hook`] is the way to mint one.
 pub fn mint(
     keypair: &Keypair,
     subject: &str,
     scope: Scope,
+    ttl_seconds: i64,
+) -> Result<Minted, String> {
+    sign(keypair, subject, scope, None, ttl_seconds)
+}
+
+/// Sign a [`Scope::Hook`] token that may start `task_id` and nothing else.
+///
+/// An empty `task_id` is refused here rather than minted, because the verifier
+/// would refuse the result anyway: a hook token bound to no task is a token
+/// that can never be used.
+pub fn mint_hook(
+    keypair: &Keypair,
+    subject: &str,
+    task_id: &str,
+    ttl_seconds: i64,
+) -> Result<Minted, String> {
+    if task_id.is_empty() {
+        return Err("a hook token needs a task id".to_string());
+    }
+    sign(
+        keypair,
+        subject,
+        Scope::Hook,
+        Some(task_id.to_string()),
+        ttl_seconds,
+    )
+}
+
+fn sign(
+    keypair: &Keypair,
+    subject: &str,
+    scope: Scope,
+    task_id: Option<String>,
     ttl_seconds: i64,
 ) -> Result<Minted, String> {
     let jti = uuid::Uuid::new_v4().simple().to_string();
@@ -234,6 +294,7 @@ pub fn mint(
         jti: jti.clone(),
         iat: issued_at,
         exp: expires_at,
+        task_id,
     };
 
     // The `kid` is what lets a verifier holding several keys pick one, and what
@@ -303,10 +364,25 @@ pub fn verify_against(
         return Err(Denied::InsufficientScope);
     }
 
+    // The task binding is all a hook token is (#695), so one without a task is
+    // refused rather than treated as unbound. And a `task_id` on any other
+    // scope is refused too: nothing mints one, so a token carrying it is not
+    // one this build issued, and a stray claim must never come to mean
+    // something later.
+    let bound = match (scope, claims.task_id.as_deref()) {
+        (Scope::Hook, Some(id)) => !id.is_empty(),
+        (Scope::Hook, None) => false,
+        (_, task_id) => task_id.is_none(),
+    };
+    if !bound {
+        return Err(Denied::InsufficientScope);
+    }
+
     Ok(Verified {
         subject: claims.sub,
         scope,
         jti: claims.jti,
+        task_id: claims.task_id,
     })
 }
 
@@ -376,6 +452,7 @@ mod tests {
             jti: "j".to_string(),
             iat: now() - 7200,
             exp: now() - (LEEWAY as i64) - 60,
+            task_id: None,
         };
         let token = jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, keys.encoding())
             .expect("encode");
@@ -398,6 +475,7 @@ mod tests {
             jti: "j".to_string(),
             iat: now() - 600,
             exp: now() - 10,
+            task_id: None,
         };
         let token = jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, keys.encoding())
             .expect("encode");
@@ -420,6 +498,7 @@ mod tests {
                 jti: "j".to_string(),
                 iat: now(),
                 exp: now() + 600,
+                task_id: None,
             };
             let token =
                 jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, keys.encoding())
@@ -450,6 +529,7 @@ mod tests {
                 jti: "j".to_string(),
                 iat: now(),
                 exp: now() + 600,
+                task_id: None,
             })
             .expect("claims"),
         );
@@ -522,6 +602,7 @@ mod tests {
             jti: "j".to_string(),
             iat: now(),
             exp: now() + 600,
+            task_id: None,
         };
         let token = jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, keys.encoding())
             .expect("encode");
@@ -532,16 +613,53 @@ mod tests {
         assert_eq!(Scope::parse("admin"), None);
         assert_eq!(Scope::parse("READ"), None, "the spelling is exact");
         assert_eq!(Scope::parse("LLM"), None, "the spelling is exact");
+        assert_eq!(Scope::parse("HOOK"), None, "the spelling is exact");
     }
 
-    /// The whole lattice, stated as a 3×3 matrix rather than spot-checked.
+    /// The whole lattice, stated as a 4×4 matrix rather than spot-checked.
     ///
     /// Exhaustive because the interesting cases are the *false* ones, and a
     /// spot-check of the true ones is exactly what would have passed against the
-    /// `(Write, _)` wildcard this replaced (#423): `Write.covers(Llm)` is the
-    /// assertion that fails if a wildcard ever comes back.
+    /// `(Write, _)` wildcard this replaced (#423): `Write.covers(Llm)` and
+    /// `Write.covers(Hook)` are the assertions that fail if a wildcard ever
+    /// comes back.
     #[test]
     fn scope_covering_is_the_split_the_guard_needs() {
+        const ALL: [Scope; 4] = [Scope::Read, Scope::Write, Scope::Llm, Scope::Hook];
+        let expected = |held: Scope, required: Scope| {
+            matches!(
+                (held, required),
+                (Scope::Write, Scope::Write | Scope::Read)
+                    | (Scope::Read, Scope::Read)
+                    | (Scope::Llm, Scope::Llm)
+                    | (Scope::Hook, Scope::Hook)
+            )
+        };
+        for held in ALL {
+            for required in ALL {
+                assert_eq!(
+                    held.covers(required),
+                    expected(held, required),
+                    "{held:?} covering {required:?}"
+                );
+            }
+        }
+
+        // hook: itself only, in both directions (#695).
+        assert!(Scope::Hook.covers(Scope::Hook));
+        assert!(
+            !Scope::Write.covers(Scope::Hook),
+            "write must not open a hook: the hook route is the hook token's alone"
+        );
+        assert!(!Scope::Read.covers(Scope::Hook));
+        assert!(!Scope::Llm.covers(Scope::Hook));
+        assert!(
+            !Scope::Hook.covers(Scope::Read),
+            "a hook credential pasted into a script must not read chat transcripts"
+        );
+        assert!(!Scope::Hook.covers(Scope::Write));
+        assert!(!Scope::Hook.covers(Scope::Llm));
+
         // write: the top of the /api hierarchy, and nothing more.
         assert!(Scope::Write.covers(Scope::Write));
         assert!(Scope::Write.covers(Scope::Read));
@@ -567,6 +685,7 @@ mod tests {
         assert_eq!(Scope::Read.as_str(), "read");
         assert_eq!(Scope::Write.as_str(), "write");
         assert_eq!(Scope::Llm.as_str(), "llm");
+        assert_eq!(Scope::Hook.as_str(), "hook");
     }
 
     /// Every scope survives the wire, because the row stores the spelling and
@@ -574,7 +693,7 @@ mod tests {
     /// other is a token that mints and then never verifies.
     #[test]
     fn a_round_trip_through_the_wire_spelling_is_identity() {
-        for scope in [Scope::Read, Scope::Write, Scope::Llm] {
+        for scope in [Scope::Read, Scope::Write, Scope::Llm, Scope::Hook] {
             assert_eq!(
                 Scope::parse(scope.as_str()),
                 Some(scope),
@@ -602,5 +721,101 @@ mod tests {
         let minted = mint(&keys, "s", Scope::Read, SESSION_TTL_SECONDS).expect("mint");
         assert_eq!(minted.expires_at - minted.issued_at, SESSION_TTL_SECONDS);
         assert!(minted.expires_at > now());
+    }
+
+    /// Sign arbitrary claims with `keys`, for the cases no mint function makes.
+    fn signed(keys: &Keypair, scope: &str, task_id: Option<&str>) -> String {
+        let claims = Claims {
+            iss: ISSUER.to_string(),
+            aud: AUDIENCE.to_string(),
+            sub: "s".to_string(),
+            scope: scope.to_string(),
+            jti: "j".to_string(),
+            iat: now(),
+            exp: now() + 600,
+            task_id: task_id.map(str::to_string),
+        };
+        jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, keys.encoding())
+            .expect("encode")
+    }
+
+    /// `mint_hook` binds the token to its task, and the binding survives
+    /// verification so the guard can compare it with the path.
+    #[test]
+    fn a_hook_token_carries_its_task() {
+        let keys = keypair();
+        let minted = mint_hook(&keys, "s", "task-a", 600).expect("mint");
+        let verified = verify(&minted.token, Scope::Hook, &keys).expect("verify");
+        assert_eq!(verified.scope, Scope::Hook);
+        assert_eq!(verified.task_id.as_deref(), Some("task-a"));
+
+        assert!(
+            mint_hook(&keys, "s", "", 600).is_err(),
+            "a hook token bound to no task must not be minted"
+        );
+    }
+
+    /// A hook token is its task binding, so one without a task — or with an
+    /// empty one — is refused rather than treated as a hook for every task.
+    #[test]
+    fn a_hook_token_without_a_task_is_refused() {
+        let keys = keypair();
+        for task_id in [None, Some("")] {
+            assert_eq!(
+                verify(&signed(&keys, "hook", task_id), Scope::Hook, &keys),
+                Err(Denied::InsufficientScope),
+                "task_id {task_id:?} must be refused"
+            );
+        }
+        // `mint` is not a way around it: its hook token has no task either.
+        let unbound = mint(&keys, "s", Scope::Hook, 600).expect("mint");
+        assert_eq!(
+            verify(&unbound.token, Scope::Hook, &keys),
+            Err(Denied::InsufficientScope)
+        );
+    }
+
+    /// Only a hook token may carry a task. Nothing mints a `task_id` on another
+    /// scope, so a token that has one did not come from this build.
+    #[test]
+    fn a_task_id_on_any_other_scope_is_refused() {
+        let keys = keypair();
+        for (scope, required) in [
+            ("read", Scope::Read),
+            ("write", Scope::Write),
+            ("llm", Scope::Llm),
+        ] {
+            assert_eq!(
+                verify(&signed(&keys, scope, Some("task-a")), required, &keys),
+                Err(Denied::InsufficientScope),
+                "a {scope} token carrying a task_id must be refused"
+            );
+            assert!(
+                verify(&signed(&keys, scope, None), required, &keys).is_ok(),
+                "...and the same {scope} token without it is served"
+            );
+        }
+    }
+
+    /// The claim is omitted, not `null`, when there is no task, so a token
+    /// minted without one reads exactly as it did before the claim existed.
+    #[test]
+    fn a_token_without_a_task_does_not_spell_the_claim() {
+        use base64::Engine;
+        let claims_of = |token: &str| -> serde_json::Value {
+            let payload = token.split('.').nth(1).expect("payload");
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .expect("base64url");
+            serde_json::from_slice(&raw).expect("json")
+        };
+        let keys = keypair();
+
+        let plain = mint(&keys, "s", Scope::Write, 600).expect("mint");
+        let claims = claims_of(&plain.token);
+        assert!(claims.get("task_id").is_none(), "{claims}");
+
+        let hook = mint_hook(&keys, "s", "task-a", 600).expect("mint");
+        assert_eq!(claims_of(&hook.token)["task_id"], "task-a");
     }
 }

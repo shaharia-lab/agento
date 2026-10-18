@@ -805,6 +805,17 @@ async fn only_an_llm_scoped_token_opens_either_surface() {
                 "{path} with a {scope:?} token must be 403, not 401 — it verified"
             );
         }
+        // A hook token (#695) verifies too, and opens nothing here either.
+        let hook = token::mint_hook(installed_keypair(), "test-token", "task-a", 3600)
+            .expect("mint")
+            .token;
+        let response = client
+            .get(gateway.url(path))
+            .bearer_auth(hook)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(response.status(), 403, "{path} with a hook token");
 
         // Garbage that does not verify.
         let response = client
