@@ -90,7 +90,10 @@ the agent's and the resumed chat's modes outright:
 | `read_only` | `--permission-mode dontAsk --allowedTools Read,Glob,Grep,WebFetch,WebSearch --disallowedTools …,Write,Edit,MultiEdit,NotebookEdit,Bash` | no |
 
 The three non-`full` arms are built on `with_default_permissions()`, so
-`--allow-dangerously-skip-permissions` is not sent for them.
+`--allow-dangerously-skip-permissions` is not sent for them. `plan` and
+`workspace_write` keep the agent's allowlist: `acceptEdits` pre-approves edits
+on top of it and shrinks nothing, so a `workspace_write` task with no agent, or
+an agent that lists no tools, still pre-allows every built-in, `Bash` included.
 `read_only`'s allowlist **replaces** the agent's (its MCP and local tools
 included, which `dontAsk` then denies) and its five denials are added to
 whatever the agent already denies; `--disallowedTools` also beats an allow

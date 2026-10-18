@@ -592,7 +592,7 @@ or a reply — and it beats the agent's own mode:
 | --- | --- |
 | **Read-only** | Read files and search the web. It writes nothing, runs no shell commands and uses none of the agent's integration or local tools. The default for a new task |
 | **Plan** | Plan and propose changes without making them |
-| **Workspace write** | Edit files without asking; anything else that would need permission is refused |
+| **Workspace write** | Edit files without asking. Other tools run only if the agent pre-allows them, and a task with no agent, or an agent that lists no tools, pre-allows every built-in one, **shell commands included** |
 | **Full** | No permission checks at all: any tool, the shell included |
 
 Nothing in a message can change a task's mode. **Upgrading:** each existing

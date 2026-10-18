@@ -601,5 +601,7 @@ async fn an_event_asking_for_more_permissions_runs_read_only_and_changes_no_task
         "{argv:?}"
     );
     assert_eq!(task_row(&conn, "t1"), before, "the event changed the task");
-    assert!(!target.exists(), "nothing wrote the file");
+    // The fake CLI writes nothing whatever it is told, so the argv above is
+    // the evidence here; that the real CLI writes no file under these flags
+    // is checked by hand against Claude Code (gate d).
 }

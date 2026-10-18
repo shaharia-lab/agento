@@ -162,7 +162,7 @@ const PERMISSION_MODES: readonly {
   {
     value: "workspace_write",
     label: "Workspace write",
-    help: "Edits files without asking. Anything else that would need permission is refused.",
+    help: "Edits files without asking. Other tools run only if the agent pre-allows them, and a task with no agent, or an agent that lists no tools, pre-allows every built-in one, the shell included.",
   },
   {
     value: "full",
