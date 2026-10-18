@@ -1395,6 +1395,10 @@ async fn run_agent(
             prompt,
             task_timeout(task),
             Some(record_process(db_path, job_id)),
+            // Refused before anything is spawned when the spec is fail-open
+            // and the task's mode is not `full`; the `Err` is the run's
+            // failed `job_history` row (#694).
+            crate::native::agent_run::PermissionGate::for_task(mode),
         )
         .await
 }
@@ -1451,6 +1455,7 @@ async fn resume_agent(
             },
             task_timeout(task),
             Some(record_process(db_path, job_id)),
+            crate::native::agent_run::PermissionGate::for_task(mode),
         )
         .await
 }

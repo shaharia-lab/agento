@@ -35,7 +35,18 @@ use crate::native::db;
 /// [`RunSpec`], [`RunResult`] and [`ExecutionSettings`] are the neutral types:
 /// a caller builds a spec and reads a result without naming the CLI behind
 /// them. What is the harness's own is how a spec becomes flags, and which of
-/// those flags leave the run unchecked — [`Self::run`] and [`Self::fail_open`].
+/// those flags leave the run unchecked — [`Self::spawn`] and
+/// [`Self::fail_open`].
+///
+/// **The refusal is the trait's, not the harness's or the caller's** (#694).
+/// [`Self::run`] and [`Self::resume`] are provided: each asks
+/// [`Self::fail_open`] first and answers `Err` without spawning unless the
+/// caller's [`PermissionGate`] is [`PermissionGate::Full`]. [`Self::spawn`]
+/// takes a [`FailOpenChecked`], which only this module can build, so nothing
+/// outside it can reach a spawn that skipped the check — a second harness
+/// inherits the refusal by implementing `spawn`. An implementor must not
+/// override `run` or `resume`: an override is a spawn path the check is not
+/// on, and nothing but this rule stops one.
 ///
 /// Generic rather than `dyn`: the methods return futures, so a trait object
 /// would need them boxed, and every caller is on the scheduler's or an inbound
@@ -49,14 +60,29 @@ pub trait Runner: Send + Sync + Sized {
     /// started with a flag combination under which a tool call nobody approved
     /// can run — or `None` when it would not be.
     ///
-    /// A declaration, not an enforcement: nothing here refuses a run. It is
-    /// decided from the spec alone, before anything is spawned or bound, so a
-    /// caller can refuse on it without knowing the harness. A spec the harness
-    /// would refuse to build at all answers `None`: that run fails closed.
+    /// [`Self::run`] refuses on it (#694). It is decided from the spec alone,
+    /// before anything is spawned or bound, so the refusal does not need to
+    /// know the harness. A spec the harness would refuse to build at all
+    /// answers `None`: that run fails closed.
     fn fail_open(&self, spec: &RunSpec) -> Option<String>;
+
+    /// The harness's own step: spec to flags, spawn, drain, result. Reached
+    /// only through [`Self::run`], which is what `checked` proves.
+    fn spawn(
+        &self,
+        checked: FailOpenChecked,
+        spec: &RunSpec,
+        prompt: &str,
+        timeout: std::time::Duration,
+        on_spawn: Option<crate::claude::SpawnHook>,
+    ) -> impl std::future::Future<Output = Result<RunResult, String>> + Send;
 
     /// Run `prompt` to completion on a fresh session and answer what it
     /// produced. `timeout` covers every stage that can await.
+    ///
+    /// A run that [`Self::fail_open`] reports is refused before anything is
+    /// spawned unless `gate` is [`PermissionGate::Full`], and the refusal is
+    /// this call's `Err` — the scheduler records it as a failed run.
     ///
     /// `on_spawn` is told the subprocess's pid before a byte of its output is
     /// read — the scheduler records it on the job row (#594). The other callers
@@ -67,7 +93,13 @@ pub trait Runner: Send + Sync + Sized {
         prompt: &str,
         timeout: std::time::Duration,
         on_spawn: Option<crate::claude::SpawnHook>,
-    ) -> impl std::future::Future<Output = Result<RunResult, String>> + Send;
+        gate: PermissionGate,
+    ) -> impl std::future::Future<Output = Result<RunResult, String>> + Send {
+        async move {
+            let checked = check_fail_open(self, spec, gate)?;
+            self.spawn(checked, spec, prompt, timeout, on_spawn).await
+        }
+    }
 
     /// Run **one turn on an existing chat**, resuming its session, and write
     /// what it produced back onto the chat.
@@ -76,9 +108,11 @@ pub trait Runner: Send + Sync + Sized {
     /// lookup and the write-back are Agento's own, and the one harness-specific
     /// step in the middle is [`Self::run`]. See [`run_resumed`] for the rules.
     ///
-    /// `on_spawn` is [`Self::run`]'s: a scheduler run that continues a chat
-    /// records its pid as a fresh one does (#686). The inbound caller passes
-    /// `None`.
+    /// `on_spawn` and `gate` are [`Self::run`]'s: a scheduler run that
+    /// continues a chat records its pid as a fresh one does (#686), and is
+    /// refused on the spec it resumes with exactly as a fresh one is (#694).
+    /// The inbound caller passes `None` and [`PermissionGate::NotFull`].
+    #[allow(clippy::too_many_arguments)]
     fn resume(
         &self,
         db_path: &std::path::Path,
@@ -87,8 +121,61 @@ pub trait Runner: Send + Sync + Sized {
         settings: &ExecutionSettings,
         timeout: std::time::Duration,
         on_spawn: Option<crate::claude::SpawnHook>,
+        gate: PermissionGate,
     ) -> impl std::future::Future<Output = Result<RunResult, String>> + Send {
-        run_resumed(self, db_path, chat_id, prompt, settings, timeout, on_spawn)
+        run_resumed(
+            self, db_path, chat_id, prompt, settings, timeout, on_spawn, gate,
+        )
+    }
+}
+
+/// Whether the caller's run may be fail-open (#694): only a task whose mode
+/// is `full` may. A caller with no task — an unlinked trigger rule — has no
+/// way to say `full`, so it passes [`Self::NotFull`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionGate {
+    /// The task's mode is [`crate::native::tasks::TaskPermissionMode::Full`].
+    Full,
+    NotFull,
+}
+
+impl PermissionGate {
+    /// The gate a run of a task in `mode` passes.
+    pub fn for_task(mode: crate::native::tasks::TaskPermissionMode) -> Self {
+        if mode == crate::native::tasks::TaskPermissionMode::Full {
+            Self::Full
+        } else {
+            Self::NotFull
+        }
+    }
+}
+
+/// Proof that [`Runner::spawn`]'s caller asked [`Runner::fail_open`] first.
+/// Its field is private, so only [`check_fail_open`] builds one.
+#[derive(Debug)]
+pub struct FailOpenChecked(());
+
+/// The refusal [`Runner::run`] makes before it spawns: `Err` naming the
+/// harness and the reason when `spec` is fail-open and `gate` is not
+/// [`PermissionGate::Full`].
+fn check_fail_open<R: Runner>(
+    runner: &R,
+    spec: &RunSpec,
+    gate: PermissionGate,
+) -> Result<FailOpenChecked, String> {
+    match (runner.fail_open(spec), gate) {
+        (None, _) | (Some(_), PermissionGate::Full) => Ok(FailOpenChecked(())),
+        (Some(reason), PermissionGate::NotFull) => {
+            let whose = match spec.task_mode {
+                Some(mode) => format!("the task's is {}", mode.as_str()),
+                None => "this run has no task".to_string(),
+            };
+            Err(format!(
+                "refused: harness {} would run fail-open ({reason}); \
+                 only permission mode full allows it, and {whose}",
+                runner.harness()
+            ))
+        }
     }
 }
 
@@ -118,7 +205,7 @@ impl ClaudeRunner {
     ///   enabled by default". It skips nothing by itself, but a run that sends
     ///   it can be switched into bypass while it runs, so it is not provably
     ///   closed. `Options::new()` sets it, and only `with_default_permissions`
-    ///   clears it — so an explicit `plan` or `dontAsk` is reported here too.
+    ///   clears it; a headless `plan` or `dontAsk` clears it since #694.
     fn fail_open_options(options: &crate::claude::options::Options) -> Option<String> {
         use crate::claude::options::permission_mode::BYPASS_PERMISSIONS;
         if options.permission_mode == BYPASS_PERMISSIONS {
@@ -151,8 +238,9 @@ impl Runner for ClaudeRunner {
         Self::fail_open_options(&options)
     }
 
-    async fn run(
+    async fn spawn(
         &self,
+        _checked: FailOpenChecked,
         spec: &RunSpec,
         prompt: &str,
         timeout: std::time::Duration,
@@ -195,7 +283,8 @@ pub struct RunResult {
 /// `on_spawn` is told the CLI's pid before a byte of its output is read — the
 /// scheduler records it on the job row (#594). The other callers pass `None`.
 ///
-/// Private: callers reach it through [`Runner::run`].
+/// Private: callers reach it through [`Runner::run`], which refuses a
+/// fail-open spec first.
 async fn run_headless(
     spec: &RunSpec,
     prompt: &str,
@@ -441,6 +530,7 @@ fn pick(overridden: &str, fallback: &str) -> String {
 /// inbound turns — so replacing would silently erase the UI turns' usage. This
 /// increments, the way `chat/persist.rs` does for the interactive turn. **Do not
 /// unify this statement with the executor's.**
+#[allow(clippy::too_many_arguments)]
 async fn run_resumed<R: Runner>(
     runner: &R,
     db_path: &std::path::Path,
@@ -449,6 +539,7 @@ async fn run_resumed<R: Runner>(
     settings: &ExecutionSettings,
     timeout: std::time::Duration,
     on_spawn: Option<crate::claude::SpawnHook>,
+    gate: PermissionGate,
 ) -> Result<RunResult, String> {
     if !live::registry().try_lock(chat_id) {
         return Err(live::CHAT_BUSY.to_string());
@@ -469,8 +560,10 @@ async fn run_resumed<R: Runner>(
         return Err(format!("chat {chat_id:?} not found"));
     };
 
+    // The fail-open check is on this spec, the one the turn would spawn with:
+    // the chat's own mode is only known once the row is read (#694).
     let spec = resume_spec(db_path, &row, agent, settings);
-    let result = runner.run(&spec, prompt, timeout, on_spawn).await;
+    let result = runner.run(&spec, prompt, timeout, on_spawn, gate).await;
 
     let result = match result {
         Ok(result) => result,
@@ -995,14 +1088,14 @@ mod tests {
     }
 
     /// Every stored spelling, on the run and on the agent, against what
-    /// `build_options` spawns for it. `bypass` is fail-open by its mode;
-    /// `plan` and `dontAsk` are fail-open by the flag `Options::new()` sets
-    /// and they never clear; `default` and the unchosen run send neither.
+    /// `build_options` spawns for it. `bypass` is fail-open by its mode; since
+    /// #694 a headless `plan` or `dontAsk` clears the flag `Options::new()`
+    /// sets, so like `default` and the unchosen run they send neither.
     ///
     /// The list is [`crate::native::chats::CHAT_PERMISSION_MODES`] itself, so
     /// a mode added there has no answer here until someone gives it one.
     #[test]
-    fn claude_declares_bypass_and_the_allow_flag_fail_open_for_every_mode() {
+    fn claude_declares_only_bypass_fail_open_for_every_mode() {
         let runner = runner();
         assert_eq!(runner.harness(), "claude");
 
@@ -1020,14 +1113,8 @@ mod tests {
 
         for mode in crate::native::chats::CHAT_PERMISSION_MODES {
             let want = match mode {
-                "" | "default" => None,
+                "" | "default" | "plan" | "dontAsk" => None,
                 "bypass" => Some("--permission-mode bypassPermissions skips"),
-                "plan" => {
-                    Some("--allow-dangerously-skip-permissions is sent with --permission-mode plan")
-                }
-                "dontAsk" => Some(
-                    "--allow-dangerously-skip-permissions is sent with --permission-mode dontAsk",
-                ),
                 other => panic!("permission mode {other:?} has no fail-open answer"),
             };
             // The run's own mode, and the same mode stored on the agent with
@@ -1081,5 +1168,240 @@ mod tests {
             flag_only.is_some_and(|r| r.contains("--allow-dangerously-skip-permissions")),
             "plan alone does not clear the flag"
         );
+    }
+
+    /// A harness whose every spec is fail-open, and whose spawn counts. What
+    /// the seam promises a second harness: it implements `spawn` and inherits
+    /// the refusal, because `run` and `resume` are the trait's (#694).
+    struct AlwaysFailOpen {
+        spawned: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Runner for AlwaysFailOpen {
+        fn harness(&self) -> &'static str {
+            "fake"
+        }
+
+        fn fail_open(&self, _spec: &RunSpec) -> Option<String> {
+            Some("--yolo".to_string())
+        }
+
+        async fn spawn(
+            &self,
+            _checked: FailOpenChecked,
+            _spec: &RunSpec,
+            _prompt: &str,
+            _timeout: std::time::Duration,
+            _on_spawn: Option<crate::claude::SpawnHook>,
+        ) -> Result<RunResult, String> {
+            self.spawned
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(RunResult {
+                answer: "ran".to_string(),
+                ..Default::default()
+            })
+        }
+    }
+
+    fn spec_of_task(mode: Option<crate::native::tasks::TaskPermissionMode>) -> RunSpec {
+        headless_spec(
+            std::path::Path::new(NO_DB),
+            agent_with_mode(""),
+            &ExecutionSettings {
+                task_mode: mode,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_fail_open_spec_never_reaches_the_spawn_unless_the_gate_is_full() {
+        use crate::native::tasks::TaskPermissionMode;
+        use std::sync::atomic::Ordering;
+        let runner = AlwaysFailOpen {
+            spawned: Default::default(),
+        };
+        let timeout = std::time::Duration::from_secs(1);
+
+        for mode in TaskPermissionMode::ALL {
+            let spec = spec_of_task(Some(mode));
+            let gate = PermissionGate::for_task(mode);
+            let got = runner.run(&spec, "p", timeout, None, gate).await;
+            if mode == TaskPermissionMode::Full {
+                assert_eq!(gate, PermissionGate::Full);
+                assert_eq!(got.map(|r| r.answer), Ok("ran".to_string()));
+            } else {
+                assert_eq!(
+                    got.map(|r| r.answer),
+                    Err(format!(
+                        "refused: harness fake would run fail-open (--yolo); \
+                         only permission mode full allows it, and the task's is {}",
+                        mode.as_str()
+                    ))
+                );
+            }
+        }
+        assert_eq!(
+            runner.spawned.load(Ordering::SeqCst),
+            1,
+            "only full spawned"
+        );
+
+        // A caller with no task names no mode, so it can never be `full`.
+        let got = runner
+            .run(
+                &spec_of_task(None),
+                "p",
+                timeout,
+                None,
+                PermissionGate::NotFull,
+            )
+            .await;
+        assert!(
+            got.as_ref()
+                .is_err_and(|e| e.ends_with("and this run has no task")),
+            "{:?}",
+            got.map(|r| r.answer)
+        );
+        assert_eq!(runner.spawned.load(Ordering::SeqCst), 1);
+    }
+
+    /// The real harness through the same seam: a task in any mode but `full`
+    /// declares nothing, so it is never refused, and what is refused is a
+    /// spec with no task whose stored mode is `bypass`.
+    #[tokio::test]
+    async fn claude_refuses_only_what_it_declares_fail_open() {
+        use crate::native::tasks::TaskPermissionMode;
+        let runner = runner();
+        for mode in TaskPermissionMode::ALL {
+            let spec = spec_of_task(Some(mode));
+            let refused = check_fail_open(&runner, &spec, PermissionGate::for_task(mode));
+            assert!(refused.is_ok(), "{mode:?}: {:?}", refused.err());
+            // `full` under a gate that is not: the combination no caller makes,
+            // and the one the check exists for.
+            let wrong_gate = check_fail_open(&runner, &spec, PermissionGate::NotFull);
+            assert_eq!(
+                wrong_gate.is_err(),
+                mode == TaskPermissionMode::Full,
+                "{mode:?}"
+            );
+        }
+        for (stored, refused) in [
+            ("bypass", true),
+            ("plan", false),
+            ("dontAsk", false),
+            ("default", false),
+            ("", false),
+        ] {
+            let spec = headless_spec(
+                std::path::Path::new(NO_DB),
+                agent_with_mode(""),
+                &ExecutionSettings {
+                    permission_mode: stored.to_string(),
+                    ..Default::default()
+                },
+            );
+            let got = check_fail_open(&runner, &spec, PermissionGate::NotFull);
+            assert_eq!(got.is_err(), refused, "{stored:?}: {:?}", got.err());
+            if let Err(e) = got {
+                assert!(
+                    e.starts_with(
+                        "refused: harness claude would run fail-open \
+                         (--permission-mode bypassPermissions skips every permission check)"
+                    ),
+                    "{e}"
+                );
+            }
+        }
+    }
+
+    /// A migrated database with one chat whose own stored mode is `mode`.
+    fn db_with_chat(id: &str, mode: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agento.db");
+        let mut conn = rusqlite::Connection::open(&path).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO chat_sessions
+                (id, title, agent_slug, sdk_session_id, working_directory, model,
+                 settings_profile_id, permission_mode, created_at, updated_at)
+             VALUES (?1, 'New Chat', '', 'sdk-1', '', '', '', ?2,
+                     '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+            [id, mode],
+        )
+        .expect("seed chat");
+        (dir, path)
+    }
+
+    /// A continued run is refused on the spec it resumes with, as a fresh one
+    /// is, and through the same provided method (#694).
+    #[tokio::test]
+    async fn a_resumed_fail_open_run_is_refused_the_same_way() {
+        use crate::native::tasks::TaskPermissionMode;
+        use std::sync::atomic::Ordering;
+        let (_dir, db) = db_with_chat("c-fake", "");
+        let runner = AlwaysFailOpen {
+            spawned: Default::default(),
+        };
+        let timeout = std::time::Duration::from_secs(1);
+        for mode in TaskPermissionMode::ALL {
+            let settings = ExecutionSettings {
+                task_mode: Some(mode),
+                ..Default::default()
+            };
+            let got = runner
+                .resume(
+                    &db,
+                    "c-fake",
+                    "p",
+                    &settings,
+                    timeout,
+                    None,
+                    PermissionGate::for_task(mode),
+                )
+                .await;
+            assert_eq!(
+                got.is_ok(),
+                mode == TaskPermissionMode::Full,
+                "{mode:?}: {:?}",
+                got.map(|r| r.answer)
+            );
+        }
+        assert_eq!(
+            runner.spawned.load(Ordering::SeqCst),
+            1,
+            "only full spawned"
+        );
+    }
+
+    /// The legacy Slack turn's shape on the real harness: no task, and a chat
+    /// whose stored mode is `bypass`. The chat's mode is only known once the
+    /// row is read, which is why the check is on the resumed spec. Refused
+    /// before `build_options`, so no CLI is looked for and none is spawned.
+    #[tokio::test]
+    async fn claude_refuses_a_resumed_bypass_chat_with_no_task() {
+        let (_dir, db) = db_with_chat("c-claude", "bypass");
+        let got = runner()
+            .resume(
+                &db,
+                "c-claude",
+                "p",
+                &ExecutionSettings::default(),
+                std::time::Duration::from_secs(1),
+                None,
+                PermissionGate::NotFull,
+            )
+            .await;
+        let err = got.map(|r| r.answer).expect_err("refused");
+        assert!(
+            err.starts_with("refused: harness claude would run fail-open")
+                && err.ends_with("and this run has no task"),
+            "{err}"
+        );
+        assert!(
+            live::registry().try_lock("c-claude"),
+            "the refusal releases the chat's busy lock"
+        );
+        live::registry().release("c-claude");
     }
 }

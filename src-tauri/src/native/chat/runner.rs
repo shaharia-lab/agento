@@ -344,9 +344,23 @@ impl PermissionChoice {
 
     /// The choice as the two option fields that carry it: the mode, and
     /// whether `--allow-dangerously-skip-permissions` is sent.
-    fn apply(self, opts: Options) -> Options {
+    ///
+    /// `interactive` is [`Self::resolve`]'s. An interactive `plan` or `dontAsk`
+    /// keeps the flag `Options::new()` sets, Go's `appendPermissionOpts`
+    /// shape; a headless one clears it (#694), because a run with nobody
+    /// watching that is offered bypass is fail-open, and the runner refuses a
+    /// fail-open run unless its task's mode is `full`.
+    fn apply(self, opts: Options, interactive: bool) -> Options {
         match self {
             Self::Default => opts.with_default_permissions(),
+            Self::Plan | Self::DontAsk if !interactive => {
+                let mode = if self == Self::Plan {
+                    permission_mode::PLAN
+                } else {
+                    permission_mode::DONT_ASK
+                };
+                opts.with_default_permissions().with_permission_mode(mode)
+            }
             Self::Plan => opts.with_permission_mode(permission_mode::PLAN),
             Self::DontAsk => opts.with_permission_mode(permission_mode::DONT_ASK),
             Self::Bypass => opts
@@ -391,7 +405,7 @@ pub(crate) fn headless_permission_options(spec: &RunSpec) -> Result<Options, Str
         spec.agent.as_ref().map(|a| a.permission_mode.as_str()),
         false,
     )?;
-    Ok(permissions.apply(Options::new()))
+    Ok(permissions.apply(Options::new(), false))
 }
 
 /// Build the SDK options for one chat turn.
@@ -476,10 +490,11 @@ pub async fn build_options(
         opts = opts.with_settings(path);
     }
 
-    // Resolved at the top, by [`PermissionChoice::resolve`]. The flag is not a
-    // function of the mode for `plan` and `dontAsk` — see
-    // `a_chats_own_permission_mode_beats_the_interactive_default`.
-    opts = permissions.apply(opts);
+    // Resolved at the top, by [`PermissionChoice::resolve`]. On an interactive
+    // turn the flag is not a function of the mode for `plan` and `dontAsk` —
+    // see `a_chats_own_permission_mode_beats_the_interactive_default`; a
+    // headless run never sends it for them (#694).
+    opts = permissions.apply(opts, permission_handler.is_some());
 
     opts = opts.with_claude_executable(claude_executable().await);
 
@@ -1515,6 +1530,52 @@ mod tests {
                 opts.allow_dangerously_skip_permissions, want_bypass,
                 "the bypass flag for {chosen:?} is not what Go's appendPermissionOpts leaves"
             );
+        }
+    }
+
+    /// #694: with no permission handler, an explicit `plan` or `dontAsk` is
+    /// not offered bypass. The interactive turn above keeps the flag; a
+    /// headless run has nobody to switch modes for, so it is cleared, and the
+    /// fail-open check reads the same answer as the spawn.
+    #[tokio::test]
+    async fn a_headless_plan_or_dont_ask_run_is_not_offered_bypass() {
+        for (chosen, want_mode) in [
+            ("plan", permission_mode::PLAN),
+            ("dontAsk", permission_mode::DONT_ASK),
+        ] {
+            // The run's own mode, and the same mode stored on the agent.
+            for on_agent in [false, true] {
+                let mut agent = agent_with(Capabilities::default());
+                if on_agent {
+                    agent.permission_mode = chosen.to_string();
+                }
+                let (mut spec, _) = spec_with(Some(agent));
+                if !on_agent {
+                    spec.permission_mode = chosen.to_string();
+                }
+                let (opts, _servers, _hosted) = build_options(&spec, None).await.expect("options");
+                assert_eq!(opts.permission_mode, want_mode, "{chosen:?}");
+                assert!(
+                    !opts.allow_dangerously_skip_permissions,
+                    "{chosen:?} (on agent: {on_agent}) is offered bypass"
+                );
+                assert!(
+                    !opts
+                        .build_args()
+                        .iter()
+                        .any(|a| a == "--allow-dangerously-skip-permissions"),
+                    "{chosen:?} (on agent: {on_agent}) sends the allow flag"
+                );
+                let headless = headless_permission_options(&spec).expect("headless");
+                assert_eq!(
+                    (
+                        headless.permission_mode.as_str(),
+                        headless.allow_dangerously_skip_permissions
+                    ),
+                    (want_mode, false),
+                    "the fail-open check reads what is spawned, {chosen:?}"
+                );
+            }
         }
     }
 

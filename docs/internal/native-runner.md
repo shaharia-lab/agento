@@ -25,26 +25,53 @@ own options with a permission handler and streams SSE; it stays Claude-only.
 pub trait Runner: Send + Sync + Sized {
     fn harness(&self) -> &'static str;
     fn fail_open(&self, spec: &RunSpec) -> Option<String>;
-    fn run(&self, spec, prompt, timeout, on_spawn) -> impl Future<Output = Result<RunResult, String>> + Send;
-    fn resume(&self, db_path, chat_id, prompt, settings, timeout, on_spawn) -> impl Future<…> + Send; // provided
+    fn spawn(&self, checked: FailOpenChecked, spec, prompt, timeout, on_spawn) -> impl Future<Output = Result<RunResult, String>> + Send;
+    fn run(&self, spec, prompt, timeout, on_spawn, gate: PermissionGate) -> impl Future<…> + Send; // provided
+    fn resume(&self, db_path, chat_id, prompt, settings, timeout, on_spawn, gate) -> impl Future<…> + Send; // provided
 }
 ```
 
 - **`RunSpec`, `RunResult` and `ExecutionSettings` are the neutral types.** A
   caller builds a spec and reads a result without naming the CLI behind them.
 - **`harness()`** is a stable lower-case id. `ClaudeRunner` answers `"claude"`.
-- **`fail_open(spec)` is a declaration, not an enforcement.** It answers why a
-  headless run of that spec would start with a flag combination under which a
-  tool call nobody approved can run, or `None`. Nothing refuses on it yet;
-  #694 is the caller. It is decided from the spec alone, before anything is
-  spawned or bound. A spec the harness refuses to build (an unknown permission
-  mode) answers `None`, because that run fails closed.
-- **`run`** is the harness's own step: spec to flags, spawn, drain, result.
+- **`fail_open(spec)`** answers why a headless run of that spec would start
+  with a flag combination under which a tool call nobody approved can run, or
+  `None`. It is decided from the spec alone, before anything is spawned or
+  bound. A spec the harness refuses to build (an unknown permission mode)
+  answers `None`, because that run fails closed.
+- **`spawn`** is the harness's own step: spec to flags, spawn, drain, result.
+  Its first argument is a `FailOpenChecked`, whose field is private to
+  `agent_run.rs`, so nothing outside that module can call it without going
+  through the check below. A harness implements `spawn` and must not override
+  `run` or `resume`: the token stops callers, not an implementor's override.
+- **`run` is a provided method, and it is the refusal (#694).** It asks
+  `fail_open(spec)` first. A fail-open spec under a `PermissionGate::NotFull`
+  answers `Err` without spawning:
+  `refused: harness claude would run fail-open (<reason>); only permission mode full allows it, and the task's is <mode>`
+  (or `… and this run has no task`). Only `PermissionGate::Full` lets a
+  fail-open spec through, and only `PermissionGate::for_task(Full)` builds one.
+  Every caller has to name a gate, so the compiler makes each one say it.
 - **`resume` is a provided method**, because none of it is the harness's. The
   chat's busy lock, the chat lookup and the additive write-back are Agento's,
-  and the one harness-specific step in the middle is `self.run`. The rules it
-  keeps are in `docs/internal/native-chat.md` (the busy lock) and at
-  `run_resumed`.
+  and the one harness-specific step in the middle is `self.run`, so a resumed
+  run is refused exactly as a fresh one is, on the spec it resumes with (the
+  chat's stored mode is only known once the row is read). A refused resume is
+  a failed turn: the question is stored with no answer and the lock is
+  released. The rules it keeps are in `docs/internal/native-chat.md` (the busy
+  lock) and at `run_resumed`.
+- **Who passes which gate.** The executor passes
+  `PermissionGate::for_task(mode)` on every run of a task, fresh or continued,
+  and a refusal is that run's `failed` `job_history` row and its `when:
+  always` delivery. The unlinked Telegram rule (`dispatcher::execute_and_reply`)
+  and the Slack inbound turn have no task, so they pass `NotFull`: a rule whose
+  settings resolve to `bypass` is refused, logged, and answered with the error
+  reply, and writes no `job_history` row.
+- Pinned by `a_fail_open_spec_never_reaches_the_spawn_unless_the_gate_is_full`
+  and `a_resumed_fail_open_run_is_refused_the_same_way` (a fake harness whose
+  every spec is fail-open), `claude_refuses_only_what_it_declares_fail_open`,
+  `claude_refuses_a_resumed_bypass_chat_with_no_task`,
+  `tests/trigger_run.rs::a_bypass_rule_is_refused_and_spawns_nothing` and
+  `slack/inbound/tests.rs::a_bypass_rule_is_refused_answered_and_spawns_nothing`.
 - **Generic, not `dyn`.** The methods return futures, so a trait object would
   need them boxed, and every caller is on a `Send` path (a scheduler task, an
   inbound worker). `runner()` returns the concrete `ClaudeRunner`. A second
@@ -68,8 +95,8 @@ into flags. Two combinations are reported:
 | Agento mode (stored) | Flags `build_options` sends, headless | Declared fail-open |
 |---|---|---|
 | `bypass` | `--permission-mode bypassPermissions --allow-dangerously-skip-permissions` | yes, by the mode |
-| `plan` | `--permission-mode plan --allow-dangerously-skip-permissions` | **yes, by the flag** |
-| `dontAsk` | `--permission-mode dontAsk --allow-dangerously-skip-permissions` | **yes, by the flag** |
+| `plan` | `--permission-mode plan` | no |
+| `dontAsk` | `--permission-mode dontAsk` | no |
 | `default` | `--permission-mode default` | no |
 | empty, agent has none (`Unchosen`) | `--permission-mode dontAsk` | no |
 | anything else | the run fails: `agent setup: unknown permission mode "…"` | no (never starts) |
@@ -102,16 +129,22 @@ rule in a project's `settings.json`, which `dontAsk` alone does not. Pinned by
 `a_read_only_task_keeps_its_agents_own_denials`,
 `claude_declares_only_a_full_task_fail_open`, and on the spawned argv by
 `tests/trigger_run.rs::an_event_asking_for_more_permissions_runs_read_only_and_changes_no_task`.
-`claude_declares_bypass_and_the_allow_flag_fail_open_for_every_mode` pins the
+`claude_declares_only_bypass_fail_open_for_every_mode` pins the
 table over `chats::CHAT_PERMISSION_MODES`, and panics on a mode added there
 without an answer here.
 
-**The `plan` and `dontAsk` rows are a finding, not a design.** `Options::new()`
-defaults the flag to true and only `with_default_permissions()` clears it, so an
-explicitly chosen `plan` or `dontAsk` still sends it. This refactor changes no
-behaviour, so the flag is still sent; #694 has to choose between clearing it
-for those two modes (one arm each in `PermissionChoice::apply`) and refusing
-them.
+**A headless `plan` or `dontAsk` clears the flag (#694).** `Options::new()`
+defaults it to true and only `with_default_permissions()` clears it, so until
+#694 an explicitly chosen `plan` or `dontAsk` sent it and was declared
+fail-open. `PermissionChoice::apply` now takes `interactive` and clears it for
+those two modes when there is no permission handler; refusing them instead
+would have made every unlinked rule on `plan` unrunnable. **The interactive
+chat turn is unchanged**: it still sends the flag for `plan` and `dontAsk`
+(`a_chats_own_permission_mode_beats_the_interactive_default`), and it is not
+behind the seam. Pinned headless by
+`a_headless_plan_or_dont_ask_run_is_not_offered_bypass`. So the only
+fail-open headless runs are `bypass` and a task's `full`, and of those only a
+task's `full` is let through.
 
 **"Not fail-open" is not "read-only".** `dontAsk` denies only what
 `--allowedTools` does not already cover, and an agent with no tool list is
@@ -133,8 +166,8 @@ Read from `claude --help` on this box, and from
 | Mode | Flags | Fail-open? |
 |---|---|---|
 | read-only | no sandbox flag; Agento sends `--permission-mode dontAsk` with a read-only `--allowedTools` and `--disallowedTools Write,Edit,MultiEdit,NotebookEdit,Bash` | no |
-| plan | `--permission-mode plan` | no, when `--allow-dangerously-skip-permissions` is absent |
-| prompts denied | `--permission-mode dontAsk`, or `--permission-prompts none` | no, but as wide as `--allowedTools` |
+| plan | `--permission-mode plan` (headless: the allow flag is never sent, #694) | no |
+| prompts denied | `--permission-mode dontAsk` (headless: the allow flag is never sent, #694), or `--permission-prompts none` | no, but as wide as `--allowedTools` |
 | workspace-write | `--permission-mode acceptEdits` | no; edits are pre-approved, the rest still prompts |
 | full | `--permission-mode bypassPermissions`, or `--dangerously-skip-permissions` | **yes** |
 | (any) | plus `--allow-dangerously-skip-permissions` | **yes** (bypass becomes reachable) |

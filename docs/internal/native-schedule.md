@@ -101,6 +101,15 @@ runs before anything binds a port:
   `read_only`, and a scheduled or manual run is refused with a failed
   `job_history` row (`task has no permission mode`). Nothing falls back to
   bypass. The table of flags is in `docs/internal/native-runner.md`.
+- **A fail-open run of a task that is not `full` is refused (#694).**
+  `run_agent` and `resume_agent` pass `agent_run::PermissionGate::for_task(mode)`,
+  and `Runner::run` refuses a spec its harness declares fail-open under any
+  gate but `full`, before anything is spawned. The `Err`
+  (`refused: harness claude would run fail-open (…); only permission mode full allows it, and the task's is <mode>`)
+  goes through `finish` like any other failed run: a `failed` `job_history`
+  row with no pid, and the `when: always` delivery. With Claude Code no task
+  spec but `full` is declared fail-open today, so the refusal is the seam's
+  guarantee for the next harness rather than a path a Claude task reaches.
 - **Linking a trigger rule makes a mode-less task `read_only`.** Every rule
   create or update with a `task_id` calls `tasks::ensure_mode_for_trigger` in
   the rule write's transaction; a task that states a mode keeps it.

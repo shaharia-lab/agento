@@ -1439,6 +1439,55 @@ async fn a_failed_run_answers_the_failure_sentence_and_keeps_the_question() {
     );
 }
 
+/// #694: an unlinked rule has no task, so nothing makes its run `full`. A rule
+/// that stores `bypass` is fail-open, so the runner refuses it before a
+/// subprocess exists, and the mention is answered with the failure sentence.
+#[tokio::test]
+async fn a_bypass_rule_is_refused_answered_and_spawns_nothing() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path(), "s-bypass");
+    seed_rule(
+        &db,
+        "s-bypass",
+        "r",
+        true,
+        "[]",
+        "",
+        "",
+        "2026-01-01 00:00:00 +0000 UTC",
+    );
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE trigger_rules SET permission_mode = 'bypass'", [])
+        .expect("store bypass");
+    let cli = fake_cli(dir.path(), "must not run", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler(&db, "s-bypass", "xoxb-t");
+    finish(handler(mention(
+        "<@U0BOT> do it",
+        "1700000000.000700",
+        "",
+        "s-bypass",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(
+        slack.posted(),
+        vec![("1700000000.000700".to_string(), ERROR_REPLY.to_string())]
+    );
+    assert!(spawns(dir.path()).is_empty(), "nothing was spawned");
+}
+
 /// #565's selection rule, as the user experiences it: turning a channel's own
 /// rule off silences that channel and leaves every other channel answering.
 #[tokio::test]

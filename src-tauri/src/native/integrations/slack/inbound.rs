@@ -506,6 +506,9 @@ impl Inbound {
                 &job.rule.settings,
                 dispatcher::run_timeout(&job.rule),
                 None,
+                // No task, so no `full` mode: a fail-open rule is refused and
+                // answered with the error reply (#694).
+                agent_run::PermissionGate::NotFull,
             )
             .await;
 

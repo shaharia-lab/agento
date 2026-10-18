@@ -269,6 +269,7 @@ async fn the_first_turn_mints_a_session_and_the_second_resumes_it() {
             &ExecutionSettings::default(),
             std::time::Duration::from_secs(600),
             None,
+            agent_run::PermissionGate::NotFull,
         ),
     )
     .await
@@ -323,6 +324,7 @@ async fn the_first_turn_mints_a_session_and_the_second_resumes_it() {
             &ExecutionSettings::default(),
             std::time::Duration::from_secs(600),
             None,
+            agent_run::PermissionGate::NotFull,
         )
         .await
         .expect("the second run");
@@ -373,6 +375,7 @@ async fn a_resumed_run_is_refused_while_the_chat_is_busy_and_spawns_nothing() {
             &ExecutionSettings::default(),
             std::time::Duration::from_secs(60),
             None,
+            agent_run::PermissionGate::NotFull,
         )
         .await
         .expect_err("a busy chat must refuse");
@@ -422,6 +425,7 @@ async fn a_ui_turn_is_refused_while_a_resumed_run_holds_the_lock() {
                     &ExecutionSettings::default(),
                     std::time::Duration::from_secs(600),
                     None,
+                    agent_run::PermissionGate::NotFull,
                 )
                 .await
         }
@@ -495,6 +499,7 @@ async fn a_turn_with_no_final_text_stores_the_user_message_and_keeps_the_session
             &ExecutionSettings::default(),
             std::time::Duration::from_secs(600),
             None,
+            agent_run::PermissionGate::NotFull,
         )
         .await
         .expect("the run");
@@ -548,6 +553,7 @@ async fn token_totals_are_summed_across_a_ui_turn_and_a_headless_turn() {
             &ExecutionSettings::default(),
             std::time::Duration::from_secs(600),
             None,
+            agent_run::PermissionGate::NotFull,
         )
         .await
         .expect("the run");
@@ -599,6 +605,7 @@ async fn a_run_that_times_out_stores_the_question_alone_and_frees_the_lock() {
             &ExecutionSettings::default(),
             std::time::Duration::from_secs(15),
             None,
+            agent_run::PermissionGate::NotFull,
         )
         .await
         .expect_err("the run must time out");
@@ -651,6 +658,7 @@ async fn a_missing_chat_is_an_error_and_releases_the_lock_it_took() {
             &ExecutionSettings::default(),
             std::time::Duration::from_secs(60),
             None,
+            agent_run::PermissionGate::NotFull,
         )
         .await
         .expect_err("no such chat");
@@ -704,6 +712,7 @@ async fn a_continued_run_takes_the_tasks_mode_over_the_chats() {
             },
             std::time::Duration::from_secs(600),
             None,
+            agent_run::PermissionGate::NotFull,
         ),
     )
     .await
