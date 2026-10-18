@@ -1723,7 +1723,7 @@ mod tests {
                     argv.iter()
                         .any(|a| a == "--allow-dangerously-skip-permissions"),
                     want_flag,
-                    "{mode:?}: {argv:?}"
+                    "{mode:?}"
                 );
                 let headless = headless_permission_options(&spec).expect("headless");
                 assert_eq!(
@@ -1737,12 +1737,17 @@ mod tests {
                 if mode != TaskPermissionMode::ReadOnly {
                     continue;
                 }
-                assert_eq!(opts.allowed_tools, READ_ONLY_TOOLS, "{:?}", agent.is_some());
+                assert!(
+                    opts.allowed_tools == READ_ONLY_TOOLS,
+                    "the read-only allowlist, agent: {}",
+                    agent.is_some()
+                );
                 for denied in READ_ONLY_DENIED_TOOLS {
+                    // Names only: options built from a real agent can carry
+                    // an integration's credentials, so they are never printed.
                     assert!(
                         opts.disallowed_tools.iter().any(|d| d == denied),
-                        "{denied} must be denied: {:?}",
-                        opts.disallowed_tools
+                        "{denied} must be denied"
                     );
                 }
                 let mut unique = opts.disallowed_tools.clone();
@@ -1771,18 +1776,15 @@ mod tests {
         let (opts, _servers, _hosted) = build_options(&spec, None).await.expect("options");
         assert!(
             opts.disallowed_tools.iter().any(|d| d == "Grep"),
-            "{:?}",
-            opts.disallowed_tools
+            "Grep must be denied"
         );
         assert!(
             opts.disallowed_tools.iter().any(|d| d == "Bash"),
-            "{:?}",
-            opts.disallowed_tools
+            "Bash must be denied"
         );
         assert!(
             !opts.disallowed_tools.iter().any(|d| d == "Read"),
-            "{:?}",
-            opts.disallowed_tools
+            "Read must not be denied"
         );
     }
 
