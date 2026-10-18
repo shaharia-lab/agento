@@ -138,18 +138,20 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
         return;
     }
 
-    let matched = {
+    // An unknown chat is counted in the same blocking section that decided it,
+    // and after the claim, so a redelivered update is counted once (#690).
+    let selected = {
         let (db, id, msg) = (
             db_path.to_path_buf(),
             integration_id.to_string(),
             msg.clone(),
         );
         db::blocking("telegram rule match", move || {
-            find_matching_rule(&db, &id, &msg)
+            select_and_count(&db, &id, &msg)
         })
         .await
     };
-    let Some(Some((rule, prompt))) = matched else {
+    let Some(Selection::Matched(rule, prompt)) = selected else {
         return;
     };
 
@@ -191,34 +193,99 @@ pub struct Rule {
     pub task_id: String,
 }
 
+/// What the enabled rules of an integration make of one message (#690).
+#[derive(Debug)]
+enum Selection {
+    /// The first enabled rule that matches, and the prompt it extracted.
+    Matched(Box<Rule>, String),
+    /// A chat an enabled rule names, whose text no such rule accepts — or rules
+    /// that could not be read. Not a dropped sender, so nothing is counted.
+    NoMatch,
+    /// A chat no enabled rule names, with the distinct tasks those rules link
+    /// to: every one of them refused it, so every one of them counts it.
+    UnknownChat(Vec<String>),
+}
+
+/// The rule selection `process` acts on, with an unknown chat already counted:
+/// one call, so the decision and the count share one blocking section (#690).
+fn select_and_count(db_path: &Path, integration_id: &str, msg: &TelegramMsg) -> Selection {
+    let selection = find_matching_rule(db_path, integration_id, msg);
+    if let Selection::UnknownChat(task_ids) = &selection {
+        drop_unknown_chat(db_path, integration_id, msg, task_ids);
+    }
+    selection
+}
+
 /// `findMatchingRule`: the first **enabled** rule that matches, in the order the
-/// store returns them (oldest first).
-fn find_matching_rule(
-    db_path: &Path,
-    integration_id: &str,
-    msg: &TelegramMsg,
-) -> Option<(Rule, String)> {
+/// store returns them (oldest first) — and since #690, which of the two kinds of
+/// "no" a miss is.
+fn find_matching_rule(db_path: &Path, integration_id: &str, msg: &TelegramMsg) -> Selection {
     let rules = match load_rules(db_path, integration_id) {
         Ok(rules) => rules,
         Err(e) => {
             log::error!("failed to load trigger rules integration_id={integration_id:?} error={e}");
-            return None;
+            return Selection::NoMatch;
         }
     };
     // `fmt.Sprintf("%d", msg.Chat.ID)`.
     let chat_id = msg.chat.id.to_string();
-    rules
+    // The `enabled` test used to be `load_rules`' SQL. It is here now, and the
+    // answer is the same one: the first enabled rule that matches, in store
+    // order.
+    let enabled: Vec<Rule> = rules.into_iter().filter(|rule| rule.enabled).collect();
+    // Asked before prefix and keywords, so a known chat failing those is a
+    // plain miss rather than a dropped sender.
+    if !chat_is_known(&enabled, &chat_id) {
+        return Selection::UnknownChat(linked_tasks(&enabled));
+    }
+    enabled
         .into_iter()
-        // The `enabled` test used to be `load_rules`' SQL. It is here now, and
-        // the answer is the same one: the first enabled rule that matches, in
-        // store order.
-        .filter(|rule| rule.enabled)
         // Senders are denied by default (#674): a rule is considered only for
         // a chat its list names, so an empty, null or unparseable
         // `filter_chat_ids` matches nobody. Asked here, ahead of `match_rule`,
         // whose own chat clause reads empty as "everything" for Slack.
         .filter(|rule| sender_allowed(&rule.filters.chat_ids, &chat_id))
         .find_map(|rule| match_rule(&rule.filters, &msg.text, &chat_id).map(|p| (rule, p)))
+        .map_or(Selection::NoMatch, |(rule, prompt)| {
+            Selection::Matched(Box::new(rule), prompt)
+        })
+}
+
+/// Whether any of `rules` names `chat_id` — the one "chat is allowed" test,
+/// [`sender_allowed`], asked of each. The caller passes only enabled rules, so
+/// a chat named only by a disabled rule is unknown.
+fn chat_is_known(rules: &[Rule], chat_id: &str) -> bool {
+    rules
+        .iter()
+        .any(|rule| sender_allowed(&rule.filters.chat_ids, chat_id))
+}
+
+/// The distinct non-empty `task_id`s of `rules`, in store order. Two rules
+/// linked to one task count a refused message on it once.
+fn linked_tasks(rules: &[Rule]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for rule in rules {
+        if !rule.task_id.is_empty() && !out.contains(&rule.task_id) {
+            out.push(rule.task_id.clone());
+        }
+    }
+    out
+}
+
+/// Record a message from a chat no enabled rule names (#690): one `debug` line,
+/// no reply, and one count on each task in `task_ids`. Rules with no linked
+/// task leave nowhere to count, so then it only logs.
+fn drop_unknown_chat(db_path: &Path, integration_id: &str, msg: &TelegramMsg, task_ids: &[String]) {
+    log::debug!(
+        "telegram message ignored, unknown chat integration_id={integration_id:?} chat_id={} linked_tasks={}",
+        msg.chat.id,
+        task_ids.len()
+    );
+    for task_id in task_ids {
+        if let Err(e) = crate::native::tasks::count_dropped_event(db_path, task_id) {
+            log::warn!("failed to count a dropped telegram event task_id={task_id:?}: {e}");
+        }
+    }
 }
 
 /// `ListRules` for one integration, oldest first — **including disabled rules**.
@@ -688,6 +755,231 @@ mod tests {
         }
     }
 
+    /// [`find_matching_rule`]'s match, for the tests that ask only that.
+    fn find(db: &Path, integration_id: &str, msg: &TelegramMsg) -> Option<(Rule, String)> {
+        match find_matching_rule(db, integration_id, msg) {
+            Selection::Matched(rule, prompt) => Some((*rule, prompt)),
+            Selection::NoMatch | Selection::UnknownChat(_) => None,
+        }
+    }
+
+    fn add_task(db: &Path, id: &str) {
+        let conn = rusqlite::Connection::open(db).expect("open");
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status,
+                 run_count, stop_after_count, created_at, updated_at)
+             VALUES (?1, ?1, 'p', 'interval', '{}', 'active', 0, 0,
+                     '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+            [id],
+        )
+        .expect("seed task");
+    }
+
+    fn link(db: &Path, rule_id: &str, task_id: &str) {
+        let conn = rusqlite::Connection::open(db).expect("open");
+        conn.execute(
+            "UPDATE trigger_rules SET task_id = ?2 WHERE id = ?1",
+            [rule_id, task_id],
+        )
+        .expect("link rule");
+    }
+
+    fn dropped(db: &Path, task_id: &str) -> i64 {
+        let conn = rusqlite::Connection::open(db).expect("open");
+        conn.query_row(
+            "SELECT dropped_event_count FROM scheduled_tasks WHERE id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .expect("count")
+    }
+
+    /// [`select_and_count`] for one message to the `tg` integration.
+    fn select(db: &Path, text: &str, chat_id: i64) -> Selection {
+        select_and_count(db, "tg", &msg(text, chat_id))
+    }
+
+    /// #690: a chat no enabled rule names is counted once on each distinct
+    /// linked task — two rules linked to one task count it there once.
+    #[test]
+    fn an_unknown_chat_is_counted_once_on_each_distinct_linked_task() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_task(&db, "t1");
+        add_task(&db, "t2");
+        add_task(&db, "other");
+        for (rule, chats, task, at) in [
+            ("a", r#"["42"]"#, "t1", "2026-01-01 00:00:00 +0000 UTC"),
+            ("b", r#"["7"]"#, "t1", "2026-02-01 00:00:00 +0000 UTC"),
+            ("c", r#"["8"]"#, "t2", "2026-03-01 00:00:00 +0000 UTC"),
+        ] {
+            add_rule(&db, rule, true, "", "[]", chats, at);
+            link(&db, rule, task);
+        }
+
+        let selection = select(&db, "hello", 99);
+        assert!(
+            matches!(&selection, Selection::UnknownChat(t) if *t == ["t1", "t2"]),
+            "{selection:?}"
+        );
+        assert_eq!(dropped(&db, "t1"), 1, "two rules, one task, one count");
+        assert_eq!(dropped(&db, "t2"), 1);
+        assert_eq!(
+            dropped(&db, "other"),
+            0,
+            "a task no rule links is untouched"
+        );
+    }
+
+    /// The chat is asked before prefix and keywords: a listed chat whose text
+    /// fails them is a plain miss, not a dropped sender.
+    #[test]
+    fn a_known_chat_failing_the_prefix_or_keywords_counts_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_task(&db, "t1");
+        add_rule(
+            &db,
+            "a",
+            true,
+            "/ask",
+            r#"["status"]"#,
+            r#"["42"]"#,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+        link(&db, "a", "t1");
+
+        for text in ["no prefix status", "/ask no keyword"] {
+            let selection = select(&db, text, 42);
+            assert!(
+                matches!(selection, Selection::NoMatch),
+                "{text:?}: {selection:?}"
+            );
+        }
+        assert_eq!(dropped(&db, "t1"), 0);
+    }
+
+    /// A disabled rule refuses nobody and names nobody: a chat only it lists is
+    /// unknown, and its own linked task is not counted.
+    #[test]
+    fn a_disabled_rules_chat_is_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_task(&db, "on-task");
+        add_task(&db, "off-task");
+        add_rule(
+            &db,
+            "on",
+            true,
+            "",
+            "[]",
+            r#"["42"]"#,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+        add_rule(
+            &db,
+            "off",
+            false,
+            "",
+            "[]",
+            r#"["7"]"#,
+            "2026-02-01 00:00:00 +0000 UTC",
+        );
+        link(&db, "on", "on-task");
+        link(&db, "off", "off-task");
+
+        let selection = select(&db, "hi", 7);
+        assert!(
+            matches!(&selection, Selection::UnknownChat(t) if *t == ["on-task"]),
+            "{selection:?}"
+        );
+        assert_eq!(dropped(&db, "on-task"), 1);
+        assert_eq!(dropped(&db, "off-task"), 0);
+    }
+
+    /// Rules with no linked task have nowhere to count: the drop writes nothing.
+    #[test]
+    fn an_unknown_chat_with_no_linked_task_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_task(&db, "t1");
+        add_rule(
+            &db,
+            "a",
+            true,
+            "",
+            "[]",
+            r#"["42"]"#,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+
+        let selection = select(&db, "hi", 99);
+        assert!(
+            matches!(&selection, Selection::UnknownChat(t) if t.is_empty()),
+            "{selection:?}"
+        );
+        assert_eq!(dropped(&db, "t1"), 0);
+    }
+
+    /// Through `process`, against a fake Bot API: an unknown chat sends
+    /// nothing, starts no chat and no job, and a redelivered update is counted
+    /// once because the count follows the claim.
+    #[tokio::test]
+    async fn a_redelivered_unknown_chat_is_counted_once_and_sends_nothing() {
+        use crate::native::integrations::telegram::client::{api_base_lock, set_api_base};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let _guard = api_base_lock().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let app = axum::Router::new().fallback(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async { r#"{"ok":true,"result":true}"# }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        set_api_base(Some(base));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        add_task(&db, "t1");
+        add_rule(
+            &db,
+            "a",
+            true,
+            "",
+            "[]",
+            r#"["42"]"#,
+            "2026-01-01 00:00:00 +0000 UTC",
+        );
+        link(&db, "a", "t1");
+
+        let update = || TelegramUpdate {
+            update_id: 1001,
+            message: Some(crate::native::gojson::GoStruct(msg("hello", 99))),
+        };
+        process(&db, "tg", "token", update()).await;
+        process(&db, "tg", "token", update()).await;
+        set_api_base(None);
+
+        assert_eq!(dropped(&db, "t1"), 1, "the same update_id is counted once");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no Telegram call at all");
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        for table in ["chat_sessions", "job_history"] {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .expect("count rows");
+            assert_eq!(rows, 0, "{table}");
+        }
+    }
+
     #[test]
     fn the_first_matching_enabled_rule_wins_in_store_order() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -712,7 +1004,7 @@ mod tests {
             "2026-02-01 00:00:00 +0000 UTC",
         );
 
-        let (rule, prompt) = find_matching_rule(&db, "tg", &msg("anything", 42)).expect("a match");
+        let (rule, prompt) = find(&db, "tg", &msg("anything", 42)).expect("a match");
         assert_eq!(rule.id, "old", "oldest first, not newest");
         assert_eq!(prompt, "anything");
     }
@@ -730,7 +1022,7 @@ mod tests {
             r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
-        assert!(find_matching_rule(&db, "tg", &msg("anything", 42)).is_none());
+        assert!(find(&db, "tg", &msg("anything", 42)).is_none());
 
         // …and an enabled one after it still matches.
         add_rule(
@@ -743,10 +1035,7 @@ mod tests {
             "2026-02-01 00:00:00 +0000 UTC",
         );
         assert_eq!(
-            find_matching_rule(&db, "tg", &msg("anything", 42))
-                .expect("a match")
-                .0
-                .id,
+            find(&db, "tg", &msg("anything", 42)).expect("a match").0.id,
             "on"
         );
     }
@@ -765,14 +1054,13 @@ mod tests {
             "2026-01-01 00:00:00 +0000 UTC",
         );
 
-        let (_, prompt) =
-            find_matching_rule(&db, "tg", &msg("/ask what is the status", 42)).expect("a match");
+        let (_, prompt) = find(&db, "tg", &msg("/ask what is the status", 42)).expect("a match");
         assert_eq!(prompt, "what is the status", "the prefix is stripped");
 
         // Each filter can reject on its own.
-        assert!(find_matching_rule(&db, "tg", &msg("what is the status", 42)).is_none());
-        assert!(find_matching_rule(&db, "tg", &msg("/ask something else", 42)).is_none());
-        assert!(find_matching_rule(&db, "tg", &msg("/ask what is the status", 99)).is_none());
+        assert!(find(&db, "tg", &msg("what is the status", 42)).is_none());
+        assert!(find(&db, "tg", &msg("/ask something else", 42)).is_none());
+        assert!(find(&db, "tg", &msg("/ask what is the status", 99)).is_none());
     }
 
     #[test]
@@ -788,7 +1076,7 @@ mod tests {
             r#"["42"]"#,
             "2026-01-01 00:00:00 +0000 UTC",
         );
-        assert!(find_matching_rule(&db, "other", &msg("hi", 42)).is_none());
+        assert!(find(&db, "other", &msg("hi", 42)).is_none());
     }
 
     #[test]
@@ -809,7 +1097,7 @@ mod tests {
                 "2026-01-01 00:00:00 +0000 UTC",
             );
         }
-        assert!(find_matching_rule(&db, "tg", &msg("anything", 42)).is_some());
+        assert!(find(&db, "tg", &msg("anything", 42)).is_some());
     }
 
     /// #674: the allowed-chats list is the one filter where "unset" is not
@@ -838,7 +1126,7 @@ mod tests {
                 "2026-01-01 00:00:00 +0000 UTC",
             );
             assert!(
-                find_matching_rule(&db, "tg", &msg("anything", 42)).is_none(),
+                find(&db, "tg", &msg("anything", 42)).is_none(),
                 "filter_chat_ids {chat_ids:?}"
             );
         }
@@ -869,7 +1157,7 @@ mod tests {
             r#"["7","-100"]"#,
             "2026-02-01 00:00:00 +0000 UTC",
         );
-        let matched = |chat| find_matching_rule(&db, "tg", &msg("hi", chat)).map(|(r, _)| r.id);
+        let matched = |chat| find(&db, "tg", &msg("hi", chat)).map(|(r, _)| r.id);
         assert_eq!(matched(42).as_deref(), Some("first"));
         assert_eq!(matched(-100).as_deref(), Some("second"));
         assert_eq!(matched(99), None);
@@ -1002,7 +1290,7 @@ mod tests {
         assert_eq!(rules.len(), 1, "the disabled row is loaded");
         assert!(!rules[0].enabled);
         assert!(
-            find_matching_rule(&db, "tg", &msg("hi", 1)).is_none(),
+            find(&db, "tg", &msg("hi", 1)).is_none(),
             "and Telegram still ignores it"
         );
     }

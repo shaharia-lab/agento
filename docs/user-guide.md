@@ -315,6 +315,12 @@ A message from any other chat starts nothing and gets no reply. To find an id,
 message `@userinfobot` on Telegram, or add `@RawDataBot` to the group for a
 moment.
 
+A message from a chat that no enabled rule of the integration lists is counted
+as a dropped event on every task those rules start, once per task, so the
+task's inspector shows that someone is messaging the bot. Rules with no task do
+not count it. A message from a listed chat whose text fails the rule's prefix or
+keywords is not counted.
+
 A rule saved by an earlier version with no chat ids is turned off when Agento
 updates, and its row says so. Edit the rule, add the chats it should answer, and
 turn it back on.
@@ -598,8 +604,10 @@ Other options:
 - **Enabled**: pause without deleting.
 
 The inspector's **Reliability** group counts the events the task refused:
-**Dropped events** arrived when the waiting list was full, and **Rate-limited
-events** arrived after the hour's runs were used up. Neither started a run, so
+**Dropped events** arrived when the waiting list was full, or came from a Slack
+user the task's rule does not list or a Telegram chat that no enabled rule of
+the integration lists, and **Rate-limited events** arrived after the hour's runs
+were used up. Neither started a run, so
 neither has a row in the history.
 
 ### Delivery

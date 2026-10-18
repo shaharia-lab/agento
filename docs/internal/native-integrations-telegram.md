@@ -133,6 +133,31 @@ changes nothing else on the row. Such a rule cannot be turned on again until it
 lists one, because the row switch posts the stored rule back and the write
 refuses it.
 
+## Unknown chats are counted (#690)
+
+A chat is **unknown** when no *enabled* rule of the integration lists it in
+`filter_chat_ids`; a chat listed only by a disabled rule is unknown too.
+`dispatcher::find_matching_rule` answers a `Selection`: `Matched`, `NoMatch`
+(a known chat whose text fails every rule's prefix or keywords, or rules that
+could not be read), or `UnknownChat` with the distinct non-empty `task_id`s of
+the enabled rules. The chat is asked first, through `chat_is_known` over
+`match_rule::sender_allowed`, so a prefix or keyword miss is never counted.
+
+An unknown chat gets no reply and starts nothing. `process` runs
+`select_and_count` in one `db::blocking` section, so the selection and
+`drop_unknown_chat` share it, and that adds one to `scheduled_tasks.dropped_event_count` on each
+task through `tasks::count_dropped_event`, which Slack's unknown senders share
+(#688). Every one of those tasks refused the message, so each counts it once,
+and two rules linked to one task count it there once. Rules with no task only
+log at `debug`. The count follows `claim_update`, so a redelivered `update_id`
+is counted once. The tests are `dispatcher.rs`'s
+`an_unknown_chat_is_counted_once_on_each_distinct_linked_task`,
+`a_known_chat_failing_the_prefix_or_keywords_counts_nothing`,
+`a_disabled_rules_chat_is_unknown`,
+`an_unknown_chat_with_no_linked_task_writes_nothing` and
+`a_redelivered_unknown_chat_is_counted_once_and_sends_nothing`. The task
+inspector's *Dropped events* row shows the count.
+
 Pinned by `match_rule.rs`'s `a_sender_is_allowed_only_when_the_list_names_it`,
 `dispatcher.rs`'s `a_rule_that_names_no_chat_answers_nobody` and
 `a_sender_is_matched_only_by_a_rule_that_names_it`, `integrations.rs`'s

@@ -4003,8 +4003,8 @@ pub fn finish_delivery(
     Ok(changed > 0)
 }
 
-/// Counts one event a rule refused on `task_id` (#688): an inbound message
-/// that produced no run and no reply.
+/// Counts one event a rule refused on `task_id` (#688, and Telegram's unknown
+/// chats since #690): an inbound message that produced no run and no reply.
 ///
 /// The column is the server's, so this writes it directly: `update_task_in`
 /// leaves it out of its `SET` list, which is what keeps a concurrent task edit
