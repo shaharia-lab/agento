@@ -223,10 +223,11 @@ edited by the form's **Task** picker (#687) and `continue_on_reply` by no
 control yet (#686). **Migration 48
 set `continue_on_reply` on every rule that existed**, because those already
 continue; a rule created afterwards defaults to off. **`task_id` is read at run
-time by Slack only** (#685): the dispatcher's `load_rules` selects it into
-`Rule.task_id`, and `slack/inbound.rs` starts that task for a top-level mention
-(`docs/internal/native-integrations-slack.md`). Telegram's dispatcher carries
-the field and ignores it until #684. `continue_on_reply` is still read by
+time by both transports**: the dispatcher's `load_rules` selects it into
+`Rule.task_id`; Telegram's dispatcher starts that task for a matched message
+(#684, `docs/internal/native-integrations-telegram.md`) and `slack/inbound.rs`
+for a top-level mention (#685, `docs/internal/native-integrations-slack.md`).
+`continue_on_reply` is still read by
 nothing (#686), and `agent_slug` is still required whether or not a task is
 linked. The task's half is in `docs/internal/native-schedule.md`.
 

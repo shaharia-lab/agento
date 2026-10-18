@@ -277,11 +277,24 @@ one and the first to finish would clear an entry the second still owns.
 (#683, epic #679). A transport — Telegram, Slack, the webhook, a reply —
 authenticates its sender, builds an `EventInput` (whose constructor refuses
 `schedule` and `manual` as a source) and calls it. Slack does
-(`slack/inbound.rs::run_linked`, #685); Telegram and the webhook do not yet
-(#684, #696). It is two steps, `admit_event` and then `run_admitted`: the
+(`slack/inbound.rs::run_linked`, #685), and so does Telegram
+(`trigger/dispatcher.rs::run_linked`, #684); the webhook does not yet (#696).
+It is two steps, `admit_event` and then `run_admitted`: the
 task's own limiter (#691, below), then `run_manual`'s shape — mark in flight,
 take one of the three permits, re-read the task — with these rules:
 
+- **The transports' bound wraps the scheduler's, never the reverse.** Telegram
+  and Slack both take the dispatcher's ten-slot permit
+  (`trigger::dispatcher::semaphore`) after `admit_event` and hold it until
+  `run_admitted` returns, so it is always taken outside the scheduler's three
+  and the two cannot deadlock (`dispatcher.rs`'s
+  `a_linked_run_holds_its_dispatcher_permit_until_the_run_ends` and
+  `a_linked_message_waiting_in_its_tasks_queue_holds_no_dispatcher_permit`).
+- **What each transport answers a refusal with** is the transport's: Telegram
+  and Slack both stay silent on `Paused`, `Dropped` and `RateLimited`, and
+  answer `ERROR_REPLY` inline on `NoSuchTask`, `Unavailable` and a process
+  with no scheduler — never by falling back to running the sender's text as a
+  prompt (`trigger/dispatcher.rs`'s `//!` table).
 - **Five refusals, and none writes a row**, since no run started:
   `NoSuchTask` (absent, or deleted while it queued — `job_history.task_id`
   cascades), `Paused` (any status but `active`: pause is the user's off switch
@@ -355,8 +368,8 @@ Six things about it are specification:
   `the_hourly_cap_survives_a_restart_and_counts_only_event_runs` pins it.
 - **A waiting event holds nothing global.** The scheduler's three permits are
   taken in `run_admitted`, and a transport takes its own bound between the two
-  steps (Slack's ten-slot dispatcher permit), so one task's burst queues behind
-  that task and nowhere else. Both global bounds stay as the outer limit.
+  steps (the dispatcher's ten-slot permit, for Slack and Telegram alike), so
+  one task's burst queues behind that task and nowhere else. Both global bounds stay as the outer limit.
 - **The slot is a guard.** `RunSlot` frees what it holds on drop — a queue place
   while it waits, a running slot after — and wakes the task's next waiter, so a
   cancelled waiter cannot leak a place. The limiter's one `std::sync::Mutex` is

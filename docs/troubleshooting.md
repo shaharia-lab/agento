@@ -368,6 +368,11 @@ polling. If it comes back, find what is setting it and stop that.
   at `debug`.
 - The rule is off because it lists no chat ids. Its row says so; edit it and add
   at least one.
+- The rule starts a task that has no **Reply to sender** destination. The task
+  ran: look in **Job history**. Add the destination to have it answer.
+- The rule starts a task that is paused, or that is at its limits for
+  message-started runs. The task's inspector counts dropped and rate-limited
+  messages.
 - The message has no text. Photos, stickers and joins are received and ignored.
 - The bot is in a group with privacy mode on, so Telegram only gives it
   commands and replies. `@BotFather` → `/setprivacy` changes that.
