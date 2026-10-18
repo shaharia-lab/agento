@@ -1061,6 +1061,9 @@ pub(crate) mod tests {
                     .collect::<Vec<_>>()
             })
             .filter(|route| route.starts_with("/api/"))
+            // The hook's own route is the one place this token is served, and
+            // the assertions below cover it; #696 records it in the parity files.
+            .filter(|route| !route.starts_with("/api/hooks/") && route != "/api/hooks")
             // Every `{param}` becomes the token's own task id — the spelling most
             // likely to be mistaken for a match.
             .map(|route| {
