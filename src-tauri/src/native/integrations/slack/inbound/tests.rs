@@ -904,7 +904,9 @@ fn links(db_path: &Path) -> Vec<(String, String, String, String)> {
 }
 
 /// #686, gate g, the default: a reply in a thread a task's run answered in,
-/// under a task that does **not** continue on reply, runs the task again —
+/// under a task that does **not** continue on reply — and a channel rule that
+/// does, as migration 48 left every rule, but is not linked to the task — runs
+/// the task again —
 /// fresh, on a new chat, with no `--resume` — as one `reply` row with no link,
 /// answering in the thread through the task's `reply` destination. The task's
 /// chat is untouched, and a reply in a thread the delivery did not map is
@@ -919,6 +921,12 @@ async fn a_reply_in_a_task_thread_runs_the_task_fresh_when_it_does_not_continue(
     let slack = fake_slack().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let db = delivered_task_thread(dir.path(), "s-fresh", false);
+    // Migration 48 left every existing rule continuing, and none of them is
+    // linked: the channel's rule flag is not the task's.
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE trigger_rules SET continue_on_reply = 1", [])
+        .expect("the migrated rule's flag");
     let cli = fake_cli(dir.path(), "dug into item {n}", "sess", false, 0);
 
     let _env = env_lock().lock().await;

@@ -456,14 +456,13 @@ says so below. Work down the list:
   users, not responding*. Edit the rule and add the person's Slack member id.
   When the rule starts a task, each of these is counted on that task.
 - **The rule's task is at its run limits.** Log, at `info`:
-  `slack mention ignored, the rule's task is at its run limits`, with
+  `slack mention ignored, the task is at its run limits`, with
   `reason=Dropped` or `reason=RateLimited`. A task runs one message-started run
   at a time, keeps five more waiting and starts ten in any hour, unless its
   limits were changed. A mention past the queue is dropped and one past the
   hour's count is rate-limited; each is counted on the task and gets no reply.
-  Wait for the running one to finish or for the hour to move on. A reply inside
-  a task's thread logs `slack reply ignored, the thread's task did not take it`
-  instead, for this and for a paused task.
+  Wait for the running one to finish or for the hour to move on. The same
+  applies to a reply inside a task's thread.
 - **A reply in a task's thread ran fresh, and the task has no Reply to sender
   destination.** Log, at `info`: `slack mention matched … kind=reply
   continues=false`. The reply started a new run of the task, which delivered to

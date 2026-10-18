@@ -1414,17 +1414,19 @@ async fn run_agent(
             ..Default::default()
         },
     );
-    let timeout = std::time::Duration::from_secs(
-        u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
-    );
     crate::native::agent_run::runner()
         .run(
             &spec,
             prompt,
-            timeout,
+            task_timeout(task),
             Some(record_process(db_path, job_id)),
         )
         .await
+}
+
+/// The task's `timeout_minutes` as the run's deadline, fresh or continued.
+fn task_timeout(task: &ScheduledTask) -> std::time::Duration {
+    std::time::Duration::from_secs(u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60)
 }
 
 /// [`run_agent`] for a continued run (#686): one turn on the continued run's
@@ -1441,16 +1443,13 @@ async fn resume_agent(
     continues: &Continues,
     prompt: &str,
 ) -> Result<RunResult, String> {
-    let timeout = std::time::Duration::from_secs(
-        u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
-    );
     crate::native::agent_run::runner()
         .resume(
             db_path,
             &continues.chat_session_id,
             prompt,
             &crate::native::agent_run::ExecutionSettings::default(),
-            timeout,
+            task_timeout(task),
             Some(record_process(db_path, job_id)),
         )
         .await

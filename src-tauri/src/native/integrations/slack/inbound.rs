@@ -579,49 +579,66 @@ impl Inbound {
             return;
         };
 
-        // The task's own limits first (#691): an event waiting in its task's
-        // queue holds no global permit. Only an admitted one takes the
-        // ten-slot bound, around the run as it is in `turn`, and the event run
-        // then takes one of the scheduler's three inside it.
-        let ran = match executor::admit_event(&scheduler, task_id).await {
-            Ok(admitted) => {
-                let Ok(_permit) = dispatcher::semaphore().acquire().await else {
-                    log::warn!("dispatcher stopped, dropping a slack event task_id={task_id:?}");
-                    return;
-                };
-                executor::run_admitted(scheduler, admitted, event).await
-            }
-            Err(refused) => Err(refused),
-        };
-        match ran {
-            Ok(job_id) => {
+        match self.run_bounded(scheduler, task_id, event).await {
+            Some(Ok(job_id)) => {
                 self.map_run(job, &job_id).await;
                 self.touch_thread(job).await;
             }
-            Err(EventRefused::Paused) => {
+            Some(Err(refused)) => self.refused(job, task_id, refused).await,
+            None => {}
+        }
+    }
+
+    /// One event of `task_id`, inside both bounds: the task's own limits
+    /// first (#691), so an event waiting in its task's queue holds no global
+    /// permit, and only an admitted one takes the ten-slot bound, around the
+    /// run as it is in `turn`; the event run then takes one of the
+    /// scheduler's three inside it. `None` is the dispatcher stopped, which
+    /// is logged here and answers nothing.
+    async fn run_bounded(
+        &self,
+        scheduler: Arc<Scheduler>,
+        task_id: &str,
+        event: EventInput,
+    ) -> Option<Result<String, EventRefused>> {
+        let admitted = match executor::admit_event(&scheduler, task_id).await {
+            Ok(admitted) => admitted,
+            Err(refused) => return Some(Err(refused)),
+        };
+        let Ok(_permit) = dispatcher::semaphore().acquire().await else {
+            log::warn!("dispatcher stopped, dropping a slack event task_id={task_id:?}");
+            return None;
+        };
+        Some(executor::run_admitted(scheduler, admitted, event).await)
+    }
+
+    /// What a refused event says, for a top-level mention and a reply alike.
+    /// None of these wrote a `job_history` row.
+    ///
+    /// - **Paused** is silence, as a disabled channel rule is.
+    /// - **Dropped or rate-limited** is silence too: the limits are the
+    ///   owner's, a sentence per refused mention is what a burst would turn
+    ///   into a flood, and the executor has counted it on the task.
+    /// - **Anything else** — a task or run that is gone, or could not be read —
+    ///   answers [`ERROR_REPLY`] in the thread.
+    async fn refused(&self, job: &Job, task_id: &str, refused: EventRefused) {
+        match refused {
+            EventRefused::Paused => {
                 log::info!(
-                    "slack mention ignored, the rule's task is paused rule_id={:?} \
-                     task_id={task_id:?}",
+                    "slack mention ignored, the task is paused rule_id={:?} task_id={task_id:?}",
                     job.rule.id
                 );
             }
-            // Silence, as for a paused task: the limits are the owner's, and
-            // a sentence per refused mention is what a burst would turn into
-            // a flood. The executor has counted it on the task.
-            Err(refused @ (EventRefused::Dropped | EventRefused::RateLimited)) => {
+            EventRefused::Dropped | EventRefused::RateLimited => {
                 log::info!(
-                    "slack mention ignored, the rule's task is at its run limits rule_id={:?} \
+                    "slack mention ignored, the task is at its run limits rule_id={:?} \
                      task_id={task_id:?} reason={refused:?}",
                     job.rule.id
                 );
             }
-            Err(
-                refused @ (EventRefused::NoSuchTask
-                | EventRefused::NoSuchRun
-                | EventRefused::Unavailable),
-            ) => {
+            EventRefused::NoSuchTask | EventRefused::NoSuchRun | EventRefused::Unavailable => {
                 log::warn!(
-                    "a slack rule's task did not run rule_id={:?} task_id={task_id:?} \
+                    "a slack mention's task did not run rule_id={:?} task_id={task_id:?} \
                      reason={refused:?}",
                     job.rule.id
                 );
@@ -684,7 +701,11 @@ impl Inbound {
                 self.refused(job, task_id, EventRefused::Unavailable).await;
                 return;
             }
-            None => return,
+            // A panic in the read, which `db::blocking` logged.
+            None => {
+                self.refused(job, task_id, EventRefused::Unavailable).await;
+                return;
+            }
         };
         let continues =
             task.continue_on_reply || (job.rule.task_id == task_id && job.rule.continue_on_reply);
@@ -722,40 +743,10 @@ impl Inbound {
             }
         }
 
-        let ran = match executor::admit_event(&scheduler, task_id).await {
-            Ok(admitted) => {
-                let Ok(_permit) = dispatcher::semaphore().acquire().await else {
-                    log::warn!("dispatcher stopped, dropping a slack reply task_id={task_id:?}");
-                    return;
-                };
-                executor::run_admitted(scheduler, admitted, event).await
-            }
-            Err(refused) => Err(refused),
-        };
-        match ran {
-            Ok(_) => self.touch_thread(job).await,
-            Err(refused) => self.refused(job, task_id, refused).await,
-        }
-    }
-
-    /// What a refused reply event says: [`Inbound::run_linked`]'s rules. A
-    /// paused task and the task's own limits are silence; anything else is a
-    /// failure, answered in the thread.
-    async fn refused(&self, job: &Job, task_id: &str, refused: EventRefused) {
-        match refused {
-            EventRefused::Paused | EventRefused::Dropped | EventRefused::RateLimited => {
-                log::info!(
-                    "slack reply ignored, the thread's task did not take it task_id={task_id:?} \
-                     reason={refused:?}"
-                );
-            }
-            EventRefused::NoSuchTask | EventRefused::NoSuchRun | EventRefused::Unavailable => {
-                log::warn!(
-                    "a slack thread's task did not run task_id={task_id:?} reason={refused:?}"
-                );
-                self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
-                    .await;
-            }
+        match self.run_bounded(scheduler, task_id, event).await {
+            Some(Ok(_)) => self.touch_thread(job).await,
+            Some(Err(refused)) => self.refused(job, task_id, refused).await,
+            None => {}
         }
     }
 
