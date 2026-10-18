@@ -1144,8 +1144,8 @@ mod tests {
             update_id: 1001,
             message: Some(crate::native::gojson::GoStruct(msg("hello", 99))),
         };
-        process(&db, "tg", "token", update()).await;
-        process(&db, "tg", "token", update()).await;
+        process(semaphore(), None, &db, "tg", "token", update()).await;
+        process(semaphore(), None, &db, "tg", "token", update()).await;
         set_api_base(None);
 
         assert_eq!(dropped(&db, "t1"), 1, "the same update_id is counted once");
