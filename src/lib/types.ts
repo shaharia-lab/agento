@@ -288,6 +288,9 @@ export interface TaskDestination {
   email?: EmailDestinationConfig;
 }
 
+/** `native/tasks.rs::TaskPermissionMode`, harness-neutral (#693). */
+export type TaskPermissionMode = "read_only" | "plan" | "workspace_write" | "full";
+
 export interface ScheduledTask {
   id: string;
   name: string;
@@ -315,6 +318,11 @@ export interface ScheduledTask {
   max_concurrent_runs: number;
   max_queued_events: number;
   max_runs_per_hour: number;
+  /**
+   * What the task's runs may do (#693). Required on every write; a value
+   * outside the four is a 422. A hand-edited row may hold `""`.
+   */
+  permission_mode: TaskPermissionMode | "";
   /** Events the task did not run for (#681). Server-owned: a write ignores both. */
   dropped_event_count: number;
   rate_limited_event_count: number;

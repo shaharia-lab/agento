@@ -91,13 +91,24 @@ runs before anything binds a port:
   `agent setup: unknown permission mode "…"`, which is a failed `job_history`
   row for a task and the error reply for a rule. Only a hand-edited row can
   hold one.
-- **A scheduled or manual run of an agent with no mode bypasses because the
-  executor says so.** `RunKind::permission_mode` answers `"bypass"` for those
-  two when the agent's mode is empty, and `""` otherwise — for an event run,
-  and for any agent that stores a mode, because a run's mode beats its agent's
-  and naming one would speak over a `plan` agent. Such a run bypassed before
-  this by passing nothing; a task has no mode column until #693, which replaces
-  that constant with the task's required mode.
+- **A task's run takes the task's own mode (#693).** `scheduled_tasks.permission_mode`
+  is required by both task writes (a 422 naming `permission_mode`) and is one
+  of `read_only`, `plan`, `workspace_write` or `full`. `run_task` reads it
+  through `executor::task_permission_mode` for every run kind and passes it as
+  `ExecutionSettings::task_mode`, to a fresh run and to a continued one
+  (`resume_agent`), and it beats the agent's mode and the resumed chat's. A
+  row with no valid mode is only a hand-edited one: an event run of it runs
+  `read_only`, and a scheduled or manual run is refused with a failed
+  `job_history` row (`task has no permission mode`). Nothing falls back to
+  bypass. The table of flags is in `docs/internal/native-runner.md`.
+- **Linking a trigger rule makes a mode-less task `read_only`.** Every rule
+  create or update with a `task_id` calls `tasks::ensure_mode_for_trigger` in
+  the rule write's transaction; a task that states a mode keeps it.
+- **Migration 56 backfills what each task did before**, with one exception: a
+  task a trigger rule links to becomes `read_only`, scheduled runs included.
+  Otherwise an agent with no mode or `bypass`, and no agent at all, is `full`;
+  `plan` is `plan`; `dontAsk`, `default`, an unknown value and a deleted agent
+  are `read_only`.
 - **"Prompts denied" is only as narrow as the allowlist.** `dontAsk` denies
   what `--allowedTools` does not already cover, and `allowed_tools` gives an
   agent that names no tool at all — the shape the agent form creates, and the
@@ -106,11 +117,12 @@ runs before anything binds a port:
 
 Pinned by `only_the_literal_bypass_bypasses_and_an_unknown_mode_is_refused`
 (every stored spelling × the agent's × with and without a handler),
-`a_scheduled_or_manual_run_names_bypass_and_an_event_run_names_nothing`, and
+`a_tasks_mode_beats_the_run_mode_and_the_agent_mode`,
+`a_run_takes_the_tasks_mode_and_a_task_without_one_never_bypasses`, and
 on the spawned CLI's argv in `tests/trigger_run.rs`, `tests/scheduled_run.rs`
-(`a_scheduled_run_leaves_an_agents_own_permission_mode_alone`,
-`an_agent_with_an_unknown_permission_mode_is_a_recorded_failure`) and
-`tests/headless_resume.rs`. `chat_id`
+(`a_scheduled_run_takes_the_tasks_mode_over_its_agents`,
+`a_task_with_no_permission_mode_is_a_recorded_failure`) and
+`tests/headless_resume.rs` (`a_continued_run_takes_the_tasks_mode_over_the_chats`). `chat_id`
 likewise became `custom_session_id`: a chat pins a new CLI session to its own id,
 while `buildRunOptions` sets neither session field, so the CLI generates one and
 `saveSessionResults` stores it back.
@@ -121,8 +133,8 @@ while `buildRunOptions` sets neither session field, so the CLI generates one and
 empty capabilities **all twelve built-in tools** while a nil config gets none.
 `None` would run a no-agent task with no `--allowedTools` argument at all. What
 that stand-in spawns on a schedule — the Settings default model, all twelve
-tools in order, no system prompt, no MCP servers, permissions bypassed
-explicitly — is pinned by
+tools in order, no system prompt, no MCP servers, and for a `full` task
+permissions bypassed — is pinned by
 `a_task_with_no_agent_runs_on_the_default_model_with_every_built_in_tool` in
 `tests/scheduled_run.rs` (#629).
 

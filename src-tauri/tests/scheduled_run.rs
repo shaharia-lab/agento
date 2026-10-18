@@ -132,9 +132,9 @@ fn migrated_with_task(path: &Path, schedule_type: &str, save_output: bool) -> St
     conn.execute(
         "INSERT INTO scheduled_tasks
             (id, name, description, prompt, schedule_type, schedule_config, status,
-             timeout_minutes, save_output, created_at, updated_at)
+             timeout_minutes, save_output, permission_mode, created_at, updated_at)
          VALUES ('task-1', 'Nightly', 'd', 'summarise the day', ?1, '{}', 'active',
-                 30, ?2, '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+                 30, ?2, 'full', '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
         rusqlite::params![schedule_type, save_output],
     )
     .expect("seed task");
@@ -161,8 +161,8 @@ fn migrated_with(
     conn.execute(
         "INSERT INTO scheduled_tasks
             (id, name, description, prompt, agent_slug, schedule_type, schedule_config,
-             status, timeout_minutes, save_output, created_at, updated_at)
-         VALUES ('task-1', 'Nightly', 'd', ?1, ?2, 'cron', '{}', 'active', ?3, 1,
+             status, timeout_minutes, save_output, permission_mode, created_at, updated_at)
+         VALUES ('task-1', 'Nightly', 'd', ?1, ?2, 'cron', '{}', 'active', ?3, 1, 'full',
                  '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
         rusqlite::params![prompt, agent_slug, timeout_minutes],
     )
@@ -703,51 +703,65 @@ async fn an_agent_whose_tools_this_build_cannot_host_is_a_recorded_failure() {
     assert_eq!(task.last_run_status, "failed");
 }
 
-/// #675. The scheduler names `bypass` only for an agent with no mode of its
-/// own: a stored one is the agent's, and a scheduled run does not speak over
-/// it. An agent's mode cannot be written through the API, so the row is edited
-/// directly — which is the only way a real one comes to hold a value.
+/// #693. A task's mode beats its agent's: a `plan` agent in a `read_only`
+/// task runs read-only, and the same agent in a `full` task bypasses. An
+/// agent's mode cannot be written through the API, so the row is edited
+/// directly.
 #[tokio::test]
-async fn a_scheduled_run_leaves_an_agents_own_permission_mode_alone() {
+async fn a_scheduled_run_takes_the_tasks_mode_over_its_agents() {
     if python3().is_none() {
         eprintln!("skipping: no python3 to script the fake CLI");
         return;
     }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("agento.db");
-    let task_id = migrated_with(&db, "go", "planner", 30, Some("{}"));
-    rusqlite::Connection::open(&db)
-        .expect("open")
-        .execute("UPDATE agents SET permission_mode = 'plan'", [])
-        .expect("store a mode");
-    let cli = fake_cli(dir.path(), ANSWERING_CLI);
+    for (task_mode, want) in [("read_only", "dontAsk"), ("full", "bypassPermissions")] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("agento.db");
+        let task_id = migrated_with(&db, "go", "planner", 30, Some("{}"));
+        rusqlite::Connection::open(&db)
+            .expect("open")
+            .execute_batch(&format!(
+                "UPDATE agents SET permission_mode = 'plan';
+                 UPDATE scheduled_tasks SET permission_mode = '{task_mode}';"
+            ))
+            .expect("store the modes");
+        let cli = fake_cli(dir.path(), ANSWERING_CLI);
 
-    let _env = env_lock().lock().await;
-    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
-    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
-    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+        let _env = env_lock().lock().await;
+        std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+        let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+        agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+        std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
 
-    let (status, error, ..) = job_rows(&db).remove(0);
-    assert_eq!(status, "success", "error was {error:?}");
-    let argv = argv(dir.path());
-    assert_eq!(
-        flag_value(&argv, "--permission-mode"),
-        Some("plan"),
-        "{argv:?}"
-    );
+        let (status, error, ..) = job_rows(&db).remove(0);
+        assert_eq!(status, "success", "error was {error:?}");
+        let argv = argv(dir.path());
+        assert_eq!(
+            flag_value(&argv, "--permission-mode"),
+            Some(want),
+            "{task_mode}: {argv:?}"
+        );
+        if task_mode == "read_only" {
+            assert_eq!(
+                flag_value(&argv, "--allowedTools"),
+                Some("Read,Glob,Grep,WebFetch,WebSearch"),
+                "{argv:?}"
+            );
+        }
+    }
 }
 
-/// #675. A stored mode that is not one fails the run with a row that names the
-/// value — never silence, and never a guess at what was meant.
+/// #693. A task with no mode can only be a row written by hand, and its
+/// scheduled run is refused with a row that says so — never silence, and
+/// never a guess wider than the row states. Nothing is spawned.
 #[tokio::test]
-async fn an_agent_with_an_unknown_permission_mode_is_a_recorded_failure() {
+async fn a_task_with_no_permission_mode_is_a_recorded_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("agento.db");
     let task_id = migrated_with(&db, "go", "typo", 30, Some("{}"));
     rusqlite::Connection::open(&db)
         .expect("open")
-        .execute("UPDATE agents SET permission_mode = 'yolo'", [])
-        .expect("store a mode");
+        .execute("UPDATE scheduled_tasks SET permission_mode = ''", [])
+        .expect("a hand-edited row");
 
     let scheduler = agento_lib::native::schedule::runtime::detached(&db);
     agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
@@ -756,11 +770,13 @@ async fn an_agent_with_an_unknown_permission_mode_is_a_recorded_failure() {
     assert_eq!(jobs.len(), 1, "the refusal is recorded, not silent");
     let (status, error, ..) = &jobs[0];
     assert_eq!(status, "failed");
-    assert_eq!(error, r#"agent setup: unknown permission mode "yolo""#);
+    assert_eq!(error, "task has no permission mode");
+    assert!(
+        !dir.path().join("argv").exists(),
+        "a refused run spawns nothing"
+    );
 }
 
-/// An unresolvable `{{name}}` in the *task's* prompt fails the run before
-/// anything is created — `prepareTaskRun`'s first step.
 #[tokio::test]
 async fn an_unresolvable_prompt_variable_fails_the_run_before_it_starts() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1628,6 +1644,13 @@ async fn an_event_run_hands_the_cli_a_delimited_payload_and_delivers_to_its_orig
     let db = dir.path().join("agento.db");
     let task_id = migrated_with_task(&db, "cron", true);
     set_destinations(&db, &task_id, r#"[{"type":"fake","when":"always"}]"#);
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute(
+            "UPDATE scheduled_tasks SET permission_mode = 'read_only'",
+            [],
+        )
+        .expect("a read-only task");
     let received_at = serde_json::to_string(&dir.path().join("user").to_string_lossy()).unwrap();
     let cli = fake_cli(
         dir.path(),
@@ -1682,9 +1705,8 @@ async fn an_event_run_hands_the_cli_a_delimited_payload_and_delivers_to_its_orig
     );
     assert!(!block_id.is_empty());
 
-    // #675: an outside sender started this run and the task's agent names no
-    // mode, so it denies prompts — and is not offered bypass — where a
-    // scheduled or manual run of the same task bypasses.
+    // #693: the task is read-only, so the run denies prompts and is not
+    // offered bypass, whatever an outside sender wrote.
     let argv = argv(dir.path());
     assert_eq!(
         flag_value(&argv, "--permission-mode"),

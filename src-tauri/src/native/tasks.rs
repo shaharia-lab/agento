@@ -202,6 +202,11 @@ pub struct ScheduledTask {
     pub max_concurrent_runs: i64,
     pub max_queued_events: i64,
     pub max_runs_per_hour: i64,
+    /// What this task's runs may do (#693): one of the
+    /// [`TaskPermissionMode`] spellings. Required by both task writes, so it
+    /// is empty only on a row written by hand, which a run refuses rather than
+    /// guesses at (`executor::task_permission_mode`).
+    pub permission_mode: String,
     /// Events this task did not run for (#681). **Server-owned**: no route
     /// writes either counter and [`update_task_in`] leaves both columns out of
     /// its `SET` list. [`count_dropped_event`] and
@@ -304,6 +309,46 @@ impl TriggeredBy {
     }
 }
 
+/// What a task's runs may do (#693), whichever event started them. Required on
+/// every task write and stored as [`Self::as_str`] in
+/// `scheduled_tasks.permission_mode`.
+///
+/// **Harness-neutral spellings**, not Claude Code's: the runner maps each one
+/// to its harness's flags (`chat/runner.rs`'s `PermissionChoice`), so a second
+/// harness adds a mapping and no stored value changes. Nothing defaults to
+/// [`Self::Full`]; a task linked to an external trigger gets [`Self::ReadOnly`]
+/// when it has none ([`ensure_mode_for_trigger`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPermissionMode {
+    /// Reads files and the web; writes nothing and runs no shell.
+    ReadOnly,
+    /// Plans and proposes, edits nothing.
+    Plan,
+    /// Edits files in the working directory.
+    WorkspaceWrite,
+    /// No permission checks at all.
+    Full,
+}
+
+impl TaskPermissionMode {
+    /// Every mode, in the order the task form offers them.
+    pub const ALL: [Self; 4] = [Self::ReadOnly, Self::Plan, Self::WorkspaceWrite, Self::Full];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Plan => "plan",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::Full => "full",
+        }
+    }
+
+    /// `None` for anything but the four stored spellings, empty included.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == value)
+    }
+}
+
 /// One delivery of a run's output to one channel (#635) — a `job_deliveries`
 /// row. One per channel rather than per destination entry, so a destination
 /// posting to two channels can succeed in one and fail in the other.
@@ -357,7 +402,7 @@ const TASK_COLUMNS: &str =
        stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
        last_run_status, next_run_at, created_at, updated_at, destinations,
        continue_on_reply, dropped_event_count, rate_limited_event_count,
-       max_concurrent_runs, max_queued_events, max_runs_per_hour
+       max_concurrent_runs, max_queued_events, max_runs_per_hour, permission_mode
 FROM scheduled_tasks";
 
 const JOB_COLUMNS: &str =
@@ -607,6 +652,7 @@ fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
         max_concurrent_runs: row.get(25)?,
         max_queued_events: row.get(26)?,
         max_runs_per_hour: row.get(27)?,
+        permission_mode: row.get(28)?,
         dropped_event_count: row.get(23)?,
         rate_limited_event_count: row.get(24)?,
         status: row.get(14)?,
@@ -1022,7 +1068,8 @@ mod tests {
             rate_limited_event_count INTEGER NOT NULL DEFAULT 0,
             max_concurrent_runs INTEGER NOT NULL DEFAULT 1,
             max_queued_events   INTEGER NOT NULL DEFAULT 5,
-            max_runs_per_hour   INTEGER NOT NULL DEFAULT 10
+            max_runs_per_hour   INTEGER NOT NULL DEFAULT 10,
+            permission_mode     TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE job_history (
             id                          TEXT PRIMARY KEY,
@@ -1072,19 +1119,21 @@ mod tests {
                 (id, name, description, prompt, agent_slug, working_directory, model,
                  settings_profile_id, timeout_minutes, schedule_type, schedule_config,
                  stop_after_count, stop_after_time, save_output, status, run_count,
-                 last_run_at, last_run_status, next_run_at, created_at, updated_at)
+                 last_run_at, last_run_status, next_run_at, created_at, updated_at,
+                 permission_mode)
             VALUES
                 ('bare', 'Bare', '', 'do it', 'writer', '', '', '', 30,
                  'run_immediately', '{}', 0, NULL, 0, 'active', 0,
                  NULL, '', NULL,
-                 '2026-01-02 03:04:05 +0000 UTC', '2026-01-02 03:04:05 +0000 UTC'),
+                 '2026-01-02 03:04:05 +0000 UTC', '2026-01-02 03:04:05 +0000 UTC', 'read_only'),
                 ('full', 'Cron <report> & co', 'ünïcödé 😀', 'summarise', 'writer',
                  '/w', 'claude-opus-4-1', 'work-profile', 45,
                  'cron', '{"expression":"0 2 * * *"}', 10,
                  '2027-06-01 12:00:00 +0000 UTC', 1, 'paused', 7,
                  '2026-08-14 23:15:04.5 +0000 UTC', 'success',
                  '2026-08-16 02:00:00 +0000 UTC',
-                 '2026-03-04 05:06:07.123456789 +0000 UTC', '2026-03-04 05:06:08 +0000 UTC');
+                 '2026-03-04 05:06:07.123456789 +0000 UTC', '2026-03-04 05:06:08 +0000 UTC',
+                 'workspace_write');
 
             INSERT INTO job_history
                 (id, task_id, task_name, agent_slug, status, started_at, finished_at,
@@ -1141,7 +1190,7 @@ mod tests {
         let tasks = list_tasks(file.path()).expect("list");
         assert_eq!(
             encoded(&tasks[0]),
-            r#"{"id":"full","name":"Cron \u003creport\u003e \u0026 co","description":"ünïcödé 😀","prompt":"summarise","agent_slug":"writer","working_directory":"/w","model":"claude-opus-4-1","settings_profile_id":"work-profile","timeout_minutes":45,"schedule_type":"cron","schedule_config":{"expression":"0 2 * * *"},"stop_after_count":10,"stop_after_time":"2027-06-01T12:00:00Z","save_output":true,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":0,"rate_limited_event_count":0,"status":"paused","run_count":7,"last_run_at":"2026-08-14T23:15:04.5Z","last_run_status":"success","next_run_at":"2026-08-16T02:00:00Z","created_at":"2026-03-04T05:06:07.123456789Z","updated_at":"2026-03-04T05:06:08Z"}"#
+            r#"{"id":"full","name":"Cron \u003creport\u003e \u0026 co","description":"ünïcödé 😀","prompt":"summarise","agent_slug":"writer","working_directory":"/w","model":"claude-opus-4-1","settings_profile_id":"work-profile","timeout_minutes":45,"schedule_type":"cron","schedule_config":{"expression":"0 2 * * *"},"stop_after_count":10,"stop_after_time":"2027-06-01T12:00:00Z","save_output":true,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"permission_mode":"workspace_write","dropped_event_count":0,"rate_limited_event_count":0,"status":"paused","run_count":7,"last_run_at":"2026-08-14T23:15:04.5Z","last_run_status":"success","next_run_at":"2026-08-16T02:00:00Z","created_at":"2026-03-04T05:06:07.123456789Z","updated_at":"2026-03-04T05:06:08Z"}"#
         );
     }
 
@@ -1154,7 +1203,7 @@ mod tests {
         let tasks = list_tasks(file.path()).expect("list");
         assert_eq!(
             encoded(&tasks[1]),
-            r#"{"id":"bare","name":"Bare","description":"","prompt":"do it","agent_slug":"writer","working_directory":"","model":"","settings_profile_id":"","timeout_minutes":30,"schedule_type":"run_immediately","schedule_config":{},"stop_after_count":0,"save_output":false,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","run_count":0,"last_run_status":"","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}"#
+            r#"{"id":"bare","name":"Bare","description":"","prompt":"do it","agent_slug":"writer","working_directory":"","model":"","settings_profile_id":"","timeout_minutes":30,"schedule_type":"run_immediately","schedule_config":{},"stop_after_count":0,"save_output":false,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"permission_mode":"read_only","dropped_event_count":0,"rate_limited_event_count":0,"status":"active","run_count":0,"last_run_status":"","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}"#
         );
     }
 
@@ -1203,7 +1252,7 @@ mod tests {
         let task = get_task(file.path(), "bare").expect("get").expect("task");
         assert!(
             encoded(&task).contains(
-                r#""save_output":false,"continue_on_reply":true,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":4,"rate_limited_event_count":2,"status":"active","#
+                r#""save_output":false,"continue_on_reply":true,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"permission_mode":"read_only","dropped_event_count":4,"rate_limited_event_count":2,"status":"active","#
             ),
             "{}",
             encoded(&task)
@@ -1674,7 +1723,7 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"Nightly","prompt":"go","schedule_type":"cron",
+            r#"{"name":"Nightly","prompt":"go","permission_mode":"full","schedule_type":"cron",
                 "schedule_config":{"expression":"0 2 * * *"}}"#,
         );
 
@@ -1690,7 +1739,10 @@ mod tests {
     #[test]
     fn an_empty_schedule_type_becomes_run_immediately_rather_than_a_422() {
         let file = migrated();
-        let task = created(&file, r#"{"name":"Now","prompt":"go"}"#);
+        let task = created(
+            &file,
+            r#"{"name":"Now","prompt":"go","permission_mode":"full"}"#,
+        );
         assert_eq!(task.schedule_type, "run_immediately");
         // …and the stored config is `{}`, not a shape full of zeros.
         let conn = rusqlite::Connection::open(file.path()).expect("open");
@@ -1711,7 +1763,7 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","working_directory":"/tmp","model":"opus",
+            r#"{"name":"N","prompt":"p","permission_mode":"full","working_directory":"/tmp","model":"opus",
                 "settings_profile_id":"prof","stop_after_count":9,
                 "stop_after_time":"2027-06-01T12:00:00Z"}"#,
         );
@@ -1732,7 +1784,7 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","working_directory":"/w/one","model":"sonnet",
+            r#"{"name":"N","prompt":"p","permission_mode":"full","working_directory":"/w/one","model":"sonnet",
                 "settings_profile_id":"prof-a","stop_after_count":3,
                 "stop_after_time":"2027-06-01T12:00:00Z"}"#,
         );
@@ -1740,7 +1792,7 @@ mod tests {
         update_task(
             file.path(),
             &task.id,
-            br#"{"name":"N","prompt":"p","working_directory":"/w/two","model":"opus",
+            br#"{"name":"N","prompt":"p","permission_mode":"full","working_directory":"/w/two","model":"opus",
                  "settings_profile_id":"prof-b","stop_after_count":7,
                  "stop_after_time":"2028-01-02T03:04:05Z"}"#,
         )
@@ -1766,8 +1818,8 @@ mod tests {
     #[test]
     fn stop_after_time_is_none_when_absent_or_null_and_byte_identical_otherwise() {
         for body in [
-            r#"{"name":"N","prompt":"p"}"#,
-            r#"{"name":"N","prompt":"p","stop_after_time":null}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","stop_after_time":null}"#,
         ] {
             let file = migrated();
             assert!(created(&file, body).stop_after_time.is_none(), "for {body}");
@@ -1776,7 +1828,7 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","stop_after_time":"2027-06-01T12:00:00Z"}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","stop_after_time":"2027-06-01T12:00:00Z"}"#,
         );
         let encoded =
             String::from_utf8(crate::native::gojson::to_vec(&task).expect("encode")).expect("utf8");
@@ -1793,7 +1845,7 @@ mod tests {
         let file = migrated();
         let err = create_task(
             file.path(),
-            br#"{"name":"N","prompt":"p","stop_after_time":"the first of June"}"#,
+            br#"{"name":"N","prompt":"p","permission_mode":"full","stop_after_time":"the first of June"}"#,
         )
         .unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -1810,12 +1862,17 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","working_directory":"/w","model":"opus",
+            r#"{"name":"N","prompt":"p","permission_mode":"full","working_directory":"/w","model":"opus",
                 "settings_profile_id":"prof","stop_after_count":9,
                 "stop_after_time":"2027-06-01T12:00:00Z"}"#,
         );
 
-        update_task(file.path(), &task.id, br#"{"name":"N","prompt":"p"}"#).expect("update");
+        update_task(
+            file.path(),
+            &task.id,
+            br#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        )
+        .expect("update");
 
         let stored = get_task(file.path(), &task.id)
             .expect("read")
@@ -1835,12 +1892,15 @@ mod tests {
     #[test]
     fn continue_on_reply_is_replaced_and_the_event_counters_are_not_writable() {
         let file = migrated();
-        let plain = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let plain = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        );
         assert!(!plain.continue_on_reply, "a new task defaults to off");
 
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","continue_on_reply":true,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","continue_on_reply":true,
                 "dropped_event_count":50,"rate_limited_event_count":60}"#,
         );
         assert!(task.continue_on_reply);
@@ -1863,11 +1923,11 @@ mod tests {
         let answer = update_task(
             file.path(),
             &task.id,
-            br#"{"name":"N","prompt":"p","continue_on_reply":true,
+            br#"{"name":"N","prompt":"p","permission_mode":"full","continue_on_reply":true,
                  "dropped_event_count":50,"rate_limited_event_count":60}"#,
         )
         .expect("update");
-        let wire = r#""continue_on_reply":true,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":3,"rate_limited_event_count":2,"status":"#;
+        let wire = r#""continue_on_reply":true,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"permission_mode":"full","dropped_event_count":3,"rate_limited_event_count":2,"status":"#;
         let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
         assert!(
             body.contains(wire),
@@ -1883,8 +1943,8 @@ mod tests {
         );
 
         for body in [
-            &br#"{"name":"N","prompt":"p"}"#[..],
-            &br#"{"name":"N","prompt":"p","continue_on_reply":null}"#[..],
+            &br#"{"name":"N","prompt":"p","permission_mode":"full"}"#[..],
+            &br#"{"name":"N","prompt":"p","permission_mode":"full","continue_on_reply":null}"#[..],
         ] {
             rusqlite::Connection::open(file.path())
                 .expect("open")
@@ -1908,8 +1968,14 @@ mod tests {
     #[test]
     fn a_dropped_event_is_counted_on_its_task_and_nowhere_else() {
         let file = migrated();
-        let counted = created(&file, r#"{"name":"A","prompt":"p"}"#);
-        let other = created(&file, r#"{"name":"B","prompt":"p"}"#);
+        let counted = created(
+            &file,
+            r#"{"name":"A","prompt":"p","permission_mode":"full"}"#,
+        );
+        let other = created(
+            &file,
+            r#"{"name":"B","prompt":"p","permission_mode":"full"}"#,
+        );
         let dropped = |id: &str| {
             get_task(file.path(), id)
                 .expect("read")
@@ -1921,7 +1987,12 @@ mod tests {
         count_dropped_event(file.path(), &counted.id).expect("count");
         assert_eq!((dropped(&counted.id), dropped(&other.id)), (2, 0));
 
-        update_task(file.path(), &counted.id, br#"{"name":"A2","prompt":"p"}"#).expect("edit");
+        update_task(
+            file.path(),
+            &counted.id,
+            br#"{"name":"A2","prompt":"p","permission_mode":"full"}"#,
+        )
+        .expect("edit");
         assert_eq!(dropped(&counted.id), 2, "an edit keeps the count");
 
         count_dropped_event(file.path(), "no-such-task").expect("a missing task is not an error");
@@ -1943,13 +2014,16 @@ mod tests {
         };
         let stored = |id: &str| limits(&get_task(file.path(), id).expect("read").expect("task"));
 
-        let plain = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let plain = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        );
         assert_eq!(limits(&plain), (1, 5, 10), "a body without them");
         assert_eq!(stored(&plain.id), (1, 5, 10));
 
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","max_concurrent_runs":3,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","max_concurrent_runs":3,
                 "max_queued_events":100,"max_runs_per_hour":1000}"#,
         );
         assert_eq!(limits(&task), (3, 100, 1000), "the top of each range");
@@ -1958,11 +2032,11 @@ mod tests {
         let answer = update_task(
             file.path(),
             &task.id,
-            br#"{"name":"N","prompt":"p","max_concurrent_runs":2,
+            br#"{"name":"N","prompt":"p","permission_mode":"full","max_concurrent_runs":2,
                  "max_queued_events":1,"max_runs_per_hour":1}"#,
         )
         .expect("update");
-        let wire = r#""continue_on_reply":false,"max_concurrent_runs":2,"max_queued_events":1,"max_runs_per_hour":1,"dropped_event_count":0,"#;
+        let wire = r#""continue_on_reply":false,"max_concurrent_runs":2,"max_queued_events":1,"max_runs_per_hour":1,"permission_mode":"full","dropped_event_count":0,"#;
         let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
         assert!(body.contains(wire), "in wire order: {body}");
         assert_eq!(stored(&task.id), (2, 1, 1));
@@ -1979,10 +2053,10 @@ mod tests {
 
         // Replace, not preserve: omitted, `null` and `0` each reset all three.
         for body in [
-            &br#"{"name":"N","prompt":"p"}"#[..],
-            &br#"{"name":"N","prompt":"p","max_concurrent_runs":null,
+            &br#"{"name":"N","prompt":"p","permission_mode":"full"}"#[..],
+            &br#"{"name":"N","prompt":"p","permission_mode":"full","max_concurrent_runs":null,
                   "max_queued_events":null,"max_runs_per_hour":null}"#[..],
-            &br#"{"name":"N","prompt":"p","max_concurrent_runs":0,
+            &br#"{"name":"N","prompt":"p","permission_mode":"full","max_concurrent_runs":0,
                   "max_queued_events":0,"max_runs_per_hour":0}"#[..],
         ] {
             rusqlite::Connection::open(file.path())
@@ -2003,7 +2077,10 @@ mod tests {
     #[test]
     fn an_event_run_limit_outside_its_range_is_a_422_naming_the_field() {
         let file = migrated();
-        let existing = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let existing = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        );
         let cases = [
             ("max_concurrent_runs", 4, 3),
             ("max_concurrent_runs", -1, 3),
@@ -2013,7 +2090,9 @@ mod tests {
             ("max_runs_per_hour", -1, 1000),
         ];
         for (field, value, max) in cases {
-            let body = format!(r#"{{"name":"n","prompt":"p","{field}":{value}}}"#);
+            let body = format!(
+                r#"{{"name":"n","prompt":"p","permission_mode":"full","{field}":{value}}}"#
+            );
             let want = format!(r#"validation error for "{field}": must be between 1 and {max}"#);
             for err in [
                 create_task(file.path(), body.as_bytes()).unwrap_err(),
@@ -2038,13 +2117,156 @@ mod tests {
         );
     }
 
+    /// #693: a task states what its runs may do. Absent, `null`, empty and a
+    /// value outside the four are each a 422 naming `permission_mode`, on both
+    /// writes, and a refused write changes nothing.
+    #[test]
+    fn a_task_without_a_known_permission_mode_is_a_422_and_writes_nothing() {
+        let file = migrated();
+        let existing = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"plan"}"#,
+        );
+        let required = r#"validation error for "permission_mode": permission mode is required"#;
+        let unknown = r#"validation error for "permission_mode": must be read_only, plan, workspace_write or full"#;
+        let cases = [
+            (r#"{"name":"n","prompt":"p"}"#, required),
+            (
+                r#"{"name":"n","prompt":"p","permission_mode":null}"#,
+                required,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","permission_mode":""}"#,
+                required,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","permission_mode":"bypass"}"#,
+                unknown,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","permission_mode":"Read_Only"}"#,
+                unknown,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","permission_mode":"read-only"}"#,
+                unknown,
+            ),
+        ];
+        for (body, want) in cases {
+            for err in [
+                create_task(file.path(), body.as_bytes()).unwrap_err(),
+                update_task(file.path(), &existing.id, body.as_bytes()).unwrap_err(),
+            ] {
+                assert_eq!(err.message(), want, "for {body}");
+                assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY, "for {body}");
+            }
+        }
+        assert_eq!(list_tasks(file.path()).expect("list").len(), 1);
+        let kept = get_task(file.path(), &existing.id)
+            .expect("read")
+            .expect("task");
+        assert_eq!(
+            kept.permission_mode, "plan",
+            "a refused update changes nothing"
+        );
+    }
+
+    /// #693: each of the four modes is stored by a create, replaced by an
+    /// update, and read back in wire order after the event-run limits.
+    #[test]
+    fn every_permission_mode_round_trips_through_create_read_and_update() {
+        let file = migrated();
+        for mode in TaskPermissionMode::ALL {
+            let body = format!(
+                r#"{{"name":"N","prompt":"p","permission_mode":"{}"}}"#,
+                mode.as_str()
+            );
+            let task = created(&file, &body);
+            assert_eq!(task.permission_mode, mode.as_str());
+            assert!(
+                encoded(&task).contains(&format!(
+                    r#""max_runs_per_hour":10,"permission_mode":"{}","dropped_event_count":0,"#,
+                    mode.as_str()
+                )),
+                "{}",
+                encoded(&task)
+            );
+            for other in TaskPermissionMode::ALL {
+                let body = format!(
+                    r#"{{"name":"N","prompt":"p","permission_mode":"{}"}}"#,
+                    other.as_str()
+                );
+                update_task(file.path(), &task.id, body.as_bytes()).expect("update");
+                let stored = get_task(file.path(), &task.id)
+                    .expect("read")
+                    .expect("task");
+                assert_eq!(stored.permission_mode, other.as_str());
+            }
+            delete_task(file.path(), &task.id).expect("delete");
+        }
+    }
+
+    /// #693: linking a trigger gives a task with no mode `read_only`, stamps
+    /// the edit, and leaves a task that states a mode — any of the four — as
+    /// it was.
+    #[test]
+    fn a_linked_trigger_sets_read_only_only_on_a_task_with_no_mode() {
+        let file = migrated();
+        for mode in TaskPermissionMode::ALL {
+            let body = format!(
+                r#"{{"name":"{0}","prompt":"p","permission_mode":"{0}"}}"#,
+                mode.as_str()
+            );
+            create_task(file.path(), body.as_bytes()).expect("create");
+        }
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(
+            "UPDATE scheduled_tasks SET permission_mode = '', updated_at = '2026-01-01 00:00:00 +0000 UTC'
+              WHERE name = 'full'",
+        )
+        .expect("a hand-edited row");
+        let ids: Vec<(String, String)> = list_tasks(file.path())
+            .expect("list")
+            .into_iter()
+            .map(|t| (t.id, t.name))
+            .collect();
+        for (id, _) in &ids {
+            ensure_mode_for_trigger(&conn, id).expect("link");
+        }
+        ensure_mode_for_trigger(&conn, "no-such-task").expect("a missing task is not an error");
+        for (id, name) in &ids {
+            let (mode, updated_at): (String, String) = conn
+                .query_row(
+                    "SELECT permission_mode, updated_at FROM scheduled_tasks WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("read");
+            if name == "full" {
+                assert_eq!(mode, "read_only", "the mode-less task");
+                assert_ne!(
+                    updated_at, "2026-01-01 00:00:00 +0000 UTC",
+                    "the edit is stamped"
+                );
+            } else {
+                assert_eq!(&mode, name, "a stated mode is kept");
+            }
+        }
+    }
+
     /// #691: a rate-limited event moves its own counter on its own task, and
     /// leaves the dropped count alone.
     #[test]
     fn a_rate_limited_event_is_counted_on_its_task_and_nowhere_else() {
         let file = migrated();
-        let counted = created(&file, r#"{"name":"A","prompt":"p"}"#);
-        let other = created(&file, r#"{"name":"B","prompt":"p"}"#);
+        let counted = created(
+            &file,
+            r#"{"name":"A","prompt":"p","permission_mode":"full"}"#,
+        );
+        let other = created(
+            &file,
+            r#"{"name":"B","prompt":"p","permission_mode":"full"}"#,
+        );
         let counts = |id: &str| {
             let task = get_task(file.path(), id).expect("read").expect("task");
             (task.dropped_event_count, task.rate_limited_event_count)
@@ -2054,7 +2276,12 @@ mod tests {
         count_rate_limited_event(file.path(), &counted.id).expect("count");
         assert_eq!((counts(&counted.id), counts(&other.id)), ((0, 2), (0, 0)));
 
-        update_task(file.path(), &counted.id, br#"{"name":"A2","prompt":"p"}"#).expect("edit");
+        update_task(
+            file.path(),
+            &counted.id,
+            br#"{"name":"A2","prompt":"p","permission_mode":"full"}"#,
+        )
+        .expect("edit");
         assert_eq!(counts(&counted.id), (0, 2), "an edit keeps the count");
 
         count_rate_limited_event(file.path(), "no-such-task")
@@ -2180,7 +2407,7 @@ mod tests {
         let file = migrated();
         let cases = [
             (
-                r#"{"prompt":"p"}"#,
+                r#"{"prompt":"p","permission_mode":"full"}"#,
                 r#"validation error for "name": name is required"#,
             ),
             (
@@ -2188,23 +2415,23 @@ mod tests {
                 r#"validation error for "prompt": prompt is required"#,
             ),
             (
-                r#"{"name":"n","prompt":"p","timeout_minutes":241}"#,
+                r#"{"name":"n","prompt":"p","permission_mode":"full","timeout_minutes":241}"#,
                 r#"validation error for "timeout_minutes": timeout must be between 1 and 240 minutes"#,
             ),
             (
-                r#"{"name":"n","prompt":"p","schedule_type":"weekly"}"#,
+                r#"{"name":"n","prompt":"p","permission_mode":"full","schedule_type":"weekly"}"#,
                 r#"validation error for "schedule_type": must be run_immediately, one_off, interval, or cron"#,
             ),
             (
-                r#"{"name":"n","prompt":"p","schedule_type":"one_off"}"#,
+                r#"{"name":"n","prompt":"p","permission_mode":"full","schedule_type":"one_off"}"#,
                 r#"validation error for "schedule_config.run_at": run_at is required for one_off schedules"#,
             ),
             (
-                r#"{"name":"n","prompt":"p","schedule_type":"interval"}"#,
+                r#"{"name":"n","prompt":"p","permission_mode":"full","schedule_type":"interval"}"#,
                 r#"validation error for "schedule_config": at least one of every_minutes, every_hours, or every_days is required for interval schedules"#,
             ),
             (
-                r#"{"name":"n","prompt":"p","schedule_type":"cron"}"#,
+                r#"{"name":"n","prompt":"p","permission_mode":"full","schedule_type":"cron"}"#,
                 r#"validation error for "schedule_config.expression": expression is required for cron schedules"#,
             ),
         ];
@@ -2236,7 +2463,7 @@ mod tests {
         file
     }
 
-    const ONE_SLACK_DESTINATION: &str = r#"{"name":"N","prompt":"p",
+    const ONE_SLACK_DESTINATION: &str = r#"{"name":"N","prompt":"p","permission_mode":"full",
         "destinations":[{"type":"slack","slack":{"integration_id":"slack-1",
             "channel_ids":["C0123ABCD","C0456EFGH"]}}]}"#;
 
@@ -2262,7 +2489,7 @@ mod tests {
         // list after `save_output` and ahead of #681's three, and an omitted
         // `when` defaulted to `success`. A Slack task created after migration
         // 48 does not continue on a reply: the backfill was not a new default.
-        let want = r#""save_output":false,"destinations":[{"type":"slack","when":"success","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0456EFGH"]}}],"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#;
+        let want = r#""save_output":false,"destinations":[{"type":"slack","when":"success","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD","C0456EFGH"]}}],"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"permission_mode":"full","dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#;
         let one = encoded(&get_task(file.path(), &id).expect("get").expect("task"));
         assert!(one.contains(want), "{one}");
         let listed = encoded(&list_tasks(file.path()).expect("list")[0]);
@@ -2281,12 +2508,15 @@ mod tests {
     #[test]
     fn a_task_without_destinations_ships_no_key_and_stores_an_empty_array() {
         let file = migrated();
-        let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        );
         let bytes = encoded(&get_task(file.path(), &task.id).expect("get").expect("task"));
         assert!(!bytes.contains("destinations"), "{bytes}");
         assert!(
             bytes.contains(
-                r#""save_output":false,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#
+                r#""save_output":false,"continue_on_reply":false,"max_concurrent_runs":1,"max_queued_events":5,"max_runs_per_hour":10,"permission_mode":"full","dropped_event_count":0,"rate_limited_event_count":0,"status":"active","#
             ),
             "{bytes}"
         );
@@ -2297,9 +2527,9 @@ mod tests {
     fn a_put_with_destinations_omitted_null_or_empty_clears_them() {
         let file = migrated_with_integrations();
         for body in [
-            r#"{"name":"N","prompt":"p"}"#,
-            r#"{"name":"N","prompt":"p","destinations":null}"#,
-            r#"{"name":"N","prompt":"p","destinations":[]}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":null}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[]}"#,
         ] {
             let task = created(&file, ONE_SLACK_DESTINATION);
             assert_eq!(task.destinations.len(), 1);
@@ -2322,20 +2552,20 @@ mod tests {
 
         let slack = |slack: &str| {
             format!(
-                r#"{{"name":"N","prompt":"p","destinations":[{{"type":"slack","slack":{slack}}}]}}"#
+                r#"{{"name":"N","prompt":"p","permission_mode":"full","destinations":[{{"type":"slack","slack":{slack}}}]}}"#
             )
         };
         let cases = [
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"pigeon"}]}"#.to_string(),
+                r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"pigeon"}]}"#.to_string(),
                 r#"validation error for "destinations[0].type": type must be slack, telegram, email or reply"#,
             ),
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","when":"sometimes","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]}"#.to_string(),
+                r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"slack","when":"sometimes","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]}"#.to_string(),
                 r#"validation error for "destinations[0].when": when must be success or always"#,
             ),
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"slack"}]}"#.to_string(),
+                r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"slack"}]}"#.to_string(),
                 r#"validation error for "destinations[0].slack": slack is required for slack destinations"#,
             ),
             (
@@ -2401,7 +2631,7 @@ mod tests {
         assert_eq!(before, after, "no row changed");
     }
 
-    const ONE_TELEGRAM_DESTINATION: &str = r#"{"name":"N","prompt":"p",
+    const ONE_TELEGRAM_DESTINATION: &str = r#"{"name":"N","prompt":"p","permission_mode":"full",
         "destinations":[{"type":"telegram","when":"always","telegram":{"integration_id":"tg-1",
             "chat_ids":["-1001234567890","42"]}}]}"#;
 
@@ -2420,13 +2650,18 @@ mod tests {
         // A `null` list decodes to the zero value, which validation refuses.
         let err = create_task(
             file.path(),
-            br#"{"name":"N","prompt":"p","destinations":[{"type":"telegram","telegram":{"integration_id":"tg-1","chat_ids":null}}]}"#,
+            br#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"telegram","telegram":{"integration_id":"tg-1","chat_ids":null}}]}"#,
         )
         .unwrap_err();
         assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
         // Replace, not preserve: a PUT that omits the list clears it.
-        update_task(file.path(), &task.id, br#"{"name":"N","prompt":"p"}"#).expect("update");
+        update_task(
+            file.path(),
+            &task.id,
+            br#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        )
+        .expect("update");
         assert_eq!(stored_destinations(&file, &task.id), "[]");
     }
 
@@ -2435,12 +2670,12 @@ mod tests {
         let file = migrated_with_integrations();
         let telegram = |telegram: &str| {
             format!(
-                r#"{{"name":"N","prompt":"p","destinations":[{{"type":"telegram","telegram":{telegram}}}]}}"#
+                r#"{{"name":"N","prompt":"p","permission_mode":"full","destinations":[{{"type":"telegram","telegram":{telegram}}}]}}"#
             )
         };
         let cases = [
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"telegram"}]}"#.to_string(),
+                r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"telegram"}]}"#.to_string(),
                 r#"validation error for "destinations[0].telegram": telegram is required for telegram destinations"#,
             ),
             (
@@ -2480,7 +2715,7 @@ mod tests {
                 r#"validation error for "destinations[0].telegram.integration_id": integration_id does not name an integration"#,
             ),
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]},"telegram":{"integration_id":"tg-1","chat_ids":["42"]}}]}"#.to_string(),
+                r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"slack","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]},"telegram":{"integration_id":"tg-1","chat_ids":["42"]}}]}"#.to_string(),
                 r#"validation error for "destinations[0].telegram": telegram is only allowed on telegram destinations"#,
             ),
         ];
@@ -2499,7 +2734,7 @@ mod tests {
         );
     }
 
-    const ONE_EMAIL_DESTINATION: &str = r#"{"name":"N","prompt":"p",
+    const ONE_EMAIL_DESTINATION: &str = r#"{"name":"N","prompt":"p","permission_mode":"full",
         "destinations":[{"type":"email","when":"always","email":{
             "recipients":["a@example.com","boss@example.com"]}}]}"#;
 
@@ -2518,7 +2753,7 @@ mod tests {
         // Recipients are trimmed and blanks dropped, as the send splits them.
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","destinations":[{"type":"email","email":{"recipients":[" a@example.com ",""]}}]}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"email","email":{"recipients":[" a@example.com ",""]}}]}"#,
         );
         assert_eq!(
             stored_destinations(&file, &task.id),
@@ -2531,12 +2766,12 @@ mod tests {
         let file = migrated_with_integrations();
         let email = |email: &str| {
             format!(
-                r#"{{"name":"N","prompt":"p","destinations":[{{"type":"email","email":{email}}}]}}"#
+                r#"{{"name":"N","prompt":"p","permission_mode":"full","destinations":[{{"type":"email","email":{email}}}]}}"#
             )
         };
         let cases = [
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"email"}]}"#.to_string(),
+                r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"email"}]}"#.to_string(),
                 r#"validation error for "destinations[0].email": email is required for email destinations"#,
             ),
             (
@@ -2560,7 +2795,7 @@ mod tests {
                 r#"validation error for "destinations[0].email.recipients": recipient "a@example.com" is listed more than once"#,
             ),
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]},"email":{"recipients":["a@example.com"]}}]}"#.to_string(),
+                r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"slack","slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]},"email":{"recipients":["a@example.com"]}}]}"#.to_string(),
                 r#"validation error for "destinations[0].email": email is only allowed on email destinations"#,
             ),
         ];
@@ -2585,11 +2820,14 @@ mod tests {
     #[test]
     fn a_reply_destination_round_trips_in_wire_order() {
         let file = migrated_with_integrations();
-        let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        );
         update_task(
             file.path(),
             &task.id,
-            br#"{"name":"N","prompt":"p","destinations":[{"type":"reply","when":"always"}]}"#,
+            br#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"reply","when":"always"}]}"#,
         )
         .expect("put");
         let one = encoded(&get_task(file.path(), &task.id).expect("get").expect("task"));
@@ -2605,7 +2843,7 @@ mod tests {
         // `when` keeps the shared default.
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","destinations":[{"type":"reply"}]}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"reply"}]}"#,
         );
         assert_eq!(
             stored_destinations(&file, &task.id),
@@ -2616,10 +2854,13 @@ mod tests {
     #[test]
     fn every_reply_destination_rule_is_a_422_on_put() {
         let file = migrated_with_integrations();
-        let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        );
         let reply = |name: &str, sub: &str| {
             format!(
-                r#"{{"name":"N","prompt":"p","destinations":[{{"type":"reply","when":"always","{name}":{sub}}}]}}"#
+                r#"{{"name":"N","prompt":"p","permission_mode":"full","destinations":[{{"type":"reply","when":"always","{name}":{sub}}}]}}"#
             )
         };
         let cases = [
@@ -2639,7 +2880,7 @@ mod tests {
                 r#"validation error for "destinations[0].email": email is only allowed on email destinations"#,
             ),
             (
-                r#"{"name":"N","prompt":"p","destinations":[{"type":"reply","when":"success"},{"type":"reply","when":"always"}]}"#.to_string(),
+                r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"reply","when":"success"},{"type":"reply","when":"always"}]}"#.to_string(),
                 r#"validation error for "destinations[1].type": only one reply destination is allowed"#,
             ),
         ];
@@ -2674,7 +2915,7 @@ mod tests {
         let file = migrated_with_integrations();
         let err = create_task(
             file.path(),
-            br#"{"name":"N","prompt":"p","destinations":[
+            br#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[
                 {"type":"slack","when":"always","slack":{"integration_id":"slack-1","channel_ids":["G0123ABCD"]}},
                 {"type":"slack","slack":{"integration_id":"slack-1","channel_ids":["D01"]}}]}"#,
         )
@@ -2701,7 +2942,10 @@ mod tests {
             file.path(),
             &task.id,
             ONE_SLACK_DESTINATION
-                .replace(r#""prompt":"p""#, r#""prompt":"edited""#)
+                .replace(
+                    r#""prompt":"p","permission_mode":"full""#,
+                    r#""prompt":"edited","permission_mode":"full""#,
+                )
                 .as_bytes(),
         )
         .expect("an edit keeping the stored destination is accepted");
@@ -2712,7 +2956,10 @@ mod tests {
         // …but the same id is new to a create, and to a task that never had it.
         let err = create_task(file.path(), ONE_SLACK_DESTINATION.as_bytes()).unwrap_err();
         assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let other = created(&file, r#"{"name":"O","prompt":"p"}"#);
+        let other = created(
+            &file,
+            r#"{"name":"O","prompt":"p","permission_mode":"full"}"#,
+        );
         let err =
             update_task(file.path(), &other.id, ONE_SLACK_DESTINATION.as_bytes()).unwrap_err();
         assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -2729,7 +2976,7 @@ mod tests {
         // A `null` element is the zero entry, which validation then refuses.
         let err = create_task(
             file.path(),
-            br#"{"name":"N","prompt":"p","destinations":[null]}"#,
+            br#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[null]}"#,
         )
         .unwrap_err();
         assert_eq!(
@@ -2738,9 +2985,9 @@ mod tests {
         );
         // Wrong container shapes are a 400, not a zero value.
         for body in [
-            r#"{"name":"N","prompt":"p","destinations":{}}"#,
-            r#"{"name":"N","prompt":"p","destinations":[[]]}"#,
-            r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","slack":[]}]}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":{}}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[[]]}"#,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"slack","slack":[]}]}"#,
         ] {
             let err = create_task(file.path(), body.as_bytes()).unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST, "for {body}");
@@ -2749,7 +2996,7 @@ mod tests {
         // Null scalars inside an entry are zero values, not type errors.
         let task = created(
             &file,
-            r#"{"name":"N","prompt":"p","destinations":[{"type":"slack","when":null,
+            r#"{"name":"N","prompt":"p","permission_mode":"full","destinations":[{"type":"slack","when":null,
                 "slack":{"integration_id":"slack-1","channel_ids":["C0123ABCD"]}}]}"#,
         );
         assert_eq!(task.destinations[0].when, "success");
@@ -2758,7 +3005,10 @@ mod tests {
     #[test]
     fn a_stored_empty_or_null_destinations_value_is_an_empty_list() {
         let file = migrated();
-        let task = created(&file, r#"{"name":"N","prompt":"p"}"#);
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        );
         let conn = rusqlite::Connection::open(file.path()).expect("open");
         for stored in ["", "null"] {
             conn.execute(
@@ -2820,7 +3070,7 @@ mod tests {
         ];
         for (expr, want) in cases {
             let body = format!(
-                r#"{{"name":"n","prompt":"p","schedule_type":"cron",
+                r#"{{"name":"n","prompt":"p","permission_mode":"full","schedule_type":"cron",
                     "schedule_config":{{"expression":{}}}}}"#,
                 serde_json::to_string(expr).expect("encode")
             );
@@ -2855,7 +3105,7 @@ mod tests {
         ] {
             let file = migrated();
             let body = format!(
-                r#"{{"name":"n","prompt":"p","schedule_type":"cron",
+                r#"{{"name":"n","prompt":"p","permission_mode":"full","schedule_type":"cron",
                     "schedule_config":{{"expression":{}}}}}"#,
                 serde_json::to_string(expr).expect("encode")
             );
@@ -2874,14 +3124,14 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"n","prompt":"p","schedule_type":"cron",
+            r#"{"name":"n","prompt":"p","permission_mode":"full","schedule_type":"cron",
                 "schedule_config":{"expression":"0 2 * * *"}}"#,
         );
 
         let err = update_task(
             file.path(),
             &task.id,
-            br#"{"name":"renamed","prompt":"p","schedule_type":"cron",
+            br#"{"name":"renamed","prompt":"p","permission_mode":"full","schedule_type":"cron",
                  "schedule_config":{"expression":"CRON_TZ=UTC"}}"#,
         )
         .unwrap_err();
@@ -2908,12 +3158,15 @@ mod tests {
         let file = migrated();
         let err = create_task(
             file.path(),
-            br#"{"name":"n","prompt":"p","timeout_minutes":-1}"#,
+            br#"{"name":"n","prompt":"p","permission_mode":"full","timeout_minutes":-1}"#,
         )
         .unwrap_err();
         assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-        let task = created(&file, r#"{"name":"n","prompt":"p","timeout_minutes":0}"#);
+        let task = created(
+            &file,
+            r#"{"name":"n","prompt":"p","permission_mode":"full","timeout_minutes":0}"#,
+        );
         assert_eq!(task.timeout_minutes, 30);
     }
 
@@ -2929,7 +3182,7 @@ mod tests {
         // same refusal one level down.
         let err = create_task(
             file.path(),
-            br#"{"name":"n","prompt":"p","schedule_config":[]}"#,
+            br#"{"name":"n","prompt":"p","permission_mode":"full","schedule_config":[]}"#,
         )
         .unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -2943,7 +3196,7 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"n","prompt":"p","description":null,"agent_slug":null,
+            r#"{"name":"n","prompt":"p","permission_mode":"full","description":null,"agent_slug":null,
                 "status":null,"timeout_minutes":null,"save_output":null,
                 "schedule_type":null,"schedule_config":null}"#,
         );
@@ -2953,7 +3206,7 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"n","prompt":"p","schedule_type":"cron",
+            r#"{"name":"n","prompt":"p","permission_mode":"full","schedule_type":"cron",
                 "schedule_config":{"expression":"@daily","run_at":null,"every_days":null}}"#,
         );
         assert_eq!(task.schedule_config.expression, "@daily");
@@ -2979,7 +3232,7 @@ mod tests {
         update_task(
             file.path(),
             "t1",
-            br#"{"name":"New","prompt":"q","schedule_type":"cron",
+            br#"{"name":"New","prompt":"q","permission_mode":"full","schedule_type":"cron",
                  "schedule_config":{"expression":"@hourly"},"status":"paused"}"#,
         )
         .expect("update");
@@ -3006,7 +3259,12 @@ mod tests {
     fn the_three_id_routes_are_404_for_an_unknown_task() {
         let file = migrated();
         for err in [
-            update_task(file.path(), "nope", br#"{"name":"n","prompt":"p"}"#).unwrap_err(),
+            update_task(
+                file.path(),
+                "nope",
+                br#"{"name":"n","prompt":"p","permission_mode":"full"}"#,
+            )
+            .unwrap_err(),
             delete_task(file.path(), "nope").unwrap_err(),
             pause_task(file.path(), "nope").unwrap_err(),
             resume_task(file.path(), "nope").unwrap_err(),
@@ -3034,7 +3292,10 @@ mod tests {
     #[test]
     fn pause_parks_the_task_and_resume_also_resets_its_run_history() {
         let file = migrated();
-        let task = created(&file, r#"{"name":"n","prompt":"p"}"#);
+        let task = created(
+            &file,
+            r#"{"name":"n","prompt":"p","permission_mode":"full"}"#,
+        );
         {
             let conn = rusqlite::Connection::open(file.path()).expect("open");
             conn.execute(
@@ -3270,7 +3531,7 @@ mod tests {
         // the route's answer, not the run.
         let task = created(
             &file,
-            r#"{"name":"n","prompt":"p","agent_slug":"no-such-agent"}"#,
+            r#"{"name":"n","prompt":"p","permission_mode":"full","agent_slug":"no-such-agent"}"#,
         );
         // **Paused**, which is most of the point: the one control the product
         // had made a task un-runnable, and this route has to ignore it.
@@ -3309,7 +3570,7 @@ mod tests {
         let file = migrated();
         let task = created(
             &file,
-            r#"{"name":"n","prompt":"p","agent_slug":"no-such-agent"}"#,
+            r#"{"name":"n","prompt":"p","permission_mode":"full","agent_slug":"no-such-agent"}"#,
         );
         let scheduler = crate::native::schedule::runtime::detached(file.path());
 
@@ -3321,7 +3582,7 @@ mod tests {
         // the scheduler.
         let other = created(
             &file,
-            r#"{"name":"o","prompt":"p","agent_slug":"no-such-agent"}"#,
+            r#"{"name":"o","prompt":"p","permission_mode":"full","agent_slug":"no-such-agent"}"#,
         );
         assert_eq!(
             start_manual_run(&scheduler, &other.id).expect("run").status,
@@ -3693,8 +3954,8 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 run_count = ?15, last_run_at = ?16, last_run_status = ?17,
                 next_run_at = ?18, updated_at = ?19, destinations = ?20,
                 continue_on_reply = ?21, max_concurrent_runs = ?22,
-                max_queued_events = ?23, max_runs_per_hour = ?24
-             WHERE id = ?25",
+                max_queued_events = ?23, max_runs_per_hour = ?24, permission_mode = ?25
+             WHERE id = ?26",
             rusqlite::params![
                 task.name,
                 task.description,
@@ -3720,6 +3981,7 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 task.max_concurrent_runs,
                 task.max_queued_events,
                 task.max_runs_per_hour,
+                task.permission_mode,
                 task.id,
             ],
         )
@@ -3747,9 +4009,10 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
              settings_profile_id, timeout_minutes, schedule_type, schedule_config,
              stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
              last_run_status, next_run_at, created_at, updated_at, destinations,
-             continue_on_reply, max_concurrent_runs, max_queued_events, max_runs_per_hour)
+             continue_on_reply, max_concurrent_runs, max_queued_events, max_runs_per_hour,
+             permission_mode)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
         rusqlite::params![
             task.id,
             task.name,
@@ -3777,6 +4040,7 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
             task.max_concurrent_runs,
             task.max_queued_events,
             task.max_runs_per_hour,
+            task.permission_mode,
         ],
     )
     .map_err(|e| format!("creating task: {e}"))?;
@@ -4042,6 +4306,29 @@ pub fn count_dropped_event(db_path: &Path, task_id: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// Gives `task_id` the [`TaskPermissionMode::ReadOnly`] mode **when it has
+/// none** (#693), on the caller's connection — linking a trigger rule calls it
+/// inside the rule write's own transaction.
+///
+/// A task that already states a mode keeps it: the mode is the user's choice,
+/// and linking a rule is not one. Both task writes require a mode, so an empty
+/// one is a row written by hand. `updated_at` is stamped, because the mode is
+/// an edit to the task the form shows. A missing task changes no row and is
+/// not an error; the rule write has already checked the id.
+pub fn ensure_mode_for_trigger(conn: &rusqlite::Connection, task_id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE scheduled_tasks SET permission_mode = ?1, updated_at = ?2
+         WHERE id = ?3 AND permission_mode = ''",
+        rusqlite::params![
+            TaskPermissionMode::ReadOnly.as_str(),
+            super::gotime::now_go_text(),
+            task_id
+        ],
+    )
+    .map_err(|e| format!("setting a linked task's permission mode: {e}"))?;
+    Ok(())
+}
+
 /// Counts one event `task_id` refused because it had already started its
 /// hour's worth of event runs (#691). The same shape as
 /// [`count_dropped_event`], for the same reason.
@@ -4228,13 +4515,17 @@ struct TaskRequest {
     max_queued_events: i64,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     max_runs_per_hour: i64,
+    /// Required (#693): absent, `null` and `""` are all a 422 from
+    /// [`validate_task`], never a default — a task states what it may do.
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    permission_mode: String,
 }
 
 impl TaskRequest {
     /// The `storage.ScheduledTask` both handlers build from the request — the
-    /// nineteen fields they copy (`destinations` since #634,
+    /// twenty fields they copy (`destinations` since #634,
     /// `continue_on_reply` since #681, the three event-run limits since
-    /// #691), and nothing else.
+    /// #691, `permission_mode` since #693), and nothing else.
     ///
     /// The other nine are the row's own, and they split three ways. `id` is
     /// minted on a create and re-set from the URL on an update; `updated_at` is
@@ -4268,6 +4559,7 @@ impl TaskRequest {
             max_concurrent_runs: self.max_concurrent_runs,
             max_queued_events: self.max_queued_events,
             max_runs_per_hour: self.max_runs_per_hour,
+            permission_mode: self.permission_mode,
             dropped_event_count: 0,
             rate_limited_event_count: 0,
             status: self.status,
@@ -4330,6 +4622,21 @@ fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
                 format!("must be between 1 and {max}"),
             ));
         }
+    }
+    // Required, with no default (#693): the mode is the control on what an
+    // event's text can make a run do, so it is never filled in on the
+    // caller's behalf.
+    if task.permission_mode.is_empty() {
+        return Err(WriteError::validation(
+            "permission_mode",
+            "permission mode is required",
+        ));
+    }
+    if TaskPermissionMode::parse(&task.permission_mode).is_none() {
+        return Err(WriteError::validation(
+            "permission_mode",
+            "must be read_only, plan, workspace_write or full",
+        ));
     }
 
     match task.schedule_type.as_str() {

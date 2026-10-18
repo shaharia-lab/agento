@@ -524,6 +524,9 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
                     working_directory: row.get(8)?,
                     settings_profile_id: row.get(9)?,
                     permission_mode: usable_permission_mode(permission_mode),
+                    // A rule's own run has no task; a linked rule's run goes
+                    // through the executor, which names the task's (#693).
+                    task_mode: None,
                 },
                 timeout_minutes: row.get(11)?,
                 task_id: row.get(12)?,

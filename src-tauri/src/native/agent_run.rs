@@ -296,6 +296,7 @@ pub fn headless_spec(
         // (#675). Empty is no conversation-level choice: `build_options`
         // applies the agent's own mode, and denies prompts when it has none.
         permission_mode: settings.permission_mode.clone(),
+        task_mode: settings.task_mode,
         resume_session_id: None,
         custom_session_id: String::new(),
     }
@@ -322,6 +323,10 @@ pub struct ExecutionSettings {
     /// refuses any other value, which fails the run, so a caller that would
     /// rather run restricted than not at all maps it before it gets here.
     pub permission_mode: String,
+    /// The task's own mode (#693), set by the scheduler on every run of a task
+    /// and by nobody else. It beats [`Self::permission_mode`] and the agent's
+    /// and the chat's own — see `chat/runner.rs`'s `PermissionChoice::resolve`.
+    pub task_mode: Option<crate::native::tasks::TaskPermissionMode>,
 }
 
 /// A [`RunSpec`] that **continues** `row`'s CLI session, with `settings`
@@ -376,6 +381,10 @@ pub fn resume_spec(
         working_dir: pick(&settings.working_directory, &row.working_dir),
         settings_profile_id: pick(&settings.settings_profile_id, &row.settings_profile_id),
         permission_mode: pick(&settings.permission_mode, &row.permission_mode),
+        // A task's mode, when a task's run continues the chat (#693). It beats
+        // the chat's stored mode, so a continued run cannot run wider than the
+        // task it is a run of.
+        task_mode: settings.task_mode,
         // `None` for a chat that has never run, which falls through to the
         // empty `custom_session_id` below and leaves the CLI to mint an id.
         resume_session_id: Some(row.sdk_session_id.clone()).filter(|s| !s.is_empty()),
@@ -823,8 +832,14 @@ mod tests {
             working_directory: "/from/the/rule".to_string(),
             settings_profile_id: "rule-profile".to_string(),
             permission_mode: "bypass".to_string(),
+            task_mode: Some(crate::native::tasks::TaskPermissionMode::Plan),
         };
         let spec = resume_spec(std::path::Path::new(NO_DB), &chat_row(), None, &settings);
+        assert_eq!(
+            spec.task_mode,
+            Some(crate::native::tasks::TaskPermissionMode::Plan),
+            "a task's mode reaches a continued run"
+        );
         assert_eq!(spec.working_dir, "/from/the/rule");
         assert_eq!(spec.settings_profile_id, "rule-profile");
         assert_eq!(spec.permission_mode, "bypass");
@@ -874,6 +889,7 @@ mod tests {
                 working_directory: "/from/the/rule".to_string(),
                 settings_profile_id: "rule-profile".to_string(),
                 permission_mode: "plan".to_string(),
+                task_mode: None,
             },
         );
         assert_eq!(spec.working_dir, "/from/the/rule");
@@ -942,6 +958,39 @@ mod tests {
             system_prompt: String::new(),
             capabilities: Default::default(),
             claude_config_dir: String::new(),
+        }
+    }
+
+    /// #693: a task's run declares fail-open only for `full`. The three
+    /// narrower modes clear `--allow-dangerously-skip-permissions`, whatever
+    /// the run and the agent store.
+    #[test]
+    fn claude_declares_only_a_full_task_fail_open() {
+        use crate::native::tasks::TaskPermissionMode;
+        let runner = runner();
+        for mode in TaskPermissionMode::ALL {
+            for stored in ["", "bypass", "plan"] {
+                let spec = headless_spec(
+                    std::path::Path::new(NO_DB),
+                    agent_with_mode(stored),
+                    &ExecutionSettings {
+                        permission_mode: stored.to_string(),
+                        task_mode: Some(mode),
+                        ..Default::default()
+                    },
+                );
+                let declared = runner.fail_open(&spec);
+                if mode == TaskPermissionMode::Full {
+                    assert!(
+                        declared
+                            .as_deref()
+                            .is_some_and(|d| d.starts_with("--permission-mode bypassPermissions")),
+                        "{declared:?}"
+                    );
+                } else {
+                    assert_eq!(declared, None, "{mode:?} over {stored:?}");
+                }
+            }
         }
     }
 

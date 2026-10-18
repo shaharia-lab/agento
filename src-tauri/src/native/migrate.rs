@@ -87,6 +87,11 @@
 //! `database-url-credentials` snippets stored under ruleset 1 whose tail held
 //! the `@` and the end of the password, because a rescan never reaches an
 //! expired session's rows (#741).
+//! Migration **56** is the twenty-sixth: `scheduled_tasks.permission_mode`,
+//! what a task's runs may do (#693). The backfill keeps each task's effective
+//! mode — `full` for an agent with no mode or `bypass` and for a task with no
+//! agent, `plan` for `plan`, `read_only` for anything else — except that a task
+//! a trigger rule links to becomes `read_only`.
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -318,8 +323,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 55, "expected 55 migrations");
-        assert_eq!(expected_version(), 55);
+        assert_eq!(all.len(), 56, "expected 56 migrations");
+        assert_eq!(expected_version(), 56);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -413,7 +418,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 55);
+        assert_eq!(current_version(&conn).expect("version"), 56);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -631,7 +636,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 55);
+        assert_eq!(current_version(&conn).expect("version"), 56);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -691,7 +696,7 @@ mod tests {
         .expect("seed rows at 47");
 
         apply(&mut conn).expect("apply 48 and later");
-        assert_eq!(current_version(&conn).expect("version"), 55);
+        assert_eq!(current_version(&conn).expect("version"), 56);
 
         let flagged = |table: &str| -> Vec<String> {
             let mut stmt = conn
@@ -863,7 +868,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 55);
+        assert_eq!(current_version(&conn).expect("version"), 56);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -972,6 +977,85 @@ mod tests {
             )
             .expect("read");
         assert_eq!(updated_at, "then", "a backfill is not a user edit");
+    }
+
+    /// Migration 56 (#693): every task comes out with the mode its runs had,
+    /// read off its agent, except that a task a trigger rule links to becomes
+    /// `read_only`. A second run of the backfill changes nothing.
+    #[test]
+    fn migration_56_backfills_each_tasks_effective_permission_mode() {
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+        seed_at(&conn, 55);
+        conn.execute_batch(
+            "INSERT INTO agents (slug, name, permission_mode) VALUES
+                 ('none', 'None', ''), ('byp', 'Bypass', 'bypass'), ('pl', 'Plan', 'plan'),
+                 ('da', 'DontAsk', 'dontAsk'), ('df', 'Default', 'default'),
+                 ('odd', 'Odd', 'yolo');
+             INSERT INTO scheduled_tasks
+                 (id, name, prompt, agent_slug, schedule_type, created_at, updated_at) VALUES
+                 ('t-noagent', 'a', 'p', '', 'cron', 't', 't'),
+                 ('t-none', 'a', 'p', 'none', 'cron', 't', 't'),
+                 ('t-byp', 'a', 'p', 'byp', 'cron', 't', 't'),
+                 ('t-pl', 'a', 'p', 'pl', 'cron', 't', 't'),
+                 ('t-da', 'a', 'p', 'da', 'cron', 't', 't'),
+                 ('t-df', 'a', 'p', 'df', 'cron', 't', 't'),
+                 ('t-odd', 'a', 'p', 'odd', 'cron', 't', 't'),
+                 ('t-gone', 'a', 'p', 'deleted-agent', 'cron', 't', 't'),
+                 ('t-linked', 'a', 'p', 'byp', 'cron', 't', 't'),
+                 ('t-linked-noagent', 'a', 'p', '', 'cron', 't', 't');
+             INSERT INTO integrations (id, name, type, created_at, updated_at)
+                 VALUES ('i1', 'S', 'slack', 't', 't');
+             INSERT INTO trigger_rules (id, integration_id, name, agent_slug, task_id) VALUES
+                 ('r1', 'i1', 'r', 'byp', 't-linked'),
+                 ('r2', 'i1', 'r', 'byp', 't-linked-noagent'),
+                 ('r3', 'i1', 'r', 'byp', '');",
+        )
+        .expect("seed rows at 55");
+
+        let modes = |conn: &Connection| -> Vec<(String, String)> {
+            let mut stmt = conn
+                .prepare("SELECT id, permission_mode FROM scheduled_tasks ORDER BY id")
+                .expect("prepare");
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("rows")
+        };
+        let expected: Vec<(String, String)> = [
+            ("t-byp", "full"),
+            ("t-da", "read_only"),
+            ("t-df", "read_only"),
+            ("t-gone", "read_only"),
+            ("t-linked", "read_only"),
+            ("t-linked-noagent", "read_only"),
+            ("t-noagent", "full"),
+            ("t-none", "full"),
+            ("t-odd", "read_only"),
+            ("t-pl", "plan"),
+        ]
+        .into_iter()
+        .map(|(id, mode)| (id.to_string(), mode.to_string()))
+        .collect();
+
+        apply(&mut conn).expect("apply 56");
+        assert_eq!(modes(&conn), expected);
+
+        // The two UPDATEs again, on rows that now all have a mode, and on one
+        // a later build left empty: only that one is filled.
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                 (id, name, prompt, agent_slug, schedule_type, created_at, updated_at)
+             VALUES ('t-late', 'a', 'p', 'pl', 'cron', 't', 't')",
+            [],
+        )
+        .expect("a task with no mode");
+        let sql = &migrations()[55].sql;
+        let backfill = &sql[sql.find("\nUPDATE").expect("the backfill")..];
+        conn.execute_batch(backfill).expect("a second run");
+        let mut want = expected.clone();
+        want.push(("t-late".to_string(), "plan".to_string()));
+        want.sort();
+        assert_eq!(modes(&conn), want);
     }
 
     /// Migration 55 (#741): a database URL snippet stored under ruleset 1 on a
@@ -1299,7 +1383,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 55);
+        assert_eq!(current_version(&conn).expect("version"), 56);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -1308,7 +1392,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 55);
+        assert_eq!(recorded, 56);
     }
 
     #[test]
