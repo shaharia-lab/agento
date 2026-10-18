@@ -383,7 +383,7 @@ mod tests {
         assert!(get(&conn, "nope").expect("get").is_none());
     }
 
-    /// **Every scope stores and lists, including `llm`** (#423).
+    /// **Every scope stores and lists, including `llm` (#423) and `hook` (#695).**
     ///
     /// The column is free-text and was already wide enough, which is why the
     /// gateway scope needed no migration — but "wide enough" is a claim about
@@ -398,6 +398,7 @@ mod tests {
             ("t-read", Scope::Read),
             ("t-write", Scope::Write),
             ("t-llm", Scope::Llm),
+            ("t-hook", Scope::Hook),
         ] {
             add(&conn, id, "tool config", scope);
             let row = get(&conn, id).expect("get").expect("row");
@@ -412,7 +413,7 @@ mod tests {
                 "and must parse back to the same variant"
             );
         }
-        assert_eq!(list(&conn).expect("list").len(), 3);
+        assert_eq!(list(&conn).expect("list").len(), 4);
     }
 
     /// **Every timestamp on the wire is RFC 3339**, not the `time.Time.String()`

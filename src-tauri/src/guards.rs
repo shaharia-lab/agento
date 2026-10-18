@@ -1026,12 +1026,138 @@ pub(crate) mod tests {
     fn no_api_credential_reaches_the_gateway() {
         assert!(!Scope::Write.covers(Scope::Llm));
         assert!(!Scope::Read.covers(Scope::Llm));
+        assert!(!Scope::Hook.covers(Scope::Llm));
         for method in [Method::GET, Method::POST, Method::DELETE] {
             for path in ["/api/agents", "/api/security/tokens", "/api/chats/x"] {
                 assert_ne!(
                     security::required_scope(&method, path),
                     Scope::Llm,
                     "no /api route may require the gateway's scope"
+                );
+            }
+        }
+    }
+
+    /// A hook token (#695) is refused on **every** `/api` route but its own
+    /// task's hook, on every method — iterated over every route the parity files
+    /// record, so a route added later is covered without this test changing.
+    #[test]
+    fn a_hook_token_serves_nothing_else_on_the_api() {
+        let hook = token::mint_hook(&seeded_keys(), "test", "task-a", 3600)
+            .expect("mint")
+            .token;
+
+        let mut paths: Vec<String> = ["read_routes", "write_routes", "desktop_routes"]
+            .iter()
+            .flat_map(|file| {
+                let path = format!("{}/../parity/{file}.json", env!("CARGO_MANIFEST_DIR"));
+                let raw = std::fs::read_to_string(&path).expect("read parity routes");
+                let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+                doc["routes"]
+                    .as_array()
+                    .expect("routes")
+                    .iter()
+                    .map(|r| r["route"].as_str().expect("route").to_string())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|route| route.starts_with("/api/"))
+            // Every `{param}` becomes the token's own task id — the spelling most
+            // likely to be mistaken for a match.
+            .map(|route| {
+                route
+                    .split('/')
+                    .map(|seg| if seg.starts_with('{') { "task-a" } else { seg })
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect();
+        paths.sort();
+        paths.dedup();
+        assert!(
+            paths.len() > 80,
+            "the parity files list {} routes",
+            paths.len()
+        );
+
+        for method in [
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ] {
+            for path in &paths {
+                assert_eq!(
+                    reject(&authed_request(
+                        method.clone(),
+                        path,
+                        "localhost",
+                        "application/json",
+                        Some(&hook)
+                    )),
+                    Some(INSUFFICIENT_SCOPE),
+                    "a hook token must not serve {method} {path}"
+                );
+            }
+        }
+
+        // ...and on its own hook the guard lets it through, so the loop above
+        // is about the routes rather than about a token that never verifies.
+        assert_eq!(
+            reject(&authed_request(
+                Method::POST,
+                "/api/hooks/task-a",
+                "localhost",
+                "application/json",
+                Some(&hook)
+            )),
+            None
+        );
+        for path in [
+            "/api/hooks/task-b",
+            "/api/hooks/task-a/extra",
+            "/api/%68ooks/task-a",
+        ] {
+            assert_eq!(
+                reject(&authed_request(
+                    Method::POST,
+                    path,
+                    "localhost",
+                    "application/json",
+                    Some(&hook)
+                )),
+                Some(INSUFFICIENT_SCOPE),
+                "a hook token for task-a must not serve {path}"
+            );
+        }
+    }
+
+    /// The converse: no other credential opens a hook — not `read`, not
+    /// `write`, not `llm`, and not the webview's own session.
+    #[test]
+    fn no_other_credential_opens_a_hook() {
+        let session = token::mint(&seeded_keys(), token::WEBVIEW_SUBJECT, Scope::Write, 3600)
+            .expect("mint")
+            .token;
+        for (what, credential) in [
+            ("read", mint(Scope::Read)),
+            ("write", mint(Scope::Write)),
+            ("llm", mint(Scope::Llm)),
+            ("webview session", session),
+        ] {
+            for method in [Method::GET, Method::POST, Method::DELETE] {
+                assert_eq!(
+                    reject(&authed_request(
+                        method.clone(),
+                        "/api/hooks/task-a",
+                        "localhost",
+                        "application/json",
+                        Some(&credential)
+                    )),
+                    Some(INSUFFICIENT_SCOPE),
+                    "a {what} token must not serve {method} /api/hooks/task-a"
                 );
             }
         }
@@ -1164,6 +1290,7 @@ pub(crate) mod tests {
             jti: "j".to_string(),
             iat: now - 60,
             exp,
+            task_id: None,
         };
 
         let expired = signed(base(now - (token::LEEWAY as i64) - 60));
