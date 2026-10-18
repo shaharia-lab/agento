@@ -332,9 +332,10 @@ A rule with no **permission mode** runs with prompts denied: anything the agent
 would have asked about is refused. Earlier versions ran such a rule with
 permission checks skipped. A rule set to *Bypass* is now refused and answered
 with the error reply, because only a task whose permission mode is **Full** may
-run with checks skipped; link the rule to such a task instead. An agent that lists no tools is still allowed every built-in one,
-including shell commands and file writes, so give the rule's agent an explicit
-tool list to limit what a message can make it do.
+run with checks skipped; link the rule to such a task instead. An agent that
+lists no tools is still allowed every built-in one, including shell commands
+and file writes, so give the rule's agent an explicit tool list to limit what a
+message can make it do.
 
 The rule form has the same **Task** picker as a Slack rule's. A matching message
 then starts one run of that task instead of the rule's own agent: the task's

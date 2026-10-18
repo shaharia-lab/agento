@@ -42,7 +42,8 @@ pub trait Runner: Send + Sync + Sized {
 - **`spawn`** is the harness's own step: spec to flags, spawn, drain, result.
   Its first argument is a `FailOpenChecked`, whose field is private to
   `agent_run.rs`, so nothing outside that module can call it without going
-  through the check below.
+  through the check below. A harness implements `spawn` and must not override
+  `run` or `resume`: the token stops callers, not an implementor's override.
 - **`run` is a provided method, and it is the refusal (#694).** It asks
   `fail_open(spec)` first. A fail-open spec under a `PermissionGate::NotFull`
   answers `Err` without spawning:

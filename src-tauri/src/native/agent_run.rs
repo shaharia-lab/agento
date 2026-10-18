@@ -44,7 +44,9 @@ use crate::native::db;
 /// caller's [`PermissionGate`] is [`PermissionGate::Full`]. [`Self::spawn`]
 /// takes a [`FailOpenChecked`], which only this module can build, so nothing
 /// outside it can reach a spawn that skipped the check — a second harness
-/// inherits the refusal by implementing `spawn`.
+/// inherits the refusal by implementing `spawn`. An implementor must not
+/// override `run` or `resume`: an override is a spawn path the check is not
+/// on, and nothing but this rule stops one.
 ///
 /// Generic rather than `dyn`: the methods return futures, so a trait object
 /// would need them boxed, and every caller is on the scheduler's or an inbound
