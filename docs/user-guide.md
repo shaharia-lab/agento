@@ -204,8 +204,10 @@ Beyond that, who decides depends on whether anyone is watching:
   an agent to the tools it lists. **An agent that lists no tools is allowed
   every built-in one, including shell commands and file writes**, so give the
   agent an explicit tool list if a message-started run should be held to less.
-  Set the rule's permission mode to *Bypass* if it should not be held back at
-  all.
+  A rule's own run is **never** run with permission checks skipped: a rule set
+  to *Bypass* is refused, and the message is answered with the error reply. To
+  run with checks skipped, link the rule to a task whose permission mode is
+  **Full**.
 
 **Known limitation:** the permission mode you pick on an *agent* is not currently
 saved. The underlying API drops the field, and the desktop app reproduces the
@@ -328,8 +330,9 @@ turn it back on.
 
 A rule with no **permission mode** runs with prompts denied: anything the agent
 would have asked about is refused. Earlier versions ran such a rule with
-permission checks skipped, so a rule that relied on that needs *Bypass* chosen
-on it. An agent that lists no tools is still allowed every built-in one,
+permission checks skipped. A rule set to *Bypass* is now refused and answered
+with the error reply, because only a task whose permission mode is **Full** may
+run with checks skipped; link the rule to such a task instead. An agent that lists no tools is still allowed every built-in one,
 including shell commands and file writes, so give the rule's agent an explicit
 tool list to limit what a message can make it do.
 
@@ -554,8 +557,9 @@ Beyond the user list:
   rule left on a permissive mode in your home directory is a rule that lets a
   channel member read and change anything you can. A rule with no permission
   mode runs with prompts denied: anything the agent would have asked about is
-  refused. Earlier versions ran such a rule with permission checks skipped, so
-  a rule that relied on that needs *Bypass* chosen on it.
+  refused. A rule set to *Bypass* is refused outright and answered with the
+  error reply; only a task whose permission mode is **Full** runs with
+  permission checks skipped.
 - Give the rule's agent an explicit **tool list**. An agent that lists no tools
   is allowed every built-in one, including shell commands and file writes, and
   prompts denied does not take those away.

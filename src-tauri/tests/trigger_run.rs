@@ -185,7 +185,13 @@ async fn run_the_rule(db: &Path) -> Result<agento_lib::native::agent_run::RunRes
     // settings fails here rather than staying green.
     let (spec, timeout) = dispatcher::run_inputs(db, agent(), rule);
     agento_lib::native::agent_run::runner()
-        .run(&spec, "hello", timeout, None)
+        .run(
+            &spec,
+            "hello",
+            timeout,
+            None,
+            agento_lib::native::agent_run::PermissionGate::NotFull,
+        )
         .await
 }
 
@@ -242,11 +248,51 @@ async fn a_rules_execution_settings_reach_the_spawned_cli() {
         Some("plan"),
         "and its permission mode is the one the CLI is started with"
     );
-    // `--allow-dangerously-skip-permissions` is on this line too, and that is
-    // not this change: `Options`' own default sets the flag, and only
-    // `with_default_permissions()` clears it — so `plan` and `dontAsk` have
-    // always carried it, for a chat as much as for a trigger run. What `plan`
-    // buys is the mode the CLI reads, which is the flag asserted above.
+    // Until #694 `plan` carried it too, from `Options`' own default. A
+    // headless `plan` is not offered bypass, so the rule is not fail-open and
+    // runs.
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"),
+        "a headless plan run is not offered bypass: {argv:?}"
+    );
+}
+
+/// #694: an unlinked rule has no task, so nothing can make its run `full`. A
+/// rule that stores `bypass` is fail-open, and it is refused before a
+/// subprocess exists; the dispatcher answers the refusal with its error reply.
+#[tokio::test]
+async fn a_bypass_rule_is_refused_and_spawns_nothing() {
+    let Some(_) = python3() else {
+        eprintln!("no python3; skipping");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    migrated_with_rule(&db, "", "", "bypass", 0);
+    let cli = fake_cli(dir.path());
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let err = match tokio::time::timeout(std::time::Duration::from_secs(30), run_the_rule(&db))
+        .await
+        .expect("a refusal does not wait on anything")
+    {
+        Ok(_) => panic!("a fail-open rule must not run"),
+        Err(e) => e,
+    };
+    assert!(
+        err.starts_with(
+            "refused: harness claude would run fail-open (--permission-mode bypassPermissions"
+        ),
+        "{err}"
+    );
+    assert!(err.ends_with("this run has no task"), "{err}");
+    assert!(
+        !spawn_log(dir.path()).exists(),
+        "refused before a subprocess exists"
+    );
 }
 
 /// A rule that records nothing runs on the agent's model, in the settings
@@ -327,12 +373,12 @@ async fn a_rule_with_an_unknown_stored_mode_runs_with_prompts_denied() {
         Some("dontAsk"),
         "{argv:?}"
     );
-    // This is the *stored* `dontAsk`, the one a rule that chose it gets, so it
-    // carries the flag every explicit `plan` and `dontAsk` always has (see
-    // `a_rules_execution_settings_reach_the_spawned_cli`). Only a run with no
-    // mode at all drops it. Asserted so the difference is a decision.
+    // This is the *stored* `dontAsk`, the one a rule that chose it gets. Until
+    // #694 it carried the allow flag, as every explicit `plan` and `dontAsk`
+    // did; a headless one is not offered bypass now, so it is not fail-open.
     assert!(
-        argv.iter()
+        !argv
+            .iter()
             .any(|a| a == "--allow-dangerously-skip-permissions"),
         "{argv:?}"
     );
@@ -360,7 +406,13 @@ async fn an_unknown_mode_on_a_headless_run_is_an_error_and_spawns_nothing() {
     let rules = dispatcher::load_rules(&db, "tg").expect("load rules");
     let (spec, timeout) = dispatcher::run_inputs(&db, agent, rules.first().expect("one rule"));
     let err = match agento_lib::native::agent_run::runner()
-        .run(&spec, "hello", timeout, None)
+        .run(
+            &spec,
+            "hello",
+            timeout,
+            None,
+            agento_lib::native::agent_run::PermissionGate::NotFull,
+        )
         .await
     {
         Ok(_) => panic!("an unknown mode must not run"),

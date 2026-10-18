@@ -676,7 +676,18 @@ async fn execute_and_reply(
     };
 
     let (spec, timeout) = run_inputs(db_path, agent, rule);
-    let result = agent_run::runner().run(&spec, prompt, timeout, None).await;
+    // An unlinked rule has no task, so no `full` mode: a rule whose settings
+    // resolve fail-open (`bypass`) is refused here and answered with the
+    // error reply below (#694).
+    let result = agent_run::runner()
+        .run(
+            &spec,
+            prompt,
+            timeout,
+            None,
+            agent_run::PermissionGate::NotFull,
+        )
+        .await;
 
     let result = match result {
         Ok(result) => result,
