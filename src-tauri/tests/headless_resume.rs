@@ -662,3 +662,73 @@ async fn a_missing_chat_is_an_error_and_releases_the_lock_it_took() {
     );
     agento_lib::native::chat::live::registry().release(&absent);
 }
+
+/// #693: a continued run of a task (#686) runs under the **task's** mode, not
+/// the one stored on the chat it resumes. The chat here says `bypass`; the task
+/// says `plan`, and `plan` is what the CLI is started with, with no
+/// `--allow-dangerously-skip-permissions`.
+#[tokio::test]
+async fn a_continued_run_takes_the_tasks_mode_over_the_chats() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let chat = unique_id("task-mode-chat");
+    migrated_with_chat(&db, &chat, "sdk-earlier", [0; 4]);
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute(
+            "UPDATE chat_sessions SET permission_mode = 'bypass' WHERE id = ?1",
+            [&chat],
+        )
+        .expect("a wide chat");
+    let cli = fake_cli(
+        dir.path(),
+        &result_frame("ok", "sdk-earlier", [1, 1, 0, 0]),
+        false,
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        agent_run::runner().resume(
+            &db,
+            &chat,
+            "a reply",
+            &ExecutionSettings {
+                task_mode: Some(agento_lib::native::tasks::TaskPermissionMode::Plan),
+                ..Default::default()
+            },
+            std::time::Duration::from_secs(600),
+            None,
+        ),
+    )
+    .await
+    .expect("the drain must terminate")
+    .expect("the run");
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+
+    let spawned = spawns(dir.path());
+    assert_eq!(spawned.len(), 1, "{spawned:?}");
+    assert_eq!(resumed_with(&spawned[0]), Some("sdk-earlier"));
+    let mode_at = spawned[0]
+        .iter()
+        .position(|a| a == "--permission-mode")
+        .expect("a permission mode is always sent");
+    assert_eq!(
+        spawned[0].get(mode_at + 1).map(String::as_str),
+        Some("plan"),
+        "{:?}",
+        spawned[0]
+    );
+    assert!(
+        !spawned[0]
+            .iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"),
+        "{:?}",
+        spawned[0]
+    );
+}

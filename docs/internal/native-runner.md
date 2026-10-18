@@ -76,6 +76,32 @@ into flags. Two combinations are reported:
 
 The run's own mode beats its agent's, so each row applies to the mode the run
 names, or to the agent's when the run names none.
+
+**A task's run reads none of those (#693).** Every run of a task — scheduled,
+manual, event, continued — carries the task's `permission_mode` as
+`RunSpec::task_mode`, and in `PermissionChoice::resolve` it beats the run's,
+the agent's and the resumed chat's modes outright:
+
+| Task mode (stored) | Flags `build_options` sends, headless | Declared fail-open |
+|---|---|---|
+| `full` | `--permission-mode bypassPermissions --allow-dangerously-skip-permissions` | yes, by the mode |
+| `plan` | `--permission-mode plan` | no |
+| `workspace_write` | `--permission-mode acceptEdits` | no |
+| `read_only` | `--permission-mode dontAsk --allowedTools Read,Glob,Grep,WebFetch,WebSearch --disallowedTools …,Write,Edit,MultiEdit,NotebookEdit,Bash` | no |
+
+The three non-`full` arms are built on `with_default_permissions()`, so
+`--allow-dangerously-skip-permissions` is not sent for them. `plan` and
+`workspace_write` keep the agent's allowlist: `acceptEdits` pre-approves edits
+on top of it and shrinks nothing, so a `workspace_write` task with no agent, or
+an agent that lists no tools, still pre-allows every built-in, `Bash` included.
+`read_only`'s allowlist **replaces** the agent's (its MCP and local tools
+included, which `dontAsk` then denies) and its five denials are added to
+whatever the agent already denies; `--disallowedTools` also beats an allow
+rule in a project's `settings.json`, which `dontAsk` alone does not. Pinned by
+`each_task_mode_maps_to_its_claude_code_flags`,
+`a_read_only_task_keeps_its_agents_own_denials`,
+`claude_declares_only_a_full_task_fail_open`, and on the spawned argv by
+`tests/trigger_run.rs::an_event_asking_for_more_permissions_runs_read_only_and_changes_no_task`.
 `claude_declares_bypass_and_the_allow_flag_fail_open_for_every_mode` pins the
 table over `chats::CHAT_PERMISSION_MODES`, and panics on a mode added there
 without an answer here.
@@ -89,12 +115,14 @@ them.
 
 **"Not fail-open" is not "read-only".** `dontAsk` denies only what
 `--allowedTools` does not already cover, and an agent with no tool list is
-pre-allowed all twelve built-ins, the shell included (#765).
+pre-allowed all twelve built-ins, the shell included (#765). A task's
+`read_only` closes that for task runs by naming the allowlist itself; a rule
+with no task, and a chat, are still as wide as their agent's list.
 
 ## Per-harness table: modes, flags, fail-open
 
-Agento has no `read-only`, `workspace-write` or `full` mode today; the four
-rows are the vocabulary the automations epic (#679) uses, mapped to what each
+The four rows are a task's modes (#693), spelled `read_only`, `plan`,
+`workspace_write` and `full` in `tasks::TaskPermissionMode`, mapped to what each
 harness offers. Only the Claude Code column is implemented.
 
 ### Claude Code 2.1.287
@@ -104,7 +132,7 @@ Read from `claude --help` on this box, and from
 
 | Mode | Flags | Fail-open? |
 |---|---|---|
-| read-only | none exists. No sandbox flag; the nearest is `plan`. | n/a |
+| read-only | no sandbox flag; Agento sends `--permission-mode dontAsk` with a read-only `--allowedTools` and `--disallowedTools Write,Edit,MultiEdit,NotebookEdit,Bash` | no |
 | plan | `--permission-mode plan` | no, when `--allow-dangerously-skip-permissions` is absent |
 | prompts denied | `--permission-mode dontAsk`, or `--permission-prompts none` | no, but as wide as `--allowedTools` |
 | workspace-write | `--permission-mode acceptEdits` | no; edits are pre-approved, the rest still prompts |

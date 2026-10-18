@@ -9,6 +9,7 @@ import type {
   ScheduledTask,
   SettingsResponse,
   TaskPreview,
+  TaskPermissionMode,
   TaskRunStarted,
   TriggeredBy,
 } from "../lib/types";
@@ -135,6 +136,58 @@ function executionSummary(t: ScheduledTask): string {
   ]
     .filter(Boolean)
     .join(" · ");
+}
+
+/* --- Permission mode (#693) ---------------------------------------------- */
+
+/** The four modes, in the order the form offers them, each with its one-line
+ *  description. The spellings are `TaskPermissionMode`'s in `native/tasks.rs`;
+ *  what each one means under Claude Code is `PermissionChoice` in
+ *  `native/chat/runner.rs`. */
+const PERMISSION_MODES: readonly {
+  value: TaskPermissionMode;
+  label: string;
+  help: string;
+}[] = [
+  {
+    value: "read_only",
+    label: "Read-only",
+    help: "Reads files and the web. Writes nothing, runs no shell commands and uses no agent tools.",
+  },
+  {
+    value: "plan",
+    label: "Plan",
+    help: "Plans and proposes changes without making them.",
+  },
+  {
+    value: "workspace_write",
+    label: "Workspace write",
+    help: "Edits files without asking. Other tools run only if the agent pre-allows them, and a task with no agent, or an agent that lists no tools, pre-allows every built-in one, the shell included.",
+  },
+  {
+    value: "full",
+    label: "Full",
+    help: "No permission checks: the agent can run any tool, the shell included.",
+  },
+];
+
+/** A task's mode as the form and the inspector name it; a value this build
+ *  does not know shows raw, and a missing one says so. */
+function permissionLabel(mode: string): string {
+  if (!mode) return "Not set";
+  return PERMISSION_MODES.find((m) => m.value === mode)?.label ?? mode;
+}
+
+/** The client's copy of the server's required-field 422, spelled the same so
+ *  one code path shows it whichever side refused. */
+function permissionModeError(t: ScheduledTask): string | undefined {
+  if (!t.permission_mode) {
+    return 'validation error for "permission_mode": permission mode is required';
+  }
+  if (!PERMISSION_MODES.some((m) => m.value === t.permission_mode)) {
+    return 'validation error for "permission_mode": must be read_only, plan, workspace_write or full';
+  }
+  return undefined;
 }
 
 /* --- Event-run limits (#691, #692) ---------------------------------------- */
@@ -319,6 +372,8 @@ function blankTask(): ScheduledTask {
     max_concurrent_runs: 1,
     max_queued_events: 5,
     max_runs_per_hour: 10,
+    // Read-only until the user says otherwise (#693): never bypass by default.
+    permission_mode: "read_only",
     dropped_event_count: 0,
     rate_limited_event_count: 0,
     status: "active",
@@ -565,7 +620,7 @@ export function TasksView({
   async function save() {
     if (!draft) return;
     // Refused before the request; the server's own check is the authority.
-    const refused = runLimitError(draft);
+    const refused = permissionModeError(draft) ?? runLimitError(draft);
     if (refused) {
       setActionError(refused);
       return;
@@ -875,7 +930,7 @@ export function TasksView({
                     help={
                       draft.agent_slug
                         ? undefined
-                        : "Runs Claude Code with the default model (or the one set below) and all built-in tools, no system prompt and no integrations. Permission prompts are skipped." +
+                        : "Runs Claude Code with the default model (or the one set below) and all built-in tools, no system prompt and no integrations." +
                           (agentsRes.data && agents.length === 0
                             ? " Create agents in Agents to give a task a system prompt and integrations."
                             : "")
@@ -886,6 +941,31 @@ export function TasksView({
                       agents={agents}
                       onChange={(slug) => edit({ agent_slug: slug })}
                     />
+                  </FormRow>
+                  <FormRow
+                    label="Permission mode"
+                    help={
+                      (PERMISSION_MODES.find((m) => m.value === draft.permission_mode)?.help ??
+                        "Required: choose what this task's runs may do.") +
+                      " Keep a task that a Telegram or Slack rule starts Read-only: its prompt carries text from other people."
+                    }
+                  >
+                    <Dropdown
+                      value={draft.permission_mode}
+                      ariaLabel="Permission mode"
+                      placeholder="Choose a mode…"
+                      options={[
+                        ...(draft.permission_mode &&
+                        !PERMISSION_MODES.some((m) => m.value === draft.permission_mode)
+                          ? [{ value: draft.permission_mode, label: `${draft.permission_mode} (unknown)` }]
+                          : []),
+                        ...PERMISSION_MODES.map((m) => ({ value: m.value, label: m.label })),
+                      ]}
+                      onChange={(v) => edit({ permission_mode: v as TaskPermissionMode })}
+                    />
+                    {fieldOf(actionError) === "permission_mode" && actionError && (
+                      <div className="formerror">{fieldMessage(actionError)}</div>
+                    )}
                   </FormRow>
                   {!creating && (
                     <FormRow
@@ -1221,6 +1301,7 @@ export function TasksView({
                       </span>
                     </InspRow>
                     <InspRow label="Repeat">{describeSchedule(draft)}</InspRow>
+                    <InspRow label="Permissions">{permissionLabel(draft.permission_mode)}</InspRow>
                   </InspGroup>
 
                   <InspGroup title="Reliability">
@@ -1381,7 +1462,8 @@ function TaskRow({
           <span className="listrow__time">{relativeTime(t.last_run_at)}</span>
         </div>
         <div className="listrow__preview">
-          {t.agent_slug || "no agent"} · {describeSchedule(t)}
+          {t.agent_slug || "no agent"} · {describeSchedule(t)} ·{" "}
+          {permissionLabel(t.permission_mode)}
         </div>
         <div className="listrow__meta">
           <StatusBadge status={t.last_run_status} />

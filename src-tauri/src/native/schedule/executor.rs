@@ -41,7 +41,7 @@ use crate::native::agents::{self, Agent};
 use crate::native::chat::runner::TurnSettings;
 use crate::native::db;
 use crate::native::notifications;
-use crate::native::tasks::{self, JobHistory, ScheduledTask};
+use crate::native::tasks::{self, JobHistory, ScheduledTask, TaskPermissionMode};
 use crate::native::template;
 
 /// Which caller started a run, and therefore what accounting it owns (#541).
@@ -93,33 +93,6 @@ impl RunKind {
             Self::Scheduled => tasks::TriggeredBy::Schedule,
             Self::Manual => tasks::TriggeredBy::Manual,
             Self::Event(source) => source,
-        }
-    }
-
-    /// The permission mode the run asks `build_options` for, given the mode
-    /// its agent stores (#675).
-    ///
-    /// **The agent's own mode is never overridden.** A run's mode beats its
-    /// agent's in the runner, so naming one for an agent that has its own
-    /// would turn a `plan` agent into a bypassing one. Whatever the agent
-    /// stores, this answers empty and the runner reads the agent — an
-    /// unknown value included, which fails the run there.
-    ///
-    /// **A scheduled or manual run of an agent with no mode bypasses, and
-    /// says so.** Every such run always has — nobody is there to answer a
-    /// prompt, and a task has no mode column to say otherwise — but it used to
-    /// get there by passing nothing and falling through the runner's
-    /// catch-all. The runner has no such arm now, so the mode is named here.
-    /// #693 replaces this constant with the task's own required mode.
-    ///
-    /// **An event run names none.** Somebody outside the app started it, so
-    /// with no mode on the agent it resolves as any other run with no recorded
-    /// choice does: prompts denied. The rule that linked the task is not read
-    /// for it, as none of the rule's other execution settings are.
-    fn permission_mode(self, agent_mode: &str) -> &'static str {
-        match self {
-            Self::Scheduled | Self::Manual if agent_mode.is_empty() => "bypass",
-            Self::Scheduled | Self::Manual | Self::Event(_) => "",
         }
     }
 }
@@ -902,9 +875,12 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
         agent,
     } = ready;
 
-    let result = match &run.continues {
-        Some(continues) => resume_agent(&db_path, &task, &job.id, continues, &prompt).await,
-        None => run_agent(&db_path, &task, &job.id, run.kind, agent, &prompt).await,
+    let result = match (task_permission_mode(&task, run.kind), &run.continues) {
+        (Err(e), _) => Err(e),
+        (Ok(mode), Some(continues)) => {
+            resume_agent(&db_path, &task, &job.id, mode, continues, &prompt).await
+        }
+        (Ok(mode), None) => run_agent(&db_path, &task, &job.id, mode, agent, &prompt).await,
     };
 
     // Taken before `run` moves into the section below.
@@ -1188,7 +1164,7 @@ fn create_task_session(db_path: &std::path::Path, task: &ScheduledTask) -> Resul
             model: &task.model,
             settings_profile_id: &task.settings_profile_id,
             // A task carries no per-conversation choice. What its *run* asks
-            // for is [`RunKind::permission_mode`], and it is not written here:
+            // for is the task's own mode (#693), and it is not written here:
             // this row is also what a later reply or an interactive turn
             // resumes, and neither of those is the scheduler.
             permission_mode: "",
@@ -1372,8 +1348,8 @@ fn resolve_agent(db_path: &std::path::Path, task: &ScheduledTask) -> Result<Agen
         description: String::new(),
         model,
         thinking: "adaptive".to_string(),
-        // Empty: no agent, so no agent's mode. What the run asks for is
-        // [`RunKind::permission_mode`].
+        // Empty: no agent, so no agent's mode. What the run asks for is the
+        // task's own ([`task_permission_mode`]).
         permission_mode: String::new(),
         system_prompt: String::new(),
         capabilities: Default::default(),
@@ -1394,23 +1370,22 @@ async fn run_agent(
     db_path: &std::path::Path,
     task: &ScheduledTask,
     job_id: &str,
-    kind: RunKind,
+    mode: TaskPermissionMode,
     agent: Agent,
     prompt: &str,
 ) -> Result<RunResult, String> {
     // `resolveSystemPrompt`'s strictness lives behind `Runner::run`, so every
     // headless caller gets it — see `agent_run`.
-    let permission_mode = kind.permission_mode(&agent.permission_mode).to_string();
     let spec = crate::native::agent_run::headless_spec(
         db_path,
         agent,
-        // A task carries only the first two of the four. Its model has always
-        // been the agent's, and its permission mode is the run kind's — see
-        // [`RunKind::permission_mode`].
+        // A task carries the working directory and the settings profile, and
+        // its own permission mode, which beats the agent's (#693). Its model
+        // has always been the agent's.
         &crate::native::agent_run::ExecutionSettings {
             working_directory: task.working_directory.clone(),
             settings_profile_id: task.settings_profile_id.clone(),
-            permission_mode,
+            task_mode: Some(mode),
             ..Default::default()
         },
     );
@@ -1424,6 +1399,26 @@ async fn run_agent(
         .await
 }
 
+/// The mode a run of `task` runs under (#693): the task's own.
+///
+/// Both task writes require one, so a task without a valid mode is a row
+/// written by hand, and nothing here guesses wider than the row says. An
+/// **event** run of such a task runs read-only — text from outside the app is
+/// in its prompt. A scheduled or manual run is refused, and the refusal is the
+/// run's `job_history` row: the task's own author is the one to fix it, and a
+/// failed run is how they find out. Nothing falls back to bypass.
+fn task_permission_mode(task: &ScheduledTask, kind: RunKind) -> Result<TaskPermissionMode, String> {
+    match TaskPermissionMode::parse(&task.permission_mode) {
+        Some(mode) => Ok(mode),
+        None if matches!(kind, RunKind::Event(_)) => Ok(TaskPermissionMode::ReadOnly),
+        None if task.permission_mode.is_empty() => Err("task has no permission mode".to_string()),
+        None => Err(format!(
+            "task has an unknown permission mode {:?}",
+            task.permission_mode
+        )),
+    }
+}
+
 /// The task's `timeout_minutes` as the run's deadline, fresh or continued.
 fn task_timeout(task: &ScheduledTask) -> std::time::Duration {
     std::time::Duration::from_secs(u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60)
@@ -1432,14 +1427,16 @@ fn task_timeout(task: &ScheduledTask) -> std::time::Duration {
 /// [`run_agent`] for a continued run (#686): one turn on the continued run's
 /// chat, through [`crate::native::agent_run::Runner::resume`].
 ///
-/// **No execution settings are imposed.** The chat was created from the task
-/// and carries its choices; an event run names no permission mode
-/// ([`RunKind::permission_mode`]), so none is named here either. The task's
-/// timeout and the pid record are the same as a fresh run's.
+/// **Only the task's permission mode is imposed** (#693). The chat was created
+/// from the task and carries its other choices, but the mode is the task's as
+/// it is *now*, not whatever the chat stores: a continued run must not run
+/// wider than a fresh one would. The task's timeout and the pid record are the
+/// same as a fresh run's.
 async fn resume_agent(
     db_path: &std::path::Path,
     task: &ScheduledTask,
     job_id: &str,
+    mode: TaskPermissionMode,
     continues: &Continues,
     prompt: &str,
 ) -> Result<RunResult, String> {
@@ -1448,7 +1445,10 @@ async fn resume_agent(
             db_path,
             &continues.chat_session_id,
             prompt,
-            &crate::native::agent_run::ExecutionSettings::default(),
+            &crate::native::agent_run::ExecutionSettings {
+                task_mode: Some(mode),
+                ..Default::default()
+            },
             task_timeout(task),
             Some(record_process(db_path, job_id)),
         )
@@ -2304,7 +2304,7 @@ mod tests {
 
         tasks::create_task(
             file.path(),
-            br#"{"name":"T","prompt":"p","schedule_type":"interval",
+            br#"{"name":"T","prompt":"p","permission_mode":"full","schedule_type":"interval",
                  "schedule_config":{"every_minutes":5},"stop_after_count":2}"#,
         )
         .expect("create");
@@ -2470,20 +2470,16 @@ mod tests {
         assert!(agent.capabilities.built_in.is_none());
         assert!(
             agent.permission_mode.is_empty(),
-            "no agent, no agent's mode: the run kind names the mode"
+            "no agent, no agent's mode: the task names the mode"
         );
     }
 
-    /// #675. What a task run asks the runner for is stated, not fallen into:
-    /// the two kinds a user starts from inside the app bypass **explicitly**
-    /// when the agent has no mode, as every such run always has, and a run an
-    /// outside sender started names no mode — which the runner resolves to
-    /// prompts denied. An agent's own mode is left to the runner by all of
-    /// them, a value it will refuse included.
+    /// #693. Every run of a task runs under the task's own mode. A row with
+    /// no valid mode — only a hand-edited one — runs read-only when an event
+    /// started it, and is refused when the schedule or the user did. Nothing
+    /// resolves to `full` that does not say `full`.
     #[test]
-    fn a_scheduled_or_manual_run_names_bypass_and_an_event_run_names_nothing() {
-        assert_eq!(RunKind::Scheduled.permission_mode(""), "bypass");
-        assert_eq!(RunKind::Manual.permission_mode(""), "bypass");
+    fn a_run_takes_the_tasks_mode_and_a_task_without_one_never_bypasses() {
         let events = [
             tasks::TriggeredBy::Telegram,
             tasks::TriggeredBy::Slack,
@@ -2491,21 +2487,36 @@ mod tests {
             tasks::TriggeredBy::Reply,
         ]
         .map(RunKind::Event);
-        for kind in events {
-            assert_eq!(kind.permission_mode(""), "", "{kind:?}");
-        }
-        for kind in [RunKind::Scheduled, RunKind::Manual]
+        let kinds: Vec<RunKind> = [RunKind::Scheduled, RunKind::Manual]
             .into_iter()
             .chain(events)
-        {
-            for own in ["plan", "dontAsk", "default", "bypass", "yolo"] {
-                assert_eq!(
-                    kind.permission_mode(own),
-                    "",
-                    "{kind:?} must not speak over an agent that stores {own:?}"
-                );
+            .collect();
+        let mut task = sample_task();
+        for mode in TaskPermissionMode::ALL {
+            task.permission_mode = mode.as_str().to_string();
+            for kind in &kinds {
+                assert_eq!(task_permission_mode(&task, *kind), Ok(mode), "{kind:?}");
             }
         }
+        for stored in ["", "bypass", "Full", "yolo"] {
+            task.permission_mode = stored.to_string();
+            for kind in events {
+                assert_eq!(
+                    task_permission_mode(&task, kind),
+                    Ok(TaskPermissionMode::ReadOnly),
+                    "{kind:?} of a task storing {stored:?}"
+                );
+            }
+            for kind in [RunKind::Scheduled, RunKind::Manual] {
+                let refused = task_permission_mode(&task, kind).expect_err("refused");
+                assert!(refused.starts_with("task has "), "{refused}");
+            }
+        }
+        task.permission_mode = String::new();
+        assert_eq!(
+            task_permission_mode(&task, RunKind::Scheduled),
+            Err("task has no permission mode".to_string())
+        );
     }
 
     #[test]
@@ -3592,6 +3603,7 @@ mod tests {
             max_concurrent_runs: 1,
             max_queued_events: 5,
             max_runs_per_hour: 10,
+            permission_mode: "full".to_string(),
             dropped_event_count: 0,
             rate_limited_event_count: 0,
             status: "active".to_string(),

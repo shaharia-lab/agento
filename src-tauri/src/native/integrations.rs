@@ -1739,6 +1739,18 @@ fn check_rule_task(conn: &rusqlite::Connection, task_id: &str) -> Result<(), Wri
     Ok(())
 }
 
+/// A task an external trigger starts runs read-only unless it says otherwise
+/// (#693): linking a rule gives a task with no mode `read_only`, on the rule
+/// write's own transaction. Every rule write with a `task_id` asks, changed or
+/// not — a task that already has a mode is left alone by
+/// [`super::tasks::ensure_mode_for_trigger`].
+fn link_task_read_only(conn: &rusqlite::Connection, task_id: &str) -> Result<(), WriteError> {
+    if task_id.is_empty() {
+        return Ok(());
+    }
+    super::tasks::ensure_mode_for_trigger(conn, task_id).map_err(WriteError::Fallback)
+}
+
 /// The checks `create` and `update` share, after `agent_slug`.
 ///
 /// **An unknown `permission_mode` is refused here, at the write**, so the one
@@ -1883,7 +1895,12 @@ fn create_trigger_rule(
     }
     validate_rule_settings(&req)?;
 
-    let conn = open_for_write(db_path)?;
+    // One transaction, so the rule and the read-only mode it gives its task
+    // (#693) land together or not at all.
+    let mut conn = open_for_write(db_path)?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin trigger rule create: {e}")))?;
     let Some(integration_type) = integration_type_of(&conn, integration_id)? else {
         return Err(WriteError::NotFound {
             resource: "integration".to_string(),
@@ -1920,6 +1937,9 @@ fn create_trigger_rule(
         updated_at: stamp,
     };
     insert_rule(&conn, &rule, &now)?;
+    link_task_read_only(&conn, &rule.task_id)?;
+    conn.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit trigger rule create: {e}")))?;
     log::info!(
         "trigger rule created id={:?} integration_id={:?}",
         rule.id,
@@ -1938,7 +1958,11 @@ fn update_trigger_rule(
     rule_id: &str,
     body: &[u8],
 ) -> Result<super::Answer, WriteError> {
-    let conn = open_for_write(db_path)?;
+    // One transaction, for `create_trigger_rule`'s reason.
+    let mut conn = open_for_write(db_path)?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin trigger rule update: {e}")))?;
     let existing = load_rule(&conn, rule_id)?;
     if existing.integration_id != integration_id {
         return Err(WriteError::Forbidden(
@@ -2021,9 +2045,12 @@ fn update_trigger_rule(
         ],
     )
     .map_err(|e| WriteError::Fallback(format!("updating trigger rule: {e}")))?;
+    link_task_read_only(&conn, &rule.task_id)?;
 
     let body = super::gojson::to_vec(&rule)
         .map_err(|e| WriteError::Fallback(format!("encoding trigger rule: {e}")))?;
+    conn.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit trigger rule update: {e}")))?;
     log::info!("trigger rule updated id={rule_id:?}");
     Ok(super::Answer::json(body))
 }
@@ -4663,6 +4690,55 @@ mod tests {
             "1/a",
             "neither refusal wrote anything"
         );
+    }
+
+    /// #693: a task an external trigger starts runs read-only unless it says
+    /// otherwise. Linking a rule — on create, and on an update whether or not
+    /// the link changed — gives a task with no mode `read_only`, and leaves a
+    /// task that states one alone.
+    #[test]
+    fn linking_a_rule_gives_a_task_with_no_mode_read_only() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+        Connection::open(file.path())
+            .expect("open")
+            .execute_batch(
+                "INSERT INTO scheduled_tasks (id, name, prompt, permission_mode) VALUES
+                     ('bare', 'T', 'p', ''), ('wide', 'T', 'p', 'full'),
+                     ('later', 'T', 'p', '');",
+            )
+            .expect("seed tasks");
+        let mode = |id: &str| {
+            stored(
+                &file,
+                &format!("SELECT permission_mode FROM scheduled_tasks WHERE id = '{id}'"),
+            )
+        };
+
+        let body = |task: &str| {
+            format!(
+                r#"{{"agent_slug":"a","enabled":true,"task_id":"{task}","filter_user_ids":["U0123ABCD"]}}"#
+            )
+        };
+        create_trigger_rule(file.path(), "int-1", body("bare").as_bytes()).expect("create");
+        create_trigger_rule(file.path(), "int-1", body("wide").as_bytes()).expect("create");
+        assert_eq!(mode("bare"), "read_only");
+        assert_eq!(mode("wide"), "full", "a stated mode is the user's choice");
+
+        // An update that keeps its link still asks: the task lost its mode
+        // after the rule was linked.
+        let id = stored(&file, "SELECT id FROM trigger_rules WHERE task_id = 'bare'");
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE scheduled_tasks SET permission_mode = '' WHERE id = 'bare'",
+                [],
+            )
+            .expect("hand-edit");
+        update_trigger_rule(file.path(), "int-1", &id, body("bare").as_bytes()).expect("update");
+        assert_eq!(mode("bare"), "read_only");
+        update_trigger_rule(file.path(), "int-1", &id, body("later").as_bytes()).expect("relink");
+        assert_eq!(mode("later"), "read_only");
     }
 
     /// #687: nothing clears `task_id` when its task is deleted, so the update

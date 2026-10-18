@@ -195,16 +195,17 @@ Beyond that, who decides depends on whether anyone is watching:
   mode, chosen when you start it — see [Permissions, per
   conversation](#permissions-per-conversation). Left at *Agent default* it falls
   back to the agent's, and to asking you if the agent has no preference.
-- **In an unattended run**, the agent's **permission mode** field decides, and
-  what happens when it is unset depends on who started the run. A scheduled
-  task, or one you start with **Run now**, proceeds without prompting, because
-  the alternative is a task that hangs until it times out. A run started by a
-  Slack or Telegram message never prompts either, but it **denies** what it
-  would have asked about instead of going ahead. That limits an agent to the
-  tools it lists. **An agent that lists no tools is allowed every built-in
-  one, including shell commands and file writes**, so give the agent an
-  explicit tool list if a message-started run should be held to less. Set the
-  rule's permission mode to *Bypass* if it should not be held back at all.
+- **In a scheduled task's run**, the task's own **Permission mode** decides,
+  however the run was started — see [Scheduled tasks](#scheduled-tasks). The
+  agent's mode is not used.
+- **In a rule's own run** (a Slack or Telegram rule that starts no task), the
+  agent's **permission mode** field decides. Unset, the run never prompts and
+  **denies** what it would have asked about instead of going ahead. That limits
+  an agent to the tools it lists. **An agent that lists no tools is allowed
+  every built-in one, including shell commands and file writes**, so give the
+  agent an explicit tool list if a message-started run should be held to less.
+  Set the rule's permission mode to *Bypass* if it should not be held back at
+  all.
 
 **Known limitation:** the permission mode you pick on an *agent* is not currently
 saved. The underlying API drops the field, and the desktop app reproduces the
@@ -475,11 +476,10 @@ A rule can name a scheduled **task** instead of running its own agent. A
 mention that opens a thread then starts one run of that task: the task's own
 instructions are the prompt, what was said is handed to it as data, and the run
 is recorded in **Job history** like any other. The rule's agent, model and
-permission mode are not used for it. A run started this way does not skip
-permission checks the way a scheduled run of the same task does: anything the
-task's agent would have asked about is denied. An agent that lists no tools,
-and a task with no agent, is still allowed every built-in tool, including shell
-commands and file writes.
+permission mode are not used for it: the task's own **Permission mode** is.
+Linking a rule to a task that has no mode makes it **Read-only**, and a task
+that a message can start should stay that way — what was said is written by
+someone other than you, and the mode, not the prompt, is what limits the run.
 
 **The task answers in the thread only if it has a *Reply to sender*
 destination** (see *Delivery* under Tasks). Without one the task still runs and
@@ -581,9 +581,26 @@ happened.
 Create one with a name and the **prompt** sent verbatim on every run. The agent
 is optional: **No agent** is the default, and runs Claude Code with the default
 model (or the task's own **Model**) and all built-in tools, no system prompt and
-no integrations, with permission prompts skipped when it runs on its schedule
-or from **Run now**. Pick an agent from the list
+no integrations. Pick an agent from the list
 instead to run with its model, tools, system prompt and integrations.
+
+**Every task has a Permission mode**, and it is required. It decides what the
+task's runs may do, whoever started them — the schedule, **Run now**, a message
+or a reply — and it beats the agent's own mode:
+
+| Mode | What a run may do |
+| --- | --- |
+| **Read-only** | Read files and search the web. It writes nothing, runs no shell commands and uses none of the agent's integration or local tools. The default for a new task |
+| **Plan** | Plan and propose changes without making them |
+| **Workspace write** | Edit files without asking. Other tools run only if the agent pre-allows them, and a task with no agent, or an agent that lists no tools, pre-allows every built-in one, **shell commands included** |
+| **Full** | No permission checks at all: any tool, the shell included |
+
+Nothing in a message can change a task's mode. **Upgrading:** each existing
+task keeps the mode its runs had — **Full** for a task with no agent or an
+agent with no mode, **Plan** for a *Plan* agent, **Read-only** otherwise — except
+that **a task a Slack or Telegram rule starts becomes Read-only**, its scheduled
+runs included. Switch such a task to **Workspace write** or **Full** in its form
+if it needs to write.
 
 **Schedules:**
 

@@ -66,6 +66,7 @@ use crate::claude::options::{permission_mode, Options};
 use crate::claude::permissions::PermissionHandler;
 use crate::claude::InProcessMcpServer;
 use crate::native::agents::{Agent, Capabilities};
+use crate::native::tasks::TaskPermissionMode;
 
 /// Every built-in tool, as `allBuiltInTools` lists them. Order is Go's, because
 /// it becomes the `--allowedTools` argument and a reordered list is a different
@@ -247,6 +248,11 @@ pub struct RunSpec {
     /// "no choice recorded", which is what every caller but the chat turn
     /// passes, and it leaves the pre-existing rules exactly as they were.
     pub permission_mode: String,
+    /// The task's own mode (#693), on a task's run and nowhere else. It beats
+    /// both [`Self::permission_mode`] and the agent's: on a task the mode is
+    /// the one visible control over what a run may do. `None` leaves the rules
+    /// above exactly as they were.
+    pub task_mode: Option<TaskPermissionMode>,
     /// `Some` resumes an existing CLI session; `None` falls through to
     /// [`Self::custom_session_id`].
     pub resume_session_id: Option<String>,
@@ -273,7 +279,21 @@ enum PermissionChoice {
     /// No mode on the run and none on its agent, and no permission handler:
     /// nothing prompts, and what is not already allowed is denied.
     Unchosen,
+    /// A task's own mode (#693), which wins over everything above.
+    Task(TaskPermissionMode),
 }
+
+/// The built-ins a [`TaskPermissionMode::ReadOnly`] run is pre-allowed: the
+/// ones that read files or the web. Replaces the agent's own allowlist, so an
+/// agent's MCP and local tools are not pre-approved on such a run either, and
+/// under `dontAsk` anything not pre-approved is denied.
+const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
+
+/// The built-ins a [`TaskPermissionMode::ReadOnly`] run is denied outright, on
+/// top of whatever its agent already denies. `--disallowedTools` beats any
+/// allow rule a project's `settings.json` carries, which `dontAsk` alone does
+/// not: an allow rule there pre-approves a tool as surely as `--allowedTools`.
+const READ_ONLY_DENIED_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
 
 impl PermissionChoice {
     /// `run` is the run's own mode, `agent` its agent's, and `interactive`
@@ -293,7 +313,20 @@ impl PermissionChoice {
     /// the write paths refuse one, so it can only be a hand-edited row, and
     /// running it on any guess at what was meant is the wrong answer. A caller
     /// that means bypass says so, as the scheduler does.
-    fn resolve(run: &str, agent: Option<&str>, interactive: bool) -> Result<Self, String> {
+    ///
+    /// **A task's mode beats all of it** (#693). On a task's run the mode is
+    /// the one control a user sees and sets, so it is not narrowed or widened
+    /// by the agent's, and a continued run cannot inherit a wider one from the
+    /// chat it resumes.
+    fn resolve(
+        task: Option<TaskPermissionMode>,
+        run: &str,
+        agent: Option<&str>,
+        interactive: bool,
+    ) -> Result<Self, String> {
+        if let Some(mode) = task {
+            return Ok(Self::Task(mode));
+        }
         let stored = match (run, interactive) {
             ("", true) => "default",
             ("", false) => agent.unwrap_or(""),
@@ -324,6 +357,22 @@ impl PermissionChoice {
             Self::Unchosen => opts
                 .with_default_permissions()
                 .with_permission_mode(permission_mode::DONT_ASK),
+            // Only `full` bypasses, and only `full` is offered bypass: the
+            // other three clear `--allow-dangerously-skip-permissions` first.
+            Self::Task(TaskPermissionMode::Full) => opts
+                .with_permission_mode(permission_mode::BYPASS_PERMISSIONS)
+                .with_bypass_permissions(),
+            Self::Task(TaskPermissionMode::Plan) => opts
+                .with_default_permissions()
+                .with_permission_mode(permission_mode::PLAN),
+            Self::Task(TaskPermissionMode::WorkspaceWrite) => opts
+                .with_default_permissions()
+                .with_permission_mode(permission_mode::ACCEPT_EDITS),
+            // The tool lists that make it read-only are `build_options`'s,
+            // because they replace the agent's: see [`READ_ONLY_TOOLS`].
+            Self::Task(TaskPermissionMode::ReadOnly) => opts
+                .with_default_permissions()
+                .with_permission_mode(permission_mode::DONT_ASK),
         }
     }
 }
@@ -337,6 +386,7 @@ impl PermissionChoice {
 /// bound and no row is read — so it can be asked before a run is started.
 pub(crate) fn headless_permission_options(spec: &RunSpec) -> Result<Options, String> {
     let permissions = PermissionChoice::resolve(
+        spec.task_mode,
         &spec.permission_mode,
         spec.agent.as_ref().map(|a| a.permission_mode.as_str()),
         false,
@@ -380,6 +430,7 @@ pub async fn build_options(
     // Up here for the same reason: a mode this build does not know is a
     // refusal, and a refusal leaves no listener behind.
     let permissions = PermissionChoice::resolve(
+        spec.task_mode,
         &spec.permission_mode,
         spec.agent.as_ref().map(|a| a.permission_mode.as_str()),
         permission_handler.is_some(),
@@ -513,6 +564,23 @@ pub async fn build_options(
         if !disallowed.is_empty() {
             opts = opts.with_disallowed_tools(disallowed);
         }
+    }
+    // A read-only task (#693): the read built-ins and nothing else are
+    // pre-allowed, whatever the agent lists, and the writing ones are denied on
+    // top of what the agent already denies. The servers above are still
+    // started, and [`narrow_to_command_line`] reports their tools as not
+    // offered, which on this run they are not.
+    if permissions == PermissionChoice::Task(TaskPermissionMode::ReadOnly) {
+        allowed = READ_ONLY_TOOLS.iter().map(|t| (*t).to_string()).collect();
+        let mut denied = opts.disallowed_tools.clone();
+        for tool in READ_ONLY_DENIED_TOOLS {
+            if !denied.iter().any(|d| d == tool) {
+                denied.push((*tool).to_string());
+            }
+        }
+        opts = opts
+            .with_allowed_tools(allowed.iter().cloned())
+            .with_disallowed_tools(denied);
     }
 
     // `if opts.PermissionHandler != nil` — the last thing Go appends, and the
@@ -1332,6 +1400,7 @@ mod tests {
                 working_dir: String::new(),
                 settings_profile_id: String::new(),
                 permission_mode: String::new(),
+                task_mode: None,
                 resume_session_id: None,
                 custom_session_id: "c1".into(),
             },
@@ -1349,6 +1418,7 @@ mod tests {
             working_dir: String::new(),
             settings_profile_id: String::new(),
             permission_mode: String::new(),
+            task_mode: None,
             resume_session_id: None,
             custom_session_id: "c1".into(),
         }
@@ -1516,7 +1586,7 @@ mod tests {
         for (run, own) in stored {
             for agent in agents {
                 for interactive in [true, false] {
-                    let got = PermissionChoice::resolve(run, agent, interactive)
+                    let got = PermissionChoice::resolve(None, run, agent, interactive)
                         .unwrap_or_else(|e| panic!("({run:?}, {agent:?}, {interactive}): {e}"));
                     let want = match (own, interactive) {
                         // The run's own mode wins outright.
@@ -1544,17 +1614,17 @@ mod tests {
         // Unknown, wherever it is read from. The message names the value.
         for interactive in [true, false] {
             assert_eq!(
-                PermissionChoice::resolve("yolo", Some("plan"), interactive),
+                PermissionChoice::resolve(None, "yolo", Some("plan"), interactive),
                 Err(r#"unknown permission mode "yolo""#.to_string())
             );
         }
         assert_eq!(
-            PermissionChoice::resolve("", Some("Bypass"), false),
+            PermissionChoice::resolve(None, "", Some("Bypass"), false),
             Err(r#"unknown permission mode "Bypass""#.to_string()),
             "the agent's own mode is held to the same list, case included"
         );
         assert_eq!(
-            PermissionChoice::resolve("", Some("yolo"), true),
+            PermissionChoice::resolve(None, "", Some("yolo"), true),
             Ok(Default),
             "an interactive turn never reads the agent's mode, so cannot fail on it"
         );
@@ -1581,6 +1651,141 @@ mod tests {
                 "{argv:?}"
             );
         }
+    }
+
+    /// #693: a task's mode beats the run's and the agent's, whatever they say
+    /// — an unknown value on either included, since neither is read — with a
+    /// permission handler or without.
+    #[test]
+    fn a_tasks_mode_beats_the_run_mode_and_the_agent_mode() {
+        for mode in TaskPermissionMode::ALL {
+            for run in ["", "default", "plan", "dontAsk", "bypass", "yolo"] {
+                for agent in [None, Some(""), Some("plan"), Some("bypass"), Some("yolo")] {
+                    for interactive in [false, true] {
+                        assert_eq!(
+                            PermissionChoice::resolve(Some(mode), run, agent, interactive),
+                            Ok(PermissionChoice::Task(mode)),
+                            "{mode:?} over run {run:?}, agent {agent:?}, interactive {interactive}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// #693: what each task mode is spawned with under Claude Code. Only
+    /// `full` bypasses and only `full` is offered bypass. `read_only` is
+    /// `dontAsk` with the read built-ins pre-allowed — replacing the agent's
+    /// own list, MCP tools included — and the writing built-ins and the shell
+    /// denied on top of whatever the agent denies.
+    #[tokio::test]
+    async fn each_task_mode_maps_to_its_claude_code_flags() {
+        let wants = [
+            (
+                TaskPermissionMode::Full,
+                permission_mode::BYPASS_PERMISSIONS,
+                true,
+            ),
+            (TaskPermissionMode::Plan, permission_mode::PLAN, false),
+            (
+                TaskPermissionMode::WorkspaceWrite,
+                permission_mode::ACCEPT_EDITS,
+                false,
+            ),
+            (
+                TaskPermissionMode::ReadOnly,
+                permission_mode::DONT_ASK,
+                false,
+            ),
+        ];
+        let narrow = Capabilities {
+            built_in: Some(vec!["Read".to_string(), "Bash".to_string()].into()),
+            ..Default::default()
+        };
+        for agent in [
+            None,
+            Some(agent_with(Capabilities::default())),
+            Some(agent_with(narrow)),
+        ] {
+            for (mode, want_mode, want_flag) in wants {
+                let (mut spec, _) = spec_with(agent.clone());
+                spec.task_mode = Some(mode);
+                // The agent's and the run's own say nothing on a task's run.
+                spec.permission_mode = "bypass".into();
+                let (opts, _servers, _hosted) = build_options(&spec, None).await.expect("options");
+                assert_eq!(opts.permission_mode, want_mode, "{mode:?}");
+                assert_eq!(
+                    opts.allow_dangerously_skip_permissions, want_flag,
+                    "{mode:?}"
+                );
+                let argv = opts.build_args();
+                assert_eq!(
+                    argv.iter()
+                        .any(|a| a == "--allow-dangerously-skip-permissions"),
+                    want_flag,
+                    "{mode:?}"
+                );
+                let headless = headless_permission_options(&spec).expect("headless");
+                assert_eq!(
+                    (
+                        headless.permission_mode.as_str(),
+                        headless.allow_dangerously_skip_permissions
+                    ),
+                    (want_mode, want_flag),
+                    "the fail-open check reads what is spawned, {mode:?}"
+                );
+                if mode != TaskPermissionMode::ReadOnly {
+                    continue;
+                }
+                assert!(
+                    opts.allowed_tools == READ_ONLY_TOOLS,
+                    "the read-only allowlist, agent: {}",
+                    agent.is_some()
+                );
+                for denied in READ_ONLY_DENIED_TOOLS {
+                    // Names only: options built from a real agent can carry
+                    // an integration's credentials, so they are never printed.
+                    assert!(
+                        opts.disallowed_tools.iter().any(|d| d == denied),
+                        "{denied} must be denied"
+                    );
+                }
+                let mut unique = opts.disallowed_tools.clone();
+                unique.sort();
+                unique.dedup();
+                assert_eq!(
+                    unique.len(),
+                    opts.disallowed_tools.len(),
+                    "no tool is denied twice"
+                );
+            }
+        }
+    }
+
+    /// #693: a read-only task keeps what its agent already denies — an agent
+    /// listing only `Read` still has `Grep` denied — so the read set never
+    /// widens an agent's own list.
+    #[tokio::test]
+    async fn a_read_only_task_keeps_its_agents_own_denials() {
+        let caps = Capabilities {
+            built_in: Some(vec!["Read".to_string()].into()),
+            ..Default::default()
+        };
+        let mut spec = spec_for(caps);
+        spec.task_mode = Some(TaskPermissionMode::ReadOnly);
+        let (opts, _servers, _hosted) = build_options(&spec, None).await.expect("options");
+        assert!(
+            opts.disallowed_tools.iter().any(|d| d == "Grep"),
+            "Grep must be denied"
+        );
+        assert!(
+            opts.disallowed_tools.iter().any(|d| d == "Bash"),
+            "Bash must be denied"
+        );
+        assert!(
+            !opts.disallowed_tools.iter().any(|d| d == "Read"),
+            "Read must not be denied"
+        );
     }
 
     /// What the scheduler relies on: a headless caller that *says* bypass gets

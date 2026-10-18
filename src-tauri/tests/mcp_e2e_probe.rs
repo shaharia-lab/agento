@@ -79,6 +79,7 @@ fn spec() -> RunSpec {
         working_dir: String::new(),
         settings_profile_id: String::new(),
         permission_mode: String::new(),
+        task_mode: None,
         resume_session_id: None,
         custom_session_id: String::new(),
     }
