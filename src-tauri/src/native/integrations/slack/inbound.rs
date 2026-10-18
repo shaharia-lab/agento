@@ -23,6 +23,15 @@
 //!    chat that run created. All three are threads Agento answers in, so the
 //!    rule holds; a delivery maps **one** thread per run, because the table is
 //!    `UNIQUE (chat_id)`.
+//!
+//!    **A resume is one of two things, decided by the mapped chat's runs**
+//!    (#686). A chat no task run ever used — an unlinked rule's — is resumed
+//!    as a chat turn, inline, as it always was. A chat a task's run used makes
+//!    the reply an event of that task, `triggered_by = reply`: a **fresh** run
+//!    by default, delivered through the task's own destinations, or a
+//!    **continuation** of the chat's newest run when the task's
+//!    `continue_on_reply` is on, or when the selected rule is linked to that
+//!    task and its own `continue_on_reply` is on. See [`Inbound::run_reply`].
 //! 2. **Which rule.** [`select_rule_for_channel`] — most specific first, and a
 //!    *disabled* channel-specific rule is that channel's off switch rather than
 //!    a fall-through to the workspace default (#565). No rule at all is silence.
@@ -89,8 +98,8 @@
 //!   `reply` delivery rather than from here — so a linked task with no `reply`
 //!   destination runs, is recorded, and says nothing in Slack. The rule's
 //!   `agent_slug` and execution settings are not read on that path. A reply
-//!   *inside* a thread is unchanged whatever the rule says: it resumes the
-//!   mapped chat, linked rule or not. The task's run limits (#691) apply
+//!   *inside* a thread follows the mapped chat, not the rule: decision (1).
+//!   The task's run limits (#691) apply
 //!   before the dispatcher's permit, so a mention the task has no slot for
 //!   waits in the task's queue, up to its bound, holding this thread's worker
 //!   and nothing global; one past the queue or past the hourly cap is counted
@@ -434,7 +443,22 @@ impl Inbound {
         };
 
         let (chat_id, kind) = match mapped {
-            Some(chat_id) => (chat_id, "resume"),
+            // A thread a task's run answered in is that task's (#686).
+            Some(chat_id) => match self.chat_run(&chat_id).await {
+                Ok(Some((run_id, task_id))) => {
+                    self.run_reply(job, prompt, &run_id, &task_id).await;
+                    return;
+                }
+                Ok(None) => (chat_id, "resume"),
+                Err(e) => {
+                    log::error!(
+                        "reading the runs of a slack thread's chat chat_id={chat_id:?}: {e}"
+                    );
+                    self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
+                        .await;
+                    return;
+                }
+            },
             // A rule that names a task starts that task, not a chat of the
             // rule's own (#685). Only here: a mapped thread resumed above
             // whatever its rule now says.
@@ -481,6 +505,7 @@ impl Inbound {
                 prompt,
                 &job.rule.settings,
                 dispatcher::run_timeout(&job.rule),
+                None,
             )
             .await;
 
@@ -590,11 +615,143 @@ impl Inbound {
                     job.rule.id
                 );
             }
-            Err(refused @ (EventRefused::NoSuchTask | EventRefused::Unavailable)) => {
+            Err(
+                refused @ (EventRefused::NoSuchTask
+                | EventRefused::NoSuchRun
+                | EventRefused::Unavailable),
+            ) => {
                 log::warn!(
                     "a slack rule's task did not run rule_id={:?} task_id={task_id:?} \
                      reason={refused:?}",
                     job.rule.id
+                );
+                self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
+                    .await;
+            }
+        }
+    }
+
+    /// The newest task run on `chat_id`, as its job id and task id, or `None`
+    /// for a chat no task run used.
+    async fn chat_run(&self, chat_id: &str) -> Result<Option<(String, String)>, String> {
+        let (db_path, chat_id) = (self.db_path.clone(), chat_id.to_string());
+        db::blocking("slack thread run lookup", move || {
+            tasks::latest_job_for_chat(&db_path, &chat_id)
+        })
+        .await
+        .unwrap_or_else(|| Err("the slack thread run lookup task failed".to_string()))
+    }
+
+    /// A reply in a thread whose chat a run of `task_id` used: one event run of
+    /// that task, `triggered_by = reply` (#686).
+    ///
+    /// **Whose flag decides, read when the reply arrives:** the task's
+    /// `continue_on_reply`, or the selected rule's while that rule is linked to
+    /// this task. Either on continues `run_id`'s chat
+    /// ([`executor::continued_run`]); both off starts the task fresh, on a new
+    /// chat, answering through the task's destinations — in this thread only
+    /// when the task has a `reply` destination. The thread stays mapped to the
+    /// chat it was mapped to, so the next reply decides the same way.
+    ///
+    /// `text` is the event's payload, never the prompt. The refusals are
+    /// [`Inbound::run_linked`]'s, and so is the order: the task's limits, then
+    /// the ten-slot bound around the run.
+    async fn run_reply(&self, job: &Job, text: &str, run_id: &str, task_id: &str) {
+        let Some(scheduler) = self.scheduler() else {
+            log::warn!(
+                "a slack thread's task cannot run, this process has no scheduler \
+                 task_id={task_id:?}"
+            );
+            self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
+                .await;
+            return;
+        };
+        let read = {
+            let (db_path, id) = (self.db_path.clone(), task_id.to_string());
+            db::blocking("slack reply task read", move || {
+                tasks::get_task(&db_path, &id)
+            })
+            .await
+        };
+        let task = match read {
+            Some(Ok(Some(task))) => task,
+            Some(Ok(None)) => {
+                self.refused(job, task_id, EventRefused::NoSuchTask).await;
+                return;
+            }
+            Some(Err(e)) => {
+                log::error!("reading a slack thread's task task_id={task_id:?}: {e}");
+                self.refused(job, task_id, EventRefused::Unavailable).await;
+                return;
+            }
+            None => return,
+        };
+        let continues =
+            task.continue_on_reply || (job.rule.task_id == task_id && job.rule.continue_on_reply);
+        log::info!(
+            "slack mention matched integration_id={:?} channel={:?} thread={:?} rule_id={:?} \
+             task_id={task_id:?} kind=reply continues={continues}",
+            self.integration_id,
+            job.mention.channel,
+            job.thread_ts,
+            job.rule.id
+        );
+
+        let origin = ReplyTarget::Slack {
+            integration_id: self.integration_id.clone(),
+            channel: job.mention.channel.clone(),
+            thread_ts: job.thread_ts.clone(),
+        };
+        let Some(mut event) = EventInput::new(
+            tasks::TriggeredBy::Reply,
+            text.to_string(),
+            Some(origin),
+            uuid::Uuid::new_v4().to_string(),
+        ) else {
+            // `Reply` is an event source, so `new` cannot refuse it.
+            log::error!("a slack reply was refused as an event task_id={task_id:?}");
+            return;
+        };
+        if continues {
+            match executor::continued_run(&scheduler, run_id).await {
+                Ok(run) => event = event.continuing(run),
+                Err(refused) => {
+                    self.refused(job, task_id, refused).await;
+                    return;
+                }
+            }
+        }
+
+        let ran = match executor::admit_event(&scheduler, task_id).await {
+            Ok(admitted) => {
+                let Ok(_permit) = dispatcher::semaphore().acquire().await else {
+                    log::warn!("dispatcher stopped, dropping a slack reply task_id={task_id:?}");
+                    return;
+                };
+                executor::run_admitted(scheduler, admitted, event).await
+            }
+            Err(refused) => Err(refused),
+        };
+        match ran {
+            Ok(_) => self.touch_thread(job).await,
+            Err(refused) => self.refused(job, task_id, refused).await,
+        }
+    }
+
+    /// What a refused reply event says: [`Inbound::run_linked`]'s rules. A
+    /// paused task and the task's own limits are silence; anything else is a
+    /// failure, answered in the thread.
+    async fn refused(&self, job: &Job, task_id: &str, refused: EventRefused) {
+        match refused {
+            EventRefused::Paused | EventRefused::Dropped | EventRefused::RateLimited => {
+                log::info!(
+                    "slack reply ignored, the thread's task did not take it task_id={task_id:?} \
+                     reason={refused:?}"
+                );
+            }
+            EventRefused::NoSuchTask | EventRefused::NoSuchRun | EventRefused::Unavailable => {
+                log::warn!(
+                    "a slack thread's task did not run task_id={task_id:?} reason={refused:?}"
                 );
                 self.post(&job.mention.channel, &job.thread_ts, ERROR_REPLY)
                     .await;

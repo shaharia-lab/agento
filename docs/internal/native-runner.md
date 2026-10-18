@@ -26,7 +26,7 @@ pub trait Runner: Send + Sync + Sized {
     fn harness(&self) -> &'static str;
     fn fail_open(&self, spec: &RunSpec) -> Option<String>;
     fn run(&self, spec, prompt, timeout, on_spawn) -> impl Future<Output = Result<RunResult, String>> + Send;
-    fn resume(&self, db_path, chat_id, prompt, settings, timeout) -> impl Future<…> + Send; // provided
+    fn resume(&self, db_path, chat_id, prompt, settings, timeout, on_spawn) -> impl Future<…> + Send; // provided
 }
 ```
 

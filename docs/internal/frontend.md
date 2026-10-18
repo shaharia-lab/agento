@@ -346,7 +346,12 @@ summary gains ` · ⚠`, so an untouched save round-trips it. Warnings wait unti
 `/integrations` has loaded, and the auth word comes from `connectionState()`. A
 422 on `destinations[i]…` opens the section: `SECTION_FIELDS` matches a field
 *within* the owned name, not only equal to it. The channel field keeps its raw
-text row-locally and writes the parsed array through `edit()`.
+text row-locally and writes the parsed array through `edit()`. **Continue on
+reply** (#686) is a `Switch` in a `FormRow` at the section's foot, shown only
+while the draft has a `slack` or `reply` destination — the only ones whose
+thread a reply can arrive in — and `continue_on_reply` is in
+`SECTION_FIELDS.delivery`. A stored `true` rides in the draft when it is
+hidden.
 
 **A Slack rule's allowed users** (#688). `Provider.triggerSenders` in
 `views/integrations/catalog.ts` is set for Slack only and carries the field's

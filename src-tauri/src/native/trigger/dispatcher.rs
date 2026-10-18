@@ -262,7 +262,11 @@ async fn process(
                 rule.id
             );
         }
-        Err(refused @ (EventRefused::NoSuchTask | EventRefused::Unavailable)) => {
+        Err(
+            refused @ (EventRefused::NoSuchTask
+            | EventRefused::NoSuchRun
+            | EventRefused::Unavailable),
+        ) => {
             log::error!(
                 "a telegram rule's task did not run rule_id={:?} task_id={task_id:?} \
                  reason={refused:?}",
@@ -370,6 +374,10 @@ pub struct Rule {
     /// #684, Slack #685); empty for a rule that runs its own agent, which is
     /// every rule migration 48 found.
     pub task_id: String,
+    /// Whether a reply in a thread this rule's linked task answered continues
+    /// that run's chat (#686). Read only while `task_id` is that task; see
+    /// `slack/inbound.rs`. Migration 48 turned it on for every existing rule.
+    pub continue_on_reply: bool,
 }
 
 /// What the enabled rules of an integration make of one message (#690).
@@ -486,7 +494,8 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
         .prepare(
             "SELECT id, name, agent_slug, enabled, filter_prefix, filter_keywords,
                     filter_chat_ids, model, working_directory, settings_profile_id,
-                    permission_mode, timeout_minutes, task_id, filter_user_ids
+                    permission_mode, timeout_minutes, task_id, filter_user_ids,
+                    continue_on_reply
              FROM trigger_rules
              WHERE integration_id = ?1
              ORDER BY created_at ASC",
@@ -518,6 +527,7 @@ pub fn load_rules(db_path: &Path, integration_id: &str) -> Result<Vec<Rule>, Str
                 },
                 timeout_minutes: row.get(11)?,
                 task_id: row.get(12)?,
+                continue_on_reply: row.get(14)?,
             })
         })
         .map_err(|e| format!("querying trigger rules: {e}"))?;
@@ -1518,6 +1528,7 @@ mod tests {
             settings: Default::default(),
             timeout_minutes: minutes,
             task_id: String::new(),
+            continue_on_reply: false,
         };
 
         assert_eq!(run_timeout(&rule(0)), RUN_TIMEOUT);

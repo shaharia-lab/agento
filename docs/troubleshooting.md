@@ -432,9 +432,9 @@ Three things that look like this and are not:
 
 ### Socket Mode says Connected but a mention does nothing
 
-Every one of these is silent by design. Of the eleven, two say nothing in the
+Every one of these is silent by design. Of the twelve, two say nothing in the
 log at all, seven are at **`debug`** level — so raise the level before you go
-looking — one is at `info` and one is at `error`. Two of the seven have a
+looking — two are at `info` and one is at `error`. Two of the seven have a
 second, database cause that logs at `warn` or `error` just above them, and each
 says so below. Work down the list:
 
@@ -461,7 +461,15 @@ says so below. Work down the list:
   at a time, keeps five more waiting and starts ten in any hour, unless its
   limits were changed. A mention past the queue is dropped and one past the
   hour's count is rate-limited; each is counted on the task and gets no reply.
-  Wait for the running one to finish or for the hour to move on.
+  Wait for the running one to finish or for the hour to move on. A reply inside
+  a task's thread logs `slack reply ignored, the thread's task did not take it`
+  instead, for this and for a paused task.
+- **A reply in a task's thread ran fresh, and the task has no Reply to sender
+  destination.** Log, at `info`: `slack mention matched … kind=reply
+  continues=false`. The reply started a new run of the task, which delivered to
+  the task's other destinations and not to the thread (see **Job history**).
+  Add a **Reply to sender** destination to answer in the thread, or turn on
+  **Continue on reply** to continue the run's chat instead.
 - **The thread was not started by Agento.** Log:
   `slack mention ignored, a thread Agento did not start`. Only a mention that
   starts a new thread can start a chat; inside an existing thread Agento answers
@@ -568,7 +576,9 @@ The ones worth knowing by name:
   with Slack's reason.
 - `slack socket: … slack asked for a reconnect` — the routine cycle.
 - `slack mention matched … kind=start` or `kind=resume` — a mention that ran,
-  and whether it started a chat or continued one.
+  and whether it started a chat or continued one. `kind=event` is a mention a
+  rule's task ran, and `kind=reply continues=…` a reply in a task's thread,
+  continued or run fresh by the task's **Continue on reply**.
 - `slack mention ignored, …` — a mention that did not, and why.
 - `failed to load slack trigger rules` / `failed to claim slack event …` — a
   mention dropped because the database could not be read or written, not

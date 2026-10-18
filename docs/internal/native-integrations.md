@@ -220,16 +220,18 @@ turn off (`a_rule_whose_task_was_deleted_can_still_be_updated`). Both fields are
 **replaced** on `PUT` like the rest of the rule, which is why the Integrations
 form carries them in `RuleDraft` and in both `RuleWrite` builders; `task_id` is
 edited by the form's **Task** picker (#687) and `continue_on_reply` by no
-control yet (#686). **Migration 48
+control yet. **Migration 48
 set `continue_on_reply` on every rule that existed**, because those already
 continue; a rule created afterwards defaults to off. **`task_id` is read at run
 time by both transports**: the dispatcher's `load_rules` selects it into
 `Rule.task_id`; Telegram's dispatcher starts that task for a matched message
 (#684, `docs/internal/native-integrations-telegram.md`) and `slack/inbound.rs`
 for a top-level mention (#685, `docs/internal/native-integrations-slack.md`).
-`continue_on_reply` is still read by
-nothing (#686), and `agent_slug` is still required whether or not a task is
-linked. The task's half is in `docs/internal/native-schedule.md`.
+`continue_on_reply` is read by Slack alone (#686), when a reply arrives in a
+thread a run of the rule's linked task answered in, and only while the rule is
+still linked to that task: on, it continues the run as the task's own flag
+does. An unlinked rule's flag is read by nothing. `agent_slug` is still
+required whether or not a task is linked. The task's half is in `docs/internal/native-schedule.md`.
 
 ## The OAuth flow (#318)
 

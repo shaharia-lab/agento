@@ -484,8 +484,9 @@ commands and file writes.
 **The task answers in the thread only if it has a *Reply to sender*
 destination** (see *Delivery* under Tasks). Without one the task still runs and
 is recorded, and nothing is posted in Slack. A paused task is not run and says
-nothing. Later mentions in the same thread continue that run's chat, as in any
-other thread.
+nothing. A later mention in the same thread runs the task again: fresh by
+default, or continuing the first run's chat when the task's **Continue on
+reply** is on (see *Delivery* under Tasks).
 
 **A task limits how often messages can start it.** Each task runs one
 message-started run at a time, keeps up to five more messages waiting in the
@@ -635,13 +636,24 @@ connected (see [Integrations](#integrations)) or an SMTP server is set up in
   `channels:read` scope, and `groups:read` as well — the list includes private
   channels. If the list cannot be loaded, the row falls back to typing
   comma-separated **Channel IDs** such as `C0123ABCD`.
-- **Continue a run from Slack.** Mention the app in the thread under a run's
-  summary — `@agento dig into item 3` — and the run's own chat picks it up with
-  its context, answering in the same thread. This needs Socket Mode on for the
-  integration (see [Slack Socket Mode](#slack-socket-mode)) and a trigger rule
-  covering the channel, whose prefix and keywords apply to the reply as to any
-  mention. Only the **first** channel whose summary posted is linked; a mention
-  in another channel's thread is ignored.
+- **Reply to a run from Slack.** Mention the app in the thread under a run's
+  summary — `@agento dig into item 3` — and the task runs again on the reply.
+  By default that is a **fresh run**: a new chat, the task's instructions with
+  the reply handed to it as data, recorded in **Job history** as started by a
+  reply, and delivered to the task's destinations — so it answers in the thread
+  only if the task has a **Reply to sender** destination. Turn on **Continue on
+  reply** (below) and the reply instead **continues the run's own chat**, with
+  its context, and answers in the same thread; it is recorded as its own run,
+  linked to the one it continues. This needs Socket Mode on for the integration
+  (see [Slack Socket Mode](#slack-socket-mode)) and a trigger rule covering the
+  channel, whose prefix and keywords apply to the reply as to any mention. Only
+  the **first** channel whose summary posted is linked; a mention in another
+  channel's thread is ignored.
+- **Continue on reply** shows once the task has a Slack or Reply to sender
+  destination. Tasks that had a Slack destination before this setting existed
+  have it on, so their threads keep continuing; a new task starts with it off.
+  A trigger rule linked to the task that had it on also keeps continuing, even
+  with the switch off here.
 - **+ Add Telegram destination** works the same way with **Chat IDs**: numeric
   ids such as `123456789`, or `-1001234567890` for a group or channel. Each chat
   gets a short header (task, status, duration) and then the output as plain
