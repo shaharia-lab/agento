@@ -460,6 +460,28 @@ pub fn get_job_history(db_path: &Path, id: &str) -> Result<Option<JobHistory>, S
     Ok(job)
 }
 
+/// The newest run on `chat_session_id`, as its job id and task id, or `None`
+/// when no run ever used that chat (#686).
+///
+/// This is how a reply in a mapped Slack thread finds the task and the run it
+/// follows: `inbound_threads` names only a chat. A run with no chat is no
+/// chat's, so `""` matches nothing.
+pub fn latest_job_for_chat(
+    db_path: &Path,
+    chat_session_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let conn = db::open_read_only(db_path)?;
+    conn.query_row(
+        "SELECT id, task_id FROM job_history
+         WHERE chat_session_id = ?1 AND chat_session_id != ''
+         ORDER BY started_at DESC LIMIT 1",
+        [chat_session_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| format!("reading the runs of a chat: {e}"))
+}
+
 /// The most job ids one delivery lookup binds. The page limit is capped at
 /// [`MAX_QUERY_LIMIT`], so a page is always one statement; the chunking only
 /// keeps a larger caller under SQLite's bound-variable limit.

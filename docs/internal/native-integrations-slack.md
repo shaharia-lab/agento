@@ -335,6 +335,33 @@ declines to start one.
   empty, released nothing and then removed its entry would lose a job queued in
   between, so the drain re-checks the channel while holding the lock that hands
   out senders and only removes the entry when it is still empty.
+- **A mapped thread follows its chat's runs** (#686). After `thread_chat`
+  answers a chat, `tasks::latest_job_for_chat` decides:
+  - **No `job_history` row on the chat** — an unlinked rule's chat, or one
+    whose task was deleted with its runs — resumes it inline, the rule's
+    settings applied, no row written: everything before #686.
+  - **A task's run** makes the reply that task's event, in
+    `Inbound::run_reply`: `TriggeredBy::Reply`, the filtered text as the
+    payload, the thread as the `ReplyTarget`. **Whose flag decides**, read
+    when the reply arrives: the task's `continue_on_reply`, or the selected
+    rule's while its `task_id` is that task. Either on →
+    `executor::continued_run` on the chat's newest run, so the run resumes the
+    chat and answers in the thread as one `reply` delivery. Both off → a fresh
+    run, on a new chat, delivered through the task's own destinations — in
+    the thread only when the task has a `reply` destination. The thread stays
+    mapped to its original chat either way, so the next reply decides the
+    same way.
+  - The refusals are `run_linked`'s: `Paused`, `Dropped` and `RateLimited`
+    are silence; `NoSuchTask`, `NoSuchRun`, `Unavailable`, an unreadable run
+    map and a process with no scheduler answer `ERROR_REPLY` in the thread.
+  - **A continued turn runs on the chat's stored settings**, which are the
+    task's, not the rule's: the rule still selects and filters the mention.
+  Pinned by `a_reply_in_a_task_thread_runs_the_task_fresh_when_it_does_not_continue`,
+  `a_reply_in_a_task_thread_continues_the_run_when_the_task_does`,
+  `a_reply_in_a_chat_no_task_ran_resumes_it_as_before` and
+  `a_linked_mentions_thread_is_mapped_and_a_reply_follows_the_flags`; with
+  `migrate.rs`'s `existing_rules_and_slack_tasks_continue_on_reply_after_the_upgrade`
+  these are the epic's gate g.
 - **An unlinked start and every resume go through `agent_run::Runner::resume`.** A
   start creates the chat first and then resumes it — no `sdk_session_id` yet, so
   `resume_spec` passes no `--resume` — which makes the busy lock, the session-id
@@ -343,7 +370,8 @@ declines to start one.
 - **A top-level mention under a rule that names a task is an event run, not a
   chat turn** (#685). `Inbound::turn` keeps its order — thread map, the
   unmapped-and-threaded drop, the `auth.test` failure — and then branches three
-  ways: a mapped thread resumes, as before and **whatever the rule now says**; an
+  ways: a mapped thread follows its chat (the next bullet), **whatever the rule
+  now says**; an
   unmapped top-level mention whose `rule.task_id` is empty starts a chat, as
   before; otherwise `Inbound::run_linked` builds an `EventInput`
   (`TriggeredBy::Slack`, the text `filtered_prompt` left, and
@@ -370,12 +398,12 @@ declines to start one.
     `handler_with_scheduler`.
   - **The thread is mapped after the run**, to the run's `chat_session_id`, by
     the same `insert_thread` a start uses — the third writer of
-    `inbound_threads`. A later mention in that thread is then an ordinary
-    resume, answered inline. A failed insert is a `warn`. A linked task that
+    `inbound_threads`. A later mention in that thread is then a reply to a
+    task's run (next bullet). A failed insert is a `warn`. A linked task that
     also has a `slack` destination has two inserts racing for one
     `UNIQUE (chat_id)` row — this one and the delivery's summary thread (#642),
     which is spawned and not awaited — so the second fails, and which of the
-    two threads ends up mapped is not determined (#686). When the delivery
+    two threads ends up mapped is not determined. When the delivery
     wins, a follow-up in the mention's thread is dropped as unmapped.
   - **The task's limits come first, then both global bounds** (#691).
     `admit_event` passes the task's limiter, and only an admitted event takes
@@ -469,16 +497,18 @@ Pinned by `slack/delivery.rs`'s tests (against a recording fake, in the library
 for the reason above) and `registry.rs`'s
 `slack_delivery_token_refuses_every_row_it_cannot_post_with`.
 
-### A delivered thread continues the run's chat (#642)
+### A delivered thread is the task's (#642, #686)
 
 After the first summary that posts — in destination order, then channel order —
 and **before** its replies, `slack/delivery.rs::map_thread` writes
 `(integration, channel, summary ts, run's chat_session_id, permalink)` to
 `inbound_threads` through `inbound::insert_thread`, the same insert an inbound
-start makes. A later `app_mention` in that thread is then an ordinary resume in
-`Inbound::turn`: rule selection, filters, the FIFO and the busy lock are
-unchanged, and "ignore threads Agento did not start" still holds because only
-threads Agento posted are mapped.
+start makes. A later `app_mention` in that thread is then a reply to the run
+in `Inbound::turn` — a continuation or a fresh run of the task by
+`continue_on_reply`, as above (#686): rule selection, filters, the FIFO and the
+busy lock are unchanged, and "ignore threads Agento did not start" still holds
+because only threads Agento posted are mapped. Every summary thread is mapped
+whatever the flag says, since the map is what recognises the thread.
 
 - **One thread per run.** `inbound_threads` is `UNIQUE (chat_id)` and
   `chats.rs`'s one-row join relies on it, so the mapping is an
@@ -498,7 +528,7 @@ threads Agento posted are mapped.
 Pinned by `slack/delivery.rs`'s `only_the_first_channel_is_mapped_and_before_its_replies`,
 `a_failed_first_channel_hands_the_mapping_to_the_next` and
 `a_failed_mapping_never_fails_the_delivery_or_moves_on`, and end to end by
-`slack/inbound/tests.rs`'s `a_reply_in_a_delivered_task_thread_resumes_the_tasks_chat`.
+`slack/inbound/tests.rs`'s two `a_reply_in_a_task_thread_…` tests.
 
 ## Channel list route (#641)
 

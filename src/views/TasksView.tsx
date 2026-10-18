@@ -223,7 +223,7 @@ function limitsSummary(t: ScheduledTask): string {
 const SECTION_FIELDS: Record<TaskFormSectionId, readonly string[]> = {
   execution: ["working_directory", "model", "timeout_minutes", "save_output"],
   limits: ["stop_after_count", "stop_after_time", ...RUN_LIMITS.map((l) => l.field)],
-  delivery: ["destinations"],
+  delivery: ["destinations", "continue_on_reply"],
 };
 
 /** Whether a 422's field is `owned` or inside it — `destinations[0].slack.channel_ids`
@@ -1157,6 +1157,8 @@ export function TasksView({
                       open={isOpen("delivery")}
                       onToggle={() => toggleSection("delivery")}
                       onChange={(destinations) => edit({ destinations })}
+                      continueOnReply={draft.continue_on_reply}
+                      onContinueOnReply={(v) => edit({ continue_on_reply: v })}
                     />
                     <div className="divider" />
                   </>

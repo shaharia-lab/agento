@@ -97,6 +97,7 @@ mod tests {
             settings: Default::default(),
             timeout_minutes: 0,
             task_id: String::new(),
+            continue_on_reply: false,
         }
     }
 

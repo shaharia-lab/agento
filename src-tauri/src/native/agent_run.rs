@@ -75,6 +75,10 @@ pub trait Runner: Send + Sync + Sized {
     /// Provided, because none of it is the harness's: the busy lock, the chat
     /// lookup and the write-back are Agento's own, and the one harness-specific
     /// step in the middle is [`Self::run`]. See [`run_resumed`] for the rules.
+    ///
+    /// `on_spawn` is [`Self::run`]'s: a scheduler run that continues a chat
+    /// records its pid as a fresh one does (#686). The inbound caller passes
+    /// `None`.
     fn resume(
         &self,
         db_path: &std::path::Path,
@@ -82,8 +86,9 @@ pub trait Runner: Send + Sync + Sized {
         prompt: &str,
         settings: &ExecutionSettings,
         timeout: std::time::Duration,
+        on_spawn: Option<crate::claude::SpawnHook>,
     ) -> impl std::future::Future<Output = Result<RunResult, String>> + Send {
-        run_resumed(self, db_path, chat_id, prompt, settings, timeout)
+        run_resumed(self, db_path, chat_id, prompt, settings, timeout, on_spawn)
     }
 }
 
@@ -434,6 +439,7 @@ async fn run_resumed<R: Runner>(
     prompt: &str,
     settings: &ExecutionSettings,
     timeout: std::time::Duration,
+    on_spawn: Option<crate::claude::SpawnHook>,
 ) -> Result<RunResult, String> {
     if !live::registry().try_lock(chat_id) {
         return Err(live::CHAT_BUSY.to_string());
@@ -455,7 +461,7 @@ async fn run_resumed<R: Runner>(
     };
 
     let spec = resume_spec(db_path, &row, agent, settings);
-    let result = runner.run(&spec, prompt, timeout, None).await;
+    let result = runner.run(&spec, prompt, timeout, on_spawn).await;
 
     let result = match result {
         Ok(result) => result,

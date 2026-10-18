@@ -842,12 +842,77 @@ async fn a_second_mention_in_the_thread_queues_and_resumes_the_same_chat() {
     );
 }
 
-/// A thread a scheduled task's Slack delivery mapped (#642) is a thread Agento
-/// started: a reply in it resumes the **task's** chat — its stored session id,
-/// its own message history, its `[Task]` title — and a reply in the thread of a
-/// second channel the delivery posted to but did not map is silence.
+/// A Slack-delivered task thread (#642) as a scheduled run leaves it: task
+/// `t1` with a `reply` destination and `continue_on_reply` as given, its run
+/// `j0` on chat `task-chat` (session `task-sess`, both messages), and the
+/// summary's thread mapped to that chat.
+fn delivered_task_thread(dir: &Path, integration_id: &str, continue_on_reply: bool) -> PathBuf {
+    let db = linked(dir, integration_id, "active", REPLY_ALWAYS);
+    // The rule is the channel's, not the task's: only the task's flag counts.
+    link_rule(&db, "r", "");
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    conn.execute(
+        "UPDATE scheduled_tasks SET continue_on_reply = ?1",
+        [continue_on_reply],
+    )
+    .expect("set the task's flag");
+    conn.execute_batch(
+        "INSERT INTO chat_sessions
+            (id, title, agent_slug, sdk_session_id, working_directory, created_at, updated_at)
+         VALUES ('task-chat', '[Task] Triage', '', 'task-sess', '',
+                 '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC');
+         INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
+         VALUES ('task-chat', 'user', 'write the brief', '[]', '2026-01-01 00:00:00 +0000 UTC'),
+                ('task-chat', 'assistant', 'the brief', '[]', '2026-01-01 00:00:01 +0000 UTC');
+         INSERT INTO job_history
+            (id, task_id, task_name, agent_slug, status, started_at, chat_session_id,
+             triggered_by)
+         VALUES ('j0', 't1', 'Triage', '', 'success', '2026-01-01 00:00:00 +0000 UTC',
+                 'task-chat', 'schedule');",
+    )
+    .expect("seed the task's run and its chat");
+    drop(conn);
+    // Exactly the row the delivery writes for the channel it mapped.
+    super::insert_thread(
+        &db,
+        integration_id,
+        CHANNEL,
+        "1700000000.000100",
+        "task-chat",
+        "https://slack.example/p/1",
+    )
+    .expect("map the delivered thread");
+    db
+}
+
+/// `(id, triggered_by, chat_session_id, continues_job_id)` of every run,
+/// oldest first.
+fn links(db_path: &Path) -> Vec<(String, String, String, String)> {
+    let conn = rusqlite::Connection::open(db_path).expect("open");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, triggered_by, chat_session_id, continues_job_id
+             FROM job_history ORDER BY started_at",
+        )
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query");
+    rows.map(|row| row.expect("a row")).collect()
+}
+
+/// #686, gate g, the default: a reply in a thread a task's run answered in,
+/// under a task that does **not** continue on reply — and a channel rule that
+/// does, as migration 48 left every rule, but is not linked to the task — runs
+/// the task again —
+/// fresh, on a new chat, with no `--resume` — as one `reply` row with no link,
+/// answering in the thread through the task's `reply` destination. The task's
+/// chat is untouched, and a reply in a thread the delivery did not map is
+/// silence.
 #[tokio::test]
-async fn a_reply_in_a_delivered_task_thread_resumes_the_tasks_chat() {
+async fn a_reply_in_a_task_thread_runs_the_task_fresh_when_it_does_not_continue() {
     if python3().is_none() {
         eprintln!("no python3; skipping");
         return;
@@ -855,51 +920,28 @@ async fn a_reply_in_a_delivered_task_thread_resumes_the_tasks_chat() {
     let _base = api_base_lock().await;
     let slack = fake_slack().await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = migrated(dir.path(), "s-task");
-    seed_rule(
-        &db,
-        "s-task",
-        "r",
-        true,
-        "[]",
-        "",
-        "",
-        "2026-01-01 00:00:00 +0000 UTC",
-    );
-    // The chat as `executor::write_session_results` leaves it: the run's session
-    // id and both messages, whatever `save_output` was.
-    let conn = rusqlite::Connection::open(&db).expect("open");
-    conn.execute_batch(
-        "INSERT INTO chat_sessions
-            (id, title, agent_slug, sdk_session_id, working_directory, created_at, updated_at)
-         VALUES ('task-chat', '[Task] Daily brief', '', 'task-sess', '',
-                 '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC');
-         INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
-         VALUES ('task-chat', 'user', 'write the brief', '[]', '2026-01-01 00:00:00 +0000 UTC'),
-                ('task-chat', 'assistant', 'the brief', '[]', '2026-01-01 00:00:01 +0000 UTC');",
-    )
-    .expect("seed the task chat");
-    drop(conn);
-    // Exactly the row the delivery writes for the channel it mapped.
-    super::insert_thread(
-        &db,
-        "s-task",
-        CHANNEL,
-        "1700000000.000100",
-        "task-chat",
-        "https://slack.example/p/1",
-    )
-    .expect("map the delivered thread");
+    let db = delivered_task_thread(dir.path(), "s-fresh", false);
+    // Migration 48 left every existing rule continuing, and none of them is
+    // linked: the channel's rule flag is not the task's.
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("UPDATE trigger_rules SET continue_on_reply = 1", [])
+        .expect("the migrated rule's flag");
     let cli = fake_cli(dir.path(), "dug into item {n}", "sess", false, 0);
 
     let _env = env_lock().lock().await;
     std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
-    let handler = super::handler(&db, "s-task", "xoxb-t");
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-fresh",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
     finish(handler(mention(
         "<@U0BOT> dig into item 3",
         "1700000000.000300",
         "1700000000.000100",
-        "s-task",
+        "s-fresh",
     )))
     .await;
     // The same summary, posted to a second channel's thread, was not mapped.
@@ -907,60 +949,224 @@ async fn a_reply_in_a_delivered_task_thread_resumes_the_tasks_chat() {
         "<@U0BOT> and here?",
         "1700000000.000500",
         "1700000000.000400",
-        "s-task",
+        "s-fresh",
     )))
     .await;
+    let runs = links(&db);
+    assert_eq!(
+        runs.len(),
+        2,
+        "one new run: the unmapped thread ran nothing"
+    );
+    let (job_id, triggered_by, chat_id, continues) = runs[1].clone();
+    let deliveries = settled_deliveries(&db, &job_id, 1).await;
     std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
     set_api_base(None);
 
+    assert_eq!(triggered_by, "reply");
+    assert_eq!(continues, "", "a fresh run continues nothing");
+    assert_ne!(chat_id, "task-chat", "on a chat of its own");
     let argv = spawns(dir.path());
-    assert_eq!(argv.len(), 1, "one run: the unmapped thread ran nothing");
+    assert_eq!(argv.len(), 1);
     assert_eq!(
         flag(&argv[0].0, "--resume"),
-        Some("task-sess"),
-        "the reply resumes the task run's own session"
+        None,
+        "and a session of its own"
     );
+    assert_eq!(deliveries, vec![("reply".to_string(), "sent".to_string())]);
     assert_eq!(
         slack.posted(),
         vec![(
             "1700000000.000100".to_string(),
             "dug into item 1".to_string()
         )],
-        "answered in the delivered thread and nowhere else"
+        "answered in the thread, by the task's reply destination"
+    );
+    let first = &messages(&db, &chat_id)[0].1;
+    assert!(
+        first.starts_with(&format!("{TASK_PROMPT}\n\n")),
+        "the task's instructions lead a fresh run"
+    );
+    assert!(first.contains("<event-payload source=\"reply\" id=\""));
+    assert_eq!(
+        messages(&db, "task-chat").len(),
+        2,
+        "the task's chat is untouched"
     );
     assert_eq!(
-        messages(&db, "task-chat")
+        threads(&db),
+        vec![(
+            "1700000000.000100".to_string(),
+            "task-chat".to_string(),
+            "https://slack.example/p/1".to_string()
+        )],
+        "the thread stays mapped to the chat it was mapped to"
+    );
+}
+
+/// #686: the same reply under a task that continues on reply resumes the
+/// run's chat — its session, its history — as a second row linked to the run
+/// it continues, with the reply as a data block and never as the preview, and
+/// one `reply` delivery in the thread. A third reply links to the second.
+#[tokio::test]
+async fn a_reply_in_a_task_thread_continues_the_run_when_the_task_does() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = delivered_task_thread(dir.path(), "s-continue", true);
+    let cli = fake_cli(dir.path(), "dug into item {n}", "sess", false, 0);
+    // Built from pieces and never printed, as the linked-mention test does.
+    let said = format!("dig into item 3, key AKIA{}", "Q7ZP2M4XK9WT3HVB");
+    let masked = crate::native::security_scan::scan::mask_text(&said);
+    assert!(masked != said, "the fixture carries something to mask");
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-continue",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention(
+        &format!("<@U0BOT> {said}"),
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-continue",
+    )))
+    .await;
+    let second = links(&db)[1].0.clone();
+    settled_deliveries(&db, &second, 1).await;
+    finish(handler(mention(
+        "<@U0BOT> and then?",
+        "1700000000.000500",
+        "1700000000.000100",
+        "s-continue",
+    )))
+    .await;
+    let runs = links(&db);
+    assert_eq!(runs.len(), 3);
+    let third = runs[2].0.clone();
+    let deliveries = settled_deliveries(&db, &third, 1).await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert_eq!(
+        runs[1..]
             .iter()
-            .map(|(role, content)| format!("{role}:{content}"))
+            .map(|(_, by, chat, continues)| (by.as_str(), chat.as_str(), continues.as_str()))
             .collect::<Vec<_>>(),
         vec![
-            "user:write the brief".to_string(),
-            "assistant:the brief".to_string(),
-            "user:dig into item 3".to_string(),
-            "assistant:dug into item 1".to_string(),
+            ("reply", "task-chat", "j0"),
+            ("reply", "task-chat", second.as_str()),
         ],
-        "the follow-up is appended to the task's chat"
+        "each continuation is its own row, linked to the newest run before it"
     );
-    assert_eq!(chat_title(&db, "task-chat"), "[Task] Daily brief");
-    assert_eq!(threads(&db).len(), 1, "no new thread, no new chat");
-    let conn = rusqlite::Connection::open(&db).expect("open");
-    let chats: i64 = conn
-        .query_row("SELECT count(*) FROM chat_sessions", [], |row| row.get(0))
-        .expect("count");
-    assert_eq!(chats, 1);
-
-    // `GET /api/chats` shows the task chat with its Slack thread, through the
-    // same `chats.rs` join an inbound-started chat uses.
-    let listed = crate::native::chats::list(&db).expect("list chats");
-    let task = listed
-        .iter()
-        .find(|chat| chat.id == "task-chat")
-        .expect("the task chat is listed");
-    assert_eq!(task.title, "[Task] Daily brief");
-    let inbound = task.inbound.as_ref().expect("the chat carries its thread");
+    let argv = spawns(dir.path());
+    assert_eq!(argv.len(), 2);
+    assert_eq!(flag(&argv[0].0, "--resume"), Some("task-sess"));
     assert_eq!(
-        (inbound.channel_id.as_str(), inbound.thread_ts.as_str()),
-        (CHANNEL, "1700000000.000100")
+        flag(&argv[1].0, "--resume"),
+        Some("sess-1"),
+        "the second continuation resumes the session the first one left"
+    );
+    assert_eq!(deliveries, vec![("reply".to_string(), "sent".to_string())]);
+    assert_eq!(
+        slack.posted(),
+        vec![
+            (
+                "1700000000.000100".to_string(),
+                "dug into item 1".to_string()
+            ),
+            (
+                "1700000000.000100".to_string(),
+                "dug into item 2".to_string()
+            ),
+        ],
+        "each answer lands in the thread, once"
+    );
+
+    let job = crate::native::tasks::get_job_history(&db, &second)
+        .expect("read")
+        .expect("the row");
+    assert!(job.event_payload == masked, "the reply, masked");
+    assert_eq!(
+        job.prompt_preview, TASK_PROMPT,
+        "the preview is the instructions"
+    );
+    let turns = messages(&db, "task-chat");
+    assert_eq!(turns.len(), 6, "both turns appended to the run's chat");
+    assert_eq!(turns[0].1, "write the brief");
+    let prompt = &turns[2].1;
+    assert!(
+        !prompt.contains(TASK_PROMPT),
+        "the chat already holds the instructions"
+    );
+    assert!(prompt.contains("<event-payload source=\"reply\" id=\""));
+    assert!(prompt.contains(&format!("\">\n{masked}\n</event-payload id=\"")));
+    assert!(!prompt.contains(&said), "and never raw");
+    assert_eq!(chat_title(&db, "task-chat"), "[Task] Triage");
+    assert_eq!(threads(&db).len(), 1, "no new thread, no new chat");
+    assert_eq!(chat_count(&db), 1);
+}
+
+/// #686, gate g: a thread with no task run behind it — an unlinked rule's
+/// chat, or one whose task was deleted with its runs — resumes as it always
+/// did, inline and with no `job_history` row, whatever the flags say.
+#[tokio::test]
+async fn a_reply_in_a_chat_no_task_ran_resumes_it_as_before() {
+    if python3().is_none() {
+        eprintln!("no python3; skipping");
+        return;
+    }
+    let _base = api_base_lock().await;
+    let slack = fake_slack().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = delivered_task_thread(dir.path(), "s-orphan", true);
+    rusqlite::Connection::open(&db)
+        .expect("open")
+        .execute("DELETE FROM job_history", [])
+        .expect("no run behind the chat");
+    let cli = fake_cli(dir.path(), "dug into item {n}", "sess", false, 0);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let handler = super::handler_with_scheduler(
+        &db,
+        "s-orphan",
+        "xoxb-t",
+        crate::native::schedule::runtime::detached(&db),
+    );
+    finish(handler(mention(
+        "<@U0BOT> dig into item 3",
+        "1700000000.000300",
+        "1700000000.000100",
+        "s-orphan",
+    )))
+    .await;
+    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+    set_api_base(None);
+
+    assert!(links(&db).is_empty(), "a resume is not a run");
+    let argv = spawns(dir.path());
+    assert_eq!(argv.len(), 1);
+    assert_eq!(flag(&argv[0].0, "--resume"), Some("task-sess"));
+    assert_eq!(
+        slack.posted(),
+        vec![(
+            "1700000000.000100".to_string(),
+            "dug into item 1".to_string()
+        )],
+        "answered inline"
+    );
+    assert_eq!(
+        messages(&db, "task-chat").last(),
+        Some(&("assistant".to_string(), "dug into item 1".to_string())),
+        "the words were the prompt on this path, as they always were"
     );
 }
 
@@ -1668,80 +1874,99 @@ async fn a_linked_rules_mention_runs_the_task_and_replies_through_delivery() {
     assert!(!prompt.contains(&said), "and never raw");
 }
 
-/// The second: the mention's thread is mapped to the run's chat, so a reply in
-/// it resumes that chat as an ordinary turn and is answered inline.
+/// The second: the mention's thread is mapped to the run's chat. A reply in
+/// it is the task's again (#686): with neither the task's nor the linked
+/// rule's `continue_on_reply` on, a fresh run with no `--resume`; with the
+/// linked rule's on, a continuation of the run, which is how a migrated rule
+/// keeps continuing once linked.
 #[tokio::test]
-async fn a_linked_mentions_thread_is_mapped_and_a_reply_resumes_its_chat() {
+async fn a_linked_mentions_thread_is_mapped_and_a_reply_follows_the_flags() {
     if python3().is_none() {
         eprintln!("no python3; skipping");
         return;
     }
-    let _base = api_base_lock().await;
-    let slack = fake_slack().await;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = linked(dir.path(), "s-linked-2", "active", REPLY_ALWAYS);
-    let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
+    for rule_continues in [false, true] {
+        let _base = api_base_lock().await;
+        let slack = fake_slack().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = linked(dir.path(), "s-linked-2", "active", REPLY_ALWAYS);
+        rusqlite::Connection::open(&db)
+            .expect("open")
+            .execute(
+                "UPDATE trigger_rules SET continue_on_reply = ?1",
+                [rule_continues],
+            )
+            .expect("set the rule's flag");
+        let cli = fake_cli(dir.path(), "answer {n}", "sess", false, 0);
 
-    let _env = env_lock().lock().await;
-    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
-    let handler = super::handler_with_scheduler(
-        &db,
-        "s-linked-2",
-        "xoxb-t",
-        crate::native::schedule::runtime::detached(&db),
-    );
-    finish(handler(mention(
-        "<@U0BOT> first",
-        "1700000000.000100",
-        "",
-        "s-linked-2",
-    )))
-    .await;
-    let runs = jobs(&db);
-    assert_eq!(runs.len(), 1);
-    let (job_id, chat_id) = (runs[0].0.clone(), runs[0].4.clone());
-    settled_deliveries(&db, &job_id, 1).await;
-    assert_eq!(
-        threads(&db),
-        vec![(
-            "1700000000.000100".to_string(),
-            chat_id.clone(),
-            "https://slack.example/p/1".to_string()
-        )],
-        "(integration, channel, mention ts) → the run's chat"
-    );
+        let _env = env_lock().lock().await;
+        std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+        let handler = super::handler_with_scheduler(
+            &db,
+            "s-linked-2",
+            "xoxb-t",
+            crate::native::schedule::runtime::detached(&db),
+        );
+        finish(handler(mention(
+            "<@U0BOT> first",
+            "1700000000.000100",
+            "",
+            "s-linked-2",
+        )))
+        .await;
+        let runs = links(&db);
+        assert_eq!(runs.len(), 1);
+        let (job_id, chat_id) = (runs[0].0.clone(), runs[0].2.clone());
+        settled_deliveries(&db, &job_id, 1).await;
+        assert_eq!(
+            threads(&db),
+            vec![(
+                "1700000000.000100".to_string(),
+                chat_id.clone(),
+                "https://slack.example/p/1".to_string()
+            )],
+            "(integration, channel, mention ts) → the run's chat"
+        );
 
-    finish(handler(mention(
-        "<@U0BOT> and then?",
-        "1700000000.000300",
-        "1700000000.000100",
-        "s-linked-2",
-    )))
-    .await;
-    std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
-    set_api_base(None);
+        finish(handler(mention(
+            "<@U0BOT> and then?",
+            "1700000000.000300",
+            "1700000000.000100",
+            "s-linked-2",
+        )))
+        .await;
+        let runs = links(&db);
+        assert_eq!(runs.len(), 2, "the reply is a run of the task");
+        settled_deliveries(&db, &runs[1].0, 1).await;
+        std::env::remove_var("AGENTO_CLAUDE_EXECUTABLE");
+        set_api_base(None);
 
-    assert_eq!(jobs(&db).len(), 1, "the reply is a chat turn, not a run");
-    let argv = spawns(dir.path());
-    assert_eq!(argv.len(), 2);
-    assert_eq!(
-        flag(&argv[1].0, "--resume"),
-        Some("sess-1"),
-        "the reply resumes the session the event run minted"
-    );
-    assert_eq!(
-        slack.posted(),
-        vec![
-            ("1700000000.000100".to_string(), "answer 1".to_string()),
-            ("1700000000.000100".to_string(), "answer 2".to_string()),
-        ],
-        "the delivery's reply, then the inline one, in one thread"
-    );
-    assert_eq!(
-        messages(&db, &chat_id).last(),
-        Some(&("assistant".to_string(), "answer 2".to_string())),
-        "appended to the run's chat"
-    );
+        let argv = spawns(dir.path());
+        assert_eq!(argv.len(), 2);
+        let (_, by, reply_chat, continues) = &runs[1];
+        assert_eq!(by, "reply");
+        if rule_continues {
+            assert_eq!(flag(&argv[1].0, "--resume"), Some("sess-1"));
+            assert_eq!((reply_chat, continues), (&chat_id, &job_id));
+            assert_eq!(
+                messages(&db, &chat_id).last(),
+                Some(&("assistant".to_string(), "answer 2".to_string())),
+                "appended to the run's chat"
+            );
+        } else {
+            assert_eq!(flag(&argv[1].0, "--resume"), None);
+            assert_ne!(reply_chat, &chat_id);
+            assert_eq!(continues, "");
+        }
+        assert_eq!(
+            slack.posted(),
+            vec![
+                ("1700000000.000100".to_string(), "answer 1".to_string()),
+                ("1700000000.000100".to_string(), "answer 2".to_string()),
+            ],
+            "both answers are reply deliveries, in one thread"
+        );
+    }
 }
 
 /// The reply is not implied: a linked task without a `reply` destination runs

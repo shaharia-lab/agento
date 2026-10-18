@@ -1768,3 +1768,96 @@ async fn an_event_run_that_outlives_its_timeout_is_one_failed_row() {
     assert_eq!(job.event_payload, "ping");
     assert_run_summary(&db, "job-event-timeout");
 }
+
+// ─── Continuation (#686) ──────────────────────────────────────────────────────
+
+/// A run, then a reply that continues it: the CLI is spawned with `--resume`
+/// and the run's session, the reply is its own row on the same chat linked to
+/// the run, the chat's usage is added to rather than replaced, and the answer
+/// goes to the thread as one `reply` delivery — not to the task's destinations.
+#[tokio::test]
+async fn a_continuation_resumes_the_runs_chat_as_a_linked_row() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    set_destinations(&db, &task_id, r#"[{"type":"fake","when":"always"}]"#);
+    let cli = fake_cli(dir.path(), ANSWERING_CLI);
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+    let first = only_job_id(&db);
+    assert!(
+        flag_value(&argv(dir.path()), "--resume").is_none(),
+        "the scheduled run starts fresh"
+    );
+
+    let origin = agento_lib::native::schedule::delivery::ReplyTarget::Slack {
+        integration_id: "slack-1".into(),
+        channel: "C0123ABCD".into(),
+        thread_ts: "1700000000.000100".into(),
+    };
+    let event = agento_lib::native::schedule::executor::EventInput::new(
+        agento_lib::native::tasks::TriggeredBy::Reply,
+        "and then?".into(),
+        Some(origin),
+        "job-continued".into(),
+    )
+    .expect("reply is an event source");
+    let answered = agento_lib::native::schedule::executor::run_continuation(
+        std::sync::Arc::clone(&scheduler),
+        &first,
+        event,
+    )
+    .await;
+    assert_eq!(answered, Ok("job-continued".to_string()));
+
+    assert_eq!(
+        flag_value(&argv(dir.path()), "--resume"),
+        Some("sdk-d-1"),
+        "the reply resumes the run's session"
+    );
+    let ran = agento_lib::native::tasks::get_job_history(&db, &first)
+        .expect("read")
+        .expect("the run");
+    let job = agento_lib::native::tasks::get_job_history(&db, "job-continued")
+        .expect("read")
+        .expect("the continuation");
+    assert_eq!(job.status, "success", "error was {:?}", job.error_message);
+    assert_eq!(job.triggered_by, "reply");
+    assert_eq!(job.continues_job_id, first);
+    assert_eq!(job.chat_session_id, ran.chat_session_id);
+    assert_eq!(job.event_payload, "and then?");
+    assert_eq!(job.response_text, "the full answer");
+    assert_eq!(session_count(&db), 1, "no second chat");
+
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    let (input, messages): (i64, i64) = conn
+        .query_row(
+            "SELECT total_input_tokens,
+                    (SELECT count(*) FROM chat_messages WHERE session_id = s.id)
+             FROM chat_sessions s",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the chat");
+    assert_eq!(input, 2, "the turn's usage is added to the run's");
+    assert_eq!(messages, 4, "both turns are on the chat");
+
+    let delivered = settled(&db, "job-continued", 1).await;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].0, "reply", "one reply to the thread");
+    assert!(
+        agento_lib::native::schedule::delivery::fake_received("job-continued").is_empty(),
+        "and nothing to the task's own destinations"
+    );
+    let task = agento_lib::native::tasks::get_task(&db, &task_id)
+        .expect("read")
+        .expect("row");
+    assert_eq!(task.run_count, 1, "a reply is not the schedule firing");
+}

@@ -30,7 +30,7 @@ import type {
 } from "../../lib/types";
 import { api } from "../../lib/api";
 import { SlackChannelPicker } from "../../components/SlackChannelPicker";
-import { Dropdown, FormRow, FormSection, Segmented } from "../../components/ui";
+import { Dropdown, FormRow, FormSection, Segmented, Switch } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { connectionState } from "../integrations/catalog";
 
@@ -38,11 +38,16 @@ type DestinationType = TaskDestination["type"];
 
 /** What differs between the destination types, and nothing else — the row,
  *  the warning and the summary are one implementation over this table. */
-/** When a reply in a delivered thread continues the run's chat (#642): the
- *  inbound handler has to be listening, a rule has to want the channel, and
- *  `inbound_threads` holds one thread per chat. */
+/** What a reply in a delivered thread does (#642, #686): the inbound handler
+ *  has to be listening, a rule has to want the channel, and `inbound_threads`
+ *  holds one thread per chat. Whether it continues is Continue on reply. */
 const SLACK_CONTINUE_HELP =
-  "Mention @app in the posted thread to continue this run's chat. This needs inbound enabled on the integration and a trigger rule for the channel; only the first channel's thread is linked.";
+  "Mention @app in the posted thread to run this task again on the reply, or to continue this run's chat when Continue on reply is on. This needs inbound enabled on the integration and a trigger rule for the channel; only the first channel's thread is linked.";
+
+/** The Continue on reply switch's help (#686). A rule linked to the task can
+ *  turn continuation on too, which is why off is not always fresh. */
+const CONTINUE_ON_REPLY_HELP =
+  "When someone mentions @app in a Slack thread a run of this task answered in, continue that run's chat with the reply, answering in the thread. Off, the reply starts a fresh run, delivered to this task's destinations — in the thread only with a Reply to sender destination. A trigger rule linked to this task can also turn continuation on.";
 
 const KINDS: Record<
   DestinationType,
@@ -238,6 +243,8 @@ export function DeliverySection({
   open,
   onToggle,
   onChange,
+  continueOnReply,
+  onContinueOnReply,
 }: {
   destinations: TaskDestination[];
   /** `null` while `/integrations` is loading or failed to load. */
@@ -248,6 +255,9 @@ export function DeliverySection({
   open: boolean;
   onToggle(): void;
   onChange(next: TaskDestination[]): void;
+  /** The task's `continue_on_reply` (#686). */
+  continueOnReply: boolean;
+  onContinueOnReply(v: boolean): void;
 }) {
   // One `conversations.list` walk per integration for as long as the form is
   // open, shared by every row that picks it: Slack allows about 20 a minute.
@@ -331,6 +341,13 @@ export function DeliverySection({
           </button>
         ))}
       </div>
+      {/* Only where a thread can exist: a Slack post opens one, and a reply
+          answers in the thread that started the run. */}
+      {destinations.some((d) => d.type === "slack" || d.type === "reply") && (
+        <FormRow label="Continue on reply" help={CONTINUE_ON_REPLY_HELP}>
+          <Switch on={continueOnReply} onChange={onContinueOnReply} />
+        </FormRow>
+      )}
     </FormSection>
   );
 }
