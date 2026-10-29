@@ -22,6 +22,18 @@ Opening an issue first gives the community the opportunity to discuss the proble
 3. Wait for acknowledgment or feedback before starting significant work.
 4. Reference the issue in your pull request (e.g., `Fixes #42` or `Closes #42`).
 
+## New Features Need Community Review First
+
+A feature request from an outside contributor gets a community review before anyone builds it:
+
+- It is labelled `needs-community-review` and stays open for at least 14 days.
+- After that it gets `ready-for-pr` only if at least 3 people other than the author back it, with a 👍, ❤️, 🚀 or 🎉 reaction or a comment describing their own use case. The maintainer may apply `ready-for-pr` at any time.
+- A pull request for a feature whose issue does not have `ready-for-pr` is not reviewed. It gets a short "on hold" comment and stays open until the issue is marked `ready-for-pr`.
+
+So please wait for `ready-for-pr` before opening a PR for a feature. If you would use a feature someone else requested, a 👍 on the issue helps.
+
+Bug fixes, documentation, dependency and security fixes are not features and follow the normal process above.
+
 ## Development Setup
 
 Before making code changes, read the developer documentation in the [`docs/`](docs/) directory:
@@ -93,6 +105,7 @@ real Claude corpus or the Claude Code CLI — see
 ### Before Submitting
 
 - [ ] Your PR is linked to a GitHub issue.
+- [ ] If it is a new feature, the issue has the `ready-for-pr` label.
 - [ ] You have read the relevant developer documentation in `docs/`.
 - [ ] All pre-commit hooks pass locally.
 - [ ] `cargo test` passes.
@@ -130,9 +143,10 @@ Write clear, descriptive commit messages. Use the imperative mood (e.g., "Add pa
 AI-generated contributions are welcome and go through the same process as human contributions:
 
 1. An issue must exist before a pull request is created.
-2. All automated checks (linting, tests, type checking) must pass.
-3. Code must meet the same quality and security standards.
-4. Pull requests are reviewed with the same rigor.
+2. A new feature must have `ready-for-pr` on its issue before a pull request is opened (see [New Features Need Community Review First](#new-features-need-community-review-first)).
+3. All automated checks (linting, tests, type checking) must pass.
+4. Code must meet the same quality and security standards.
+5. Pull requests are reviewed with the same rigor.
 
 The `CLAUDE.md` file at the root of the repository contains project-specific instructions, architecture details, and conventions that AI agents should follow when contributing.
 
