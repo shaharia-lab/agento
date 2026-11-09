@@ -40,8 +40,9 @@ Four consequences worth knowing before debugging anything:
   token's scope does not permit this request` means it did, and the token is
   `read`-scoped against a state-changing method (or against `/api/security/*`,
   which needs `write` whatever the method), **or it is `llm`-scoped and on
-  `/api` at all**. Retrying will not help.
-- **There are three scopes, and the third is not on the ladder** (#423).
+  `/api` at all**, **or it is `hook`-scoped and anywhere but its own task's
+  `/api/hooks/{task_id}`**. Retrying will not help.
+- **There are four scopes, and only two are on the ladder** (#423, #695).
   `read` < `write` is a hierarchy; **`llm` is disjoint from both**. It is the LLM
   gateway's data-plane credential: `write` does **not** cover it, `llm` covers
   nothing on `/api`, and `required_scope` never returns it — those two halves
@@ -57,6 +58,20 @@ Four consequences worth knowing before debugging anything:
   One dev consequence: the debug build's `api-token` file holds a **`write`**
   token, so it will *not* work against the gateway — mint an `llm` one via
   `POST /api/security/tokens` first.
+- **`hook` is disjoint too, and bound to one task** (#695). It is the local
+  webhook's credential, pasted into git hooks, cron lines and CI scripts, so it
+  is neither `write` (arbitrary command execution) nor `read` (every
+  transcript). A hook token carries a `task_id` claim — `token::mint_hook` sets
+  it, and `verify_against` refuses a `hook` token without one and any other
+  scope *with* one. `required_scope` answers `hook` for everything under
+  `/api/hooks/` on every method, so no other token is served there, and
+  `security::verify_with` serves a hook token only when the raw target is
+  exactly `/api/hooks/{task_id}` with its own id — another task, a trailing
+  segment or an escaped spelling is a 403. `POST /api/security/tokens` refuses
+  `scope: "hook"` with a 422: it has no task to bind the token to, and per-task
+  minting is #697's. `a_hook_token_serves_nothing_else_on_the_api` in
+  `guards.rs` walks every route in the three parity files to hold the first
+  half.
 - **`api.ts` retries a 401 exactly once**, re-invoking `host_info` for a fresh
   token first. That is what makes a keypair regenerate recoverable without a
   restart, and the bound is structural rather than a counter — see `withAuth`,
@@ -88,11 +103,11 @@ hardcoded compare against a single string". What it adds:
 
 - **A scope, and one definition of it.** `security::required_scope` maps
   `is_state_changing` onto `read`/`write`, so the guard has a single
-  read-versus-write rule rather than a second table. Its one exception is
+  read-versus-write rule rather than a second table. Its two exceptions are
   `/api/security/*`, which needs `write` whatever the method, because those
   reads *are* the credential system — a `read` token must not enumerate every
-  credential on the machine. A per-route permission model over ~90 endpoints is
-  explicitly deferred.
+  credential on the machine — and `/api/hooks/*`, which needs `hook` (#695). A
+  per-route permission model over ~90 endpoints is explicitly deferred.
 - **Insufficient scope is a 403**, sharing a status with the `Host` rejection
   and not its body.
 - **A third and fourth process-wide static, both in `native::security`** — the
