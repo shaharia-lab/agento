@@ -71,7 +71,10 @@ Four consequences worth knowing before debugging anything:
   `scope: "hook"` with a 422: it has no task to bind the token to, and per-task
   minting is #697's. `a_hook_token_serves_nothing_else_on_the_api` in
   `guards.rs` walks every route in the three parity files to hold the first
-  half.
+  half. The one route it is served on is `POST /api/hooks/{task_id}`
+  (`native/trigger/hook.rs`, #696), which starts that task's event run; the
+  `Host` and `Content-Type` guards apply there as everywhere
+  (`the_hook_route_keeps_the_host_token_and_content_type_guards`).
 - **`api.ts` retries a 401 exactly once**, re-invoking `host_info` for a fresh
   token first. That is what makes a keypair regenerate recoverable without a
   restart, and the bound is structural rather than a counter — see `withAuth`,

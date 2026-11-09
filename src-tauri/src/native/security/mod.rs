@@ -831,6 +831,24 @@ mod tests {
         }
     }
 
+    /// A revoked hook token is a 401 on its own hook (#696), like any other.
+    #[test]
+    fn a_revoked_hook_token_is_refused_on_its_own_hook() {
+        let keypair = keys::Keypair::generate().expect("generate");
+        let minted = token::mint_hook(&keypair, "s", "task-a", 600).expect("mint");
+        let revoked = minted.jti.clone();
+        assert_eq!(
+            verify_with(
+                &minted.token,
+                &Method::POST,
+                "/api/hooks/task-a",
+                Some(&keypair),
+                &|jti| jti == revoked
+            ),
+            Err(Denied::Unauthenticated)
+        );
+    }
+
     /// RFC 8037's shape, which is what makes "a stock library on the other side"
     /// true rather than hoped for.
     #[test]
