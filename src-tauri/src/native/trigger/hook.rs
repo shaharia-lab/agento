@@ -18,7 +18,9 @@
 //!   asks the task's limiter for its decision ([`executor::place_event`]),
 //!   answers, and leaves the waiting and the run to a spawned task — as
 //!   `POST /api/tasks/{id}/run` does. `202` carries the `job_history` id the
-//!   run will write.
+//!   run writes **if it starts**: a queued call can still be refused before
+//!   its slot comes (the task paused or deleted meanwhile, the scheduler
+//!   unavailable), and that leaves a log line and no row.
 //! - **Every refusal has its own status**, and none starts a run or writes a
 //!   row: no task `404`, not active `409` (an event never overrides pause),
 //!   rate-limited `429`, queue full `503` (those two are counted on the task
@@ -170,7 +172,7 @@ fn refusal_status(task_id: &str, refused: EventRefused) -> (StatusCode, String) 
         ),
         EventRefused::RateLimited => (
             StatusCode::TOO_MANY_REQUESTS,
-            "the task has started its hourly limit of event runs".to_string(),
+            "the task has reached its hourly limit of event runs".to_string(),
         ),
         EventRefused::Dropped => (
             StatusCode::SERVICE_UNAVAILABLE,

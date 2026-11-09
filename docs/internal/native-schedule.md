@@ -406,6 +406,12 @@ one per outcome, none of the refusals writing a row:
 | `Dropped` (counted) | `503` |
 | `Unavailable`, or no scheduler | `500` |
 
+The statuses are the decision's, so they are final only for a call that is
+refused at arrival. A `202` names the row the run writes **if it starts**: a
+queued call is re-checked when its slot comes, and one whose task was paused or
+deleted meanwhile, or whose scheduler is unavailable, is refused then with a
+log line and no row.
+
 Authentication and the task binding are the guard's (`native-security.md`), so
 the handler never sees the token. `trigger/hook.rs`'s tests pin each row.
 
