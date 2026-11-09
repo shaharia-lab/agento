@@ -1137,6 +1137,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// The hook route keeps every other guard (#696): no credential is a 401,
+    /// a foreign `Host` a 403 whatever the token, and a body that is not
+    /// declared JSON a 415, even with the task's own hook token.
+    #[test]
+    fn the_hook_route_keeps_the_host_token_and_content_type_guards() {
+        let hook = token::mint_hook(&seeded_keys(), "test", "task-a", 3600)
+            .expect("mint")
+            .token;
+        let at = |host: &str, content_type: &str, token: Option<&str>| {
+            reject(&authed_request(
+                Method::POST,
+                "/api/hooks/task-a",
+                host,
+                content_type,
+                token,
+            ))
+        };
+        assert_eq!(
+            at("localhost", "application/json", None),
+            Some(UNAUTHORIZED)
+        );
+        assert_eq!(
+            at("evil.example", "application/json", Some(&hook)),
+            Some(HOST_REJECTION)
+        );
+        assert_eq!(
+            at("localhost", "text/plain", Some(&hook)),
+            Some(CONTENT_TYPE_WRONG)
+        );
+        assert_eq!(at("localhost", "", Some(&hook)), Some(CONTENT_TYPE_MISSING));
+        assert_eq!(at("127.0.0.1:8990", "application/json", Some(&hook)), None);
+    }
+
     /// The converse: no other credential opens a hook — not `read`, not
     /// `write`, not `llm`, and not the webview's own session.
     #[test]

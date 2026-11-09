@@ -4,6 +4,7 @@
 //! Mirrors `internal/trigger`.
 
 pub mod dispatcher;
+pub mod hook;
 pub mod match_rule;
 pub mod receiver;
 pub mod registration;

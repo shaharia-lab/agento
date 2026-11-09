@@ -255,12 +255,15 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 ///
 /// #641 added a second: `GET /api/integrations/{id}/slack/channels` pages
 /// through Slack's `conversations.list` on the same terms, and #689 a third:
-/// `GET /api/integrations/{id}/slack/users` over `users.list`.
+/// `GET /api/integrations/{id}/slack/users` over `users.list`. #696 added
+/// `POST /api/hooks/{task_id}`, whose answer waits on the task limiter's
+/// decision and then spawns the run.
 const STREAM_ENDPOINTS: &[StreamEndpoint] = &[
     chat::ENDPOINT,
     gateway_api::STREAM_ENDPOINT,
     integrations::slack::channels::STREAM_ENDPOINT,
     integrations::slack::users::STREAM_ENDPOINT,
+    trigger::hook::STREAM_ENDPOINT,
 ];
 
 /// Whether this request is answered by a *streaming* native handler.
@@ -866,8 +869,8 @@ mod tests {
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
         //
-        // The file has **eight owners** since #751, so the claimed set is the
-        // union of all eight modules' consts. A ninth owner appends here;
+        // The file has **nine owners** since #696, so the claimed set is the
+        // union of all nine modules' consts. A tenth owner appends here;
         // leaving it out would silently weaken the assertion from set equality
         // to "the owners I remembered", which is the one-directional property
         // this test exists to escape.
@@ -880,6 +883,7 @@ mod tests {
             .chain(sessions::ROUTES.iter())
             .chain(claude_settings::retention::ROUTES.iter())
             .chain(settings::ROUTES.iter())
+            .chain(trigger::hook::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(

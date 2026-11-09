@@ -299,13 +299,14 @@ one and the first to finish would clear an entry the second still owns.
 authenticates its sender, builds an `EventInput` (whose constructor refuses
 `schedule` and `manual` as a source) and calls it. Slack does
 (`slack/inbound.rs::run_linked`, #685), and so does Telegram
-(`trigger/dispatcher.rs::run_linked`, #684); the webhook does not yet (#696).
+(`trigger/dispatcher.rs::run_linked`, #684), and so does the webhook
+(`trigger/hook.rs`, #696, below).
 It is two steps, `admit_event` and then `run_admitted`: the
 task's own limiter (#691, below), then `run_manual`'s shape — mark in flight,
 take one of the three permits, re-read the task — with these rules:
 
-- **The transports' bound wraps the scheduler's, never the reverse.** Telegram
-  and Slack both take the dispatcher's ten-slot permit
+- **The transports' bound wraps the scheduler's, never the reverse.** Telegram,
+  Slack and the webhook all take the dispatcher's ten-slot permit
   (`trigger::dispatcher::semaphore`) after `admit_event` and hold it until
   `run_admitted` returns, so it is always taken outside the scheduler's three
   and the two cannot deadlock (`dispatcher.rs`'s
@@ -384,13 +385,37 @@ run, and it changes five things and nothing else:
   (`Run::destinations`), on the prepare-failure path too: a continuation
   answers in the thread it was asked in, and nowhere else.
 
+**The webhook, `POST /api/hooks/{task_id}` (#696), answers on the limiter's
+decision, not on the run.** `admit_event` is itself two halves:
+`executor::place_event` reads the task, checks it, and asks
+`limiter::TaskLimiter::place` for the decision without waiting, and
+`PlacedEvent::admitted` waits for a queued slot. The hook handler awaits only
+the first, answers, and spawns the second with the dispatcher permit and
+`run_admitted`, so a queued call is answered at once rather than holding the
+connection for hours. The body must parse as JSON and its raw text is the
+payload, with no reply target, so a webhook run is always fresh. Its statuses,
+one per outcome, none of the refusals writing a row:
+
+| outcome | status |
+|---|---|
+| admitted or queued | `202` `{"job_id","task_id"}` |
+| body is not JSON | `400` |
+| `NoSuchTask` | `404` |
+| `Paused` | `409` |
+| `RateLimited` (counted) | `429` |
+| `Dropped` (counted) | `503` |
+| `Unavailable`, or no scheduler | `500` |
+
+Authentication and the task binding are the guard's (`native-security.md`), so
+the handler never sees the token. `trigger/hook.rs`'s tests pin each row.
+
 Both row writers set `continues_job_id` from `Run`; every other run writes
 `''`. A third reply links to the second, because the link is the newest run
 on the chat (`tasks::latest_job_for_chat`).
 
 **An event passes its task's limiter first** (#691). `schedule/limiter.rs` is a
 small in-memory state per task, owned by the `Scheduler` and asked only by
-`executor::admit_event`. A timer's fire and **Run now** never reach it and are
+`executor::place_event`, the first half of `admit_event`. A timer's fire and **Run now** never reach it and are
 not counted by it. Each task stores three limits (migration 54), and the
 decision is `limiter::decide`, a pure function made once, when the event
 arrives, in this order:
@@ -424,7 +449,8 @@ Six things about it are specification:
   `the_hourly_cap_survives_a_restart_and_counts_only_event_runs` pins it.
 - **A waiting event holds nothing global.** The scheduler's three permits are
   taken in `run_admitted`, and a transport takes its own bound between the two
-  steps (the dispatcher's ten-slot permit, for Slack and Telegram alike), so
+  steps (the dispatcher's ten-slot permit, for Slack, Telegram and the webhook
+  alike), so
   one task's burst queues behind that task and nowhere else. Both global bounds stay as the outer limit.
 - **The slot is a guard.** `RunSlot` frees what it holds on drop — a queue place
   while it waits, a running slot after — and wakes the task's next waiter, so a

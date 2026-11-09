@@ -573,6 +573,55 @@ pub async fn admit_event(
     scheduler: &Arc<Scheduler>,
     task_id: &str,
 ) -> Result<Admitted, EventRefused> {
+    place_event(scheduler, task_id)
+        .await?
+        .admitted(scheduler)
+        .await
+}
+
+/// An event [`place_event`] let in, running or queued, that has not yet been
+/// given its slot. [`PlacedEvent::admitted`] waits for the slot; dropping this
+/// instead gives the place back.
+pub struct PlacedEvent {
+    task_id: String,
+    pending: limiter::Pending,
+}
+
+impl PlacedEvent {
+    /// Whether the event waits in its task's queue.
+    pub fn is_queued(&self) -> bool {
+        self.pending.is_queued()
+    }
+
+    /// [`admit_event`]'s second half: wait for the slot, then mark the run in
+    /// flight.
+    pub async fn admitted(self, scheduler: &Arc<Scheduler>) -> Result<Admitted, EventRefused> {
+        let Self { task_id, pending } = self;
+        match pending.slot().await {
+            Ok(slot) => Ok(Admitted {
+                // Marked once it has a slot, not while it waits: the in-flight
+                // map answers "is a run of this task under way", and a queued
+                // event is not one yet.
+                _in_flight: scheduler.mark_running(&task_id),
+                task_id,
+                slot,
+            }),
+            // Only reachable if the task's limiter state lost the waker, which
+            // nothing does; refused as a drop, the limiter's own answer for it.
+            Err(_) => Err(EventRefused::Dropped),
+        }
+    }
+}
+
+/// [`admit_event`]'s decision alone, made without waiting for a queued slot
+/// (#696): everything it checks and counts, up to and including the limiter's
+/// answer. A transport that must answer its sender on the decision rather than
+/// on the run — the webhook — calls this, answers, and then waits on
+/// [`PlacedEvent::admitted`] in the background.
+pub async fn place_event(
+    scheduler: &Arc<Scheduler>,
+    task_id: &str,
+) -> Result<PlacedEvent, EventRefused> {
     let now = Utc::now();
     let read: Option<Result<AdmissionRead, String>> = {
         let (db_path, id) = (scheduler.db_path().to_path_buf(), task_id.to_string());
@@ -623,14 +672,10 @@ pub async fn admit_event(
         task.max_queued_events,
         task.max_runs_per_hour,
     );
-    match scheduler.limiter().admit(task_id, limits, now).await {
-        Ok(slot) => Ok(Admitted {
+    match scheduler.limiter().place(task_id, limits, now) {
+        Ok(pending) => Ok(PlacedEvent {
             task_id: task_id.to_string(),
-            slot,
-            // Marked once it has a slot, not while it waits: the in-flight map
-            // answers "is a run of this task under way", and a queued event is
-            // not one yet.
-            _in_flight: scheduler.mark_running(task_id),
+            pending,
         }),
         Err(refusal) => {
             let refused = match refusal {
@@ -1848,7 +1893,7 @@ fn publish_task_failed(db_path: &std::path::Path, task: &ScheduledTask, error_me
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A run stopped by the app-exit hook (#595) records why, not what the
@@ -2735,7 +2780,7 @@ mod tests {
 
     /// Polls until `job_id` has `n` deliveries and none is `pending`, since
     /// [`delivery::dispatch`] finishes on a spawned task of its own.
-    async fn settled_deliveries(
+    pub(crate) async fn settled_deliveries(
         path: &std::path::Path,
         job_id: &str,
         n: usize,
@@ -2889,7 +2934,7 @@ mod tests {
     }
 
     /// An active task with no agent, whose run prepares without a subprocess.
-    fn with_active_task(prompt: &str) -> tempfile::NamedTempFile {
+    pub(crate) fn with_active_task(prompt: &str) -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut conn = rusqlite::Connection::open(file.path()).expect("open");
         crate::native::migrate::apply(&mut conn).expect("migrate");
