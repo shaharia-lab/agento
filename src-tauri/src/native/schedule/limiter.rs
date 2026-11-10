@@ -237,6 +237,36 @@ impl Drop for RunSlot {
     }
 }
 
+/// An event [`TaskLimiter::place`] let in: its slot, already running or
+/// still queued. Dropping it gives the place back, as dropping the slot does.
+pub struct Pending {
+    slot: RunSlot,
+    /// `None` when the event was admitted outright.
+    wake: Option<oneshot::Receiver<()>>,
+}
+
+impl Pending {
+    /// Whether the event waits in the task's queue rather than holding a slot.
+    pub fn is_queued(&self) -> bool {
+        self.wake.is_some()
+    }
+
+    /// The slot, once it is this event's turn.
+    pub async fn slot(self) -> Result<RunSlot, Refusal> {
+        let Self { slot, wake } = self;
+        let Some(wake) = wake else {
+            return Ok(slot);
+        };
+        // The sender lives in the task's state, which is never removed, so
+        // this resolves only by being woken. Were it ever dropped instead, the
+        // slot's own `Drop` gives the queue place back.
+        match wake.await {
+            Ok(()) => Ok(slot),
+            Err(_) => Err(Refusal::Dropped),
+        }
+    }
+}
+
 impl TaskLimiter {
     pub fn new() -> Self {
         Self::default()
@@ -275,52 +305,62 @@ impl TaskLimiter {
         limits: Limits,
         now: DateTime<Utc>,
     ) -> Result<RunSlot, Refusal> {
-        let (slot, wake) = {
-            let mut tasks = lock(&self.tasks);
-            let state = tasks.entry(task_id.to_string()).or_default();
-            state.concurrent = limits.concurrent;
-            // A raised limit reaches the events already waiting before this
-            // one is considered, so it cannot overtake them.
-            state.promote();
-            // A start stamped in the future — the clock was set back — is
-            // kept: counting it is the choice that cannot exceed the cap.
-            let cutoff = now - window();
-            state.starts.retain(|start| *start > cutoff);
+        self.place(task_id, limits, now)?.slot().await
+    }
 
-            let load = Load {
-                running: state.running,
-                queued: state.waiting.len(),
-                reserved: state.starts.len() + state.unstarted,
-            };
-            let slot = |id| RunSlot {
-                tasks: Arc::clone(&self.tasks),
-                task_id: task_id.to_string(),
-                id,
-                started: false,
-            };
-            match decide(load, limits) {
-                Decision::RateLimit => return Err(Refusal::RateLimited),
-                Decision::Drop => return Err(Refusal::Dropped),
-                Decision::Admit => {
-                    state.running += 1;
-                    state.unstarted += 1;
-                    return Ok(slot(self.next_id.fetch_add(1, Ordering::Relaxed)));
-                }
-                Decision::Queue => {
-                    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                    let (wake, woken) = oneshot::channel();
-                    state.waiting.push_back((id, wake));
-                    state.unstarted += 1;
-                    (slot(id), woken)
-                }
-            }
+    /// [`Self::admit`]'s decision alone, made now and without waiting (#696):
+    /// a refusal, or the event's place — running or queued — to wait on with
+    /// [`Pending::slot`]. A caller that must answer on the decision, not on
+    /// the slot, asks this; everything else asks [`Self::admit`].
+    pub fn place(
+        &self,
+        task_id: &str,
+        limits: Limits,
+        now: DateTime<Utc>,
+    ) -> Result<Pending, Refusal> {
+        let mut tasks = lock(&self.tasks);
+        let state = tasks.entry(task_id.to_string()).or_default();
+        state.concurrent = limits.concurrent;
+        // A raised limit reaches the events already waiting before this
+        // one is considered, so it cannot overtake them.
+        state.promote();
+        // A start stamped in the future — the clock was set back — is
+        // kept: counting it is the choice that cannot exceed the cap.
+        let cutoff = now - window();
+        state.starts.retain(|start| *start > cutoff);
+
+        let load = Load {
+            running: state.running,
+            queued: state.waiting.len(),
+            reserved: state.starts.len() + state.unstarted,
         };
-        // The sender lives in the task's state, which is never removed, so
-        // this resolves only by being woken. Were it ever dropped instead, the
-        // slot's own `Drop` gives the queue place back.
-        match wake.await {
-            Ok(()) => Ok(slot),
-            Err(_) => Err(Refusal::Dropped),
+        let slot = |id| RunSlot {
+            tasks: Arc::clone(&self.tasks),
+            task_id: task_id.to_string(),
+            id,
+            started: false,
+        };
+        match decide(load, limits) {
+            Decision::RateLimit => Err(Refusal::RateLimited),
+            Decision::Drop => Err(Refusal::Dropped),
+            Decision::Admit => {
+                state.running += 1;
+                state.unstarted += 1;
+                Ok(Pending {
+                    slot: slot(self.next_id.fetch_add(1, Ordering::Relaxed)),
+                    wake: None,
+                })
+            }
+            Decision::Queue => {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let (wake, woken) = oneshot::channel();
+                state.waiting.push_back((id, wake));
+                state.unstarted += 1;
+                Ok(Pending {
+                    slot: slot(id),
+                    wake: Some(woken),
+                })
+            }
         }
     }
 

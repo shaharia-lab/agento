@@ -42,7 +42,7 @@ required, not optional, and this table is the only thing that will prompt it.
 | `src-tauri/src/claude/` | `docs/internal/claude-sdk.md` — the Agent SDK port, and *Hosting a tool* — read before any integration |
 | `src-tauri/src/gateway/` | `docs/internal/gateway.md` — the LLM gateway's engine, control plane (`native/gateway_api.rs`) and usage log |
 | `src-tauri/src/native/` | `docs/internal/native.md` — the `/api` registry, the JSON contract in full, the write path, wire-format traps |
-| `native/security/` | `docs/internal/native-security.md` — the JWT, the three scopes, the guards |
+| `native/security/` | `docs/internal/native-security.md` — the JWT, the four scopes, the guards |
 | `native/chat/` | `docs/internal/native-chat.md` — the SSE turn, permissions, the runner and `mcps.yaml` |
 | `native/sessions/` | `docs/internal/native-sessions.md` — the corpus reads: cost, pagination, relevance, the journey |
 | `native/scanner/`, `native/insights/` | `docs/internal/native-scanner.md`, `docs/internal/native-insights.md` — the scan, the insight worker, the search index and its numbers |
@@ -279,9 +279,11 @@ works against `:8991`. Four things to know before debugging a refusal:
 
 - **A 403 is not a 401.** 401 means the credential did not verify; 403 means it
   did and its scope does not permit the request. Retrying will not help.
-- **Three scopes, and the third is not on the ladder.** `read` < `write` is a
+- **Four scopes, and only two are on the ladder.** `read` < `write` is a
   hierarchy; **`llm` is disjoint from both** — it is the gateway's data-plane
   credential, `write` does not cover it and it covers nothing on `/api`.
+  **`hook` is disjoint too** (#695): it carries a `task_id` claim and is served
+  only on `/api/hooks/{that task_id}`, and no other token is served there.
   `Scope::covers` is enumerated rather than wildcarded; keep it that way.
 - **`api.ts` retries a 401 exactly once**, after a fresh `host_info`. That bound
   is structural (`withAuth`); do not turn it into a loop.
