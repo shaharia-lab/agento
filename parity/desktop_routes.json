@@ -290,6 +290,13 @@
       "status": "native",
       "owner": "#751",
       "reason": "records the one-time retention prompt as answered by setting user_settings.claude_retention_prompt_answered and no other column: no body is read, 200 with {claude_retention_prompt_answered: true} on every call, a missing row is created from the schema defaults so default_model and default_working_dir stay unstored, and no rescan or Credentials Checker sync follows -- the prompt no longer answers through PUT /api/settings, which replaces the whole row"
+    },
+    {
+      "method": "POST",
+      "route": "/api/hooks/{task_id}",
+      "status": "native",
+      "owner": "#696",
+      "reason": "starts one fresh event run of the task (triggered_by webhook) for a hook token bound to that task -- the guard serves no other token here; the body must be JSON (400 otherwise) and its raw text is the event payload, masked and capped by the executor; 202 with {job_id, task_id} on the limiter's decision, admitted or queued, before the run; 404 no such task, 409 not active, 429 rate-limited and 503 queue full (both counted on the task), 500 when the scheduler cannot start it -- none of the refusals writes a job_history row"
     }
   ]
 }

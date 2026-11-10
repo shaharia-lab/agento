@@ -23,14 +23,18 @@
 [advisories]
 ignore = [
     # zip 4.6.1 (RUSTSEC-2026-0367, -0368, -0369: symlink targets, permissions
-    # through symlinks and SUID/SGID bits on extract). The only user is
-    # tauri-plugin-updater, which pins zip ^4 up to its latest release (2.14.0).
+    # through symlinks and SUID/SGID bits on extract; RUSTSEC-2026-0429: an
+    # abort on a symlink entry with a huge declared size). The only user is
+    # tauri-plugin-updater, which pins zip ^4 through 2.14.0; 2.14.1 moves to
+    # zip ^9 but needs tauri ^2.12, and this lockfile is on tauri 2.11.
     # It extracts only on Windows, only the update archive, and only after the
     # archive's minisign signature has been verified against the public key in
-    # tauri.conf.json, so an unsigned archive never reaches `extract`. All three
-    # are Unix permission and symlink behaviour. Remove when
-    # tauri-plugin-updater depends on zip >= 9.0.0.
+    # tauri.conf.json, so an unsigned archive never reaches `extract`. The
+    # first three are Unix permission and symlink behaviour; the fourth needs a
+    # crafted archive, which only the holder of the signing key can produce.
+    # Remove when the lockfile's tauri-plugin-updater depends on zip >= 9.0.0.
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
 ]
