@@ -149,7 +149,7 @@ tauri-plugin-single-instance = "2"
 # owns. `bundled` compiles SQLite from source rather than linking the system
 # library: Windows has none, and every release target builds on its own native
 # runner, so there is no C cross-toolchain to arrange.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 # Effective-dated rates are timestamps, and their wire format has to match Go's
 # byte for byte. `clock` is only for "which rate is in force now".
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
@@ -228,7 +228,7 @@ lettre = { version = "0.11.19", default-features = false, features = [
 # `serde_derive_internals`. `tokio`, `http`, `http-body(-util)`, `tokio-stream`,
 # `tokio-util`, `chrono`, `uuid`, `serde_json`, `thiserror`, `base64`,
 # `schemars` and `tracing` were all in the tree already.
-rmcp = { version = "3.1.2", default-features = false, features = [
+rmcp = { version = "3.9.0", default-features = false, features = [
     "server",
     "transport-streamable-http-server",
 ] }
