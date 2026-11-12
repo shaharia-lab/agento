@@ -1077,10 +1077,7 @@ mod tests {
         // while an aliased or reordered column could hide a real one.
         let columns = |sql: &str| -> Vec<String> {
             let stmt = conn.prepare(sql).expect("prepare");
-            stmt.column_names()
-                .into_iter()
-                .map(str::to_string)
-                .collect()
+            stmt.column_names().map(str::to_string).collect()
         };
 
         let public = columns(PROVIDER_COLUMNS_PUBLIC);
