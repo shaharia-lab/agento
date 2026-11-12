@@ -7,6 +7,11 @@ version: 2
 # `eslint-plugin-react-hooks`, both build-time only. `open-pull-requests-limit`
 # and `groups` (version updates unless `applies-to` says otherwise) do not
 # touch security updates either.
+#
+# Cadence: version updates run on the 1st and 15th, not weekly — roughly every
+# 14 days, which a cron step cannot express exactly. Security updates ignore
+# the schedule by design and open when an advisory lands; the `*-security`
+# groups make each directory's batch one PR instead of one per package.
 updates:
   # Rust: the app's backend. Patch updates only, single grouped PR.
   #
@@ -17,9 +22,8 @@ updates:
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
+      interval: cron
+      cronjob: "0 6 1,15 * *"
       timezone: Europe/Berlin
     open-pull-requests-limit: 1
     ignore:
@@ -31,6 +35,10 @@ updates:
       backend:
         patterns:
           - "*"
+      backend-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Frontend: npm packages — patch updates only, single grouped PR.
   #
@@ -39,9 +47,8 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
+      interval: cron
+      cronjob: "0 6 1,15 * *"
       timezone: Europe/Berlin
     open-pull-requests-limit: 1
     # typescript-eslint does not support TS 7 yet; eslint-plugin-react-hooks 7.1
@@ -59,17 +66,40 @@ updates:
       frontend:
         patterns:
           - "*"
+      frontend-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # GitHub Actions — single grouped PR
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
+      interval: cron
+      cronjob: "0 6 1,15 * *"
       timezone: Europe/Berlin
     open-pull-requests-limit: 1
     groups:
       actions:
+        patterns:
+          - "*"
+      actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # The docs site. Security updates only, grouped: `open-pull-requests-limit:
+  # 0` disables version updates, and the entry exists so that the advisories
+  # Dependabot raises here land as one PR instead of one per package.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: cron
+      cronjob: "0 6 1,15 * *"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 0
+    groups:
+      docs-security:
+        applies-to: security-updates
         patterns:
           - "*"
