@@ -112,7 +112,8 @@ use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
+    Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
@@ -334,7 +335,7 @@ fn normalize_object(schema: &mut serde_json::Map<String, serde_json::Value>) -> 
 /// `*mcp.Server` shared across sessions does.
 #[derive(Clone)]
 pub struct ToolServer {
-    info: ServerInfo,
+    info: ServerConfig,
     router: ToolRouter<ToolServer>,
 }
 
@@ -349,7 +350,7 @@ impl ToolServer {
     /// and [`super::Options::with_tools`] pass one string to both, so the two
     /// only diverge if a caller wires them up by hand.
     pub fn new(name: impl Into<String>) -> Self {
-        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+        let mut info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build());
         info.server_info = Implementation::new(name, super::SDK_VERSION);
         Self {
             info,
@@ -393,7 +394,7 @@ impl ToolServer {
 }
 
 impl ServerHandler for ToolServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         self.info.clone()
     }
 
