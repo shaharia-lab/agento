@@ -13,8 +13,8 @@ on:
     branches: [main]
   push:
     branches: [main]
-  # Mondays 06:00 UTC: after Dependabot's weekly run (06:00 Europe/Berlin, so
-  # 04:00 or 05:00 UTC), and at the start of the week rather than the end.
+  # Mondays 06:00 UTC, at the start of the week rather than the end. Weekly on
+  # its own: Dependabot's version updates run only on the 1st and 15th.
   schedule:
     - cron: '0 6 * * 1'
   workflow_dispatch:
