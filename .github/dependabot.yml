@@ -8,10 +8,8 @@ version: 2
 # and `groups` (version updates unless `applies-to` says otherwise) do not
 # touch security updates either.
 #
-# Cadence: version updates run on the 1st and 15th, not weekly — roughly every
-# 14 days, which a cron step cannot express exactly. Security updates ignore
-# the schedule by design and open when an advisory lands; the `*-security`
-# groups make each directory's batch one PR instead of one per package.
+# Schedule: the 1st and 15th of each month, the org's pattern (Dependabot has
+# no 14-day interval). Security updates ignore the schedule and open at once.
 updates:
   # Rust: the app's backend. Patch updates only, single grouped PR.
   #
@@ -88,9 +86,8 @@ updates:
         patterns:
           - "*"
 
-  # The docs site. Security updates only, grouped: `open-pull-requests-limit:
-  # 0` disables version updates, and the entry exists so that the advisories
-  # Dependabot raises here land as one PR instead of one per package.
+  # The website (/web) is not version-tracked (limit 0); this entry exists only
+  # so its security updates arrive as one grouped PR instead of one per package.
   - package-ecosystem: npm
     directory: /web
     schedule:
@@ -99,7 +96,7 @@ updates:
       timezone: Europe/Berlin
     open-pull-requests-limit: 0
     groups:
-      docs-security:
+      web-security:
         applies-to: security-updates
         patterns:
           - "*"
