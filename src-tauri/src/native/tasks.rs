@@ -4206,9 +4206,6 @@ pub fn marshal_schedule_config(cfg: &ScheduleConfig) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("marshaling schedule config: {e}"))
 }
 
-/// The JSON stored in the `destinations` column: `[]` for none, never `null`,
-/// so the column keeps the one spelling its `DEFAULT` gave every existing row.
-/// `to_vec_marshal` for the same reason as [`marshal_schedule_config`].
 /// The `builtin` column for `builtin`: `''` when the task has none, which is
 /// the column's default and what every pre-#699 row holds.
 fn marshal_builtin(builtin: Option<&TaskBuiltin>) -> Result<String, String> {
@@ -4220,6 +4217,9 @@ fn marshal_builtin(builtin: Option<&TaskBuiltin>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("marshaling builtin: {e}"))
 }
 
+/// The JSON stored in the `destinations` column: `[]` for none, never `null`,
+/// so the column keeps the one spelling its `DEFAULT` gave every existing row.
+/// `to_vec_marshal` for the same reason as [`marshal_schedule_config`].
 fn marshal_destinations(destinations: &[TaskDestination]) -> Result<String, String> {
     let bytes = super::gojson::to_vec_marshal(&destinations)
         .map_err(|e| format!("marshaling destinations: {e}"))?;

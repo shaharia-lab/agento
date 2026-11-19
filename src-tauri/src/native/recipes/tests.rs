@@ -420,13 +420,21 @@ fn a_weekly_digest_round_trips_its_builtin() {
     assert!(!exported(&file, &plain.id).contains("builtin"));
 }
 
-/// An unknown kind in a recipe is the same 422 the task write answers.
+/// An unknown kind in a recipe is the same 422 the task write answers, and an
+/// unknown key inside `builtin` is a 422 naming it, as at every other level.
 #[test]
-fn a_recipe_with_an_unknown_builtin_kind_is_a_422() {
+fn a_recipe_with_an_unknown_builtin_kind_or_key_is_a_422() {
     let file = migrated();
     assert_422(
         &file,
         &format!(r#"{{"agento_recipe":1,{VALID},"builtin":{{"kind":"monthly"}}}}"#),
         "builtin",
+    );
+    assert_422(
+        &file,
+        &format!(
+            r#"{{"agento_recipe":1,{VALID},"builtin":{{"kind":"weekly_digest","narative":true}}}}"#
+        ),
+        "builtin.narative",
     );
 }

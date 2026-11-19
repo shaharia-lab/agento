@@ -320,10 +320,11 @@ fn digest_narrative(task: &ScheduledTask) -> Option<bool> {
         .map(|b| b.narrative)
 }
 
-/// Whether a run of `task` spawns nothing at all: a digest with the narrative
-/// off.
+/// Whether a run of `task` spawns nothing at all: a built-in with the
+/// narrative off. A kind this build does not know counts too, because its run
+/// is refused rather than handed to an agent.
 fn spawns_nothing(task: &ScheduledTask) -> bool {
-    digest_narrative(task) == Some(false)
+    task.builtin.as_ref().is_some_and(|b| !b.narrative)
 }
 
 /// The `job_history.harness` a run of `task` records: [`BUILTIN_HARNESS`]
@@ -979,35 +980,28 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
         step,
     } = ready;
 
-    let (agent, digest) = match step {
-        Step::Agent(agent) => (Some(agent), None),
-        Step::Digest(text) => (None, Some(text)),
-        Step::Narrated { agent, digest } => (Some(agent), Some(digest)),
+    // What a narrated digest delivers if its agent step fails (#699).
+    let digest = match &step {
+        Step::Narrated { digest, .. } => Some(digest.clone()),
+        Step::Agent(_) | Step::Digest(_) => None,
     };
-    let result = match agent {
+    let result = match step {
         // A digest with no narrative (#699): the rendered text is the answer,
         // and nothing is spawned, so there are no tokens to count.
-        None => Ok(RunResult {
-            answer: digest.clone().unwrap_or_default(),
+        Step::Digest(text) => Ok(RunResult {
+            answer: text,
             ..Default::default()
         }),
-        Some(agent) => {
-            let result = match (task_permission_mode(&task, run.kind), &run.continues) {
-                (Err(e), _) => Err(e),
-                (Ok(mode), Some(continues)) => {
-                    resume_agent(&db_path, &task, &job.id, mode, continues, &prompt).await
-                }
-                (Ok(mode), None) => run_agent(&db_path, &task, &job.id, mode, agent, &prompt).await,
-            };
-            // A narrated digest delivers the prose, then the digest itself, so
-            // the numbers arrive whatever the agent made of them.
-            match &digest {
-                Some(digest) => result.map(|mut result| {
+        Step::Agent(agent) => agent_step(&db_path, &task, &job.id, &run, agent, &prompt).await,
+        // A narrated digest delivers the prose, then the digest itself, so
+        // the numbers arrive whatever the agent made of them.
+        Step::Narrated { agent, digest } => {
+            agent_step(&db_path, &task, &job.id, &run, agent, &prompt)
+                .await
+                .map(|mut result| {
                     result.answer = format!("{}{DIGEST_SEPARATOR}{digest}", result.answer);
                     result
-                }),
-                None => result,
-            }
+                })
         }
     };
 
@@ -1072,6 +1066,25 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask, run: Run) {
     );
 }
 
+/// The agent half of a run: a fresh run, or one turn on the chat a
+/// continuation resumes, under the task's own permission mode.
+async fn agent_step(
+    db_path: &std::path::Path,
+    task: &ScheduledTask,
+    job_id: &str,
+    run: &Run,
+    agent: Agent,
+    prompt: &str,
+) -> Result<RunResult, String> {
+    match (task_permission_mode(task, run.kind), &run.continues) {
+        (Err(e), _) => Err(e),
+        (Ok(mode), Some(continues)) => {
+            resume_agent(db_path, task, job_id, mode, continues, prompt).await
+        }
+        (Ok(mode), None) => run_agent(db_path, task, job_id, mode, agent, prompt).await,
+    }
+}
+
 /// What a run needs once everything that can fail before it has not.
 struct Ready {
     task: ScheduledTask,
@@ -1121,6 +1134,21 @@ fn prepare(
 ) -> Result<Ready, Box<Failed>> {
     let db_path = scheduler.db_path().to_path_buf();
     let started_at = run.started_at;
+
+    // A built-in kind this build does not know — a row written by a newer
+    // build — is refused, never run as an agent task: that would spend quota
+    // on a task whose author asked for none (#699).
+    if let Some(builtin) = &task.builtin {
+        if !tasks::BUILTIN_KINDS.contains(&builtin.kind.as_str()) {
+            let message = format!("unknown built-in kind {:?}", builtin.kind);
+            log::error!(
+                "refusing a built-in run task_id={:?} error={message}",
+                task.id
+            );
+            record_failed_run(scheduler, &mut task, "", &message, run);
+            return Err(Box::new(Failed { task, message }));
+        }
+    }
 
     // `prepareTaskRun`. Both failures record a *complete* failed job row and
     // return — the run never reaches `createInitialJobHistory`, so there is no
@@ -1215,15 +1243,18 @@ fn prepare(
         (None, None) => instructions,
     };
 
-    if let (Some(false), Some(digest)) = (narrative, digest.clone()) {
-        return Ok(Ready {
-            task,
-            job,
-            chat_session_id,
-            prompt,
-            step: Step::Digest(digest),
-        });
-    }
+    let digest = match (narrative, digest) {
+        (Some(false), Some(digest)) => {
+            return Ok(Ready {
+                task,
+                job,
+                chat_session_id,
+                prompt,
+                step: Step::Digest(digest),
+            })
+        }
+        (_, digest) => digest,
+    };
 
     // `resolveAgentConfig`. From here on there *is* a running row, so every
     // failure finishes it rather than creating a second.
@@ -4223,5 +4254,36 @@ pub(crate) mod tests {
             "{}",
             received[0].answer
         );
+    }
+
+    /// A stored kind this build does not know is one failed row, on no chat,
+    /// and never an agent run (review of #699).
+    #[tokio::test]
+    async fn a_stored_unknown_builtin_kind_is_refused_not_run_as_an_agent() {
+        let file = with_digest_task(false, "read_only");
+        rusqlite::Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE scheduled_tasks SET builtin = '{\"kind\":\"monthly\",\"narrative\":false}'",
+                [],
+            )
+            .expect("a newer build's kind");
+        let scheduler = test_scheduler(file.path());
+        let task = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        run_task(
+            &scheduler,
+            task,
+            Run::plain(RunKind::Manual, "j-unknown-kind".to_string()),
+        )
+        .await;
+
+        let rows = job_rows_of(file.path());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].error_message, "unknown built-in kind \"monthly\"");
+        assert_eq!(rows[0].harness, BUILTIN_HARNESS);
+        assert_eq!(chat_session_count(file.path()), 0);
     }
 }

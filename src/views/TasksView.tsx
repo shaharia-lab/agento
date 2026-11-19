@@ -908,7 +908,7 @@ export function TasksView({
                   New task
                 </button>
                 <button className="btn" onClick={createWeeklyDigest}>
-                  <Icon name="plus" size={13} />
+                  <Icon name="chart" size={13} />
                   New weekly digest
                 </button>
               </div>

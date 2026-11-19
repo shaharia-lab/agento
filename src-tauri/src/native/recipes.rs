@@ -36,8 +36,9 @@
 //!   sender allow-list (deny-by-default, #688/#690). The UI lists them as "to
 //!   connect".
 //! - **Strict, and strictness is a 422.** A missing or unsupported
-//!   `agento_recipe`, or an unknown key at the top level or inside a
-//!   `destinations[i]`/`triggers[i]` entry, is a 422 naming the field and
+//!   `agento_recipe`, or an unknown key at the top level or inside the
+//!   `builtin` object or a `destinations[i]`/`triggers[i]` entry, is a 422
+//!   naming the field and
 //!   writes nothing — so `status`, `id` and `integration_id` are refused, and a
 //!   later version cannot be half-read by this one. A body that is not JSON or
 //!   not an object stays the 400 every other write answers.
@@ -140,6 +141,7 @@ const RECIPE_KEYS: [&str; 18] = [
 ];
 const DESTINATION_KEYS: [&str; 2] = ["type", "when"];
 const TRIGGER_KEYS: [&str; 3] = ["type", "filter_prefix", "filter_keywords"];
+const BUILTIN_KEYS: [&str; 2] = ["kind", "narrative"];
 
 /// A recipe as an import decodes it, from the request's original bytes after
 /// [`check_keys`] has passed. Every scalar is a zero value when `null`, and
@@ -332,13 +334,26 @@ fn check_version(keys: &serde_json::Map<String, serde_json::Value>) -> Result<()
     ))
 }
 
-/// The first key that is not part of version 1, at the top level or inside a
-/// `destinations[i]`/`triggers[i]` object, is a 422 naming it. Entries that
+/// The first key that is not part of version 1, at the top level or inside the
+/// `builtin` object or a `destinations[i]`/`triggers[i]` object, is a 422
+/// naming it. Entries that
 /// are not objects are left to the typed decode.
 fn check_keys(keys: &serde_json::Map<String, serde_json::Value>) -> Result<(), WriteError> {
     for key in keys.keys() {
         if !RECIPE_KEYS.contains(&key.as_str()) {
             return Err(WriteError::validation(key, "unknown field"));
+        }
+    }
+    // The built-in object (#699): a misspelt `narrative` would otherwise be
+    // dropped by the typed decode and import with the narrative silently off.
+    if let Some(serde_json::Value::Object(builtin)) = keys.get("builtin") {
+        for key in builtin.keys() {
+            if !BUILTIN_KEYS.contains(&key.as_str()) {
+                return Err(WriteError::validation(
+                    &format!("builtin.{key}"),
+                    "unknown field",
+                ));
+            }
         }
     }
     for (list, allowed) in [

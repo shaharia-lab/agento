@@ -881,8 +881,9 @@ tests named below pin them.
   `permission_mode` as stated (`full` included) through `validate_task`.
 - **Strictness is a 422, not serde's 400.** A missing `agento_recipe`, or one
   that is not the integer `1` (`2`, `"1"` and `1.0` are all refused), is a 422
-  on `agento_recipe`. A key outside the version-1 set at the top level or in a
-  `destinations[i]`/`triggers[i]` object is a 422 naming it, so `status`, `id`
+  on `agento_recipe`. A key outside the version-1 set at the top level or in
+  the `builtin` object (#699) or a `destinations[i]`/`triggers[i]` object is a
+  422 naming it, so `status`, `id`
   and `integration_id` are refused rather than ignored. Both checks run on the
   decoded key map before the typed decode, and neither writes. A body that is
   not JSON or not an object, or a known key of the wrong shape, stays the 400
@@ -926,6 +927,10 @@ unchanged:
   prose, `\n\n---\n\n`, then the digest. If the agent step fails, the row is
   `failed` and the destinations receive the **digest** as the answer, so a
   `when: always` destination still gets the numbers.
+- A stored kind this build does not know (a row a newer build wrote) is
+  refused in `prepare` with one failed row, `unknown built-in kind "…"`, and is
+  never run as an agent task
+  (`a_stored_unknown_builtin_kind_is_refused_not_run_as_an_agent`).
 - An event or continuation run of a built-in task renders the same digest. The
   event's payload is stored on the row as for any run and never added to the
   report.
