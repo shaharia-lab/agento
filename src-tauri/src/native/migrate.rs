@@ -92,6 +92,8 @@
 //! mode — `full` for an agent with no mode or `bypass` and for a task with no
 //! agent, `plan` for `plan`, `read_only` for anything else — except that a task
 //! a trigger rule links to becomes `read_only`.
+//! Migration **57** is the twenty-seventh: `api_tokens.task_id`, the task a
+//! `hook` token is bound to, empty for every other scope (#697).
 //! Same terms every time — authored,
 //! additive, and
 //! appended to the vector file as *text*, because a JSON round-trip through most
@@ -323,8 +325,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 56, "expected 56 migrations");
-        assert_eq!(expected_version(), 56);
+        assert_eq!(all.len(), 57, "expected 57 migrations");
+        assert_eq!(expected_version(), 57);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -418,7 +420,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 56);
+        assert_eq!(current_version(&conn).expect("version"), 57);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -636,7 +638,7 @@ mod tests {
         .expect("seed rows at 45");
 
         apply(&mut conn).expect("apply 46 and later");
-        assert_eq!(current_version(&conn).expect("version"), 56);
+        assert_eq!(current_version(&conn).expect("version"), 57);
 
         for table in ["claude_session_cache", "claude_subagent_cache"] {
             let (rows, untouched): (i64, i64) = conn
@@ -696,7 +698,7 @@ mod tests {
         .expect("seed rows at 47");
 
         apply(&mut conn).expect("apply 48 and later");
-        assert_eq!(current_version(&conn).expect("version"), 56);
+        assert_eq!(current_version(&conn).expect("version"), 57);
 
         let flagged = |table: &str| -> Vec<String> {
             let mut stmt = conn
@@ -868,7 +870,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 56);
+        assert_eq!(current_version(&conn).expect("version"), 57);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -1056,6 +1058,38 @@ mod tests {
         want.push(("t-late".to_string(), "plan".to_string()));
         want.sort();
         assert_eq!(modes(&conn), want);
+    }
+
+    /// Migration 57 (#697): an existing token row comes out bound to no task,
+    /// which is what every scope but `hook` is, and the column is indexed for a
+    /// task's list and its delete.
+    #[test]
+    fn migration_57_adds_an_empty_task_id_to_every_existing_token() {
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+        seed_at(&conn, 56);
+        conn.execute(
+            "INSERT INTO api_tokens (id, name, scope, jti, created_at) \
+             VALUES ('t1', 'CI', 'read', 'jti-1', 't')",
+            [],
+        )
+        .expect("a token at 56");
+
+        apply(&mut conn).expect("apply 57");
+        let task_id: String = conn
+            .query_row("SELECT task_id FROM api_tokens WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .expect("read");
+        assert_eq!(task_id, "");
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_api_tokens_task_id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("index");
+        assert_eq!(indexed, 1);
     }
 
     /// Migration 55 (#741): a database URL snippet stored under ruleset 1 on a
@@ -1383,7 +1417,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 56);
+        assert_eq!(current_version(&conn).expect("version"), 57);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -1392,7 +1426,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 56);
+        assert_eq!(recorded, 57);
     }
 
     #[test]

@@ -728,7 +728,50 @@ switch in the form below.
 **Agento has to be running.** A scheduled task fires from the app itself, so
 nothing runs while it is closed.
 
+### Starting a task from a script
+
+A saved task's inspector has a **Webhook** group, for starting the task from a
+git hook, a cron line or a CI job on this machine.
+
+- **Create** a hook token under **New hook token**, with a name and an expiry
+  (90 days by default). It is shown once and stored nowhere, and it can start
+  this task and nothing else: no other task, and nothing else in Agento.
+- The group shows a `curl` that starts the task. Right after **Create** it has
+  the token in it. Once you dismiss the banner it reads the token from
+  `$AGENTO_HOOK_TOKEN` instead, so export that variable where the command runs.
+- The `curl` reads Agento's port from the `api-port` file in Agento's data
+  directory, which the app rewrites every time it starts. The same command keeps
+  working after a restart, and fails to connect while Agento is closed.
+- A call answers `202` with the run's `job_id`, and the run shows in **Job
+  history** as **Webhook**. A paused task answers `409`.
+- **Revoke** a token from the same group, or from **Settings → Security**, and
+  its next call is refused. Deleting the task revokes every one of its hook
+  tokens.
+- The command is POSIX shell. On Windows, run it from Git Bash or WSL.
+
 ---
+
+### Sharing a task as a recipe
+
+A **recipe** is a task saved as a small `.agento-recipe.json` file, to back an
+automation up or hand it to someone else. It carries the task's name,
+description, prompt, agent, model, schedule, limits and permission mode, and
+says only *what kind* of delivery and trigger the task had.
+
+- **Export recipe** in a task's toolbar saves the stored task (not unsaved
+  edits) through the Save dialog. The file holds no credentials and nothing
+  that identifies your setup: no integration, channel, chat, recipient,
+  allowed sender, working directory or settings profile. The prompt and
+  description are copied as written, except that any key the Credentials
+  Checker recognises is masked — so read a prompt before sharing it.
+- **Import** at the top of the task list opens a recipe and creates a new
+  task from it, always **paused**, whatever the original was. It does not run
+  until you have reviewed it and pressed **Enable**. Its **Reply to sender**
+  destination comes with it; Slack, Telegram and email destinations and
+  trigger rules do not, because each needs your own integration, recipients or
+  allowed senders. The note on the imported task lists what to connect.
+- A file from a newer Agento, or with a field this version does not know, is
+  refused with a message naming the field, and nothing is created.
 
 ## Job history
 
@@ -1323,6 +1366,9 @@ The API tokens this install has issued, and the key that signs them.
 
 - **Issue a token** with a scope: `read` or `write` for the Agento API, or `llm`
   for the [LLM Gateway](#llm-gateway). It is shown once and stored nowhere.
+  A `hook` token, which starts one task, is issued from that task's **Webhook**
+  group instead (see [Starting a task from a script](#starting-a-task-from-a-script)),
+  and is listed here with the task it is bound to.
 - **Revoke** one by name, which stops it immediately and leaves every other token
   working.
 - **Regenerate the signing key** invalidates *every* token at once, gateway

@@ -473,6 +473,10 @@ struct CreateTokenRequest {
     /// `0` or absent means [`DEFAULT_TOKEN_DAYS`].
     #[serde(default, deserialize_with = "gojson::null_is_zero_value")]
     expires_in_days: i64,
+    /// The task a `hook` token may start (#697): required for that scope and
+    /// refused for every other.
+    #[serde(default, deserialize_with = "gojson::null_is_zero_value")]
+    task_id: String,
 }
 
 /// How long a user token lasts when the request does not say.
@@ -510,15 +514,27 @@ fn create_token(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
         Scope::Read
     } else {
         Scope::parse(&req.scope).ok_or_else(|| {
-            WriteError::validation("scope", "scope must be \"read\", \"write\" or \"llm\"")
+            WriteError::validation(
+                "scope",
+                "scope must be \"read\", \"write\", \"llm\" or \"hook\"",
+            )
         })?
     };
-    // A hook token is bound to one task, and this route has no task to bind it
-    // to — minting one here would be a token that can never verify (#695).
-    if scope == Scope::Hook {
+    // A hook token is bound to one task (#695), so it needs one, and nothing
+    // else may carry one: a `task_id` on a read token would sit in the row and
+    // the list as if it narrowed something, when the JWT it describes opens
+    // every route its scope covers (#697).
+    let task_id = req.task_id.trim().to_string();
+    if scope == Scope::Hook && task_id.is_empty() {
         return Err(WriteError::validation(
-            "scope",
-            "hook tokens are minted per task",
+            "task_id",
+            "a hook token needs the task_id it may start",
+        ));
+    }
+    if scope != Scope::Hook && !task_id.is_empty() {
+        return Err(WriteError::validation(
+            "task_id",
+            "task_id is only for a hook token",
         ));
     }
     let days = match req.expires_in_days {
@@ -532,31 +548,51 @@ fn create_token(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
         d => d,
     };
 
-    let keypair = keys::current()
-        .ok_or_else(|| WriteError::Fallback("no signing key installed".to_string()))?;
-
     // The id is minted first so it can be the token's `sub`: a decoded token
     // then names the row that can revoke it, which is what makes a token found
     // in someone's script traceable to a line in the Security tab.
     let id = uuid::Uuid::new_v4().to_string();
-    let minted =
-        token::mint(&keypair, &id, scope, days * 24 * 60 * 60).map_err(WriteError::Fallback)?;
+
+    let mut conn = super::db::open_read_write(db_path).map_err(WriteError::Fallback)?;
+    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
+    // One immediate transaction around the task check and the insert, because
+    // the task's delete revokes its hook tokens inside one of its own: the two
+    // serialise, so a token is either seen and revoked by the delete or refused
+    // here for naming no task — never inserted live for a task already gone.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin token create: {e}")))?;
+    if scope == Scope::Hook && !task_exists(&tx, &task_id).map_err(WriteError::Fallback)? {
+        return Err(WriteError::validation("task_id", "no such task"));
+    }
+
+    let keypair = keys::current()
+        .ok_or_else(|| WriteError::Fallback("no signing key installed".to_string()))?;
+
+    let ttl = days * 24 * 60 * 60;
+    let minted = if scope == Scope::Hook {
+        token::mint_hook(&keypair, &id, &task_id, ttl)
+    } else {
+        token::mint(&keypair, &id, scope, ttl)
+    }
+    .map_err(WriteError::Fallback)?;
 
     let created_at = gotime::now_go_text();
     let expires_at = gotime::go_text_at(minted.expires_at);
 
-    let conn = super::db::open_read_write(db_path).map_err(WriteError::Fallback)?;
-    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
     tokens::insert(
-        &conn,
+        &tx,
         &id,
         &name,
         scope,
+        &task_id,
         &minted.jti,
         &created_at,
         &expires_at,
     )
     .map_err(WriteError::Fallback)?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit token create: {e}")))?;
 
     // Built by hand rather than re-read, so it must apply the same wire
     // conversion `TokenRow::from_row` does — otherwise the row a creation
@@ -566,6 +602,7 @@ fn create_token(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
         id: id.clone(),
         name: name.clone(),
         scope: scope.as_str().to_string(),
+        task_id: task_id.clone(),
         created_at: tokens::wire_time(&created_at),
         expires_at: Some(tokens::wire_time(&expires_at)),
         last_used_at: None,
@@ -581,10 +618,23 @@ fn create_token(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
     // the name is what makes the line worth having, and the credential is the
     // one thing this log must never carry.
     log::info!(
-        "api token created id={id:?} name={name:?} scope={:?}",
+        "api token created id={id:?} name={name:?} scope={:?} task_id={task_id:?}",
         scope.as_str()
     );
     Ok(Answer::json_status(StatusCode::CREATED, body))
+}
+
+/// Whether a task with this id exists, for a hook token's mint.
+fn task_exists(conn: &rusqlite::Connection, task_id: &str) -> Result<bool, String> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT 1 FROM scheduled_tasks WHERE id = ?1",
+        [task_id],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(|e| format!("looking up task {task_id:?}: {e}"))
 }
 
 fn revoke_token(db_path: &std::path::Path, id: &str) -> Result<Answer, WriteError> {
@@ -755,24 +805,121 @@ mod tests {
         assert!(claims(&Method::GET, "/api/security/tokens"));
     }
 
-    /// A hook token is refused by the generic create route rather than minted
-    /// unbound (#695): the route has no task to bind it to.
-    #[test]
-    fn the_create_route_refuses_a_hook_token() {
-        let db = std::path::Path::new("/nonexistent/agento-create-token-test.db");
-        let err = match create_token(db, br#"{"name":"git hook","scope":"hook"}"#) {
+    /// A migrated database holding one task, `task-a`.
+    fn db_with_task() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agento.db");
+        let mut conn = rusqlite::Connection::open(&path).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks (id, name, prompt, schedule_type, created_at, updated_at) \
+             VALUES ('task-a', 'Deploy notes', 'p', 'cron', 't', 't')",
+            [],
+        )
+        .expect("task");
+        (dir, path)
+    }
+
+    /// The 422 a create answers, and the field it names.
+    fn refused(db: &std::path::Path, body: &str) -> String {
+        let err = match create_token(db, body.as_bytes()) {
             Err(e) => e,
-            Ok(_) => panic!("a hook token must not be minted by the generic route"),
+            Ok(_) => panic!("{body} must be refused"),
         };
-        assert!(
-            err.message().contains("hook tokens are minted per task"),
-            "{}",
-            err.message()
-        );
+        let message = err.message();
         assert_eq!(
             writes::finish(Err(err)).expect("answer").status,
-            StatusCode::UNPROCESSABLE_ENTITY
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}: {message}"
         );
+        message
+    }
+
+    /// **A hook token needs a task that exists, and only a hook token takes
+    /// one** (#697). Each of these is decided before a key is read, so none of
+    /// them touches the process-wide keypair.
+    #[test]
+    fn the_create_route_binds_a_hook_token_to_an_existing_task() {
+        let (_dir, db) = db_with_task();
+
+        for body in [
+            r#"{"name":"git hook","scope":"hook"}"#,
+            r#"{"name":"git hook","scope":"hook","task_id":""}"#,
+            r#"{"name":"git hook","scope":"hook","task_id":null}"#,
+            r#"{"name":"git hook","scope":"hook","task_id":"  "}"#,
+        ] {
+            let message = refused(&db, body);
+            assert!(message.contains("\"task_id\""), "{body}: {message}");
+        }
+
+        let message = refused(
+            &db,
+            r#"{"name":"git hook","scope":"hook","task_id":"task-b"}"#,
+        );
+        assert!(message.contains("no such task"), "{message}");
+
+        for scope in ["read", "write", "llm", ""] {
+            let body = format!(r#"{{"name":"n","scope":"{scope}","task_id":"task-a"}}"#);
+            let message = refused(&db, &body);
+            assert!(
+                message.contains("only for a hook token"),
+                "{body}: {message}"
+            );
+        }
+
+        // Nothing above reached the table.
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM api_tokens", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(rows, 0);
+    }
+
+    /// **A hook token minted through the route opens its own task's hook and
+    /// nothing else**, and its row and answer carry the task (#697).
+    ///
+    /// Signs with the guard tests' seeded keypair, which is installed once and
+    /// never replaced, so this is safe beside them.
+    #[test]
+    fn a_hook_token_minted_through_the_route_opens_only_its_own_task() {
+        let keypair = crate::guards::tests::seeded_keys();
+        let (_dir, db) = db_with_task();
+
+        let answer = writes::finish(create_token(
+            &db,
+            br#"{"name":"git hook","scope":"hook","task_id":"task-a","expires_in_days":3650}"#,
+        ))
+        .expect("answer");
+        assert_eq!(answer.status, StatusCode::CREATED);
+        let body: serde_json::Value =
+            serde_json::from_slice(&answer.body.expect("body")).expect("json");
+        assert_eq!(body["scope"], "hook");
+        assert_eq!(body["task_id"], "task-a");
+        let presented = body["token"].as_str().expect("token").to_string();
+
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        let row = tokens::get(&conn, body["id"].as_str().expect("id"))
+            .expect("get")
+            .expect("row");
+        assert_eq!(row.task_id, "task-a");
+
+        let at = |method: Method, path: &str| {
+            verify_with(&presented, &method, path, Some(&keypair), &|_| false)
+        };
+        let verified = at(Method::POST, "/api/hooks/task-a").expect("its own hook");
+        assert_eq!(verified.task_id.as_deref(), Some("task-a"));
+        for (method, path) in [
+            (Method::POST, "/api/hooks/task-b"),
+            (Method::GET, "/api/tasks"),
+            (Method::POST, "/api/tasks/task-a/run"),
+            (Method::GET, "/api/security/tokens"),
+        ] {
+            assert_eq!(
+                at(method.clone(), path),
+                Err(Denied::InsufficientScope),
+                "{method} {path}"
+            );
+        }
     }
 
     /// Every method under `/api/hooks/` needs the hook scope, so neither a

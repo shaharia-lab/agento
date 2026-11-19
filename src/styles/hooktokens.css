@@ -1,0 +1,130 @@
+/* ============================================================================
+   A task's Webhook group (#697) — `views/tasks/HookTokens.tsx`.
+
+   It lives in the inspector, which is 220-420px wide, so everything stacks:
+   the `curl` wraps rather than scrolls, and each token is a short block rather
+   than a table row.
+   ========================================================================== */
+
+.hooktokens {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-2) 0;
+}
+
+/* The reveal banner's own bottom margin is for a settings form; here the
+   group's gap already spaces it. */
+.hooktokens .secnew {
+  margin-bottom: 0;
+  padding: var(--sp-4);
+}
+
+/* A JWT beside its Copy button leaves a 120px column in the inspector, so the
+   two stack here. */
+.hooktokens .secnew__token {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.hooktokens .secnew__token code {
+  width: 100%;
+}
+
+.hooktokens__curl {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-inset);
+}
+
+.hooktokens__curl pre {
+  margin: 0;
+  width: 100%;
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--fg);
+}
+
+.hooktokens__note {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--fg-secondary);
+}
+
+.hooktokens__error {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--red);
+}
+
+.hooktokens__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hooktokens__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.hooktokens__name {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg);
+}
+
+/* Kept in the list, dimmed, for the Security tab's reason: a revoked row
+   vanishing would read as a deletion. */
+.hooktokens__item--revoked .hooktokens__name,
+.hooktokens__item--revoked .hooktokens__meta {
+  color: var(--fg-tertiary);
+}
+
+.hooktokens__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+}
+
+.hooktokens__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  font-size: var(--text-xs);
+  color: var(--fg);
+}
+
+.hooktokens__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.hooktokens__label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+.hooktokens__days {
+  gap: var(--sp-3);
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../lib/api";
+import { api, importRecipe } from "../lib/api";
 import type {
   Agent,
   Integration,
@@ -43,7 +43,17 @@ import {
   Splitter,
   Switch,
 } from "../components/ui";
+import {
+  RECIPES_AVAILABLE,
+  exportTaskRecipe,
+  pickRecipeOpenPath,
+  pickRecipeSavePath,
+  readRecipeFile,
+  recipeFileName,
+  unconnectedWiring,
+} from "../lib/recipes";
 import { DeliverySection, isUsableDestination } from "./tasks/Delivery";
+import { HookTokens } from "./tasks/HookTokens";
 import "../styles/tasks.css";
 
 const POLL_MS = 10_000;
@@ -401,6 +411,8 @@ function modelPlaceholder(slug: string, agents: Agent[], defaultModel: string): 
 export function TasksView({
   inspectorOpen,
   onNavigate,
+  openTaskId,
+  openTaskNonce = 0,
 }: {
   inspectorOpen: boolean;
   /**
@@ -411,6 +423,10 @@ export function TasksView({
    * the same reason the three gateway views take one.
    */
   onNavigate: NavigateFn;
+  /** A task handed off from a hook token's row in Security, to select (#697). */
+  openTaskId?: string;
+  /** `App`'s nav nonce, so the *same* hand-off twice still fires. */
+  openTaskNonce?: number;
 }) {
   const picker = useDirPicker();
   const tasksRes = useResource<ScheduledTask[] | null>(
@@ -486,18 +502,43 @@ export function TasksView({
   const [autoOpenDismissed, setAutoOpenDismissed] = useState(false);
   useEffect(() => setAutoOpenDismissed(false), [actionError]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /**
+   * The last recipe export or import (#698), shown inline on the task it
+   * concerns — never a dialog. `importError` sits under the list head
+   * instead, because a refused import has no task to show it on.
+   */
+  const [recipeNote, setRecipeNote] = useState<{
+    taskId: string;
+    text: string;
+    unconnected?: string[];
+  } | null>(null);
+  const [importError, setImportError] = useState<string>();
+  /** The imported task to keep selected until the list reload includes it. */
+  const importedId = useRef<string | null>(null);
   /** See `LimitStash` — what the two Limits switches restore when flicked back on. */
   const lastLimits = useRef<LimitStash>({ id: "", count: 0, time: null });
 
   const selected = selectedId ? tasks.find((t) => t.id === selectedId) ?? null : null;
 
-  // Select something as soon as there is something to select.
+  // Select something as soon as there is something to select — except a task
+  // just imported, which the list has not reloaded with yet (#698).
   useEffect(() => {
     if (creating || tasks.length === 0) return;
+    if (selectedId && selectedId === importedId.current) {
+      if (tasks.some((t) => t.id === selectedId)) importedId.current = null;
+      return;
+    }
     if (!selectedId || !tasks.some((t) => t.id === selectedId)) {
       setSelectedId(tasks[0].id);
     }
   }, [tasks, selectedId, creating]);
+
+  // A hand-off selects its task, as a click on the row would.
+  useEffect(() => {
+    if (!openTaskId) return;
+    setCreating(false);
+    setSelectedId(openTaskId);
+  }, [openTaskId, openTaskNonce]);
 
   // Re-seed the form from the server, but never on top of unsaved edits — the
   // 10s poll would otherwise wipe out whatever is being typed.
@@ -710,6 +751,47 @@ export function TasksView({
     }
   }
 
+  /** Write the stored task — not the draft — to a picked `.agento-recipe.json`. */
+  async function exportRecipe() {
+    if (!draft?.id) return;
+    const taskId = draft.id;
+    setActionError(undefined);
+    try {
+      const dest = await pickRecipeSavePath(recipeFileName(draft.name));
+      if (!dest) return;
+      await exportTaskRecipe(taskId, dest);
+      setRecipeNote({
+        taskId,
+        text: `Recipe exported to ${dest}. The prompt is copied as written, except for keys the Credentials Checker recognises, which are masked.`,
+      });
+    } catch (err) {
+      setActionError(describeError(err));
+    }
+  }
+
+  /** Read a picked recipe file and create its task, paused, then select it. */
+  async function importRecipeFile() {
+    setImportError(undefined);
+    try {
+      const path = await pickRecipeOpenPath();
+      if (!path) return;
+      const text = await readRecipeFile(path);
+      const task = await importRecipe(text);
+      setRecipeNote({
+        taskId: task.id,
+        text: `Imported as a paused task with the ${task.permission_mode} permission mode. Review it, then enable it.`,
+        unconnected: unconnectedWiring(text),
+      });
+      importedId.current = task.id;
+      setCreating(false);
+      setDirty(false);
+      setSelectedId(task.id);
+      tasksRes.reload();
+    } catch (err) {
+      setImportError(describeError(err));
+    }
+  }
+
   async function remove() {
     if (!draft?.id) return;
     setBusy(true);
@@ -741,10 +823,18 @@ export function TasksView({
         <div className="listhead">
           <div className="listhead__row">
             <Search value={query} onChange={setQuery} placeholder="Search tasks" />
+            {/* Not a `+`: an import is not "New X" (#516). Tauri only, since
+                both the dialog and the file read are the shell's. */}
+            {RECIPES_AVAILABLE && (
+              <button className="btn btn--ghost" onClick={importRecipeFile}>
+                Import
+              </button>
+            )}
             <button className="iconbtn" title="New task" onClick={startCreate}>
               <Icon name="plus" size={14} />
             </button>
           </div>
+          {importError && <div className="formerror">{importError}</div>}
         </div>
 
         {listLoading ? (
@@ -888,6 +978,11 @@ export function TasksView({
                       >
                         {draft.status === "active" ? "Disable" : "Enable"}
                       </button>
+                      {RECIPES_AVAILABLE && (
+                        <button className="btn" onClick={exportRecipe} disabled={busy}>
+                          Export recipe
+                        </button>
+                      )}
                       <button
                         className="iconbtn"
                         title={DESTROY}
@@ -904,6 +999,17 @@ export function TasksView({
             <div className="scroll tasks-form" style={{ flex: 1, padding: "var(--sp-8)" }}>
               <div className="form">
                 {actionError && <div className="formerror">{actionError}</div>}
+                {recipeNote && !creating && recipeNote.taskId === draft.id && (
+                  <div className="tasks-form__note">
+                    {recipeNote.text}
+                    {recipeNote.unconnected && recipeNote.unconnected.length > 0 && (
+                      <>
+                        {" "}Not imported, connect on this task:{" "}
+                        {recipeNote.unconnected.join(", ")}.
+                      </>
+                    )}
+                  </div>
+                )}
 
                 <div className="formsec">
                   <div className="formsec__title">Task</div>
@@ -1343,6 +1449,12 @@ export function TasksView({
                       onRetry={historyRes.reload}
                       onOpen={(jobId) => onNavigate("jobs", { jobId })}
                     />
+                  </InspGroup>
+
+                  <InspGroup title="Webhook">
+                    {/* Keyed by task so a revealed token never survives a
+                        switch to another task. */}
+                    <HookTokens key={draft.id} task={selected ?? draft} />
                   </InspGroup>
                 </>
               )}

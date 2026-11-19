@@ -47,6 +47,7 @@ pub mod notifications;
 pub mod pricing;
 pub mod pricing_seed;
 pub mod query;
+pub mod recipes;
 pub mod scan;
 pub mod scanner;
 pub mod schedule;
@@ -483,6 +484,8 @@ mod tests {
         assert!(claims(&Method::GET, "/api/tasks"));
         assert!(claims(&Method::GET, "/api/tasks/abc-123"));
         assert!(claims(&Method::GET, "/api/tasks/abc-123/job-history"));
+        assert!(claims(&Method::GET, "/api/tasks/abc-123/recipe"));
+        assert!(claims(&Method::POST, "/api/tasks/import"));
         assert!(claims(&Method::GET, "/api/job-history"));
         assert!(claims(&Method::GET, "/api/job-history/abc-123"));
         assert!(claims(&Method::POST, "/api/tasks"));
@@ -1023,6 +1026,7 @@ mod tests {
             "/api/tasks",
             "/api/tasks/abc-123",
             "/api/tasks/abc-123/job-history",
+            "/api/tasks/abc-123/recipe",
             "/api/job-history",
             "/api/job-history/abc-123",
             "/api/settings",
@@ -1070,6 +1074,7 @@ mod tests {
             "/api/tasks",
             "/api/tasks/abc-123",
             "/api/tasks/abc-123/job-history",
+            "/api/tasks/abc-123/recipe",
             "/api/job-history",
             "/api/job-history/abc-123",
             "/api/settings",

@@ -471,7 +471,7 @@ pub(crate) mod tests {
     /// regenerate case — would break every test running beside it. That case is
     /// therefore tested where it belongs, in `security::token`, against two
     /// explicit keypairs and no global at all.
-    fn seeded_keys() -> std::sync::Arc<keys::Keypair> {
+    pub(crate) fn seeded_keys() -> std::sync::Arc<keys::Keypair> {
         static SEEDED: std::sync::OnceLock<std::sync::Arc<keys::Keypair>> =
             std::sync::OnceLock::new();
         std::sync::Arc::clone(SEEDED.get_or_init(|| {

@@ -37,4 +37,13 @@ ignore = [
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
     "RUSTSEC-2026-0429",
+    # zip 4.6.1 (RUSTSEC-2026-0545: AES entries returned without checking their
+    # authentication code; RUSTSEC-2026-0548: `ZipStreamReader` extracting under
+    # local-header names). Same sole user as above, and neither path is
+    # reachable: tauri-plugin-updater 2.10.1 depends on zip with
+    # `default-features = false`, so AES support is not compiled in, and it
+    # extracts through `ZipArchive`, never `ZipStreamReader`. Remove on the same
+    # condition as the entries above.
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0548",
 ]

@@ -105,6 +105,10 @@ pub struct HostInfo {
     /// How this copy was installed, for the update wording ("appimage",
     /// "package", "dmg", "installer").
     pub install_kind: String,
+    /// Absolute path of the file this launch wrote its `/api` port to
+    /// ([`write_api_port_file`]), or empty when there is no data dir. A task's
+    /// webhook `curl` reads the port from it, so it survives a restart.
+    pub api_port_file: String,
 }
 
 #[tauri::command]
@@ -133,6 +137,9 @@ fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
         claude_cli_source: claude.as_ref().map(|r| r.source.as_str().to_string()),
         can_self_update: install_kind() != "package",
         install_kind: install_kind().to_string(),
+        api_port_file: paths::data_dir()
+            .map(|dir| api_port_path(&dir).display().to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -161,6 +168,48 @@ async fn export_session(
     })
     .await
     .unwrap_or_else(|| Err(ExportError::failed("the export failed unexpectedly")))
+}
+
+/// Write task `task_id` as a recipe file at the path the user picked in the
+/// native Save-As dialog (#698). `native::recipes` holds the format and its
+/// rules; these are the same bytes `GET /api/tasks/{id}/recipe` answers.
+/// Answers the number of bytes written.
+#[tauri::command]
+async fn export_task_recipe(task_id: String, dest_path: String) -> Result<u64, String> {
+    let db = paths::database_path().ok_or("no home directory to find the database in")?;
+    native::db::blocking("task recipe export", move || {
+        let recipe = native::recipes::export(&db, &task_id)?
+            .ok_or_else(|| format!("task {task_id:?} not found"))?;
+        let bytes = native::recipes::encode(&recipe)?;
+        std::fs::write(&dest_path, &bytes).map_err(|e| format!("writing {dest_path}: {e}"))?;
+        Ok(bytes.len() as u64)
+    })
+    .await
+    .unwrap_or_else(|| Err("the export failed unexpectedly".to_string()))
+}
+
+/// The largest recipe file [`read_recipe_file`] reads. A version-1 recipe is a
+/// few kilobytes; anything near this is not one.
+const MAX_RECIPE_BYTES: u64 = 256 * 1024;
+
+/// Read the recipe file the user picked in the native Open dialog (#698), as
+/// text for the webview to post to `POST /api/tasks/import` — so the import
+/// itself goes through the `/api` write path like every other write.
+#[tauri::command]
+async fn read_recipe_file(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let size = std::fs::metadata(&path)
+            .map_err(|e| format!("reading {path}: {e}"))?
+            .len();
+        if size > MAX_RECIPE_BYTES {
+            return Err(format!(
+                "{path} is {size} bytes; a recipe file is at most {MAX_RECIPE_BYTES}"
+            ));
+        }
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("reading the recipe failed unexpectedly: {e}")))
 }
 
 /// How this copy was installed.
@@ -252,6 +301,34 @@ fn write_dev_token_file(token: &str) {
     log::info!("dev api token written to {}", path.display());
 }
 
+/// Where this launch's `/api` port is written: `<data dir>/api-port`.
+fn api_port_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("api-port")
+}
+
+/// Write the port the `/api` server bound, so a script can find it (#697).
+///
+/// A release build binds an OS-chosen port every launch, so a port typed into
+/// a task's webhook `curl` would stop working at the next restart. The `curl`
+/// reads this file instead. Written on every launch, debug included, and it
+/// holds only the port: unlike `api-token` it is not a secret, so it keeps the
+/// default mode.
+///
+/// A failure is a warning, never a failed startup: the app works without it,
+/// and only an external `curl` loses its way to the port.
+fn write_api_port_file(port: u16) {
+    let Some(dir) = paths::data_dir() else {
+        log::warn!("api port file: no data dir to write it to");
+        return;
+    };
+    let path = api_port_path(&dir);
+    if let Err(e) =
+        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, port.to_string()))
+    {
+        log::warn!("api port file: writing {}: {e}", path.display());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -316,7 +393,9 @@ pub fn run() {
             logs::log_files,
             logs::read_log,
             logs::export_logs,
-            export_session
+            export_session,
+            export_task_recipe,
+            read_recipe_file
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -451,6 +530,7 @@ pub fn run() {
                 let proxy = proxy::serve(proxy_port)
                     .await
                     .map_err(|e| format!("starting api server: {e}"))?;
+                write_api_port_file(proxy);
 
                 handle.manage(AppPorts { proxy });
 
@@ -837,6 +917,26 @@ mod acl_manifest_tests {
              capabilities/default.json disagree: an ungranted command is refused \
              with `Command <name> not allowed by ACL` in every release build"
         );
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod port_file_tests {
+    use super::*;
+
+    /// The port file holds the port and nothing else, and a second launch
+    /// replaces the first one's port (#697).
+    #[test]
+    fn the_api_port_file_holds_only_this_launchs_port() {
+        let _lock = crate::paths::tests::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = crate::paths::tests::EnvVar::set("HOME", home.path());
+
+        write_api_port_file(41234);
+        write_api_port_file(8991);
+
+        let path = api_port_path(&crate::paths::data_dir().expect("data dir"));
+        assert_eq!(std::fs::read_to_string(&path).expect("port file"), "8991");
     }
 }
 

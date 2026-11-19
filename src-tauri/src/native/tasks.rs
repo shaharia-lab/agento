@@ -777,6 +777,8 @@ fn page_offset(query: &str) -> i64 {
 pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/tasks/{id}/run"),
     ("POST", "/api/tasks/preview"),
+    ("GET", "/api/tasks/{id}/recipe"),
+    ("POST", "/api/tasks/import"),
 ];
 
 /// This module's entry in `native::ENDPOINTS`.
@@ -797,6 +799,11 @@ enum Route<'a> {
     /// other method on the path is `Task("preview")`, as it was before — see
     /// [`route`].
     TaskPreview,
+    /// `GET /api/tasks/{id}/recipe` (#698): the task as a shareable recipe.
+    TaskRecipe(&'a str),
+    /// `POST /api/tasks/import` (#698). `preview`'s method rule: every other
+    /// method on the path is `Task("import")` — see [`route`].
+    TaskImport,
     TaskJobHistory(&'a str),
     JobHistoryList,
     JobHistory(&'a str),
@@ -808,6 +815,7 @@ fn claims(method: &Method, path: &str) -> bool {
             route(method, path),
             Some(Route::TaskList)
                 | Some(Route::Task(_))
+                | Some(Route::TaskRecipe(_))
                 | Some(Route::TaskJobHistory(_))
                 | Some(Route::JobHistoryList)
                 | Some(Route::JobHistory(_))
@@ -824,6 +832,7 @@ fn claims(method: &Method, path: &str) -> bool {
                 | Some(Route::TaskResume(_))
                 | Some(Route::TaskRun(_))
                 | Some(Route::TaskPreview)
+                | Some(Route::TaskImport)
         ),
         Method::PUT => matches!(route(method, path), Some(Route::Task(_))),
         Method::DELETE => matches!(
@@ -834,13 +843,15 @@ fn claims(method: &Method, path: &str) -> bool {
     }
 }
 
-/// [`route_of`], with the one method-dependent path resolved: `preview` is the
-/// preview route only for a `POST`, and a task id for everything else — so a
-/// `GET /api/tasks/preview` is still an unknown task, exactly as it was before
-/// the route existed. (A real id is a UUID, so it can never be `preview`.)
+/// [`route_of`], with the two method-dependent paths resolved: `preview` and
+/// `import` (#698) are their routes only for a `POST`, and a task id for
+/// everything else — so a `GET /api/tasks/preview` is still an unknown task,
+/// exactly as it was before the route existed. (A real id is a UUID, so it can
+/// never be either word.)
 fn route<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
     match route_of(path) {
         Some(Route::TaskPreview) if *method != Method::POST => Some(Route::Task("preview")),
+        Some(Route::TaskImport) if *method != Method::POST => Some(Route::Task("import")),
         other => other,
     }
 }
@@ -874,8 +885,14 @@ fn route_of(path: &str) -> Option<Route<'_>> {
         if let Some(id) = rest.strip_suffix("/run") {
             return segment(id).map(Route::TaskRun);
         }
+        if let Some(id) = rest.strip_suffix("/recipe") {
+            return segment(id).map(Route::TaskRecipe);
+        }
         if rest == "preview" {
             return Some(Route::TaskPreview);
+        }
+        if rest == "import" {
+            return Some(Route::TaskImport);
         }
         return segment(rest).map(Route::Task);
     }
@@ -902,6 +919,8 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         (Method::POST, Some(Route::TaskResume(id))) => finish(resume_task(db, id)),
         (Method::POST, Some(Route::TaskRun(id))) => finish(run_task_now(id)),
         (Method::POST, Some(Route::TaskPreview)) => finish(preview_task(db, req.body)),
+        (Method::POST, Some(Route::TaskImport)) => finish(super::recipes::import(db, req.body)),
+        (Method::GET, Some(Route::TaskRecipe(id))) => finish(super::recipes::answer(db, id)),
         (Method::PUT, Some(Route::Task(id))) => finish(update_task(db, id, req.body)),
         (Method::GET, _) => serve_read(ctx, req),
         _ => Err(format!("{} {} is not ported", req.method, req.path)),
@@ -950,7 +969,11 @@ fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, S
         | Some(Route::TaskResume(_))
         | Some(Route::TaskRun(_))
         | Some(Route::TaskPreview)
+        | Some(Route::TaskImport)
         | None => return Err(format!("{} is not a task read", req.path)),
+        // Answered by `serve` before it reaches here: unlike the bare task
+        // read, an unknown id is a real 404 (#698).
+        Some(Route::TaskRecipe(_)) => return Err(format!("{} is not a task read", req.path)),
     };
     Ok(super::Answer::json(body))
 }
@@ -3332,6 +3355,50 @@ mod tests {
         assert!(history_ids(&file).is_empty());
     }
 
+    /// **Deleting a task revokes every one of its hook tokens** (#697), in the
+    /// database and in the guard's set, and leaves another task's alone. The
+    /// rows survive, because deleting one would un-revoke it.
+    #[test]
+    fn deleting_a_task_revokes_its_hook_tokens_and_no_others() {
+        use crate::native::security::{token::Scope, tokens};
+        let file = migrated_with_history();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO scheduled_tasks (id, name, prompt) VALUES ('t2', 'U', 'p')",
+            [],
+        )
+        .expect("second task");
+        for (id, task) in [("h1", "t1"), ("h2", "t1"), ("h3", "t2")] {
+            tokens::insert(
+                &conn,
+                id,
+                "hook",
+                Scope::Hook,
+                task,
+                &format!("jti-697-delete-{id}"),
+                "2026-01-01 00:00:00 +0000 UTC",
+                "2027-01-01 00:00:00 +0000 UTC",
+            )
+            .expect("token");
+        }
+        drop(conn);
+
+        delete_task(file.path(), "t1").expect("delete");
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        for (id, revoked) in [("h1", true), ("h2", true), ("h3", false)] {
+            let row = tokens::get(&conn, id)
+                .expect("get")
+                .expect("the row survives");
+            assert_eq!(row.revoked_at.is_some(), revoked, "{id}");
+            assert_eq!(
+                tokens::is_revoked(&format!("jti-697-delete-{id}")),
+                revoked,
+                "{id} in the guard's set"
+            );
+        }
+    }
+
     fn migrated_with_history() -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut conn = rusqlite::Connection::open(file.path()).expect("open");
@@ -3677,6 +3744,54 @@ mod tests {
         let file = migrated();
         assert!(get_task(file.path(), "preview").expect("get").is_none());
         assert!(!claims(&Method::POST, "/api/tasks/preview/x"));
+    }
+
+    #[test]
+    fn the_import_route_is_a_post_and_every_other_method_is_still_a_task_id() {
+        assert!(claims(&Method::POST, "/api/tasks/import"));
+        assert!(matches!(
+            route(&Method::POST, "/api/tasks/import"),
+            Some(Route::TaskImport)
+        ));
+        for method in [Method::GET, Method::PUT, Method::DELETE] {
+            assert!(
+                matches!(
+                    route(&method, "/api/tasks/import"),
+                    Some(Route::Task("import"))
+                ),
+                "{method}"
+            );
+        }
+        assert!(!claims(&Method::POST, "/api/tasks/import/x"));
+    }
+
+    #[test]
+    fn the_recipe_route_is_a_get_on_a_task_and_404s_for_an_unknown_one() {
+        assert!(claims(&Method::GET, "/api/tasks/abc-123/recipe"));
+        assert!(matches!(
+            route(&Method::GET, "/api/tasks/abc-123/recipe"),
+            Some(Route::TaskRecipe("abc-123"))
+        ));
+        for method in [Method::POST, Method::PUT, Method::DELETE] {
+            assert!(!claims(&method, "/api/tasks/abc-123/recipe"), "{method}");
+        }
+        assert!(!claims(&Method::GET, "/api/tasks//recipe"));
+        assert!(!claims(&Method::GET, "/api/tasks/a/b/recipe"));
+
+        let file = migrated();
+        let req = crate::native::Request {
+            method: &Method::GET,
+            path: "/api/tasks/nope/recipe",
+            query: "",
+            content_type: "",
+            secret_token: "",
+            body: &[],
+        };
+        let ctx = crate::native::Ctx {
+            db_path: file.path().to_path_buf(),
+        };
+        let answer = serve(&ctx, &req).expect("answer");
+        assert_eq!(answer.status, StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -4582,7 +4697,7 @@ impl TaskRequest {
 /// The `timeout_minutes` message says "between 1 and 240" while the check admits
 /// 0 — Go's wording, kept, because a paraphrase would be a different string on
 /// the wire. Zero is then replaced by 30 in the caller.
-fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
+pub(crate) fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
     if task.name.is_empty() {
         return Err(WriteError::validation("name", "name is required"));
     }
@@ -5030,6 +5145,17 @@ pub(crate) fn create_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, 
     if task.status.is_empty() {
         task.status = "active".to_string();
     }
+    insert_new_task(db_path, task)
+}
+
+/// The half of [`create_task`] after validation: defaults, a fresh id and
+/// timestamps, the insert, and the timer for an `active` task. Shared with
+/// `recipes::import` (#698), which builds its task from a recipe rather than
+/// from a `TaskRequest` and always hands it over `paused`.
+pub(crate) fn insert_new_task(
+    db_path: &Path,
+    mut task: ScheduledTask,
+) -> Result<super::Answer, WriteError> {
     apply_defaults(&mut task);
 
     task.id = uuid::Uuid::new_v4().to_string();
@@ -5155,9 +5281,20 @@ fn delete_task(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 
     tx.execute("DELETE FROM scheduled_tasks WHERE id = ?1", [id])
         .map_err(|e| WriteError::Fallback(format!("deleting task {id:?}: {e}")))?;
+    // Its hook tokens die with it (#697), revoked rather than deleted so a
+    // leaked one answers 401 rather than reaching a hook that 404s. The
+    // in-memory set is updated only once the delete has committed.
+    let revoked =
+        super::security::tokens::revoke_for_task(&tx, id).map_err(WriteError::Fallback)?;
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit task delete: {e}")))?;
-    log::info!("task deleted id={id:?}");
+    for jti in &revoked {
+        super::security::tokens::mark_revoked(jti);
+    }
+    log::info!(
+        "task deleted id={id:?} hook_tokens_revoked={}",
+        revoked.len()
+    );
     Ok(super::Answer::no_content())
 }
 

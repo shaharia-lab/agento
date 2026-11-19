@@ -120,6 +120,10 @@ pub struct TokenRow {
     pub id: String,
     pub name: String,
     pub scope: String,
+    /// The task a `hook` token may start (#697); omitted for every other
+    /// scope, whose column is empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub task_id: String,
     pub created_at: String,
     /// `null` when the token never expires, which nothing mints today but the
     /// column allows.
@@ -147,6 +151,7 @@ impl TokenRow {
             id: row.get(0)?,
             name: row.get(1)?,
             scope: row.get(2)?,
+            task_id: row.get(7)?,
             created_at: wire_time(&row.get::<_, String>(3)?),
             expires_at: optional(row.get(4)?),
             last_used_at: optional(row.get(5)?),
@@ -155,8 +160,10 @@ impl TokenRow {
     }
 }
 
+/// `task_id` is last so no earlier `row.get` index moved when migration 57
+/// added it.
 const COLUMNS: &str =
-    "id, name, scope, created_at, expires_at, last_used_at, revoked_at FROM api_tokens";
+    "id, name, scope, created_at, expires_at, last_used_at, revoked_at, task_id FROM api_tokens";
 
 /// Every token, newest first. Revoked ones are included deliberately: the list
 /// is a record of what was issued, and a revoked row vanishing would make a
@@ -189,21 +196,30 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<TokenRow>, String> {
 }
 
 /// Record a newly minted token. The caller has the token string; this never
-/// sees it.
+/// sees it. `task_id` is empty for every scope but `hook`.
 #[allow(clippy::too_many_arguments)]
 pub fn insert(
     conn: &Connection,
     id: &str,
     name: &str,
     scope: Scope,
+    task_id: &str,
     jti: &str,
     created_at: &str,
     expires_at: &str,
 ) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO api_tokens (id, name, scope, jti, created_at, expires_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![id, name, scope.as_str(), jti, created_at, expires_at],
+        "INSERT INTO api_tokens (id, name, scope, task_id, jti, created_at, expires_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            id,
+            name,
+            scope.as_str(),
+            task_id,
+            jti,
+            created_at,
+            expires_at
+        ],
     )
     .map_err(|e| format!("inserting token: {e}"))?;
     Ok(())
@@ -234,6 +250,37 @@ pub fn revoke(conn: &Connection, id: &str) -> Result<Option<String>, String> {
     .map_err(|e| format!("revoking token: {e}"))?;
     mark_revoked(&jti);
     Ok(Some(jti))
+}
+
+/// Revoke every token bound to `task_id`, for the task's delete (#697).
+///
+/// Answers the `jti`s it revoked and does **not** touch the in-memory set: the
+/// caller runs this inside its own transaction and must call [`mark_revoked`]
+/// for each only after the commit, or a rolled-back delete would leave tokens
+/// refused in memory that the database still calls live.
+///
+/// A revoke rather than a delete, for the module header's reason: a deleted
+/// row would un-revoke its credential. Already-revoked rows keep their
+/// timestamp, as in [`revoke`].
+pub fn revoke_for_task(conn: &Connection, task_id: &str) -> Result<Vec<String>, String> {
+    if task_id.is_empty() {
+        // Every non-hook row has an empty task id; this must never match them.
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare("SELECT jti FROM api_tokens WHERE task_id = ?1 AND revoked_at IS NULL")
+        .map_err(|e| format!("preparing task token query: {e}"))?;
+    let jtis = stmt
+        .query_map([task_id], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("reading task tokens: {e}"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| format!("reading task tokens: {e}"))?;
+    conn.execute(
+        "UPDATE api_tokens SET revoked_at = ?2 WHERE task_id = ?1 AND revoked_at IS NULL",
+        rusqlite::params![task_id, gotime::now_go_text()],
+    )
+    .map_err(|e| format!("revoking task tokens: {e}"))?;
+    Ok(jtis)
 }
 
 /// How often one token's `last_used_at` is written, in seconds.
@@ -341,11 +388,13 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let jti = format!("jti-{id}-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let task_id = if scope == Scope::Hook { "task-a" } else { "" };
         insert(
             conn,
             id,
             name,
             scope,
+            task_id,
             &jti,
             &gotime::now_go_text(),
             &gotime::now_go_text(),
@@ -558,6 +607,82 @@ mod tests {
         let conn = schema();
         load_revoked(&conn).expect("load");
         assert!(!is_revoked("some-jti-nobody-recorded"));
+    }
+
+    /// `task_id` is on the wire for a hook token and absent for every other
+    /// scope, so a read/write/llm row is byte-identical to what it was before
+    /// migration 57.
+    #[test]
+    fn task_id_is_served_for_a_hook_token_and_omitted_otherwise() {
+        let conn = schema();
+        add(&conn, "t-hook", "git hook", Scope::Hook);
+        add(&conn, "t-read", "CI", Scope::Read);
+
+        let hook = get(&conn, "t-hook").expect("get").expect("row");
+        assert_eq!(hook.task_id, "task-a");
+        let text =
+            String::from_utf8(crate::native::gojson::to_vec(&hook).expect("encode")).expect("utf8");
+        assert!(
+            text.contains(r#""scope":"hook","task_id":"task-a","created_at""#),
+            "{text}"
+        );
+
+        let read = get(&conn, "t-read").expect("get").expect("row");
+        let text =
+            String::from_utf8(crate::native::gojson::to_vec(&read).expect("encode")).expect("utf8");
+        assert!(!text.contains("task_id"), "{text}");
+    }
+
+    /// A task's delete revokes its own hook tokens and nobody else's, keeps
+    /// every row, and leaves the in-memory set to the caller.
+    #[test]
+    fn revoke_for_task_revokes_only_that_tasks_live_tokens() {
+        let conn = schema();
+        let a1 = add(&conn, "a1", "one", Scope::Hook);
+        let a2 = add(&conn, "a2", "two", Scope::Hook);
+        let read = add(&conn, "r1", "CI", Scope::Read);
+        conn.execute(
+            "UPDATE api_tokens SET task_id = 'task-b' WHERE id = 'a2'",
+            [],
+        )
+        .expect("rebind");
+        add(&conn, "a3", "three", Scope::Hook);
+        revoke(&conn, "a3").expect("revoke a3 first");
+        let first = get(&conn, "a3").expect("get").expect("row").revoked_at;
+
+        let revoked = revoke_for_task(&conn, "task-a").expect("revoke");
+        assert_eq!(revoked, vec![a1.clone()], "only the live token of task-a");
+        assert!(!is_revoked(&a1), "the set waits for the caller's commit");
+
+        assert!(get(&conn, "a1")
+            .expect("get")
+            .expect("row")
+            .revoked_at
+            .is_some());
+        assert!(get(&conn, "a2")
+            .expect("get")
+            .expect("row")
+            .revoked_at
+            .is_none());
+        assert!(get(&conn, "r1")
+            .expect("get")
+            .expect("row")
+            .revoked_at
+            .is_none());
+        assert_eq!(
+            get(&conn, "a3").expect("get").expect("row").revoked_at,
+            first,
+            "an earlier revoke keeps its timestamp"
+        );
+        assert_eq!(list(&conn).expect("list").len(), 4, "no row is deleted");
+        assert!(!is_revoked(&a2) && !is_revoked(&read));
+
+        assert!(revoke_for_task(&conn, "").expect("empty").is_empty());
+        assert!(get(&conn, "r1")
+            .expect("get")
+            .expect("row")
+            .revoked_at
+            .is_none());
     }
 
     /// The throttle is what keeps a per-request column off the request path.
