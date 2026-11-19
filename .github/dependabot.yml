@@ -7,6 +7,9 @@ version: 2
 # `eslint-plugin-react-hooks`, both build-time only. `open-pull-requests-limit`
 # and `groups` (version updates unless `applies-to` says otherwise) do not
 # touch security updates either.
+#
+# Schedule: the 1st and 15th of each month, the org's pattern (Dependabot has
+# no 14-day interval). Security updates ignore the schedule and open at once.
 updates:
   # Rust: the app's backend. Patch updates only, single grouped PR.
   #
@@ -17,9 +20,8 @@ updates:
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
+      interval: cron
+      cronjob: "0 6 1,15 * *"
       timezone: Europe/Berlin
     open-pull-requests-limit: 1
     ignore:
@@ -39,9 +41,8 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
+      interval: cron
+      cronjob: "0 6 1,15 * *"
       timezone: Europe/Berlin
     open-pull-requests-limit: 1
     # typescript-eslint does not support TS 7 yet; eslint-plugin-react-hooks 7.1
@@ -64,12 +65,26 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
+      interval: cron
+      cronjob: "0 6 1,15 * *"
       timezone: Europe/Berlin
     open-pull-requests-limit: 1
     groups:
       actions:
+        patterns:
+          - "*"
+
+  # The website (/web) is not version-tracked (limit 0); this entry exists only
+  # so its security updates arrive as one grouped PR instead of one per package.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: cron
+      cronjob: "0 6 1,15 * *"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 0
+    groups:
+      web-security:
+        applies-to: security-updates
         patterns:
           - "*"

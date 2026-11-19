@@ -263,10 +263,7 @@ fn path_has_prefix_fold(s: &[u8], prefix: &[u8]) -> bool {
             return false;
         }
     }
-    if s.len() > prefix.len() && !is_sep_windows(s[prefix.len()]) {
-        return false;
-    }
-    true
+    s.len() == prefix.len() || is_sep_windows(s[prefix.len()])
 }
 
 /// Go's `filepathlite.uncLen`: the volume prefix of a UNC path runs to the
