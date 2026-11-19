@@ -105,6 +105,10 @@ pub struct HostInfo {
     /// How this copy was installed, for the update wording ("appimage",
     /// "package", "dmg", "installer").
     pub install_kind: String,
+    /// Absolute path of the file this launch wrote its `/api` port to
+    /// ([`write_api_port_file`]), or empty when there is no data dir. A task's
+    /// webhook `curl` reads the port from it, so it survives a restart.
+    pub api_port_file: String,
 }
 
 #[tauri::command]
@@ -133,6 +137,9 @@ fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
         claude_cli_source: claude.as_ref().map(|r| r.source.as_str().to_string()),
         can_self_update: install_kind() != "package",
         install_kind: install_kind().to_string(),
+        api_port_file: paths::data_dir()
+            .map(|dir| api_port_path(&dir).display().to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -250,6 +257,34 @@ fn write_dev_token_file(token: &str) {
         }
     }
     log::info!("dev api token written to {}", path.display());
+}
+
+/// Where this launch's `/api` port is written: `<data dir>/api-port`.
+fn api_port_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("api-port")
+}
+
+/// Write the port the `/api` server bound, so a script can find it (#697).
+///
+/// A release build binds an OS-chosen port every launch, so a port typed into
+/// a task's webhook `curl` would stop working at the next restart. The `curl`
+/// reads this file instead. Written on every launch, debug included, and it
+/// holds only the port: unlike `api-token` it is not a secret, so it keeps the
+/// default mode.
+///
+/// A failure is a warning, never a failed startup: the app works without it,
+/// and only an external `curl` loses its way to the port.
+fn write_api_port_file(port: u16) {
+    let Some(dir) = paths::data_dir() else {
+        log::warn!("api port file: no data dir to write it to");
+        return;
+    };
+    let path = api_port_path(&dir);
+    if let Err(e) =
+        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, port.to_string()))
+    {
+        log::warn!("api port file: writing {}: {e}", path.display());
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -451,6 +486,7 @@ pub fn run() {
                 let proxy = proxy::serve(proxy_port)
                     .await
                     .map_err(|e| format!("starting api server: {e}"))?;
+                write_api_port_file(proxy);
 
                 handle.manage(AppPorts { proxy });
 
@@ -837,6 +873,26 @@ mod acl_manifest_tests {
              capabilities/default.json disagree: an ungranted command is refused \
              with `Command <name> not allowed by ACL` in every release build"
         );
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod port_file_tests {
+    use super::*;
+
+    /// The port file holds the port and nothing else, and a second launch
+    /// replaces the first one's port (#697).
+    #[test]
+    fn the_api_port_file_holds_only_this_launchs_port() {
+        let _lock = crate::paths::tests::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = crate::paths::tests::EnvVar::set("HOME", home.path());
+
+        write_api_port_file(41234);
+        write_api_port_file(8991);
+
+        let path = api_port_path(&crate::paths::data_dir().expect("data dir"));
+        assert_eq!(std::fs::read_to_string(&path).expect("port file"), "8991");
     }
 }
 

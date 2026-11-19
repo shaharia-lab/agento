@@ -1027,6 +1027,8 @@ export interface ApiTokenRow {
   id: string;
   name: string;
   scope: string;
+  /** The task a `hook` token may start (#697); absent for every other scope. */
+  task_id?: string;
   created_at: string;
   expires_at: string | null;
   last_used_at: string | null;

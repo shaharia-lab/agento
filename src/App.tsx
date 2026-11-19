@@ -417,7 +417,12 @@ export default function App() {
               <IntegrationsView inspectorOpen={inspectorOpen} />
             )}
             {view === "tasks" && (
-              <TasksView inspectorOpen={inspectorOpen} onNavigate={navigate} />
+              <TasksView
+                inspectorOpen={inspectorOpen}
+                onNavigate={navigate}
+                openTaskId={navTarget?.taskId}
+                openTaskNonce={navNonce}
+              />
             )}
             {view === "jobs" && (
               <JobsView

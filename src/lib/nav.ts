@@ -119,6 +119,8 @@ export interface NavTarget {
   sessionId?: string;
   /** A run `jobs` should select and scroll to on arrival (#542). */
   jobId?: string;
+  /** A task `tasks` should select on arrival, from a hook token's row (#697). */
+  taskId?: string;
 }
 
 export type NavigateFn = (id: ViewId, target?: NavTarget) => void;

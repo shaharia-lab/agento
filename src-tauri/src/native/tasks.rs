@@ -3332,6 +3332,50 @@ mod tests {
         assert!(history_ids(&file).is_empty());
     }
 
+    /// **Deleting a task revokes every one of its hook tokens** (#697), in the
+    /// database and in the guard's set, and leaves another task's alone. The
+    /// rows survive, because deleting one would un-revoke it.
+    #[test]
+    fn deleting_a_task_revokes_its_hook_tokens_and_no_others() {
+        use crate::native::security::{token::Scope, tokens};
+        let file = migrated_with_history();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO scheduled_tasks (id, name, prompt) VALUES ('t2', 'U', 'p')",
+            [],
+        )
+        .expect("second task");
+        for (id, task) in [("h1", "t1"), ("h2", "t1"), ("h3", "t2")] {
+            tokens::insert(
+                &conn,
+                id,
+                "hook",
+                Scope::Hook,
+                task,
+                &format!("jti-697-delete-{id}"),
+                "2026-01-01 00:00:00 +0000 UTC",
+                "2027-01-01 00:00:00 +0000 UTC",
+            )
+            .expect("token");
+        }
+        drop(conn);
+
+        delete_task(file.path(), "t1").expect("delete");
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        for (id, revoked) in [("h1", true), ("h2", true), ("h3", false)] {
+            let row = tokens::get(&conn, id)
+                .expect("get")
+                .expect("the row survives");
+            assert_eq!(row.revoked_at.is_some(), revoked, "{id}");
+            assert_eq!(
+                tokens::is_revoked(&format!("jti-697-delete-{id}")),
+                revoked,
+                "{id} in the guard's set"
+            );
+        }
+    }
+
     fn migrated_with_history() -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut conn = rusqlite::Connection::open(file.path()).expect("open");
@@ -5155,9 +5199,20 @@ fn delete_task(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 
     tx.execute("DELETE FROM scheduled_tasks WHERE id = ?1", [id])
         .map_err(|e| WriteError::Fallback(format!("deleting task {id:?}: {e}")))?;
+    // Its hook tokens die with it (#697), revoked rather than deleted so a
+    // leaked one answers 401 rather than reaching a hook that 404s. The
+    // in-memory set is updated only once the delete has committed.
+    let revoked =
+        super::security::tokens::revoke_for_task(&tx, id).map_err(WriteError::Fallback)?;
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit task delete: {e}")))?;
-    log::info!("task deleted id={id:?}");
+    for jti in &revoked {
+        super::security::tokens::mark_revoked(jti);
+    }
+    log::info!(
+        "task deleted id={id:?} hook_tokens_revoked={}",
+        revoked.len()
+    );
     Ok(super::Answer::no_content())
 }
 

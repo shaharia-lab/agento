@@ -67,3 +67,23 @@
 .secrow--revoked td {
   color: var(--fg-tertiary);
 }
+
+/* The task a hook token is bound to (#697), under its name. A plain text link
+   rather than a button chrome, because it sits inside a table cell. */
+.sec-task {
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+}
+
+.sec-task__link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.sec-task__link:hover {
+  text-decoration: underline;
+}

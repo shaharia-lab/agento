@@ -406,6 +406,13 @@ one per outcome, none of the refusals writing a row:
 | `Dropped` (counted) | `503` |
 | `Unavailable`, or no scheduler | `500` |
 
+Its credential is a `hook` token minted from the task's **Webhook** inspector
+group (`views/tasks/HookTokens.tsx`, #697), whose `curl` reads the port from
+`<data dir>/api-port`. `lib.rs::write_api_port_file` rewrites that file on every
+launch, debug included, because a release build binds an OS-chosen port and a
+literal one would break a git hook at the next restart. Deleting a task revokes
+its hook tokens (`docs/internal/native-security.md`).
+
 The statuses are the decision's, so they are final only for a call that is
 refused at arrival. A `202` names the row the run writes **if it starts**: a
 queued call is re-checked when its slot comes, and one whose task was paused or
