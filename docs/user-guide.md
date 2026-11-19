@@ -719,6 +719,15 @@ not count towards **Stop after**, and never pauses the task. Only one run of a
 task happens at a time — pressing **Run now** while one is going says so and
 starts nothing.
 
+**Enable** / **Disable** is the other button, and it is the one that decides
+whether the schedule fires at all. It does the same thing as the **Enabled**
+switch in the form below.
+
+**Times are your local time.** They are stored in UTC and converted for display.
+
+**Agento has to be running.** A scheduled task fires from the app itself, so
+nothing runs while it is closed.
+
 ### Starting a task from a script
 
 A saved task's inspector has a **Webhook** group, for starting the task from a
@@ -739,15 +748,6 @@ git hook, a cron line or a CI job on this machine.
   its next call is refused. Deleting the task revokes every one of its hook
   tokens.
 - The command is POSIX shell. On Windows, run it from Git Bash or WSL.
-
-**Enable** / **Disable** is the other button, and it is the one that decides
-whether the schedule fires at all. It does the same thing as the **Enabled**
-switch in the form below.
-
-**Times are your local time.** They are stored in UTC and converted for display.
-
-**Agento has to be running.** A scheduled task fires from the app itself, so
-nothing runs while it is closed.
 
 ---
 
