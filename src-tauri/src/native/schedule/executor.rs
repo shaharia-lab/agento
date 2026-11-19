@@ -324,7 +324,9 @@ fn digest_narrative(task: &ScheduledTask) -> Option<bool> {
 /// narrative off. A kind this build does not know counts too, because its run
 /// is refused rather than handed to an agent.
 fn spawns_nothing(task: &ScheduledTask) -> bool {
-    task.builtin.as_ref().is_some_and(|b| !b.narrative)
+    task.builtin
+        .as_ref()
+        .is_some_and(|b| !b.narrative || !tasks::BUILTIN_KINDS.contains(&b.kind.as_str()))
 }
 
 /// The `job_history.harness` a run of `task` records: [`BUILTIN_HARNESS`]
@@ -4260,30 +4262,37 @@ pub(crate) mod tests {
     /// and never an agent run (review of #699).
     #[tokio::test]
     async fn a_stored_unknown_builtin_kind_is_refused_not_run_as_an_agent() {
-        let file = with_digest_task(false, "read_only");
-        rusqlite::Connection::open(file.path())
-            .expect("open")
-            .execute(
-                "UPDATE scheduled_tasks SET builtin = '{\"kind\":\"monthly\",\"narrative\":false}'",
-                [],
+        for narrative in [false, true] {
+            let file = with_digest_task(narrative, "read_only");
+            rusqlite::Connection::open(file.path())
+                .expect("open")
+                .execute(
+                    "UPDATE scheduled_tasks SET builtin = ?1",
+                    [format!(
+                        "{{\"kind\":\"monthly\",\"narrative\":{narrative}}}"
+                    )],
+                )
+                .expect("a newer build's kind");
+            let scheduler = test_scheduler(file.path());
+            let task = tasks::get_task(file.path(), "t1")
+                .expect("read")
+                .expect("row");
+            run_task(
+                &scheduler,
+                task,
+                Run::plain(RunKind::Manual, format!("j-unknown-kind-{narrative}")),
             )
-            .expect("a newer build's kind");
-        let scheduler = test_scheduler(file.path());
-        let task = tasks::get_task(file.path(), "t1")
-            .expect("read")
-            .expect("row");
-        run_task(
-            &scheduler,
-            task,
-            Run::plain(RunKind::Manual, "j-unknown-kind".to_string()),
-        )
-        .await;
+            .await;
 
-        let rows = job_rows_of(file.path());
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, "failed");
-        assert_eq!(rows[0].error_message, "unknown built-in kind \"monthly\"");
-        assert_eq!(rows[0].harness, BUILTIN_HARNESS);
-        assert_eq!(chat_session_count(file.path()), 0);
+            let rows = job_rows_of(file.path());
+            assert_eq!(rows.len(), 1, "narrative={narrative}");
+            assert_eq!(rows[0].status, "failed", "narrative={narrative}");
+            assert_eq!(
+                rows[0].error_message, "unknown built-in kind \"monthly\"",
+                "narrative={narrative}"
+            );
+            assert_eq!(rows[0].harness, BUILTIN_HARNESS, "narrative={narrative}");
+            assert_eq!(chat_session_count(file.path()), 0, "narrative={narrative}");
+        }
     }
 }
