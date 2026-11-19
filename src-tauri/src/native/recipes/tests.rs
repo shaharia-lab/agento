@@ -385,3 +385,56 @@ fn the_recipe_of_an_unknown_task_is_a_404() {
     let err = answer(file.path(), "nope").expect_err("404");
     assert_eq!(err.status(), StatusCode::NOT_FOUND);
 }
+
+/// A weekly digest (#699) round-trips through a recipe: the export carries
+/// `builtin` whole, after `permission_mode`, and the import stores it, empty
+/// prompt and all. A task with no built-in exports no `builtin` key.
+#[test]
+fn a_weekly_digest_round_trips_its_builtin() {
+    let file = migrated();
+    let digest = created(
+        &file,
+        r#"{"name":"Digest","permission_mode":"read_only",
+            "builtin":{"kind":"weekly_digest","narrative":true}}"#,
+    );
+    let recipe = exported(&file, &digest.id);
+    assert!(
+        recipe.contains(
+            r#""permission_mode":"read_only","builtin":{"kind":"weekly_digest","narrative":true}}"#
+        ),
+        "{recipe}"
+    );
+
+    let answer = import(file.path(), recipe.as_bytes()).expect("import");
+    assert_eq!(answer.status, StatusCode::CREATED);
+    let task: serde_json::Value =
+        serde_json::from_slice(answer.body.as_deref().expect("body")).expect("json");
+    let imported = get_task(file.path(), task["id"].as_str().expect("id"))
+        .expect("get")
+        .expect("task");
+    assert_eq!(imported.builtin, digest.builtin);
+    assert_eq!(imported.prompt, "");
+    assert_eq!(imported.status, "paused");
+
+    let plain = created(&file, &format!("{{{VALID}}}"));
+    assert!(!exported(&file, &plain.id).contains("builtin"));
+}
+
+/// An unknown kind in a recipe is the same 422 the task write answers, and an
+/// unknown key inside `builtin` is a 422 naming it, as at every other level.
+#[test]
+fn a_recipe_with_an_unknown_builtin_kind_or_key_is_a_422() {
+    let file = migrated();
+    assert_422(
+        &file,
+        &format!(r#"{{"agento_recipe":1,{VALID},"builtin":{{"kind":"monthly"}}}}"#),
+        "builtin",
+    );
+    assert_422(
+        &file,
+        &format!(
+            r#"{{"agento_recipe":1,{VALID},"builtin":{{"kind":"weekly_digest","narative":true}}}}"#
+        ),
+        "builtin.narative",
+    );
+}

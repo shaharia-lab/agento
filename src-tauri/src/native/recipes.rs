@@ -36,8 +36,9 @@
 //!   sender allow-list (deny-by-default, #688/#690). The UI lists them as "to
 //!   connect".
 //! - **Strict, and strictness is a 422.** A missing or unsupported
-//!   `agento_recipe`, or an unknown key at the top level or inside a
-//!   `destinations[i]`/`triggers[i]` entry, is a 422 naming the field and
+//!   `agento_recipe`, or an unknown key at the top level or inside the
+//!   `builtin` object or a `destinations[i]`/`triggers[i]` entry, is a 422
+//!   naming the field and
 //!   writes nothing — so `status`, `id` and `integration_id` are refused, and a
 //!   later version cannot be half-read by this one. A body that is not JSON or
 //!   not an object stays the 400 every other write answers.
@@ -48,7 +49,7 @@ use serde::{Deserialize, Serialize};
 
 use super::gojson::{GoList, GoStruct};
 use super::security_scan::scan::mask_text;
-use super::tasks::{ScheduleConfig, ScheduledTask, TaskDestination};
+use super::tasks::{ScheduleConfig, ScheduledTask, TaskBuiltin, TaskDestination};
 use super::writes::{decode_body, WriteError};
 
 /// The only recipe version this build reads and writes.
@@ -76,6 +77,11 @@ pub struct Recipe {
     pub max_queued_events: i64,
     pub max_runs_per_hour: i64,
     pub permission_mode: String,
+    /// The task's built-in recipe (#699), carried whole: it names a report,
+    /// not anything machine-local. Omitted when absent, so a recipe of a task
+    /// that runs an agent keeps its bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<TaskBuiltin>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub destinations: Vec<RecipeDestination>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -113,7 +119,7 @@ pub struct RecipeTrigger {
 }
 
 /// The keys a version-1 recipe may carry, at each of its three levels.
-const RECIPE_KEYS: [&str; 17] = [
+const RECIPE_KEYS: [&str; 18] = [
     "agento_recipe",
     "name",
     "description",
@@ -129,11 +135,13 @@ const RECIPE_KEYS: [&str; 17] = [
     "max_queued_events",
     "max_runs_per_hour",
     "permission_mode",
+    "builtin",
     "destinations",
     "triggers",
 ];
 const DESTINATION_KEYS: [&str; 2] = ["type", "when"];
 const TRIGGER_KEYS: [&str; 3] = ["type", "filter_prefix", "filter_keywords"];
+const BUILTIN_KEYS: [&str; 2] = ["kind", "narrative"];
 
 /// A recipe as an import decodes it, from the request's original bytes after
 /// [`check_keys`] has passed. Every scalar is a zero value when `null`, and
@@ -169,6 +177,7 @@ struct RecipeImport {
     max_runs_per_hour: i64,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     permission_mode: String,
+    builtin: Option<GoStruct<TaskBuiltin>>,
     destinations: Option<GoList<GoStruct<RecipeDestination>>>,
     triggers: Option<GoList<GoStruct<RecipeTrigger>>>,
 }
@@ -195,6 +204,7 @@ pub fn export(db_path: &Path, task_id: &str) -> Result<Option<Recipe>, String> {
         max_queued_events: task.max_queued_events,
         max_runs_per_hour: task.max_runs_per_hour,
         permission_mode: task.permission_mode,
+        builtin: task.builtin,
         destinations: task
             .destinations
             .into_iter()
@@ -288,6 +298,7 @@ pub fn import(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> 
         stop_after_time: None,
         save_output: recipe.save_output,
         destinations: kept,
+        builtin: recipe.builtin.map(|builtin| builtin.0),
         continue_on_reply: recipe.continue_on_reply,
         max_concurrent_runs: recipe.max_concurrent_runs,
         max_queued_events: recipe.max_queued_events,
@@ -323,13 +334,26 @@ fn check_version(keys: &serde_json::Map<String, serde_json::Value>) -> Result<()
     ))
 }
 
-/// The first key that is not part of version 1, at the top level or inside a
-/// `destinations[i]`/`triggers[i]` object, is a 422 naming it. Entries that
+/// The first key that is not part of version 1, at the top level or inside the
+/// `builtin` object or a `destinations[i]`/`triggers[i]` object, is a 422
+/// naming it. Entries that
 /// are not objects are left to the typed decode.
 fn check_keys(keys: &serde_json::Map<String, serde_json::Value>) -> Result<(), WriteError> {
     for key in keys.keys() {
         if !RECIPE_KEYS.contains(&key.as_str()) {
             return Err(WriteError::validation(key, "unknown field"));
+        }
+    }
+    // The built-in object (#699): a misspelt `narrative` would otherwise be
+    // dropped by the typed decode and import with the narrative silently off.
+    if let Some(serde_json::Value::Object(builtin)) = keys.get("builtin") {
+        for key in builtin.keys() {
+            if !BUILTIN_KEYS.contains(&key.as_str()) {
+                return Err(WriteError::validation(
+                    &format!("builtin.{key}"),
+                    "unknown field",
+                ));
+            }
         }
     }
     for (list, allowed) in [

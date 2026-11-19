@@ -288,6 +288,13 @@ export interface TaskDestination {
   email?: EmailDestinationConfig;
 }
 
+/** A task's built-in recipe (#699): what its run renders instead of an agent. */
+export interface TaskBuiltin {
+  kind: "weekly_digest";
+  /** Off by default; only `true` spawns an agent run, to write prose over the digest. */
+  narrative: boolean;
+}
+
 /** `native/tasks.rs::TaskPermissionMode`, harness-neutral (#693). */
 export type TaskPermissionMode = "read_only" | "plan" | "workspace_write" | "full";
 
@@ -308,6 +315,8 @@ export interface ScheduledTask {
   save_output: boolean;
   /** Omitted when the task has none (#634). */
   destinations?: TaskDestination[] | null;
+  /** Omitted when the task runs an agent (#699). A `PUT` without it clears it. */
+  builtin?: TaskBuiltin | null;
   /** Whether a reply to this task's output continues the conversation (#681). */
   continue_on_reply: boolean;
   /**
