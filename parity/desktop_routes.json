@@ -41,6 +41,20 @@
     },
     {
       "method": "GET",
+      "route": "/api/tasks/{id}/recipe",
+      "status": "native",
+      "owner": "#698",
+      "reason": "the task as a version-1 recipe file: an allow-listed copy with no secret, no integration id, no sender or recipient, no machine-local path or profile, and the prompt and description masked by the Credentials Checker. 404 for an unknown task. The desktop's Export recipe writes the same bytes through the export_task_recipe command"
+    },
+    {
+      "method": "POST",
+      "route": "/api/tasks/import",
+      "status": "native",
+      "owner": "#698",
+      "reason": "creates one PAUSED task from a recipe body and answers 201 with it in POST /api/tasks's encoding; registers no timer. Keeps reply destinations and creates no integration-bound destination and no trigger rule. A missing or unsupported agento_recipe, or an unknown key at the top level or in a destinations/triggers entry, is a 422 naming it and writes nothing. POST only; any other method on the path is still the unknown task id 'import'"
+    },
+    {
+      "method": "GET",
       "route": "/api/security/keys",
       "status": "native",
       "owner": "#405",

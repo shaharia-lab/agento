@@ -21,6 +21,8 @@ const APP_COMMANDS: &[&str] = &[
     "read_log",
     "export_logs",
     "export_session",
+    "export_task_recipe",
+    "read_recipe_file",
 ];
 
 fn main() {

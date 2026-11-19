@@ -829,3 +829,57 @@ drive a `Fake` variant (types `fake`, `fake-fail`, `fake-hang`) compiled under
 executor's `a_prepare_failure_delivers_to_always_and_skips_success_only`, and
 `scheduled_run.rs`'s `a_hanging_destination_does_not_hold_the_run_or_its_permit`
 and `a_run_delivers_its_unsaved_answer_the_same_way_timed_or_manual`.
+
+## Recipes (#698)
+
+A recipe is a task exported as a version-1 JSON file and imported back as a
+new task. `native/recipes.rs` owns it; its `//!` doc carries the rules and the
+tests named below pin them.
+
+- **Routes.** `GET /api/tasks/{id}/recipe` answers the recipe (404 for an
+  unknown task). `POST /api/tasks/import` answers `201` with the created task
+  in `POST /api/tasks`'s encoding. `import` follows `preview`'s method rule:
+  any other method on the path is the unknown task id `import`. Both are in
+  `tasks::ROUTES` and `parity/desktop_routes.json`. The desktop's file I/O is
+  two commands in `lib.rs`: `export_task_recipe(task_id, dest_path)` writes
+  the same bytes the GET answers, and `read_recipe_file(path)` reads at most
+  256 KiB for the webview to post to the import route.
+- **Format, in key order:** `agento_recipe` (`1`), `name`, `description`,
+  `prompt`, `agent_slug`, `model`, `timeout_minutes`, `schedule_type`,
+  `schedule_config`, `save_output`, `continue_on_reply`,
+  `max_concurrent_runs`, `max_queued_events`, `max_runs_per_hour`,
+  `permission_mode`, then `destinations` (`[{type, when}]`) and `triggers`
+  (`[{type, filter_prefix, filter_keywords}]`), each omitted when empty.
+  Pinned by `export_import_export_round_trips_the_golden_bytes`.
+- **Left out, the full list:** `id`, `status`, the run and event counters,
+  every timestamp, `stop_after_count`, `stop_after_time`,
+  `working_directory` and `settings_profile_id` (machine-local; a home path
+  names the user), every `integration_id`, Slack `channel_ids`, Telegram
+  `chat_ids`, email `recipients`, and on a trigger rule `filter_chat_ids`,
+  `filter_user_ids` and the rule's own execution settings (`model`,
+  `working_directory`, `settings_profile_id`, `permission_mode`,
+  `timeout_minutes`). Hook tokens are never read. `prompt` and `description`
+  go through `security_scan::scan::mask_text`. Only rules linked by
+  `trigger_rules.task_id` on a Slack or Telegram integration are listed.
+  Pinned by `an_export_carries_no_secret_from_any_place_one_can_sit`.
+- **The recipe is an allow-listed struct, not a filtered `ScheduledTask`,**
+  so a column added to tasks later is absent from recipes until it is added
+  to `Recipe` on purpose.
+- **Import creates the task and not its wiring.** The task is stored
+  `paused` whatever the file says, and `tasks::insert_new_task` registers a
+  timer only for an `active` task, so nothing fires before a human resumes it
+  (`an_import_is_a_201_paused_task_the_scheduler_does_not_register`). `reply`
+  destinations are kept. Slack, Telegram and email destinations and every
+  trigger are validated (type, `when`, one `reply`) but not created: each
+  needs a local integration, recipients or a sender allow-list
+  (deny-by-default, #688/#690). `agent_slug` is stored as given, and
+  `permission_mode` as stated (`full` included) through `validate_task`.
+- **Strictness is a 422, not serde's 400.** A missing `agento_recipe`, or one
+  that is not the integer `1` (`2`, `"1"` and `1.0` are all refused), is a 422
+  on `agento_recipe`. A key outside the version-1 set at the top level or in a
+  `destinations[i]`/`triggers[i]` object is a 422 naming it, so `status`, `id`
+  and `integration_id` are refused rather than ignored. Both checks run on the
+  decoded key map before the typed decode, and neither writes. A body that is
+  not JSON or not an object, or a known key of the wrong shape, stays the 400
+  every write answers. An unknown field is "well-formed, one field invalid",
+  which is #670's definition of a 422.

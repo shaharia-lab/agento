@@ -17,6 +17,8 @@
     "allow-read-log",
     "allow-export-logs",
     "allow-export-session",
+    "allow-export-task-recipe",
+    "allow-read-recipe-file",
     "core:default",
     "core:window:allow-minimize",
     "core:window:allow-unminimize",

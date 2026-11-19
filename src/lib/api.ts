@@ -19,7 +19,7 @@
    ========================================================================== */
 
 import { hostInfo, resetHostInfo } from "./tauri";
-import type { TranscriptExpiredBody } from "./types";
+import type { ScheduledTask, TranscriptExpiredBody } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -152,6 +152,14 @@ async function withAuth<T>(
   return read(res, headers);
 }
 
+/**
+ * A request body sent as the exact text given rather than re-encoded — for a
+ * file the server must judge as it is on disk (`importRecipe`).
+ */
+export class RawBody {
+  constructor(readonly text: string) {}
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -164,7 +172,12 @@ async function request<T>(
       fetch(BASE + path, {
         method,
         headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body:
+          body === undefined
+            ? undefined
+            : body instanceof RawBody
+              ? body.text
+              : JSON.stringify(body),
         signal,
       }),
     async (res, headers) => {
@@ -214,6 +227,15 @@ export const api = {
   del: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
     request<T>("DELETE", path, body, signal),
 };
+
+/**
+ * `POST /api/tasks/import` (#698): the recipe file's text, as read, so a file
+ * that is not JSON is the server's 400 and an unknown key its 422 naming it.
+ * Answers the new task, which is always paused.
+ */
+export function importRecipe(text: string): Promise<ScheduledTask> {
+  return api.post<ScheduledTask>("/tasks/import", new RawBody(text));
+}
 
 /** Build a query string, dropping empty values so the server sees no param. */
 export function qs(params: Record<string, string | number | boolean | undefined | null>): string {

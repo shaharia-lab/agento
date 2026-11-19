@@ -751,6 +751,28 @@ git hook, a cron line or a CI job on this machine.
 
 ---
 
+### Sharing a task as a recipe
+
+A **recipe** is a task saved as a small `.agento-recipe.json` file, to back an
+automation up or hand it to someone else. It carries the task's name,
+description, prompt, agent, model, schedule, limits and permission mode, and
+says only *what kind* of delivery and trigger the task had.
+
+- **Export recipe** in a task's toolbar saves the stored task (not unsaved
+  edits) through the Save dialog. The file holds no credentials and nothing
+  that identifies your setup: no integration, channel, chat, recipient,
+  allowed sender, working directory or settings profile. The prompt and
+  description are copied as written, except that any key the Credentials
+  Checker recognises is masked — so read a prompt before sharing it.
+- **Import** at the top of the task list opens a recipe and creates a new
+  task from it, always **paused**, whatever the original was. It does not run
+  until you have reviewed it and pressed **Enable**. Its **Reply to sender**
+  destination comes with it; Slack, Telegram and email destinations and
+  trigger rules do not, because each needs your own integration, recipients or
+  allowed senders. The note on the imported task lists what to connect.
+- A file from a newer Agento, or with a field this version does not know, is
+  refused with a message naming the field, and nothing is created.
+
 ## Job history
 
 Every run leaves a record — scheduled or started with **Run now** — of which
