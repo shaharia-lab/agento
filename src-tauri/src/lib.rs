@@ -170,6 +170,48 @@ async fn export_session(
     .unwrap_or_else(|| Err(ExportError::failed("the export failed unexpectedly")))
 }
 
+/// Write task `task_id` as a recipe file at the path the user picked in the
+/// native Save-As dialog (#698). `native::recipes` holds the format and its
+/// rules; these are the same bytes `GET /api/tasks/{id}/recipe` answers.
+/// Answers the number of bytes written.
+#[tauri::command]
+async fn export_task_recipe(task_id: String, dest_path: String) -> Result<u64, String> {
+    let db = paths::database_path().ok_or("no home directory to find the database in")?;
+    native::db::blocking("task recipe export", move || {
+        let recipe = native::recipes::export(&db, &task_id)?
+            .ok_or_else(|| format!("task {task_id:?} not found"))?;
+        let bytes = native::recipes::encode(&recipe)?;
+        std::fs::write(&dest_path, &bytes).map_err(|e| format!("writing {dest_path}: {e}"))?;
+        Ok(bytes.len() as u64)
+    })
+    .await
+    .unwrap_or_else(|| Err("the export failed unexpectedly".to_string()))
+}
+
+/// The largest recipe file [`read_recipe_file`] reads. A version-1 recipe is a
+/// few kilobytes; anything near this is not one.
+const MAX_RECIPE_BYTES: u64 = 256 * 1024;
+
+/// Read the recipe file the user picked in the native Open dialog (#698), as
+/// text for the webview to post to `POST /api/tasks/import` — so the import
+/// itself goes through the `/api` write path like every other write.
+#[tauri::command]
+async fn read_recipe_file(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let size = std::fs::metadata(&path)
+            .map_err(|e| format!("reading {path}: {e}"))?
+            .len();
+        if size > MAX_RECIPE_BYTES {
+            return Err(format!(
+                "{path} is {size} bytes; a recipe file is at most {MAX_RECIPE_BYTES}"
+            ));
+        }
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("reading the recipe failed unexpectedly: {e}")))
+}
+
 /// How this copy was installed.
 ///
 /// This has to be decided at runtime, not build time: one `tauri build` on
@@ -351,7 +393,9 @@ pub fn run() {
             logs::log_files,
             logs::read_log,
             logs::export_logs,
-            export_session
+            export_session,
+            export_task_recipe,
+            read_recipe_file
         ])
         .setup(|app| {
             let handle = app.handle().clone();

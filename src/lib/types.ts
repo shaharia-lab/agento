@@ -335,6 +335,36 @@ export interface ScheduledTask {
   updated_at: string;
 }
 
+/**
+ * A task recipe file, version 1 (#698): `native/recipes.rs::Recipe`, key for
+ * key. No id, status, counter, timestamp, path, profile, integration id,
+ * channel, chat, recipient or sender — and `destinations`/`triggers` say only
+ * what kind of wiring the task had. Both are omitted when empty.
+ */
+export interface TaskRecipe {
+  agento_recipe: number;
+  name: string;
+  description: string;
+  prompt: string;
+  agent_slug: string;
+  model: string;
+  timeout_minutes: number;
+  schedule_type: ScheduleType;
+  schedule_config: ScheduleConfig;
+  save_output: boolean;
+  continue_on_reply: boolean;
+  max_concurrent_runs: number;
+  max_queued_events: number;
+  max_runs_per_hour: number;
+  permission_mode: TaskPermissionMode;
+  destinations?: { type: TaskDestination["type"]; when: DeliveryWhen }[];
+  triggers?: {
+    type: "slack" | "telegram";
+    filter_prefix: string;
+    filter_keywords: string[] | null;
+  }[];
+}
+
 /** The `202` body of `POST /api/tasks/{id}/run` (#541). */
 export interface TaskRunStarted {
   job_id: string;
