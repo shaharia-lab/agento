@@ -67,9 +67,19 @@ Four consequences worth knowing before debugging anything:
   `/api/hooks/` on every method, so no other token is served there, and
   `security::verify_with` serves a hook token only when the raw target is
   exactly `/api/hooks/{task_id}` with its own id — another task, a trailing
-  segment or an escaped spelling is a 403. `POST /api/security/tokens` refuses
-  `scope: "hook"` with a 422: it has no task to bind the token to, and per-task
-  minting is #697's. `a_hook_token_serves_nothing_else_on_the_api` in
+  segment or an escaped spelling is a 403. **A hook token is minted through
+  `POST /api/security/tokens` with a `task_id`** (#697): `scope: "hook"` with no
+  `task_id`, or one naming no task, is a 422 on `task_id`, and so is a
+  `task_id` on any other scope. The task check and the insert share one
+  immediate transaction, and `tasks.rs::delete_task` revokes the task's hook
+  tokens (`tokens::revoke_for_task`) inside its own and calls `mark_revoked`
+  only after the commit, so a token for a deleted task answers 401, never 404.
+  The row stores the task in `api_tokens.task_id` (migration 57, `''` for every
+  other scope), and the list serves it after `scope`, omitted when empty. Only
+  the task's Webhook group mints one; the Security tab's scope picker never
+  offers `hook`. `a_hook_token_minted_through_the_route_opens_only_its_own_task`
+  in `security/mod.rs` holds the binding end to end, and
+  `a_hook_token_serves_nothing_else_on_the_api` in
   `guards.rs` walks every route in the three parity files to hold the first
   half. The one route it is served on is `POST /api/hooks/{task_id}`
   (`native/trigger/hook.rs`, #696), which starts that task's event run; the

@@ -728,6 +728,27 @@ switch in the form below.
 **Agento has to be running.** A scheduled task fires from the app itself, so
 nothing runs while it is closed.
 
+### Starting a task from a script
+
+A saved task's inspector has a **Webhook** group, for starting the task from a
+git hook, a cron line or a CI job on this machine.
+
+- **Create** a hook token under **New hook token**, with a name and an expiry
+  (90 days by default). It is shown once and stored nowhere, and it can start
+  this task and nothing else: no other task, and nothing else in Agento.
+- The group shows a `curl` that starts the task. Right after **Create** it has
+  the token in it. Once you dismiss the banner it reads the token from
+  `$AGENTO_HOOK_TOKEN` instead, so export that variable where the command runs.
+- The `curl` reads Agento's port from the `api-port` file in Agento's data
+  directory, which the app rewrites every time it starts. The same command keeps
+  working after a restart, and fails to connect while Agento is closed.
+- A call answers `202` with the run's `job_id`, and the run shows in **Job
+  history** as **Webhook**. A paused task answers `409`.
+- **Revoke** a token from the same group, or from **Settings → Security**, and
+  its next call is refused. Deleting the task revokes every one of its hook
+  tokens.
+- The command is POSIX shell. On Windows, run it from Git Bash or WSL.
+
 ---
 
 ## Job history
@@ -1323,6 +1344,9 @@ The API tokens this install has issued, and the key that signs them.
 
 - **Issue a token** with a scope: `read` or `write` for the Agento API, or `llm`
   for the [LLM Gateway](#llm-gateway). It is shown once and stored nowhere.
+  A `hook` token, which starts one task, is issued from that task's **Webhook**
+  group instead (see [Starting a task from a script](#starting-a-task-from-a-script)),
+  and is listed here with the task it is bound to.
 - **Revoke** one by name, which stops it immediately and leaves every other token
   working.
 - **Regenerate the signing key** invalidates *every* token at once, gateway

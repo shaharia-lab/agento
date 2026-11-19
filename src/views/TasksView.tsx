@@ -44,6 +44,7 @@ import {
   Switch,
 } from "../components/ui";
 import { DeliverySection, isUsableDestination } from "./tasks/Delivery";
+import { HookTokens } from "./tasks/HookTokens";
 import "../styles/tasks.css";
 
 const POLL_MS = 10_000;
@@ -401,6 +402,8 @@ function modelPlaceholder(slug: string, agents: Agent[], defaultModel: string): 
 export function TasksView({
   inspectorOpen,
   onNavigate,
+  openTaskId,
+  openTaskNonce = 0,
 }: {
   inspectorOpen: boolean;
   /**
@@ -411,6 +414,10 @@ export function TasksView({
    * the same reason the three gateway views take one.
    */
   onNavigate: NavigateFn;
+  /** A task handed off from a hook token's row in Security, to select (#697). */
+  openTaskId?: string;
+  /** `App`'s nav nonce, so the *same* hand-off twice still fires. */
+  openTaskNonce?: number;
 }) {
   const picker = useDirPicker();
   const tasksRes = useResource<ScheduledTask[] | null>(
@@ -498,6 +505,13 @@ export function TasksView({
       setSelectedId(tasks[0].id);
     }
   }, [tasks, selectedId, creating]);
+
+  // A hand-off selects its task, as a click on the row would.
+  useEffect(() => {
+    if (!openTaskId) return;
+    setCreating(false);
+    setSelectedId(openTaskId);
+  }, [openTaskId, openTaskNonce]);
 
   // Re-seed the form from the server, but never on top of unsaved edits — the
   // 10s poll would otherwise wipe out whatever is being typed.
@@ -1343,6 +1357,12 @@ export function TasksView({
                       onRetry={historyRes.reload}
                       onOpen={(jobId) => onNavigate("jobs", { jobId })}
                     />
+                  </InspGroup>
+
+                  <InspGroup title="Webhook">
+                    {/* Keyed by task so a revealed token never survives a
+                        switch to another task. */}
+                    <HookTokens key={draft.id} task={selected ?? draft} />
                   </InspGroup>
                 </>
               )}

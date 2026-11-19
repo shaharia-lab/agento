@@ -7,10 +7,12 @@ import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
 import { dateTime, relativeTime, tildePath } from "../../lib/format";
 import { useHostInfo } from "../../lib/host";
+import { useNavigate } from "../../lib/nav";
 import type {
   ApiTokenRow,
   CreatedApiToken,
   CredentialWhitelistEntry,
+  ScheduledTask,
 } from "../../lib/types";
 import "../../styles/security.css";
 
@@ -123,11 +125,16 @@ const SCOPE_WARNINGS: Record<string, string> = {
 /**
  * The badge class per scope. `write` is amber because it is the dangerous one;
  * `llm` gets its own colour because three scopes reading as two visuals is how a
- * gateway token gets mistaken for a read token at a glance.
+ * gateway token gets mistaken for a read token at a glance. `hook` (#697) gets
+ * one too, for the same reason.
+ *
+ * `hook` is deliberately not in `SCOPES`: a hook token is bound to one task, so
+ * it is minted from that task's Webhook group and never from this form.
  */
 const SCOPE_BADGES: Record<string, string> = {
   write: "badge badge--amber",
   llm: "badge badge--purple",
+  hook: "badge badge--teal",
 };
 
 /**
@@ -154,6 +161,13 @@ export function SecurityPane({ checker }: { checker: CheckerToggle }) {
     (signal) => api.get<TokenRow[] | null>("/security/tokens", signal),
     []
   );
+  // Only to name the task a hook token is bound to (#697). A failed read
+  // leaves the raw id showing, which is still the right task.
+  const tasks = useResource<ScheduledTask[] | null>(
+    (signal) => api.get<ScheduledTask[] | null>("/tasks", signal),
+    []
+  );
+  const navigate = useNavigate();
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -425,6 +439,13 @@ export function SecurityPane({ checker }: { checker: CheckerToggle }) {
                 <tr key={t.id} className={t.revoked_at ? "secrow--revoked" : ""}>
                   <td className="truncate" title={t.name}>
                     {t.name}
+                    {t.task_id && (
+                      <HookTask
+                        taskId={t.task_id}
+                        task={tasks.data?.find((x) => x.id === t.task_id)}
+                        onOpen={() => navigate("tasks", { taskId: t.task_id })}
+                      />
+                    )}
                   </td>
                   <td>
                     <span className={SCOPE_BADGES[t.scope] ?? "badge"}>
@@ -492,6 +513,32 @@ export function SecurityPane({ checker }: { checker: CheckerToggle }) {
       <div className="divider" />
 
       <CredentialsCheckerSection checker={checker} />
+    </div>
+  );
+}
+
+/**
+ * The task a hook token is bound to (#697): its name, opening it, while the
+ * task exists; the raw id once it does not (its delete revoked the token).
+ */
+function HookTask({
+  taskId,
+  task,
+  onOpen,
+}: {
+  taskId: string;
+  task: ScheduledTask | undefined;
+  onOpen(): void;
+}) {
+  if (!task) {
+    return <div className="sec-task mono">task {taskId}</div>;
+  }
+  return (
+    <div className="sec-task">
+      task{" "}
+      <button className="sec-task__link" onClick={onOpen} title="Open the task">
+        {task.name || task.id}
+      </button>
     </div>
   );
 }

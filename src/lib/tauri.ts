@@ -29,6 +29,11 @@ export interface HostInfo {
   install_kind: string;
   /** This launch's bearer token for /api. Empty outside Tauri. */
   api_token: string;
+  /**
+   * Absolute path of the file holding this launch's /api port (#697), which a
+   * task's webhook `curl` reads. Empty when the app has no data dir.
+   */
+  api_port_file: string;
 }
 
 let hostInfoPromise: Promise<HostInfo | null> | undefined;
