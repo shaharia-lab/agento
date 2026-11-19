@@ -33,6 +33,10 @@ updates:
       backend:
         patterns:
           - "*"
+      backend-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Frontend: npm packages — patch updates only, single grouped PR.
   #
@@ -60,6 +64,10 @@ updates:
       frontend:
         patterns:
           - "*"
+      frontend-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # GitHub Actions — single grouped PR
   - package-ecosystem: github-actions
@@ -71,6 +79,10 @@ updates:
     open-pull-requests-limit: 1
     groups:
       actions:
+        patterns:
+          - "*"
+      actions-security:
+        applies-to: security-updates
         patterns:
           - "*"
 
