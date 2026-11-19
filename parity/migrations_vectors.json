@@ -248,6 +248,10 @@
     {
       "version": 57,
       "sql": "\n-- The task a hook token is bound to (#697). Authored here like 31-56, and\n-- additive: one defaulted column, so an older build opening this database\n-- applies nothing and never reads it.\n--\n-- '' for every scope but hook. The JWT's own task_id claim is what the guard\n-- checks; this column is what lets a task list, and its delete revoke, the\n-- tokens minted for it.\nALTER TABLE api_tokens ADD COLUMN task_id TEXT NOT NULL DEFAULT '';\nCREATE INDEX IF NOT EXISTS idx_api_tokens_task_id ON api_tokens(task_id);\n"
+    },
+    {
+      "version": 58,
+      "sql": "\n-- The built-in recipe a task runs instead of an agent (#699). Authored here\n-- like 31-57, and additive: one defaulted column, so an older build opening\n-- this database applies nothing and never reads it.\n--\n-- '' for every task that runs an agent. Otherwise a JSON object such as\n-- {\"kind\":\"weekly_digest\",\"narrative\":false}, so a second kind is a new value\n-- and needs no migration.\nALTER TABLE scheduled_tasks ADD COLUMN builtin TEXT NOT NULL DEFAULT '';\n"
     }
   ]
 }

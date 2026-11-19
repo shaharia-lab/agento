@@ -164,6 +164,30 @@ pub struct EmailDestination {
     pub recipients: super::gojson::GoList<String>,
 }
 
+/// The built-in recipes a task can run instead of an agent (#699). A kind not
+/// listed here is a 422 on `builtin`, so a second recipe is a new entry and no
+/// migration.
+pub const BUILTIN_KINDS: &[&str] = &[BUILTIN_WEEKLY_DIGEST];
+
+/// The deterministic weekly report on the automations themselves, rendered by
+/// [`super::schedule::digest`] from stored data with no CLI spawn.
+pub const BUILTIN_WEEKLY_DIGEST: &str = "weekly_digest";
+
+/// A task's built-in recipe (#699): what its run renders instead of handing a
+/// prompt to an agent.
+///
+/// Stored whole as a JSON object in `scheduled_tasks.builtin` and decoded from
+/// request bodies, so both scalars carry `null_is_zero_value`: an absent or
+/// `null` `narrative` is `false`, which is the off-by-default the spec asks
+/// for. `narrative: true` is the one way a built-in run reaches an agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskBuiltin {
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
+    pub kind: String,
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
+    pub narrative: bool,
+}
+
 /// One scheduled task. Mirrors `storage.ScheduledTask`.
 ///
 /// Field order is the Go struct's declaration order, which here happens to
@@ -191,6 +215,12 @@ pub struct ScheduledTask {
     /// bytes it had before the field existed — the `inbound` precedent (#570).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub destinations: Vec<TaskDestination>,
+    /// The built-in recipe this task runs instead of an agent (#699). Placed
+    /// straight after `destinations` and **omitted when absent**, by the same
+    /// precedent, so every task that runs an agent keeps exactly the bytes it
+    /// had before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<TaskBuiltin>,
     /// Whether a reply to this task's output continues the conversation
     /// (#681). Stored and round-tripped only: Slack delivery maps every thread
     /// whatever this says until #686 reads it.
@@ -402,7 +432,8 @@ const TASK_COLUMNS: &str =
        stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
        last_run_status, next_run_at, created_at, updated_at, destinations,
        continue_on_reply, dropped_event_count, rate_limited_event_count,
-       max_concurrent_runs, max_queued_events, max_runs_per_hour, permission_mode
+       max_concurrent_runs, max_queued_events, max_runs_per_hour, permission_mode,
+       builtin
 FROM scheduled_tasks";
 
 const JOB_COLUMNS: &str =
@@ -607,6 +638,7 @@ pub fn list_deliveries_for_jobs(
 fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
     let config: String = row.get(10)?;
     let destinations: Option<String> = row.get(21)?;
+    let builtin: Option<String> = row.get(29)?;
     Ok(ScheduledTask {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -648,6 +680,13 @@ fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
                 Box::new(std::io::Error::other(e)),
             )
         })?,
+        builtin: decode_builtin(builtin.as_deref()).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                29,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(e)),
+            )
+        })?,
         continue_on_reply: row.get(22)?,
         max_concurrent_runs: row.get(25)?,
         max_queued_events: row.get(26)?,
@@ -674,6 +713,16 @@ fn decode_destinations(stored: Option<&str>) -> Result<Vec<TaskDestination>, Str
         Some(text) => serde_json::from_str::<Option<Vec<TaskDestination>>>(text)
             .map(Option::unwrap_or_default)
             .map_err(|e| format!("parsing destinations: {e}")),
+    }
+}
+
+/// The stored `builtin` column (#699): `''`, `NULL` or a JSON `null` is no
+/// built-in, and anything unparsable fails the read, as `destinations` does.
+fn decode_builtin(stored: Option<&str>) -> Result<Option<TaskBuiltin>, String> {
+    match stored.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(text) => serde_json::from_str::<Option<TaskBuiltin>>(text)
+            .map_err(|e| format!("parsing builtin: {e}")),
     }
 }
 
@@ -1092,7 +1141,8 @@ mod tests {
             max_concurrent_runs INTEGER NOT NULL DEFAULT 1,
             max_queued_events   INTEGER NOT NULL DEFAULT 5,
             max_runs_per_hour   INTEGER NOT NULL DEFAULT 10,
-            permission_mode     TEXT NOT NULL DEFAULT ''
+            permission_mode     TEXT NOT NULL DEFAULT '',
+            builtin             TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE job_history (
             id                          TEXT PRIMARY KEY,
@@ -2544,6 +2594,137 @@ mod tests {
             "{bytes}"
         );
         assert_eq!(stored_destinations(&file, &task.id), "[]");
+    }
+
+    // ─── Built-in tasks (#699) ───────────────────────────────────────────────
+
+    fn stored_builtin(file: &tempfile::NamedTempFile, id: &str) -> String {
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.query_row(
+            "SELECT builtin FROM scheduled_tasks WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .expect("read builtin")
+    }
+
+    /// A digest task saves with an empty prompt, stores its recipe as one JSON
+    /// object, and reads it back; `narrative` is `false` whether it is absent,
+    /// `null` or `false`.
+    #[test]
+    fn a_digest_task_saves_without_a_prompt_and_its_narrative_defaults_off() {
+        let file = migrated();
+        for builtin in [
+            r#"{"kind":"weekly_digest"}"#,
+            r#"{"kind":"weekly_digest","narrative":null}"#,
+            r#"{"kind":"weekly_digest","narrative":false}"#,
+        ] {
+            let task = created(
+                &file,
+                &format!(
+                    r#"{{"name":"Digest","prompt":"","permission_mode":"read_only","builtin":{builtin}}}"#
+                ),
+            );
+            assert_eq!(
+                task.builtin,
+                Some(TaskBuiltin {
+                    kind: BUILTIN_WEEKLY_DIGEST.to_string(),
+                    narrative: false,
+                }),
+                "for {builtin}"
+            );
+            assert_eq!(
+                stored_builtin(&file, &task.id),
+                r#"{"kind":"weekly_digest","narrative":false}"#,
+                "for {builtin}"
+            );
+            delete_task(file.path(), &task.id).expect("delete");
+        }
+        let task = created(
+            &file,
+            r#"{"name":"Digest","permission_mode":"read_only","builtin":{"kind":"weekly_digest","narrative":true}}"#,
+        );
+        assert_eq!(task.builtin.map(|b| b.narrative), Some(true));
+    }
+
+    /// An unknown kind is a 422 on `builtin`, and a task that is not built-in
+    /// still needs its prompt.
+    #[test]
+    fn an_unknown_builtin_kind_is_a_422_and_a_plain_task_still_needs_a_prompt() {
+        let file = migrated();
+        for (body, want) in [
+            (
+                r#"{"name":"N","prompt":"p","permission_mode":"full","builtin":{"kind":"monthly_digest"}}"#,
+                r#"validation error for "builtin": kind must be weekly_digest"#,
+            ),
+            (
+                r#"{"name":"N","prompt":"p","permission_mode":"full","builtin":{}}"#,
+                r#"validation error for "builtin": kind must be weekly_digest"#,
+            ),
+            (
+                r#"{"name":"N","prompt":"","permission_mode":"full","builtin":null}"#,
+                r#"validation error for "prompt": prompt is required"#,
+            ),
+        ] {
+            let err = create_task(file.path(), body.as_bytes()).expect_err(body);
+            assert_eq!(err.message(), want, "for {body}");
+            assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY, "for {body}");
+        }
+        assert!(list_tasks(file.path()).expect("list").is_empty());
+    }
+
+    /// The `PUT` replaces `builtin` like every other field: omitting it
+    /// clears it, and the column goes back to `''`.
+    #[test]
+    fn a_put_without_builtin_clears_it() {
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"Digest","permission_mode":"read_only","builtin":{"kind":"weekly_digest"}}"#,
+        );
+        update_task(
+            file.path(),
+            &task.id,
+            br#"{"name":"Digest","prompt":"p","permission_mode":"read_only"}"#,
+        )
+        .expect("update");
+        let stored = get_task(file.path(), &task.id).expect("get").expect("task");
+        assert!(stored.builtin.is_none());
+        assert_eq!(stored_builtin(&file, &task.id), "");
+    }
+
+    /// A task with no built-in ships no `builtin` key at all, so its bytes are
+    /// what they were before the field existed; a digest task ships the
+    /// object straight after `destinations`, pinned whole by a golden.
+    #[test]
+    fn a_digest_task_ships_builtin_after_destinations_with_the_golden_bytes() {
+        let file = migrated();
+        let plain = created(
+            &file,
+            r#"{"name":"N","prompt":"p","permission_mode":"full"}"#,
+        );
+        assert!(!encoded(&plain).contains("builtin"), "{}", encoded(&plain));
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            r#"INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status, destinations,
+                 permission_mode, builtin, created_at, updated_at)
+               VALUES ('digest-1', 'Weekly digest', '', 'cron', '{"expression":"0 9 * * 1"}',
+                       'paused', '[{"type":"fake","when":"always"}]', 'read_only',
+                       '{"kind":"weekly_digest","narrative":false}',
+                       '2026-01-01 00:00:00 +0000 UTC', '2026-01-02 00:00:00 +0000 UTC')"#,
+            [],
+        )
+        .expect("seed a digest task");
+        drop(conn);
+        let digest = get_task(file.path(), "digest-1")
+            .expect("get")
+            .expect("task");
+        assert_eq!(
+            encoded(&digest),
+            include_str!("../../../parity/task_builtin_digest_golden.json").trim_end()
+        );
     }
 
     #[test]
@@ -4028,6 +4209,17 @@ pub fn marshal_schedule_config(cfg: &ScheduleConfig) -> Result<String, String> {
 /// The JSON stored in the `destinations` column: `[]` for none, never `null`,
 /// so the column keeps the one spelling its `DEFAULT` gave every existing row.
 /// `to_vec_marshal` for the same reason as [`marshal_schedule_config`].
+/// The `builtin` column for `builtin`: `''` when the task has none, which is
+/// the column's default and what every pre-#699 row holds.
+fn marshal_builtin(builtin: Option<&TaskBuiltin>) -> Result<String, String> {
+    let Some(builtin) = builtin else {
+        return Ok(String::new());
+    };
+    let bytes =
+        super::gojson::to_vec_marshal(builtin).map_err(|e| format!("marshaling builtin: {e}"))?;
+    String::from_utf8(bytes).map_err(|e| format!("marshaling builtin: {e}"))
+}
+
 fn marshal_destinations(destinations: &[TaskDestination]) -> Result<String, String> {
     let bytes = super::gojson::to_vec_marshal(&destinations)
         .map_err(|e| format!("marshaling destinations: {e}"))?;
@@ -4059,6 +4251,7 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
     let now = super::gotime::now_go_text();
     let config = marshal_schedule_config(&task.schedule_config)?;
     let destinations = marshal_destinations(&task.destinations)?;
+    let builtin = marshal_builtin(task.builtin.as_ref())?;
     let affected = conn
         .execute(
             "UPDATE scheduled_tasks SET
@@ -4069,8 +4262,9 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 run_count = ?15, last_run_at = ?16, last_run_status = ?17,
                 next_run_at = ?18, updated_at = ?19, destinations = ?20,
                 continue_on_reply = ?21, max_concurrent_runs = ?22,
-                max_queued_events = ?23, max_runs_per_hour = ?24, permission_mode = ?25
-             WHERE id = ?26",
+                max_queued_events = ?23, max_runs_per_hour = ?24, permission_mode = ?25,
+                builtin = ?26
+             WHERE id = ?27",
             rusqlite::params![
                 task.name,
                 task.description,
@@ -4097,6 +4291,7 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
                 task.max_queued_events,
                 task.max_runs_per_hour,
                 task.permission_mode,
+                builtin,
                 task.id,
             ],
         )
@@ -4118,6 +4313,7 @@ pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> 
 pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Result<(), String> {
     let config = marshal_schedule_config(&task.schedule_config)?;
     let destinations = marshal_destinations(&task.destinations)?;
+    let builtin = marshal_builtin(task.builtin.as_ref())?;
     conn.execute(
         "INSERT INTO scheduled_tasks
             (id, name, description, prompt, agent_slug, working_directory, model,
@@ -4125,9 +4321,9 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
              stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
              last_run_status, next_run_at, created_at, updated_at, destinations,
              continue_on_reply, max_concurrent_runs, max_queued_events, max_runs_per_hour,
-             permission_mode)
+             permission_mode, builtin)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         rusqlite::params![
             task.id,
             task.name,
@@ -4156,6 +4352,7 @@ pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Resu
             task.max_queued_events,
             task.max_runs_per_hour,
             task.permission_mode,
+            builtin,
         ],
     )
     .map_err(|e| format!("creating task: {e}"))?;
@@ -4634,13 +4831,18 @@ struct TaskRequest {
     /// [`validate_task`], never a default — a task states what it may do.
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     permission_mode: String,
+    /// The built-in recipe (#699), replaced like every other field: absent and
+    /// `null` both store none. A [`GoStruct`](super::gojson::GoStruct), so an
+    /// array where the object belongs is a 400 rather than a zero recipe.
+    builtin: Option<super::gojson::GoStruct<TaskBuiltin>>,
 }
 
 impl TaskRequest {
     /// The `storage.ScheduledTask` both handlers build from the request — the
-    /// twenty fields they copy (`destinations` since #634,
+    /// twenty-one fields they copy (`destinations` since #634,
     /// `continue_on_reply` since #681, the three event-run limits since
-    /// #691, `permission_mode` since #693), and nothing else.
+    /// #691, `permission_mode` since #693, `builtin` since #699), and nothing
+    /// else.
     ///
     /// The other nine are the row's own, and they split three ways. `id` is
     /// minted on a create and re-set from the URL on an update; `updated_at` is
@@ -4670,6 +4872,7 @@ impl TaskRequest {
                 .destinations
                 .map(|list| list.0.into_iter().map(|entry| entry.0).collect())
                 .unwrap_or_default(),
+            builtin: self.builtin.map(|builtin| builtin.0),
             continue_on_reply: self.continue_on_reply,
             max_concurrent_runs: self.max_concurrent_runs,
             max_queued_events: self.max_queued_events,
@@ -4701,7 +4904,17 @@ pub(crate) fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> 
     if task.name.is_empty() {
         return Err(WriteError::validation("name", "name is required"));
     }
-    if task.prompt.is_empty() {
+    // A built-in task renders its run from stored data (#699), so its prompt
+    // is optional: it is read only when the narrative is on, and a fixed
+    // sentence stands in for an empty one there.
+    if let Some(builtin) = &task.builtin {
+        if !BUILTIN_KINDS.contains(&builtin.kind.as_str()) {
+            return Err(WriteError::validation(
+                "builtin",
+                format!("kind must be {}", BUILTIN_KINDS.join(" or ")),
+            ));
+        }
+    } else if task.prompt.is_empty() {
         return Err(WriteError::validation("prompt", "prompt is required"));
     }
     if task.timeout_minutes < 0 || task.timeout_minutes > 240 {

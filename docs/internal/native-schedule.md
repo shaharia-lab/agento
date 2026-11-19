@@ -726,7 +726,11 @@ epic #679). Migration 48 adds eight columns across three tables.
   (`an_inserted_run_carries_the_installs_machine_id_whatever_the_caller_passed`).
   A database with no identity row stores `''` rather than failing the insert.
   `harness` is `Runner::harness()`, asked of `agent_run::runner()` by
-  `executor::harness()` at both inserts; it is `claude` on every row today.
+  `executor::harness()` at both inserts; it is `claude` on every row of a run
+  handed to an agent, and `builtin` (`executor::BUILTIN_HARNESS`) on a
+  weekly-digest run with the narrative off, which spawns nothing (#699). That
+  value is **not** a `Runner::harness()` id: no runner is involved.
+  `executor::row_harness(task)` makes the choice at both inserts.
   `update_job_history` names neither column, so a finish cannot rewrite them.
   **Every row older than the migration was backfilled** with this install's id
   and `claude`. The id copies with the database (#704's known limit), so a
@@ -848,7 +852,8 @@ tests named below pin them.
   `prompt`, `agent_slug`, `model`, `timeout_minutes`, `schedule_type`,
   `schedule_config`, `save_output`, `continue_on_reply`,
   `max_concurrent_runs`, `max_queued_events`, `max_runs_per_hour`,
-  `permission_mode`, then `destinations` (`[{type, when}]`) and `triggers`
+  `permission_mode`, `builtin` (#699, the task's built-in recipe whole, omitted
+  when absent), then `destinations` (`[{type, when}]`) and `triggers`
   (`[{type, filter_prefix, filter_keywords}]`), each omitted when empty.
   Pinned by `export_import_export_round_trips_the_golden_bytes`.
 - **Left out, the full list:** `id`, `status`, the run and event counters,
@@ -883,3 +888,72 @@ tests named below pin them.
   not JSON or not an object, or a known key of the wrong shape, stays the 400
   every write answers. An unknown field is "well-formed, one field invalid",
   which is #670's definition of a 422.
+
+## Built-in tasks: the weekly digest (#699)
+
+A task can carry **`builtin`**: one JSON object in `scheduled_tasks.builtin`
+(migration 58, `''` when absent), `{"kind":"weekly_digest","narrative":false}`.
+It follows the `destinations` precedent: on the wire it sits straight after
+`destinations` and is **omitted when absent**, so a task that runs an agent keeps
+its bytes (`parity/task_builtin_digest_golden.json` pins a digest task).
+`tasks::BUILTIN_KINDS` is the allowlist; another kind is a 422 on `builtin`, and
+a second recipe is a new entry there, not a migration. `narrative` decodes
+absent and `null` as `false`. A built-in task's `prompt` may be empty; every
+other task still needs one. `PUT` replaces the field like every other.
+
+The run is the ordinary run path with the agent step replaced, so it keeps the
+schedule, the limiter, `job_history`, `save_output` and `delivery::dispatch`
+unchanged:
+
+- **`prepare`** renders the digest first, inside the existing
+  `db::blocking("task run preparation")` section: `digest::gather` (one
+  read-only connection) over `[fire time − 7 days, fire time)`, then the pure
+  `digest::render` in `runtime::local_tz()`. The run's own row starts at the
+  fire time, so it is outside its window. A gather error is a recorded failed
+  run (`digest: …`).
+- **Narrative off** creates **no chat session** and resolves **no agent**;
+  `prepare` answers `Step::Digest(text)` and `run_task` turns it into a
+  `RunResult` with the text as the answer and zero tokens, without awaiting any
+  runner. The row is `success`, `harness = "builtin"`, `model = ""`,
+  `chat_session_id = ""`, and `finish` skips `save_session_results` for an empty
+  chat. Pinned by `a_digest_without_narrative_spawns_nothing_for_every_run_kind`
+  and, end to end with the fake CLI's `argv` file never written,
+  `tests/scheduled_run.rs::a_builtin_digest_runs_without_spawning_the_cli`.
+- **Narrative on** is an ordinary agent run (`Step::Narrated`) under the task's
+  permission mode. Its prompt is `compose_digest_prompt`: the task's prompt (or
+  `DIGEST_DEFAULT_INSTRUCTIONS` when empty), `DIGEST_PREAMBLE`, then the digest
+  in one `<digest id="…">` block with a per-run id. The delivered answer is the
+  prose, `\n\n---\n\n`, then the digest. If the agent step fails, the row is
+  `failed` and the destinations receive the **digest** as the answer, so a
+  `when: always` destination still gets the numbers.
+- An event or continuation run of a built-in task renders the same digest. The
+  event's payload is stored on the row as for any run and never added to the
+  report.
+
+What the digest reads (`schedule/digest.rs`'s `//!` doc has the rules):
+
+- **Runs** per task (current name, ties by id), by status and by
+  `triggered_by`; the failed runs oldest first, at most ten, then `+N more`.
+- **Cost and tokens.** Tokens are `job_history`'s totals. Cost is **stored only**:
+  `job_history.chat_session_id → chat_sessions.sdk_session_id →
+  claude_session_cache.total_cost_usd` (the largest row per session, since a
+  session can sit under two `project_path`s) plus the session's
+  `claude_subagent_cache` rows, summed per distinct session in session-id order.
+  The pricing tables are never read. A session the scanner has not reached is
+  *not yet priced*, unpriced models are listed, and either makes the total a
+  floor (`≥`). Nothing is shown as `$0` for being unknown.
+- **Deliveries** of the window's runs by status, and the failed ones.
+- **Events not run**: each task's `dropped_event_count` and
+  `rate_limited_event_count`, labelled as running totals, because #681 stores no
+  per-event time.
+
+Every error line is cut to its first line after `security_scan::scan::mask_text`.
+`render` is deterministic: every sort ends in an id and every map is a
+`BTreeMap` (`rendering_is_deterministic`, `editing_the_pricing_changes_nothing`,
+`a_mixed_week_renders_byte_for_byte`).
+
+The Tasks view's **New weekly digest** list action posts a task with cron
+`0 9 * * 1`, `read_only`, narrative off, no destinations and status `paused`,
+then selects it. On a built-in task the form shows the recipe, the **Narrative**
+switch, and the agent picker only while the narrative is on; the prompt is
+optional there.

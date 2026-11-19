@@ -1883,3 +1883,153 @@ async fn a_continuation_resumes_the_runs_chat_as_a_linked_row() {
         .expect("row");
     assert_eq!(task.run_count, 1, "a reply is not the schedule firing");
 }
+
+/// Turn the seeded task into a weekly digest (#699).
+fn make_digest(path: &Path, task_id: &str, narrative: bool) {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.execute(
+        "UPDATE scheduled_tasks SET builtin = ?1, prompt = '', permission_mode = 'read_only'
+         WHERE id = ?2",
+        [
+            format!(r#"{{"kind":"weekly_digest","narrative":{narrative}}}"#),
+            task_id.to_string(),
+        ],
+    )
+    .expect("make it a digest");
+}
+
+/// Gate (f) of #699, end to end: a timer fire and a manual run of a digest with
+/// no narrative each finish with a `success` row on the `builtin` harness, the
+/// fake CLI's `argv` file is **never written**, no chat is created, and the
+/// `fake` destination — success-only and always alike — receives the digest.
+#[tokio::test]
+async fn a_builtin_digest_runs_without_spawning_the_cli() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    for manual in [false, true] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("agento.db");
+        let task_id = migrated_with_task(&db, "cron", true);
+        make_digest(&db, &task_id, false);
+        set_destinations(
+            &db,
+            &task_id,
+            r#"[{"type":"fake","when":"success"},{"type":"fake","when":"always"}]"#,
+        );
+        let cli = fake_cli(dir.path(), ANSWERING_CLI);
+
+        let _env = env_lock().lock().await;
+        std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+        let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+        if manual {
+            let guard = scheduler.try_mark_running(&task_id).expect("free");
+            agento_lib::native::schedule::executor::run_manual(
+                std::sync::Arc::clone(&scheduler),
+                agento_lib::native::tasks::get_task(&db, &task_id)
+                    .expect("read")
+                    .expect("row"),
+                "job-digest-manual".to_string(),
+                guard,
+            )
+            .await;
+        } else {
+            agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+        }
+
+        let job_id = only_job_id(&db);
+        let job = agento_lib::native::tasks::get_job_history(&db, &job_id)
+            .expect("read")
+            .expect("the row");
+        assert_eq!(
+            job.status, "success",
+            "manual={manual}: {}",
+            job.error_message
+        );
+        assert_eq!(job.harness, "builtin", "manual={manual}");
+        assert_eq!(job.chat_session_id, "", "manual={manual}");
+        assert_eq!(job.model, "", "manual={manual}");
+        assert!(
+            job.response_text.starts_with("Weekly digest: "),
+            "manual={manual}"
+        );
+        assert!(
+            !dir.path().join("argv").exists(),
+            "manual={manual}: the CLI was spawned"
+        );
+        assert_eq!(session_count(&db), 0, "manual={manual}: no chat");
+
+        assert_eq!(
+            settled(&db, &job_id, 2).await,
+            vec![
+                ("fake".into(), "sent".into(), String::new()),
+                ("fake".into(), "sent".into(), String::new()),
+            ],
+            "manual={manual}"
+        );
+        let received = agento_lib::native::schedule::delivery::fake_received(&job_id);
+        assert_eq!(received.len(), 2, "manual={manual}");
+        assert!(
+            received
+                .iter()
+                .all(|r| r.answer == job.response_text && r.status == "success"),
+            "manual={manual}: {received:?}"
+        );
+    }
+}
+
+/// #699: only `narrative: true` reaches the CLI. It spawns once, under the
+/// task's mode, and the prompt it receives holds the digest inside exactly one
+/// delimited block; the delivered answer is the prose, a separator, then the
+/// digest.
+#[tokio::test]
+async fn a_digest_with_narrative_spawns_once_with_the_digest_as_data() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+    make_digest(&db, &task_id, true);
+    set_destinations(&db, &task_id, r#"[{"type":"fake","when":"always"}]"#);
+    let prompt_file = serde_json::to_string(&dir.path().join("prompt").to_string_lossy()).unwrap();
+    let cli = fake_cli(
+        dir.path(),
+        &format!("        open({prompt_file}, \"w\").write(json.dumps(msg))\n{ANSWERING_CLI}"),
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let job_id = only_job_id(&db);
+    let job = agento_lib::native::tasks::get_job_history(&db, &job_id)
+        .expect("read")
+        .expect("the row");
+    assert_eq!(job.status, "success", "{}", job.error_message);
+    assert_eq!(job.harness, "claude");
+    assert_eq!(session_count(&db), 1);
+
+    let argv = argv(dir.path());
+    assert_eq!(
+        flag_value(&argv, "--permission-mode"),
+        Some("dontAsk"),
+        "the task's read_only mode: {argv:?}"
+    );
+    let sent = std::fs::read_to_string(dir.path().join("prompt")).expect("the CLI got a prompt");
+    let digest_open = r#"<digest id=\""#;
+    assert_eq!(sent.matches(digest_open).count(), 1, "{sent}");
+    assert!(sent.contains("Weekly digest: "), "{sent}");
+
+    settled(&db, &job_id, 1).await;
+    let received = agento_lib::native::schedule::delivery::fake_received(&job_id);
+    assert_eq!(received.len(), 1);
+    let answer = &received[0].answer;
+    assert!(
+        answer.starts_with("the full answer\n\n---\n\nWeekly digest: "),
+        "{answer}"
+    );
+}

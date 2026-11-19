@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use super::gojson::{GoList, GoStruct};
 use super::security_scan::scan::mask_text;
-use super::tasks::{ScheduleConfig, ScheduledTask, TaskDestination};
+use super::tasks::{ScheduleConfig, ScheduledTask, TaskBuiltin, TaskDestination};
 use super::writes::{decode_body, WriteError};
 
 /// The only recipe version this build reads and writes.
@@ -76,6 +76,11 @@ pub struct Recipe {
     pub max_queued_events: i64,
     pub max_runs_per_hour: i64,
     pub permission_mode: String,
+    /// The task's built-in recipe (#699), carried whole: it names a report,
+    /// not anything machine-local. Omitted when absent, so a recipe of a task
+    /// that runs an agent keeps its bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<TaskBuiltin>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub destinations: Vec<RecipeDestination>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -113,7 +118,7 @@ pub struct RecipeTrigger {
 }
 
 /// The keys a version-1 recipe may carry, at each of its three levels.
-const RECIPE_KEYS: [&str; 17] = [
+const RECIPE_KEYS: [&str; 18] = [
     "agento_recipe",
     "name",
     "description",
@@ -129,6 +134,7 @@ const RECIPE_KEYS: [&str; 17] = [
     "max_queued_events",
     "max_runs_per_hour",
     "permission_mode",
+    "builtin",
     "destinations",
     "triggers",
 ];
@@ -169,6 +175,7 @@ struct RecipeImport {
     max_runs_per_hour: i64,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     permission_mode: String,
+    builtin: Option<GoStruct<TaskBuiltin>>,
     destinations: Option<GoList<GoStruct<RecipeDestination>>>,
     triggers: Option<GoList<GoStruct<RecipeTrigger>>>,
 }
@@ -195,6 +202,7 @@ pub fn export(db_path: &Path, task_id: &str) -> Result<Option<Recipe>, String> {
         max_queued_events: task.max_queued_events,
         max_runs_per_hour: task.max_runs_per_hour,
         permission_mode: task.permission_mode,
+        builtin: task.builtin,
         destinations: task
             .destinations
             .into_iter()
@@ -288,6 +296,7 @@ pub fn import(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> 
         stop_after_time: None,
         save_output: recipe.save_output,
         destinations: kept,
+        builtin: recipe.builtin.map(|builtin| builtin.0),
         continue_on_reply: recipe.continue_on_reply,
         max_concurrent_runs: recipe.max_concurrent_runs,
         max_queued_events: recipe.max_queued_events,

@@ -641,6 +641,19 @@ the integration lists, and **Rate-limited events** arrived after the hour's runs
 were used up. Neither started a run, so
 neither has a row in the history.
 
+### Weekly digest
+
+**New weekly digest** (the chart button beside **New task**) creates a task that
+reports on your automations instead of running an agent: each task's runs over
+the last seven days, the failures, tokens and stored cost, how its deliveries
+went, and the events your tasks did not run for. It is built from what Agento
+already recorded, so it starts no agent and spends no quota. It runs every
+Monday at 09:00 and is created **paused**: add the destinations it should go to,
+then enable it. Cost is what the session scan stored; a session not scanned yet
+and a model with no price are listed, and the total is then shown as a minimum.
+Turn on **Narrative** to have one agent run write a short summary above the
+report; that run uses the task's agent, permission mode and prompt.
+
 ### Delivery
 
 A task can also send each run's output to Slack, Telegram or email. The

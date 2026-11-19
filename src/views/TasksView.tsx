@@ -396,6 +396,21 @@ function blankTask(): ScheduledTask {
   };
 }
 
+/** The task **New weekly digest** posts (#699): the built-in report, every
+ *  Monday at 09:00, read-only, narrative off and no destinations. It is created
+ *  **paused**, so the user picks where it goes before it runs. */
+function weeklyDigestTask(): ScheduledTask {
+  return {
+    ...blankTask(),
+    name: "Weekly digest",
+    schedule_type: "cron",
+    schedule_config: { expression: "0 9 * * 1" },
+    permission_mode: "read_only",
+    status: "paused",
+    builtin: { kind: "weekly_digest", narrative: false },
+  };
+}
+
 /** The Model field's placeholder: the model the run will use when the field
  *  is left empty. With no agent that is the Settings default model — the same
  *  `settings::resolve` the executor's `TurnSettings::default_model` reads; with
@@ -658,6 +673,29 @@ export function TasksView({
     setSelectedId(id);
   }
 
+  /** Posts [`weeklyDigestTask`] straight away and selects the new row (#699):
+   *  there is nothing to fill in before it exists, and it is created paused. */
+  async function createWeeklyDigest() {
+    if (busy) return;
+    setBusy(true);
+    setConfirmDelete(false);
+    setActionError(undefined);
+    try {
+      const created = await api.post<ScheduledTask | undefined>("/tasks", weeklyDigestTask());
+      setCreating(false);
+      setDirty(false);
+      if (created?.id) {
+        setDraft(created);
+        setSelectedId(created.id);
+      }
+      tasksRes.reload();
+    } catch (err) {
+      setActionError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function save() {
     if (!draft) return;
     // Refused before the request; the server's own check is the authority.
@@ -833,6 +871,13 @@ export function TasksView({
             <button className="iconbtn" title="New task" onClick={startCreate}>
               <Icon name="plus" size={14} />
             </button>
+            <button
+              className="iconbtn"
+              title="New weekly digest"
+              onClick={createWeeklyDigest}
+            >
+              <Icon name="chart" size={14} />
+            </button>
           </div>
           {importError && <div className="formerror">{importError}</div>}
         </div>
@@ -857,10 +902,16 @@ export function TasksView({
             title="No scheduled tasks"
             text="A task runs an agent on a schedule and keeps every run in its history."
             action={
-              <button className="btn btn--primary" onClick={startCreate}>
-                <Icon name="plus" size={13} />
-                New task
-              </button>
+              <div style={{ display: "flex", gap: "var(--sp-3)" }}>
+                <button className="btn btn--primary" onClick={startCreate}>
+                  <Icon name="plus" size={13} />
+                  New task
+                </button>
+                <button className="btn" onClick={createWeeklyDigest}>
+                  <Icon name="plus" size={13} />
+                  New weekly digest
+                </button>
+              </div>
             }
           />
         ) : filtered.length === 0 ? (
@@ -1031,23 +1082,50 @@ export function TasksView({
                       />
                     </label>
                   </FormRow>
-                  <FormRow
-                    label="Agent"
-                    help={
-                      draft.agent_slug
-                        ? undefined
-                        : "Runs Claude Code with the default model (or the one set below) and all built-in tools, no system prompt and no integrations." +
-                          (agentsRes.data && agents.length === 0
-                            ? " Create agents in Agents to give a task a system prompt and integrations."
-                            : "")
-                    }
-                  >
-                    <AgentPicker
-                      value={draft.agent_slug}
-                      agents={agents}
-                      onChange={(slug) => edit({ agent_slug: slug })}
-                    />
-                  </FormRow>
+                  {draft.builtin && (
+                    <>
+                      <FormRow
+                        label="Built-in"
+                        help="A report on every task's runs, cost and deliveries over the last seven days, rendered from stored data and sent to this task's destinations."
+                      >
+                        <div style={{ paddingTop: "var(--sp-3)" }}>Weekly digest</div>
+                      </FormRow>
+                      <FormRow
+                        label="Narrative"
+                        help={
+                          draft.builtin.narrative
+                            ? "Spawns one agent run that writes a short summary above the report. It uses the agent, permission mode and prompt below."
+                            : "Off: no agent runs and no quota is spent. Turn it on to spawn one agent run that writes a short summary above the report."
+                        }
+                      >
+                        <Switch
+                          on={draft.builtin.narrative}
+                          onChange={(v) =>
+                            edit({ builtin: { kind: "weekly_digest", narrative: v } })
+                          }
+                        />
+                      </FormRow>
+                    </>
+                  )}
+                  {(!draft.builtin || draft.builtin.narrative) && (
+                    <FormRow
+                      label="Agent"
+                      help={
+                        draft.agent_slug
+                          ? undefined
+                          : "Runs Claude Code with the default model (or the one set below) and all built-in tools, no system prompt and no integrations." +
+                            (agentsRes.data && agents.length === 0
+                              ? " Create agents in Agents to give a task a system prompt and integrations."
+                              : "")
+                      }
+                    >
+                      <AgentPicker
+                        value={draft.agent_slug}
+                        agents={agents}
+                        onChange={(slug) => edit({ agent_slug: slug })}
+                      />
+                    </FormRow>
+                  )}
                   <FormRow
                     label="Permission mode"
                     help={
@@ -1356,7 +1434,11 @@ export function TasksView({
                   <div className="formsec__title">Instruction</div>
                   <FormRow
                     label="Prompt"
-                    help="Sent to the agent verbatim on every run."
+                    help={
+                      draft.builtin
+                        ? "Optional. Read only when Narrative is on: the instructions for the summary, sent with the report as data. Left empty, a short default is used."
+                        : "Sent to the agent verbatim on every run."
+                    }
                     className="tasks-form__fillrow"
                   >
                     <textarea
@@ -1574,7 +1656,7 @@ function TaskRow({
           <span className="listrow__time">{relativeTime(t.last_run_at)}</span>
         </div>
         <div className="listrow__preview">
-          {t.agent_slug || "no agent"} · {describeSchedule(t)} ·{" "}
+          {t.builtin ? "weekly digest" : t.agent_slug || "no agent"} · {describeSchedule(t)} ·{" "}
           {permissionLabel(t.permission_mode)}
         </div>
         <div className="listrow__meta">

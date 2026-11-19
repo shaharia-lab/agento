@@ -686,6 +686,7 @@ pub fn fire_times(
 }
 
 pub mod delivery;
+pub mod digest;
 pub mod executor;
 pub mod limiter;
 pub mod runtime;
