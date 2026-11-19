@@ -69,8 +69,12 @@ pub struct Served {
 /// It names the **last** target tried, not the first: the walk gives up on the
 /// last one, and on a chain whose earlier links merely failed over, the last is
 /// the one whose failure is the answer.
+///
+/// `error` is boxed to satisfy `clippy::result_large_err`, whose threshold is
+/// 128 bytes and which `ProxyError` crossed when ferrox-providers 0.4.0 added
+/// `ProviderStreamError` (three strings and a status).
 pub struct Failure {
-    pub error: ProxyError,
+    pub error: Box<ProxyError>,
     pub attempted: Option<Served>,
 }
 
@@ -249,7 +253,7 @@ impl Dispatcher {
         Fut: std::future::Future<Output = Result<T, ProxyError>>,
     {
         let targets = self.resolve(alias).map_err(|error| Failure {
-            error,
+            error: Box::new(error),
             // Resolution failed, so no provider was ever chosen. This is the
             // only `None`, and it is what a `refused` row's empty provider
             // column truthfully means.
@@ -277,7 +281,7 @@ impl Dispatcher {
                     });
                     if !should_failover(&e) {
                         return Err(Failure {
-                            error: e,
+                            error: Box::new(e),
                             attempted,
                         });
                     }
@@ -293,9 +297,9 @@ impl Dispatcher {
         }
 
         Err(Failure {
-            error: last.unwrap_or_else(|| {
+            error: Box::new(last.unwrap_or_else(|| {
                 ProxyError::ConfigError(format!("model alias '{alias}' produced no target to try"))
-            }),
+            })),
             attempted,
         })
     }
@@ -319,6 +323,9 @@ pub fn is_retryable(e: &ProxyError) -> bool {
         ProxyError::UpstreamTimeout(_) => true,
         ProxyError::CircuitOpen(_) => true,
         ProxyError::ProviderError { status, .. } => *status >= 500 || *status == 429,
+        // Only ever raised after a stream started, past retry; classified
+        // like the HTTP error it reports for consistency.
+        ProxyError::ProviderStreamError { status, .. } => *status >= 500 || *status == 429,
         ProxyError::HttpClientError(e) => e.is_timeout() || e.is_connect(),
         ProxyError::StreamError(_) => true,
 
@@ -431,6 +438,15 @@ mod tests {
         }
     }
 
+    fn provider_stream_error(status: u16) -> ProxyError {
+        ProxyError::ProviderStreamError {
+            provider: "p".into(),
+            status,
+            message: "upstream said so mid-stream".into(),
+            body: "{}".into(),
+        }
+    }
+
     fn fast_retry(max_attempts: u32) -> RetryConfig {
         RetryConfig {
             max_attempts,
@@ -455,6 +471,8 @@ mod tests {
             provider_error(500),
             provider_error(503),
             provider_error(429),
+            provider_stream_error(502),
+            provider_stream_error(429),
         ] {
             assert!(is_retryable(&e), "should retry: {e}");
             assert!(should_failover(&e), "should fail over: {e}");
@@ -476,6 +494,7 @@ mod tests {
             provider_error(400),
             provider_error(404),
             provider_error(422),
+            provider_stream_error(400),
         ] {
             assert!(!is_retryable(&e), "must not retry: {e}");
             assert!(!should_failover(&e), "must not fail over: {e}");
